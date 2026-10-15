@@ -12,6 +12,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **`RecaptchaResult::has_challenge_ts` (Huly QB-537).** Whether Google's reply carried a
   readable `challenge_ts`, beside `has_score`; appended after `challenge_ts`, so positional
   aggregate initialisation keeps compiling.
+- **`qb::http::MessageHead{msg}` writes a message's start line and header section, and nothing after them (Huly
+  QB-493).** `out << MessageHead{request_or_response}` validates exactly as the full serialization and stops at the
+  empty line that ends the header section: no body, no chunked last-chunk. The HTTP/1.1 server session now writes
+  every `HEAD` response this way, and it is the head to write before a body streamed by hand as `Chunk`s (see the
+  complete-message entry under Changed).
 - **HTTP/3 active cancellation retains the client through its callback (Huly QB-960).** A
   cancellation callback may release the last external `shared_ptr`; the client stays alive until
   the active stream has been reset and the pending queue has resumed.
@@ -58,6 +63,52 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `Client::push_requests` return `false` when the bound refused the request or a batch member (the
   503 already delivered through the callback), as the HTTP/1.1 and HTTP/2 clients do; they returned
   `true` for any non-null callback.
+- **The typed `Content-Type` is derived from the raw header on first read, and nothing is allocated for the
+  defaults (Huly QB-506 follow-up).** `content_type()` parses the raw `Content-Type` header (its first value,
+  or the defaults) the first time it is read after a message was built, parsed, or had that header changed
+  through `set_header`, `add_header`, `remove_header` or `set_content_type`; `refresh_content_type()` only marks
+  it for re-derivation. The HTTP/1.1 parser no longer parses it for every header section it frames, nor does
+  `set_content_type` parse it (twice) at every call: a message whose typed Content-Type nobody reads never parses
+  it, and a reader pays one parse. A `ContentType` holds empty strings for the defaults and reports
+  `application/octet-stream` / `utf-8` from one process-wide `std::string` each, so constructing a message no
+  longer heap-allocates a 24-byte string it will most likely never show; `ContentType()` is the defaults,
+  `assign(value)` re-parses in place. `content_type()` is no longer `constexpr` (it could not be evaluated at
+  compile time before either). The derivation is a `const` read's side effect on `mutable` members; a message
+  is, like every qb object, used by one thread at a time.
+  A parameter list in the plain shape (`name=value` tokens, no quote, no backslash, no control byte) is read
+  without the attribute state machine, with the machine's exact verdict; every other shape still goes through it.
+- **Serializing a `Request` or `Response` writes a COMPLETE message: an empty chunked body is its last-chunk (Huly
+  QB-493).** A message declaring `Transfer-Encoding: chunked` with no body used to serialize as its header section
+  alone, which left the peer waiting for a body that never came (RFC 9112 §7.1). Behaviour change, source compatible:
+  code that relied on that header-only output to stream its own `Chunk`s afterwards writes
+  `qb::http::MessageHead{msg}` first instead. The repository's one such site, the `http1-loopback` chunked round
+  trip, now does.
+- **The request serializer refuses a request-target byte the request line cannot carry (Huly QB-494).** SP, HTAB, CR,
+  LF, NUL, any other control byte and DEL in the URI's raw query now throw `std::length_error` before a byte is
+  written, as an invalid header value already did: `qb::io::uri` keeps the query's raw bytes (its path admits only
+  path characters already), so percent-encode them.
+  Percent-encoded forms and every printable byte keep their exact bytes. A one-shot client answers such a request
+  400 without sending it; the persistent client already answered a serialization failure 400.
+  The check takes sixteen bytes per step where SSE2 is the baseline (eight elsewhere) and re-reads the last block
+  overlapped instead of looping over a tail, so a query costs one block per sixteen bytes and nothing else.
+- **`Body::as<Multipart>()` refuses a document its closing delimiter does not end (Huly QB-491).** A body that stops
+  inside a part or its headers now throws, and `try_as<Multipart>()` yields `nullopt`, instead of returning the
+  parts read so far as a complete document. Bytes after the closing delimiter (the epilogue) stay ignored.
+- **The HTTP/1.1 parser accepts a trailing horizontal tab after the `Content-Length` digits and after `chunked`
+  (Huly QB-555).** It is optional whitespace (RFC 9110 §5.6.3), as a trailing space already was; the message frames
+  exactly as the space form does. Such a request used to be refused, and such a response read until the connection
+  closed. A local patch of the vendored llhttp, recorded in `THIRD-PARTY-NOTICES`.
+- **HTTP dates refuse a fixed-width numeric field that is not all digits (Huly QB-599).** `08:4x:37` or a signed
+  two-digit year used to parse (as `08:04:37`, or the year 1991 for `-9`); they now yield `nullopt`, as the
+  `parse_http_date` contract promises for an unknown format. Cookie `Expires` and `If-Modified-Since` read through it.
+- **The HTTP/1.1 status line carries the registered reason phrase, and `Status::str()` returns it (Huly QB-1062).**
+  `400 BAD_REQUEST` and `101 SWITCHING_PROTOCOLS` were llhttp's enum identifiers; the line now reads
+  `400 Bad Request`, `101 Switching Protocols` -- the IANA registry's text (RFC 9110: 413 `Content Too Large`, 422
+  `Unprocessable Content`), a defining document's for 306, 418 and the unregistered codes llhttp maps. Behaviour
+  change, source compatible: `str()`, the string conversions, `std::to_string(Status)` and `operator<<` return that
+  phrase, as their documentation always said, instead of the identifier -- so does the logging middleware's
+  `"404 Not Found"`. The serializer writes it from a static table without building a string. Header names keep
+  going out in lower case, now documented: field names are case-insensitive, and `Headers` keys them folded.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -336,6 +387,37 @@ All notable changes to the qbm-http module are documented here. The format is ba
   vanished, and a token whose two identifiers looked like JSON was refused. The signed branch now
   reads the token's own payload, as the unsigned branch already did. `JwtMiddleware` keeps its
   claim coercion except for the textual claims (`iss`, `sub`, `aud`, `jti`, `username`).
+- **`Headers::remove_header` and `CookieJar::remove` find a name passed as a `const std::string` (Huly QB-279).**
+  The case-insensitive map's `erase` looked that one key form up unfolded (fixed in qb's `icase_basic_map`), so the
+  header or cookie stayed whenever the name passed had an upper-case letter.
+- **`set_header` accepts a view of, or the `header()` reference to, the value it replaces (Huly QB-490).** It cleared
+  the stored values before building the new one, reading freed storage (a heap-use-after-free under
+  AddressSanitizer, garbage bytes otherwise); the new value is now built first.
+- **`content_encoding()` keeps a coding refused after the wildcard out of the wildcard (Huly QB-492).** `*, gzip;q=0`
+  returned `gzip`: the refusals were collected while walking the field, too late for a `*` listed before them. They
+  are collected first; selection still follows the field's order, not the q-values (QB-100).
+- **A dispatched HTTP/1.1 message's typed `content_type()` matches its raw `Content-Type` on every framing path (Huly
+  QB-506).** Only a chunked message refreshed it; Content-Length, empty, `HEAD` and close-delimited messages kept
+  `application/octet-stream`. The parser now refreshes it where the header section ends, and a chunked message
+  without a `Content-Type` no longer gains an empty one.
+- **The one-shot HTTP/1.1 client answers exactly once (Huly QB-507).** A response delimited by the connection close
+  (no Content-Length, no Transfer-Encoding) is delivered at EOF instead of a 502; a session disposed for any other
+  reason before a verdict -- a protocol error, a read limit -- answers 502 instead of never, so a coroutine awaiting it
+  no longer waits forever; and a compression or serialization failure answers 400 instead of letting the exception
+  out of the connect completion.
+- **A `HEAD` response that declares `Transfer-Encoding` is sent (Huly QB-493).** The server session added a
+  `Content-Length` beside it, which the serializer refuses, and dropped the connection; it now keeps the response's
+  own framing and writes its header section only.
+- **A copied or moved `Parser` parses into itself (Huly QB-510).** The callbacks reached the parser through a
+  self-pointer the implicit copy and move copied verbatim, so a copy wrote into its source -- or into a destroyed
+  object. They now find it through the state llhttp executes; copy and move are complete at every phase.
+- **`MultipartParser` keeps its end state when bytes follow the closing delimiter in the same feed (Huly QB-491).**
+  It returned without committing it, so `succeeded()` was false for any document followed by a CRLF.
+- **The vendored llhttp's provenance note says what the code is (Huly QB-554).** The files claimed llhttp 9.2.1 with
+  only the symbol prefix changed; they are llhttp at upstream commit 8371b40 (between 9.2.1 and 9.3.0, whose version
+  macros still read 9.2.1), with a local `HTTP_UNINITIALIZED` enumerator, an `api.c` wasm table as upstream wrote it
+  later, and the QB-555 patch. `THIRD-PARTY-NOTICES` lists each difference and the procedure that regenerates the
+  sources, verified byte for byte.
 - **API documentation checks reject comment-only names and invalid later citations (Huly QB-561, QB-562).**
   The shipped guard indexes C++ code without comments or literals and examines every
   citation on a line before accepting it.

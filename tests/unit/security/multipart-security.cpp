@@ -284,7 +284,7 @@ TEST_F(MultipartSecurityTest, HeaderAttributeValueAtLimitSucceeds) {
 }
 
 TEST_F(MultipartSecurityTest, HeaderAttributeValueExactlyAtLimitIsAccepted) {
-    // Ground truth (headers.cpp:199): the guard is `size() >= ATTRIBUTE_VALUE_MAX`
+    // Ground truth (headers.cpp, for_each_header_attribute): the guard is `size() >= ATTRIBUTE_VALUE_MAX`
     // checked BEFORE pushing, so the longest accepted value is exactly
     // ATTRIBUTE_VALUE_MAX bytes. A value of exactly ATTRIBUTE_VALUE_MAX is
     // therefore ACCEPTED verbatim, not rejected — the constant is the max stored
@@ -299,7 +299,7 @@ TEST_F(MultipartSecurityTest, HeaderAttributeValueExactlyAtLimitIsAccepted) {
 
 TEST_F(MultipartSecurityTest, HeaderAttributeValueOverLimitIsRejected) {
     // The FIRST rejected length is ATTRIBUTE_VALUE_MAX + 1: on the (MAX+1)-th value
-    // char the guard `size() >= ATTRIBUTE_VALUE_MAX` (headers.cpp:199) trips and
+    // char the guard `size() >= ATTRIBUTE_VALUE_MAX` (headers.cpp, for_each_header_attribute) trips and
     // throws, even though the whole input stays well under the 64KB total cap.
     const std::string over_value(ATTRIBUTE_VALUE_MAX + 1, 'x');
     const std::string attrs = "data=" + over_value;
@@ -694,7 +694,7 @@ TEST_F(MultipartSecurityTest, ParserFeedMalformedHeadersEndingLf) {
 
 // Mid-stream flush: feeding a partial part body (no closing boundary) leaves
 // partDataMark open, so the post-loop dataCallback(..., clear=false) path
-// flushes it to the consumer (multipart.cpp:113-115, 391). A second feed of the
+// flushes it to the consumer (multipart.cpp:113-115, 400). A second feed of the
 // closing boundary then completes the parse and the reassembled body matches.
 TEST_F(MultipartSecurityTest, ParserFeedFlushesOpenPartDataOnChunkBoundary) {
     MultipartParser parser("bnd");
@@ -766,4 +766,36 @@ TEST_F(MultipartSecurityTest, ParserFeedBoyerMooreSkipLandsOnBufferEnd) {
     EXPECT_TRUE(parser.succeeded());
     EXPECT_TRUE(ctx.ended);
     EXPECT_EQ(ctx.data, body);
+}
+
+// The closing delimiter ends the document; whatever follows it in the same feed is the epilogue
+// (RFC 2046 §5.1.1), which the parser skips. It skipped it by returning from feed() without
+// committing its end state, so `state` stayed what it was when the call began and succeeded()
+// answered false for any document followed by a byte — a CRLF after the closing delimiter
+// included, which is the common case (Huly QB-491: the full-body adapter now relies on
+// succeeded()).
+TEST_F(MultipartSecurityTest, ParserFeedKeepsItsEndStateWhenAnEpilogueFollows) {
+    for (const std::string epilogue : {"\r\n", "\r\nany epilogue text, even --bnd--\r\n"}) {
+        MultipartParser parser("bnd");
+        ASSERT_FALSE(parser.hasError());
+
+        CaptureCtx ctx;
+        parser.userData   = &ctx;
+        parser.onPartData = &capture_part_data;
+        parser.onEnd      = &capture_end;
+
+        const std::string raw = "--bnd\r\nK:v\r\n\r\nbody\r\n--bnd--" + epilogue;
+        parser.feed(raw.data(), raw.size());
+
+        EXPECT_FALSE(parser.hasError()) << "epilogue [" << epilogue << "]";
+        EXPECT_TRUE(parser.succeeded()) << "epilogue [" << epilogue << "]";
+        EXPECT_TRUE(parser.stopped());
+        EXPECT_TRUE(ctx.ended);
+        EXPECT_EQ(ctx.data, "body");
+
+        // A later feed (more epilogue) leaves the ended document as it is.
+        const std::string more = "trailing bytes";
+        EXPECT_EQ(parser.feed(more.data(), more.size()), 0u);
+        EXPECT_TRUE(parser.succeeded());
+    }
 }

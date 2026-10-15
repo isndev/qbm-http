@@ -8,7 +8,8 @@ add_library(llhttp STATIC
 
 # No PUBLIC include directory, on purpose.
 #
-# This is a FORK, not a swappable dependency: it is llhttp 9.2.1 regenerated with the `http_`
+# This is a FORK, not a swappable dependency: it is llhttp (upstream commit 8371b40, whose version
+# macros still say 9.2.1; THIRD-PARTY-NOTICES lists its local changes) regenerated with the `http_`
 # symbol prefix (http_t, http_errno, http_init/http_execute), and a system llhttp cannot
 # substitute for it. So it gets the same treatment as qb's own forks under
 # qb/src/qb/vendor/ -- qbm-http OWNS the name and ships it inside its own header root:

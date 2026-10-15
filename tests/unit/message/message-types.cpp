@@ -27,9 +27,11 @@
  */
 #include <gtest/gtest.h>
 
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <qb/io/uri.h>
 
@@ -129,11 +131,118 @@ TEST(StatusTest, ReasonPhraseConversions) {
     EXPECT_EQ(std::string(ok), "OK");
     EXPECT_EQ(std::string_view(ok), "OK");
 
-    // str() / the string conversions return the enum identifier, not the HTTP reason
-    // phrase — "OK" matches both, but a multi-word status reveals the actual form.
+    // str() / the string conversions return the reason phrase their documentation names
+    // ("Not Found"), the text the HTTP/1.1 status line carries -- not the enum identifier
+    // llhttp's status map spells, which they returned until Huly QB-1062. "OK" is both; a
+    // multi-word status tells them apart.
     Status nf(Status::NOT_FOUND);
-    EXPECT_EQ(nf.str(), "NOT_FOUND");
-    EXPECT_EQ(std::to_string(nf), "NOT_FOUND");
+    EXPECT_EQ(nf.str(), "Not Found");
+    EXPECT_EQ(std::string(nf), "Not Found");
+    EXPECT_EQ(std::to_string(nf), "Not Found");
+    std::ostringstream os;
+    os << nf;
+    EXPECT_EQ(os.str(), "Not Found");
+}
+
+// Every code of the IANA HTTP Status Code Registry that llhttp's status map holds carries
+// the registry's text (RFC 9110 §15 names: 413 Content Too Large, 422 Unprocessable
+// Content). 306 and 418 are "(Unused)" in the registry, so they keep the phrase of the
+// document that defined them, as the codes llhttp maps beyond the registry do.
+TEST(StatusTest, RegisteredCodesCarryTheRegistryText) {
+    const std::pair<int, std::string_view> registry[] = {
+        {100, "Continue"},
+        {101, "Switching Protocols"},
+        {102, "Processing"},
+        {103, "Early Hints"},
+        {200, "OK"},
+        {201, "Created"},
+        {202, "Accepted"},
+        {203, "Non-Authoritative Information"},
+        {204, "No Content"},
+        {205, "Reset Content"},
+        {206, "Partial Content"},
+        {207, "Multi-Status"},
+        {208, "Already Reported"},
+        {226, "IM Used"},
+        {300, "Multiple Choices"},
+        {301, "Moved Permanently"},
+        {302, "Found"},
+        {303, "See Other"},
+        {304, "Not Modified"},
+        {305, "Use Proxy"},
+        {307, "Temporary Redirect"},
+        {308, "Permanent Redirect"},
+        {400, "Bad Request"},
+        {401, "Unauthorized"},
+        {402, "Payment Required"},
+        {403, "Forbidden"},
+        {404, "Not Found"},
+        {405, "Method Not Allowed"},
+        {406, "Not Acceptable"},
+        {407, "Proxy Authentication Required"},
+        {408, "Request Timeout"},
+        {409, "Conflict"},
+        {410, "Gone"},
+        {411, "Length Required"},
+        {412, "Precondition Failed"},
+        {413, "Content Too Large"},
+        {414, "URI Too Long"},
+        {415, "Unsupported Media Type"},
+        {416, "Range Not Satisfiable"},
+        {417, "Expectation Failed"},
+        {421, "Misdirected Request"},
+        {422, "Unprocessable Content"},
+        {423, "Locked"},
+        {424, "Failed Dependency"},
+        {425, "Too Early"},
+        {426, "Upgrade Required"},
+        {428, "Precondition Required"},
+        {429, "Too Many Requests"},
+        {431, "Request Header Fields Too Large"},
+        {451, "Unavailable For Legal Reasons"},
+        {500, "Internal Server Error"},
+        {501, "Not Implemented"},
+        {502, "Bad Gateway"},
+        {503, "Service Unavailable"},
+        {504, "Gateway Timeout"},
+        {505, "HTTP Version Not Supported"},
+        {506, "Variant Also Negotiates"},
+        {507, "Insufficient Storage"},
+        {508, "Loop Detected"},
+        {510, "Not Extended"},
+        {511, "Network Authentication Required"},
+    };
+    for (auto const &[code, phrase] : registry)
+        EXPECT_EQ(Status(code).str(), phrase) << code;
+    EXPECT_EQ(Status(418).str(), "I'm a teapot");
+}
+
+// Every code llhttp's status map holds has a phrase, and none is an enum identifier: the
+// table is complete for the map it replaces, and each phrase is a reason-phrase (RFC 9112
+// §4: SP, HTAB, VCHAR, obs-text) that is not an identifier with underscores.
+TEST(StatusTest, EveryMappedCodeHasAReasonPhrase) {
+    struct Mapped {
+        int         code;
+        const char *identifier;
+    };
+#define QB_TEST_STATUS_ENTRY(NUM, NAME, STRING) {NUM, #NAME},
+    const Mapped mapped[] = {HTTP_STATUS_MAP(QB_TEST_STATUS_ENTRY)};
+#undef QB_TEST_STATUS_ENTRY
+    ASSERT_GT(std::size(mapped), 90u) << "the premise: llhttp maps the registry and more";
+    for (auto const &m : mapped) {
+        const char *phrase = qb::http::detail::status_reason(m.code);
+        ASSERT_NE(phrase, nullptr) << m.code << " " << m.identifier;
+        const std::string_view p{phrase};
+        EXPECT_FALSE(p.empty()) << m.code;
+        EXPECT_EQ(p.find('_'), std::string_view::npos) << m.code << ": " << p;
+        if (m.code != 200) {
+            EXPECT_NE(p, std::string_view(m.identifier)) << m.code;
+        }
+        for (const char c : p) {
+            const auto uc = static_cast<unsigned char>(c);
+            EXPECT_TRUE(uc == 0x20 || uc == 0x09 || (uc > 0x20 && uc != 0x7f)) << m.code << ": " << p;
+        }
+    }
 }
 
 TEST(StatusTest, UnmappedCodeYieldsUnknownStatusInsteadOfAborting) {
@@ -148,9 +257,9 @@ TEST(StatusTest, UnmappedCodeYieldsUnknownStatusInsteadOfAborting) {
         EXPECT_EQ(std::string_view(s), std::string_view("Unknown Status")) << code;
         EXPECT_EQ(std::to_string(s), "Unknown Status") << code;
     }
-    // Mapped codes keep their previous (byte-identical) reason token.
+    // Mapped codes keep their reason phrase.
     EXPECT_EQ(std::to_string(Status(200)), "OK");
-    EXPECT_EQ(std::to_string(Status(404)), "NOT_FOUND");
+    EXPECT_EQ(std::to_string(Status(404)), "Not Found");
 }
 
 TEST(StatusTest, ComparisonOperators) {

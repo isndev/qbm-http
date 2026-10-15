@@ -129,7 +129,7 @@ res.add_cookie("session", "abc123");                    // jar + matching Set-Co
 int code = res.status().code();                         // 200..., st.str() -> "OK"
 ```
 
-- `Body`/`Headers` are **base classes, not members**: call `req.set_header(...)` / `req.body()` directly. `headers()` returns the raw map for bulk inspection; after direct mutation call `refresh_content_type()`.
+- `Body`/`Headers` are **base classes, not members**: call `req.set_header(...)` / `req.body()` directly. `headers()` returns the raw map for bulk inspection; after direct mutation call `refresh_content_type()` (the typed `content_type()` is derived from the raw header on the next read, and only when read).
 - Body extraction is closed: only `std::string`, `std::string_view`, `qb::json`, `Multipart`, `Form` convert out; anything else is a compile error. Two accessors share that set — `as<T>()` **throws** on malformed input, `try_as<T>()` returns `std::optional<T>` and is `noexcept`. **Use `try_as<T>()` for anything a client sent you**, so a bad payload becomes a `nullopt` you turn into a 400 instead of an exception crossing your handler. Append/constructor accepts `Body`, `Chunk`, `Multipart`, `qb::json`, `std::string`, `std::string_view`, `std::vector<char>`, arithmetic values, built-in `char[N]` arrays, and `char*`/`const char*`; assignment has explicit support for `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*`. `Form` is assignment-only; arithmetic is append-only.
 - **DELETE is `qb::http::method::DEL`** (`delete` is a keyword); `method::DELETE_METHOD` is an alias. Default `Method` is `UNINITIALIZED`; `Request{uri}` defaults to `GET`.
 
@@ -486,7 +486,7 @@ client->set_connect_timeout(std::chrono::seconds(10));               // default 
 client->set_verify_peer(false);                                      // BEFORE connect
 ```
 
-`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Qb-io also resolves default ports for portless mixed-case HTTP(S) URLs (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), or 502 (peer disconnect). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it bridges synchronous top-level code and tests, **not** code inside an already driven coroutine. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
+`qb::http::async::Reply` = `{ Request request; Response response; }`. One-shot helpers compare URI schemes case-insensitively for transport selection: unsupported schemes fail locally with 400, and HTTPS without SSL support fails locally with 503; neither opens a socket. Qb-io also resolves default ports for portless mixed-case HTTP(S) URLs (QB-919). A local rejection may invoke the callback before the helper returns; the coroutine awaiter schedules its continuation. Other failures synthesize 503 (cannot connect), 504 (timeout), 400 (the request cannot be compressed or serialized -- e.g. a raw SP or control byte in the URI's query), or 502 (the session is disposed before a complete response: a peer close, a protocol error, a read limit). The callback runs exactly once, and a response delimited by the connection close (no Content-Length, no Transfer-Encoding) is delivered at EOF (QB-507). Persistent clients (`http1`/`http2`/`http3`) are non-copyable/non-movable, single-origin, and must be owned through `make_client`'s `shared_ptr`. Timeouts everywhere are `qb::duration`; `qb::duration::zero()` means **no timeout**. `qb::http::run_sync(awaitable)` (used above; declared in `coro.h`, pulled in by `<qbm/http/http.h>`) drives one awaitable to completion on the current I/O thread — it bridges synchronous top-level code and tests, **not** code inside an already driven coroutine. The WebSocket side has its own alias, `qb::http::ws::run_sync`; both re-export `qb::io::async::run_sync`. A coroutine parked on a client request shows as `"http"` in qb's `CoroutineScheduler::dump()` when its thread tracks suspensions (3.3).
 
 HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/timeout retires the old request and connect-callback cohort before user notification; new callback submissions belong to the next cycle. An explicit connect accepted during retirement starts after the old callback/protocol dispatch returns, and pending work may queue behind that intent with auto-reconnect disabled. Destruction abandons pending connect observers; explicit disconnect reports cancellation once. _(src/qbm/http/1.1/client.cpp:232-236,272-307,338-349,565-630,690-749)_
 
@@ -506,10 +506,11 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 ## Gotchas
 
 - **DELETE ⇒ `qb::http::method::DEL`** and `router().del(...)`. `method::DELETE` does not exist.
-- `Body`/`Headers` are base classes — `req.set_header(...)`/`req.body()`, not `req.headers().set(...)`. After mutating `headers()` directly, call `refresh_content_type()`.
+- `Body`/`Headers` are base classes — `req.set_header(...)`/`req.body()`, not `req.headers().set(...)`. After mutating `headers()` directly, call `refresh_content_type()`; `content_type()` derives itself from the raw header on the next read.
 - Request cookies need an explicit `req.parse_cookie_header()`; response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.
+- `out << msg` writes a COMPLETE HTTP/1.1 message — an empty chunked body is its last-chunk — and a request with a raw SP, control byte or DEL in its URI's query throws `std::length_error` (percent-encode it; `qb::io::uri` already refuses them in a path). To stream chunks yourself, write `qb::http::MessageHead{msg}` (start line + header section only), then the `Chunk`s and the terminating `Chunk{}`.
 - Assigning a C++-constructed `qb::json` with invalid UTF-8 to `Body` throws for const and rvalue JSON alike and clears partial output; a routed `Context::json` handler becomes a 500 instead of terminating the process.
 - HTTP/2 / HTTP/3 are TLS-only with ALPN; no plaintext h2c. HTTP/2 client `connect(nullptr)` for fire-and-forget.
 - `verify_peer` defaults to `true`; disable only for trusted/self-signed endpoints, and set it before connecting on persistent clients.
@@ -558,26 +559,26 @@ Every signature below is confirmed against the real headers under `qbm/http/src/
 
 # Namespace `qb::http` — core message types
 
-### `qb::http::Method` (alias `method`) — `types.h:71`
+### `qb::http::Method` (alias `method`) — `types.h:274`
 `class Method { enum class Value:int { GET, POST, DEL, ... }; constexpr Method(Value); constexpr Method(::http_method); explicit Method(std::string_view); operator ::http_method()/Value()/std::string()/std::string_view(); }`
 Value-type wrapper over llhttp `http_method`; case-insensitive string ctor; **`DEL` is DELETE** (alias `DELETE_METHOD`); static constants `Method::GET`, `Method::POST`, …
 Returns: a method value. Throws: nothing on enum ctors.
 Usage: `qb::http::method m = qb::http::method::GET;`
 
-### `qb::http::Status` (alias `status`) — `types.h:306`
+### `qb::http::Status` (alias `status`) — `types.h:509`
 `class Status { enum class Value:int { OK=200, NOT_FOUND=404, ... }; constexpr Status(Value); constexpr Status(::http_status); constexpr Status(int); constexpr int code() const; std::string_view str() const; operator std::string()/std::string_view()/::http_status()/Value(); }`
-Value-type wrapper over llhttp `http_status`; **default-constructs to 200 OK**; `code()` returns the numeric code; static constants `Status::OK`, `Status::NOT_FOUND`, …
+Value-type wrapper over llhttp `http_status`; **default-constructs to 200 OK**; `code()` returns the numeric code; static constants `Status::OK`, `Status::NOT_FOUND`, … `str()`, the string conversions, `std::to_string(Status)` and `operator<<` return the reason phrase the HTTP/1.1 status line carries: the IANA registry's text (`"Not Found"`, 413 `"Content Too Large"`), a defining document's for 306, 418 and the unregistered codes llhttp maps, `"Unknown Status"` for any other code -- not the enum identifier (`NOT_FOUND`) they returned before 3.3 (Huly QB-1062).
 Returns: a status value. Throws: nothing.
 Usage: `resp.status() = qb::http::status::NOT_FOUND;`
 
-### `qb::http::DisconnectedReason` — `types.h:731`
+### `qb::http::DisconnectedReason` — `types.h:934`
 `enum DisconnectedReason:int { ByUser=0, ByTimeout, ResponseTransmitted, ServerError, ByProtocolError, Undefined }`
 Reason codes supplied on HTTP session disconnect.
 
-### `qb::http::endl` / `sep` — `types.h:713` / `:721`
+### `qb::http::endl` / `sep` — `types.h:916` / `:924`
 `constexpr char endl[]="\r\n"; constexpr char sep=' ';` — HTTP CRLF terminator and SP separator.
 
-### std helpers — `types.h:748`
+### std helpers — `types.h:951`
 `template<> struct std::hash<qb::http::method>; template<> struct std::hash<qb::http::status>; std::string std::to_string(qb::http::method); std::string std::to_string(qb::http::status);`
 Make method/status usable as unordered-map keys and stringifiable.
 
@@ -595,23 +596,23 @@ Usage: `qb::http::Request r{qb::http::method::GET, qb::io::uri{"https://h/x"}}; 
 Owning response: default-constructs to 200 OK (`response.h:56-58`), CookieJar serialized to `Set-Cookie`. Mutating cookies directly needs `update_cookie_header(s)` to resync. Of the chainable `with_*`, only `with_status` is `noexcept`. `status()` has **both** a const and a mutating overload (`response.h:75, :79`) — `resp.status() = qb::http::status::CREATED;` is valid.
 Usage: `qb::http::Response resp{qb::http::status::OK}; resp.with_body("hi");`
 
-### `qb::http::Headers` (alias `headers`) — `headers.h:151`
+### `qb::http::Headers` (alias `headers`) — `headers.h:161`
 `class Headers { headers_map_type& headers(); const std::string& header(name, idx=0) const; std::string header_or(name, std::string fallback, idx=0) const; bool has_header(name) const noexcept; qb::icase_unordered_map<std::string> attributes(name, idx=0, std::string_view default_to_parse="") const; void set_header(name,value); void add_header(name,value); void remove_header(name); void set_content_type(string_view); const ContentType& content_type() const; void refresh_content_type() noexcept; std::size_t header_count() const; bool exceeds_header_limit(max=100) const; }`
-Case-insensitive multi-value store; typed mutators keep the cached `ContentType` in sync — call `refresh_content_type()` after raw `headers()` mutation. **Accessor model:** `header(name, idx)` returns a `const std::string&` bound to a process-wide static empty string on a miss — never a temporary, always safe to keep for the message's lifetime. For a custom fallback use the by-value `header_or(name, fallback, idx)` (no lifetime caveat). `attributes(name, ...)` parses the header value's `name=value; n2="q v"` params via `parse_header_attributes`.
+Case-insensitive multi-value store, keyed by the lower-cased name: iteration and the HTTP/1.1 serializer yield `content-type`, whatever case it was set in (field names are case-insensitive, RFC 9110 §5.1; HTTP/2 and HTTP/3 require lower case), values keep their bytes. The typed `ContentType` is DERIVED from the raw `Content-Type` header (its first value, or the defaults) on the first `content_type()` read after the message was built, parsed, or had that header changed through a typed mutator; a message whose typed Content-Type is never read never parses it (QB-506). After raw `headers()` mutation call `refresh_content_type()`, which only marks it for re-derivation. `set_header` builds its new value before clearing the old ones, so the value may be a view of, or the `header()` reference to, the value it replaces (Huly QB-490); `remove_header` folds every name form, a `const std::string` included (QB-279). **Accessor model:** `header(name, idx)` returns a `const std::string&` bound to a process-wide static empty string on a miss — never a temporary, always safe to keep for the message's lifetime. For a custom fallback use the by-value `header_or(name, fallback, idx)` (no lifetime caveat). `attributes(name, ...)` parses the header value's `name=value; n2="q v"` params via `parse_header_attributes`.
 `headers_map = qb::icase_unordered_map<std::vector<std::string>>` (`headers.h:52`).
 
-### `qb::http::Headers::ContentType` — `headers.h:167`
-`class ContentType { static std::pair<std::string,std::string> parse(std::string_view); explicit ContentType(std::string_view=""); const std::string& type() const; const std::string& charset() const; }`
-Parses Content-Type into MIME type + charset; defaults to `application/octet-stream` / `utf-8` (never reports "no type").
+### `qb::http::Headers::ContentType` — `headers.h:182`
+`class ContentType { static std::pair<std::string,std::string> parse(std::string_view); ContentType() noexcept; explicit ContentType(std::string_view); void assign(std::string_view); const std::string& type() const; const std::string& charset() const; }`
+Parses Content-Type into MIME type + charset; defaults to `application/octet-stream` / `utf-8` (never reports "no type"). The defaults are not stored: a default-constructed or typeless `ContentType` holds empty strings and reports them from one process-wide `std::string` each, so building one allocates nothing.
 
 ### Header free functions
 - `parse_header_attributes(const char*, size_t)` (+ string/string_view overloads) — `headers.h:67` — parse `name=value; n2="q v"` params. Throws `std::runtime_error` on malformed/oversized/unterminated input. Bounds: `ATTRIBUTE_NAME_MAX=1024`, `ATTRIBUTE_VALUE_MAX=8192` (`headers.h:37`).
-- `std::string accept_encoding();` / `std::string content_encoding(std::string_view accept_encoding_header);` — `headers.h:97` — build `Accept-Encoding` from server capability; pick a `Content-Encoding`: q=0 or a malformed q refuses a coding, and the first acceptable coding in the header's order wins -- not the highest q (`CompressionMiddleware::select_best_encoding` ranks by q). Empty when compression disabled.
+- `std::string accept_encoding();` / `std::string content_encoding(std::string_view accept_encoding_header);` — `headers.h:97` — build `Accept-Encoding` from server capability; pick a `Content-Encoding`: q=0 or a malformed q refuses a coding, and the first acceptable coding in the header's order wins -- not the highest q (`CompressionMiddleware::select_best_encoding` ranks by q). `*` stands for any coding the field does not refuse, wherever the refusal is listed -- after the wildcard too (QB-492). Empty when compression disabled.
 
 ### `qb::http::Body` — `body.h:57`
 `class Body { template<typename...A> requires (is_body_appendable_v<A> && ...) Body(A&&...); template<typename...A> requires (is_body_appendable_v<A> && ...) Body& operator<<(A&&...); template<typename T> Body& operator=(...); template<typename T> T as() const; template<typename T> [[nodiscard]] std::optional<T> try_as() const noexcept; Body& add_chunk(const Chunk&); Body& add_final_chunk(); pipe<char>& raw(); std::size_t size() const; bool empty() const; void clear() noexcept; }`
 `Body::operator=(qb::json&&)` and the const JSON assignment can throw on invalid UTF-8 (`body.h:439-443`); both clear partial output before propagation (`body.cpp:675-697`).
-Backed by `qb::allocator::pipe<char>`. `is_body_appendable` gates only the variadic constructor and `operator<<`: `Body`, `Chunk`, `Multipart`, `qb::json`, `std::string`, `std::string_view`, `std::vector<char>`, arithmetic values, built-in `char[N]` arrays, and `char*`/`const char*`. `Form` is deliberately not appendable. Assignment is a separate explicit-specialization set: `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*` (plus Body copy/move). A `nullptr` literal is not a supported assignment; use `clear()`. The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`.
+Backed by `qb::allocator::pipe<char>`. `is_body_appendable` gates only the variadic constructor and `operator<<`: `Body`, `Chunk`, `Multipart`, `qb::json`, `std::string`, `std::string_view`, `std::vector<char>`, arithmetic values, built-in `char[N]` arrays, and `char*`/`const char*`. `Form` is deliberately not appendable. Assignment is a separate explicit-specialization set: `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*` (plus Body copy/move). A `nullptr` literal is not a supported assignment; use `clear()`. The extraction set is closed: `as<T>()` / `try_as<T>()` accept only `std::string_view`, `std::string`, `qb::json`, `Multipart`, `Form` (anything else is a `static_assert`, `body.h:387`); explicit specializations of `as<T>` at `body.h:460-473`. Conversions defined in `body.cpp`. `as<Multipart>()` throws (`try_as` yields `nullopt`) unless the document is closed by its final delimiter: a body that ends inside a part or its headers is truncated, not shorter; bytes after the closing delimiter (the epilogue) are ignored (QB-491).
 **Prefer `try_as<T>()` for client-supplied bodies** (`body.h:404`): it returns `std::optional<T>` and is `noexcept`, so a malformed JSON/multipart payload yields `std::nullopt` (→ reply 400) instead of an exception you must catch at the call site. `as<T>()` throws on malformed input; the string conversions never fail.
 Usage: `req.body() = "payload"; if (auto j = resp.body().try_as<qb::json>()) { /* use *j */ }`
 
@@ -634,7 +635,7 @@ RFC 7578 builder; default ctor generates a secure-random boundary (OpenSSL when 
 Usage: `qb::http::Multipart mp; auto& p = mp.create_part(); p.set_header("Content-Disposition","form-data; name=\"f\""); p.body="v";`
 
 ### `qb::http::MultipartParser` — `multipart.h:74`
-`class MultipartParser { typedef void (*Callback)(const char* buffer,size_t start,size_t end,void* userData); MultipartParser(); MultipartParser(std::string boundary); void setBoundary(std::string); size_t feed(const char* buffer,size_t len); bool succeeded()/hasError()/stopped() const; const char* getErrorMessage() const; Callback onPartBegin/onHeaderField/onHeaderValue/onHeaderEnd/onHeadersEnd/onPartData/onPartEnd/onEnd; void* userData; }`
+`class MultipartParser { typedef void (*Callback)(const char* buffer,size_t start,size_t end,void* userData); MultipartParser(); MultipartParser(std::string boundary); void setBoundary(std::string); size_t feed(const char* buffer,size_t len); bool succeeded()/hasError()/stopped() const; const char* getErrorMessage() const; Callback onPartBegin/onHeaderField/onHeaderValue/onHeaderEnd/onHeadersEnd/onPartData/onPartEnd/onEnd; void* userData; }` — `succeeded()` holds from the closing delimiter on, whatever follows it in the same `feed()` (the epilogue is skipped; `succeeded` at `multipart.h:420`); an incomplete document is neither succeeded nor errored, so a streaming consumer feeds again.
 Callback-driven streaming state machine; `feed` returns bytes consumed. Limits in `multipart_limits` (`multipart.h:50`): `MAX_BOUNDARY_LENGTH=70`, `MAX_HEADER_NAME_LENGTH=1024`, `MAX_HEADER_VALUE_LENGTH=8192`, `MAX_PARTS_COUNT=1000`, `MAX_TOTAL_SIZE=100 MiB`.
 - `std::string::const_iterator find_boundary(str, boundary); std::string parse_boundary(content_type);` — `multipart.h:462` — locate / extract boundary (empty if not multipart).
 
@@ -645,7 +646,7 @@ Usage: `qb::http::Cookie c{"sid","abc"}; c.http_only(true).max_age(std::chrono::
 - `enum class SameSite { None, Lax, Strict, NOT_SET }` (`cookie.h:50`) — passing `NOT_SET` resets the optional.
 
 ### `qb::http::CookieJar` — `cookie.h:300`
-`class CookieJar { void add(const Cookie&); void add(Cookie&&); Cookie& add(string name,string value); bool remove(name); void clear(); const Cookie* get(name) const; Cookie* get(name); bool has(name) const; const qb::icase_unordered_map<Cookie>& all() const; size_t size() const; bool empty() const; }`
+`class CookieJar { void add(const Cookie&); void add(Cookie&&); Cookie& add(string name,string value); bool remove(name) /* case-insensitive for every name form -- QB-279 */; void clear(); const Cookie* get(name) const; Cookie* get(name); bool has(name) const; const qb::icase_unordered_map<Cookie>& all() const; size_t size() const; bool empty() const; }`
 Case-insensitive-name container; `add` replaces an existing same-name cookie. Bounds: `COOKIE_NAME_MAX=1024`, `COOKIE_VALUE_MAX=4096` (`cookie.h:33`).
 - `parse_cookies(ptr,len,set_cookie)` / `parse_cookies(string_view,set_cookie)` / `std::optional<Cookie> parse_set_cookie(string_view)` — `cookie.h:438`.
 
@@ -657,9 +658,12 @@ Same-origin comparison: case-insensitive scheme/host, scheme-default ports (http
 Char/string helpers: `is_char/is_control/is_special/is_digit/is_hex_digit(int)`, `hex_value(char)`, `decode_path_component(string_view)`, `constexpr char ascii_to_lower(char)`, `bool iequals(string_view,string_view)`, `is_http_whitespace`, `trim_http_whitespace`, `escape_html`, `uri_encode_component`. Splitting/joining: `split_and_trim_header_list`, `split_string<String>(...)`, `split_string_by<...>`, lazy `class split_view`, `join(vector<T>, delim)`.
 Usage: `if (qb::http::utility::iequals(a,b)) ...;`
 
-### pipe serialization — `request.h:384` / `chunk.h:106` / `multipart.h:629`
-`template<> pipe<char>& pipe<char>::put<Request>(const Request&); ...<Response>; ...<Chunk>; ...<Multipart>;`
-Wire-serialize into the qb pipe; Request/Response throw `std::length_error` if the message exceeds `protocol_limits`.
+### pipe serialization — `request.h:385` / `response.h:357` / `chunk.h:106` / `multipart.h:629`
+`template<> pipe<char>& pipe<char>::put<Request>(const Request&); ...<Response>; ...<MessageHead<Request>>; ...<MessageHead<Response>>; ...<Chunk>; ...<Multipart>;`
+Wire-serialize into the qb pipe; Request/Response throw `std::length_error` if the message exceeds `protocol_limits`. Each writes a COMPLETE message: a chunked body ends with its last-chunk `0\r\n\r\n` even when empty (QB-493). The Request refuses a request-target byte the request line cannot carry — SP, HTAB, CR, LF, NUL, any other control, DEL — before writing anything (`std::length_error`; percent-encode it, QB-494): `qb::io::uri` keeps raw query bytes.
+
+### `qb::http::MessageHead<Message>` — `message_base.h:186`
+`template<typename Message> struct MessageHead { const Message& message; };` + deduction guide `MessageHead{msg}`. `out << MessageHead{msg}` writes the start line and header section only — framing headers included, no body, no last-chunk — with the full serializer's validation (`request.h:395`, `response.h:367`). The HTTP/1.1 server session writes every HEAD response this way; it is also the head to write before a body you stream as `Chunk`s.
 
 ---
 
@@ -674,7 +678,7 @@ Format as RFC 1123 GMT date (empty on failure); cookie variant is functionally i
 Usage: `auto s = qb::http::date::format_http_date(std::chrono::system_clock::now());`
 
 ### `date.h:75`
-`std::optional<system_clock::time_point> parse_http_date(std::string_view) noexcept;` (+ `const std::string&` overload)
+`std::optional<system_clock::time_point> parse_http_date(std::string_view) noexcept;` (+ `const std::string&` overload) — every fixed-width numeric field must be all digits (no sign, no trailing byte: `08:4x:37` is `nullopt`, QB-599)
 `std::optional<system_clock::time_point> parse_cookie_date(...) noexcept;`
 Parse RFC 1123 / RFC 850 / asctime; `nullopt` on failure.
 
@@ -1013,7 +1017,7 @@ Usage (coro): `auto reply = co_await qb::http::GET(qb::http::Request{qb::http::m
 Usage: `auto c = qb::http1::make_client("https://h"); co_await c->connect(); auto resp = co_await c->push_request(req);`
 
 ### HTTP/1.1 protocol/parser — `1.1/protocol/*`
-- `template<typename MessageType> struct Parser : public http_t` (`base.h`) — llhttp incremental parser; `parse(buffer,size)->http_errno_t`, `reset()`, `resume()`, `get_parsed_message()`, `headers_completed()`.
+- `template<typename MessageType> struct Parser : public http_t` (`base.h:130`) — llhttp incremental parser; `parse(buffer,size)->http_errno_t`, `reset()`, `resume()`, `get_parsed_message()`, `headers_completed()`. Copyable and movable at every phase: it holds no pointer to itself, its callbacks find it through the state llhttp executes (QB-510). The parser fills the raw header map only; the message's typed `content_type()` derives from it on first read, on every framing path (QB-506).
 - `template<typename IO_Handler,typename Trait> class base` (`base.h`) — `AProtocol`; `getMessageSize()` does Content-Length + chunked framing.
 - `template<typename IO_Handler> class server` (`server.h`) / `client` (`client.h`) — parse Cookie / Set-Cookie (exceptions contained) and dispatch via `_io.on(...)`.
 - `template<typename IO_Handler> using qb::http::protocol = ...` — selects server vs client by `IO_Handler::has_server`.

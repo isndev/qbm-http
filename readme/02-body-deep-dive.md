@@ -13,7 +13,7 @@
 - **Append** through a compile-time-constrained `operator<<` (and the variadic constructor), accepting only byte-like ranges, `Chunk`, `Multipart`, `qb::json`, or arithmetic types. **Assign** through `operator=`, which additionally accepts `Form` (assignment-only — `Form` has no `pipe<char>::put<Form>` serializer, so it cannot be `<<`-appended). Anything else (a raw `nullptr`, a `std::map`) is rejected by the compiler rather than silently stringified.
 - **Typed reads** through `as<T>()` (throwing) and `try_as<T>()` (non-throwing, returns `std::optional<T>`), defined only for `std::string_view`, `std::string`, `qb::json`, `Multipart`, and `Form`. Any other `T` is a hard compile error.
 - **Optional compression** (`compress` / `uncompress`), gated on `QB_HAS_COMPRESSION`. Call these methods explicitly when you own encoding; HTTP/1.1 clients and the optional compression middleware invoke them in their own paths, not every protocol layer.
-<!-- src: qbm/http/src/qbm/http/body.h:240-312; qbm/http/src/qbm/http/1.1/http.h:765-799; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
+<!-- src: qbm/http/src/qbm/http/body.h:240-312; qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
 
 The buffer is owning. The historical zero-copy `string_view` body mode was retired because the input pipe relocates bytes between socket reads and an async handler cannot guarantee a captured view outlives the read — so a `Body` always owns stable, movable bytes.
 
@@ -204,7 +204,7 @@ if (auto doc = req.body().try_as<qb::json>()) {
 
 Parses `application/x-www-form-urlencoded` bytes into a [`Form`](#the-form-container). Keys and values are URI-decoded (so `%40` becomes `@`); a `+` in form data decodes to a space, consistent with the encoding used on assignment. A pair with no `=` is stored with an empty value; empty keys are dropped. The parser does not throw on odd input — it does its best and returns what it found.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:849-888 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:855-894 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -218,9 +218,9 @@ form.get_first("flag").value_or("");    // ""          (key present, empty value
 
 ### `as<Multipart>()`
 
-Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, or the underlying state machine reports an error.
+Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, the underlying state machine reports an error, or the document is not closed by its final delimiter — a body that ends inside a part or its headers is a truncated document, not a shorter one. Bytes after the closing delimiter (the epilogue) are ignored.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:749-785 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:750-791 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -373,7 +373,7 @@ body = mp;   // serialize parts + boundaries
 // then set the request's Content-Type to: multipart/form-data; boundary=<mp.boundary()>
 ```
 
-<!-- src: qbm/http/src/qbm/http/multipart.cpp:448-500 -->
+<!-- src: qbm/http/src/qbm/http/multipart.cpp:457-509 -->
 Serialization writes, for each part, `--<boundary>\r\n`, the part headers as `Name: value\r\n`, a blank line, the part body, and `\r\n`; the message ends with `--<boundary>--`. The serializer validates the boundary and every part header name/value first, throwing `std::length_error` on an invalid boundary or header — so a hand-built `Multipart` with a malformed boundary fails loudly at write time rather than emitting a broken wire form.
 
 ### Parsing an inbound multipart with an explicit boundary
@@ -442,7 +442,7 @@ std::size_t back = body.uncompress("gzip");    // body holds the original bytes 
 ```
 
 The transformation belongs to the path you choose. With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an **uncompressed** request body when `Content-Encoding` is set and decompress an encoded response; do not precompress that request. Server response serialization writes existing body bytes unchanged, even if `Content-Encoding` is set: either call `body().compress(...)` yourself before setting the header, or attach compression middleware to negotiate, compress when worthwhile, and set the header. That middleware can also decompress encoded requests before the handler; it skips response compression when a `Content-Encoding` header already exists. HTTP/2 and HTTP/3 have no such HTTP/1.1 client compression step, so manage their encoding explicitly. Always guard direct `Body` codec calls with `#ifdef QB_HAS_COMPRESSION`, since the methods do not exist in a build without it.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:765-799; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:315-335; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:298-323; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
 
 ## Pitfalls
 

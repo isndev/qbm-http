@@ -856,3 +856,42 @@ TEST_F(BodyTest, AsMultipartThrowsWhenBoundaryMissingOrEmpty) {
     body = std::string("-\r\n");
     EXPECT_THROW((void) body.as<Multipart>(), std::runtime_error);
 }
+
+// Body::as<Multipart>() converts a COMPLETE body, so the multipart document must be complete
+// too: a body whose closing delimiter is missing or cut short is a truncated document, not a
+// shorter one. The incremental reader rightly answers "no error yet, give me more" for such a
+// prefix (a streaming consumer feeds again); the full-body adapter checked only for an error,
+// so it returned the prefix as a valid Multipart and try_as<> an engaged optional (Huly
+// QB-491). The adapter now requires the reader's final state; the epilogue policy (bytes after
+// the closing delimiter are ignored, RFC 2046 §5.1.1) is unchanged.
+TEST_F(BodyTest, AsMultipartRejectsAnUnterminatedDocument) {
+    const std::string boundary = "Bnd42";
+    const std::string part     = "--" + boundary
+                                 + "\r\n"
+                                   "Content-Disposition: form-data; name=\"field\"\r\n"
+                                   "\r\n"
+                                   "value-bytes";
+
+    const std::pair<const char *, std::string> truncated[] = {
+        {"no closing delimiter", part},
+        {"no closing delimiter, CRLF after the data", part + "\r\n"},
+        {"next delimiter without its CRLF", part + "\r\n--" + boundary},
+        {"closing delimiter cut after one hyphen", part + "\r\n--" + boundary + "-"},
+        {"headers never terminated", "--" + boundary + "\r\nContent-Disposition: form-data; name=\"field\"\r\n"},
+        {"a second part never closed", part + "\r\n--" + boundary + "\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nmore"},
+    };
+    for (auto const &[name, raw] : truncated) {
+        body = raw;
+        EXPECT_THROW((void) body.as<Multipart>(), std::runtime_error) << name;
+        EXPECT_FALSE(body.try_as<Multipart>().has_value()) << name;
+    }
+
+    // Controls: the complete document parses, with and without an epilogue.
+    for (const std::string &tail : {std::string{}, std::string("\r\n"), std::string("\r\nepilogue ignored")}) {
+        body                      = part + "\r\n--" + boundary + "--" + tail;
+        const Multipart parsed_mp = body.as<Multipart>();
+        ASSERT_EQ(parsed_mp.parts().size(), 1u) << "tail [" << tail << "]";
+        EXPECT_EQ(parsed_mp.parts()[0].body, "value-bytes");
+        EXPECT_TRUE(body.try_as<Multipart>().has_value());
+    }
+}

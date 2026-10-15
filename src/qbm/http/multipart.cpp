@@ -380,6 +380,15 @@ MultipartParser::feed(const char *buffer, size_t len) {
             case PART_DATA:
                 processPartData(prevIndex, l_index, buffer, len, boundaryEnd, i, c, l_state, l_flags);
                 break;
+            case END:
+                // The closing delimiter has been read: what follows is the epilogue (RFC 2046
+                // §5.1.1), which is not parsed. Commit the state as the normal exit below does --
+                // returning without it left `state` as it was when this call began, so a document
+                // followed by any byte never reported succeeded() (Huly QB-491).
+                this->index = l_index;
+                this->state = l_state;
+                this->flags = l_flags;
+                return i;
             default:
                 return i;
         }

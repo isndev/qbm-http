@@ -198,6 +198,141 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
     const auto status = r.status().code();
     return (status >= 100 && status < 200) || status == 204;
 }
+
+/**
+ * @brief The HTTP/1.1 serialization of a response, with or without its content.
+ * @param out Where the bytes go. On a refusal it is cleared and nothing is emitted.
+ * @param r The response.
+ * @param content_suppressed True for `MessageHead`: the status line and the header section only,
+ *        framing headers included, and nothing after them -- no body, no chunked last-chunk (the
+ *        response to a HEAD request, RFC 9110 §9.3.2). The body, if any, is ignored.
+ */
+void
+serialize_response(pipe<char> &out, const qb::http::Response &r, const bool content_suppressed) {
+    // SECURITY FIX: Validate body size to prevent DoS
+    const std::size_t body_size = content_suppressed ? 0u : r.body().size();
+    if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: body size (" + std::to_string(body_size)
+                                + ") exceeds "
+                                  "qb::http::protocol_limits::MAX_BODY_SIZE ("
+                                + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE)
+                                + "); refusing to emit a truncated or empty wire representation.");
+    }
+
+    const auto length = body_size;
+    if (length && response_must_not_carry_body(r)) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
+    }
+
+    const auto transfer = transfer_encoding(r);
+    if (!transfer.ok) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
+    }
+    if (transfer.chunked && response_must_not_carry_body(r)) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
+    }
+
+    std::optional<std::uint64_t> content_length;
+    try {
+        content_length = declared_content_length(r);
+    } catch (...) {
+        out.clear();
+        throw;
+    }
+
+    if (transfer.chunked && content_length) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
+    }
+    if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
+    }
+    if (length && !transfer.chunked && content_length && *content_length != length) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
+    }
+
+    // Performance: Pre-calculate approximate output size to minimize allocations
+    std::size_t estimated_size = 32; // Base status line size
+    estimated_size += std::to_string(r.status().code()).size();
+    estimated_size += 32; // Status text estimate
+
+    // Add headers size
+    for (const auto &it : r.headers()) {
+        if (!header_name_is_valid(it.first)) {
+            out.clear();
+            throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
+        }
+        estimated_size += it.first.size() + 2; // ": "
+        for (const auto &value : it.second) {
+            if (!header_value_is_valid(value)) {
+                out.clear();
+                throw std::length_error("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
+            }
+            estimated_size += value.size() + 2; // CRLF
+        }
+    }
+    estimated_size += 2; // Final CRLF
+    estimated_size += body_size;
+
+    // SECURITY FIX: Cap maximum serialized size to prevent overflow
+    constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
+    if (estimated_size > MAX_SERIALIZED_SIZE) {
+        out.clear();
+        throw std::length_error("qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
+                                "or header explosion); refusing to allocate.");
+    }
+
+    // Reserve space in pipe to reduce allocations
+    out.reserve(estimated_size);
+
+    // HTTP Status Line
+    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
+        << qb::http::endl;
+
+    // HTTP Headers
+    for (const auto &it : r.headers()) {
+        for (const auto &value : it.second) {
+            if (!header_is_valid(it.first, value)) {
+                out.clear();
+                throw std::length_error("qb::http::Response serialization: invalid header name/value.");
+            }
+            out << it.first << ": " << value << qb::http::endl;
+        }
+    }
+
+    // Body. A chunked body always ends with its last-chunk, an empty one included: that terminator
+    // alone is what delimits it (RFC 9112 §7.1, Huly QB-493) -- unless the content is suppressed,
+    // where the header section is the whole message.
+    if (transfer.chunked) {
+        out << qb::http::endl;
+        if (!content_suppressed) {
+            if (length)
+                out << qb::http::Chunk(r.body().raw().begin(), length);
+            out << qb::http::Chunk();
+        }
+    } else if (length) {
+        if (!content_length) {
+            out << "content-length: " << length << qb::http::endl;
+        }
+        out << qb::http::endl << r.body().raw();
+    } else {
+        // Empty body: still emit "Content-Length: 0" so the message is self-delimiting on a
+        // keep-alive connection (RFC 9112 §6.2). Without it, a peer with no Content-Length and no
+        // Transfer-Encoding treats the response as close-delimited (read-until-EOF) and blocks on a
+        // connection that never closes. Omit it for statuses that must not carry a body (1xx/204/304)
+        // and when Content-Length is already declared.
+        if (!content_length && !response_must_not_carry_body(r)) {
+            out << "content-length: 0" << qb::http::endl;
+        }
+        out << qb::http::endl;
+    }
+}
 } // namespace
 
 /**
@@ -212,10 +347,7 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
  * - Status line: HTTP/VERSION STATUS_CODE STATUS_TEXT
  * - Headers: HEADER: VALUE
  * - Empty line separator
- * - Response body (if present)
- *
- * This method also handles automatic compression of the body
- * if Content-Encoding header is present.
+ * - Response body (if present); a chunked body, even an empty one, ends with its last-chunk
  *
  * @security Validation uses qb::http::protocol_limits; oversize messages throw
  *       std::length_error instead of emitting a truncated or empty wire format.
@@ -226,124 +358,22 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
 template <>
 pipe<char> &
 pipe<char>::put<qb::http::Response>(const qb::http::Response &r) {
-    // SECURITY FIX: Validate body size to prevent DoS
-    const std::size_t body_size = r.body().size();
-    if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: body size (" + std::to_string(body_size)
-                                + ") exceeds "
-                                  "qb::http::protocol_limits::MAX_BODY_SIZE ("
-                                + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE)
-                                + "); refusing to emit a truncated or empty wire representation.");
-    }
+    serialize_response(*this, r, false);
+    return *this;
+}
 
-    const auto length = r.body().size();
-    if (length && response_must_not_carry_body(r)) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
-    }
-
-    const auto transfer = transfer_encoding(r);
-    if (!transfer.ok) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
-    }
-    if (transfer.chunked && response_must_not_carry_body(r)) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
-    }
-
-    std::optional<std::uint64_t> content_length;
-    try {
-        content_length = declared_content_length(r);
-    } catch (...) {
-        this->clear();
-        throw;
-    }
-
-    if (transfer.chunked && content_length) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
-    }
-    if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
-    }
-    if (length && !transfer.chunked && content_length && *content_length != length) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
-    }
-
-    // Performance: Pre-calculate approximate output size to minimize allocations
-    std::size_t estimated_size = 32; // Base status line size
-    estimated_size += std::to_string(r.status().code()).size();
-    estimated_size += 32; // Status text estimate
-
-    // Add headers size
-    for (const auto &it : r.headers()) {
-        if (!header_name_is_valid(it.first)) {
-            this->clear();
-            throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
-        }
-        estimated_size += it.first.size() + 2; // ": "
-        for (const auto &value : it.second) {
-            if (!header_value_is_valid(value)) {
-                this->clear();
-                throw std::length_error("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
-            }
-            estimated_size += value.size() + 2; // CRLF
-        }
-    }
-    estimated_size += 2; // Final CRLF
-    estimated_size += body_size;
-
-    // SECURITY FIX: Cap maximum serialized size to prevent overflow
-    constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
-    if (estimated_size > MAX_SERIALIZED_SIZE) {
-        this->clear();
-        throw std::length_error("qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
-                                "or header explosion); refusing to allocate.");
-    }
-
-    // Reserve space in pipe to reduce allocations
-    this->reserve(estimated_size);
-
-    // HTTP Status Line
-    *this << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep
-          << std::to_string(r.status()) << qb::http::endl;
-
-    // HTTP Headers
-    for (const auto &it : r.headers()) {
-        for (const auto &value : it.second) {
-            if (!header_is_valid(it.first, value)) {
-                this->clear();
-                throw std::length_error("qb::http::Response serialization: invalid header name/value.");
-            }
-            *this << it.first << ": " << value << qb::http::endl;
-        }
-    }
-
-    // Body
-    if (length) {
-        if (transfer.chunked) {
-            *this << qb::http::endl << qb::http::Chunk(r.body().raw().begin(), length) << qb::http::Chunk();
-        } else {
-            if (!content_length) {
-                *this << "content-length: " << length << qb::http::endl;
-            }
-            *this << qb::http::endl << r.body().raw();
-        }
-    } else {
-        // Empty body: still emit "Content-Length: 0" so the message is self-delimiting on a
-        // keep-alive connection (RFC 9112 §6.2). Without it, a peer with no Content-Length and no
-        // Transfer-Encoding treats the response as close-delimited (read-until-EOF) and blocks on a
-        // connection that never closes. Omit it for statuses that must not carry a body (1xx/204/304)
-        // and when Content-Length / Transfer-Encoding is already declared.
-        if (!transfer.chunked && !content_length && !response_must_not_carry_body(r)) {
-            *this << "content-length: 0" << qb::http::endl;
-        }
-        *this << qb::http::endl;
-    }
+/**
+ * @brief Serialize the head of an HTTP Response: status line and header section, no content
+ * @param r The response, viewed through `qb::http::MessageHead`
+ * @return Reference to this pipe
+ *
+ * The response to a HEAD request (RFC 9110 §9.3.2), or the head of a body streamed by hand.
+ * Validation is the full serializer's.
+ */
+template <>
+pipe<char> &
+pipe<char>::put<qb::http::MessageHead<qb::http::Response>>(const qb::http::MessageHead<qb::http::Response> &r) {
+    serialize_response(*this, r.message, true);
     return *this;
 }
 } // namespace qb::allocator

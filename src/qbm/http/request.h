@@ -378,8 +378,19 @@ namespace qb::allocator {
  *
  * @param r HTTP request to serialize
  * @return Reference to the pipe for method chaining
- * @throws std::length_error if the message exceeds qb::http::protocol_limits.
+ * @throws std::length_error if the message exceeds qb::http::protocol_limits, or if the
+ *         request-target carries a byte the request line cannot (SP, a control byte, DEL).
  */
 template <>
 pipe<char> &pipe<char>::put<qb::http::Request>(const qb::http::Request &r);
+
+/**
+ * @brief HTTP Request head serialization: the request line and header section of
+ *        `r.message`, and nothing after them (see `qb::http::MessageHead`).
+ * @param r The request to serialize without its content
+ * @return Reference to the pipe for method chaining
+ * @throws std::length_error on the same validation failures as the full serialization.
+ */
+template <>
+pipe<char> &pipe<char>::put<qb::http::MessageHead<qb::http::Request>>(const qb::http::MessageHead<qb::http::Request> &r);
 } // namespace qb::allocator

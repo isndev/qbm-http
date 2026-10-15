@@ -20,10 +20,12 @@
 #include <chrono>
 #include <gtest/gtest.h>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // The raw_socket harness below talks to the server over a plain TCP socket.
@@ -263,6 +265,34 @@ public:
             ctx->response().body()   = "this is definitely not gzip";
             ctx->response().set_header("Content-Encoding", "gzip");
             ctx->complete();
+        });
+
+        // QB-493: chunked responses the server session serializes itself — an empty one (it
+        // still needs its last-chunk) and a non-empty one whose HEAD must end at its header
+        // section.
+        router().get("/empty-chunked", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Transfer-Encoding", "chunked");
+            ctx->complete();
+        });
+        const auto chunked = [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Transfer-Encoding", "chunked");
+            ctx->response().body() = "chunked-body";
+            ctx->complete();
+        };
+        router().get("/chunked", chunked);
+        router().head("/chunked", chunked);
+
+        // QB-507: bytes that are not HTTP, on a connection the server keeps open, so a client's
+        // protocol fails and disposes its session before any response or timeout.
+        router().get("/garbage", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ctx->suppress_response();
+            session->publish("NOT HTTP AT ALL\r\n\r\n");
         });
 
         router().compile();
@@ -1565,4 +1595,150 @@ TEST(Http1ClientTest, EofBodyCallbackQueuesItsNextRequestAfterRetirement) {
     EXPECT_EQ(total, 2u);
     EXPECT_EQ(successful, 2u);
     EXPECT_EQ(failed, 0u);
+}
+
+// ===========================================================================
+// The one-shot session (qb::http::GET/POST/... with a callback) answers EXACTLY once
+// (Huly QB-507).
+//
+// It delivered a response, a timeout or — for a peer close only — a 502, and nothing
+// else: a close-delimited response (RFC 9112 §6.3), complete at EOF, was answered 502
+// because the session never asked its protocol to deliver what it had buffered; and a
+// disposal for any other reason before a verdict (a protocol error, a read limit) answered
+// nothing at all, so the callback — and a coroutine awaiting it — waited forever. The
+// verdict now comes from one place, at most once, and the disposal supplies the failure
+// when nothing else did.
+// ===========================================================================
+
+namespace http1_one_shot_test {
+struct Outcome {
+    int                count = 0;
+    qb::http::Response response;
+};
+
+[[nodiscard]] inline auto
+recorder(std::shared_ptr<Outcome> const &outcome) {
+    return [outcome](qb::http::async::Reply &&reply) {
+        ++outcome->count;
+        outcome->response = std::move(reply.response);
+    };
+}
+} // namespace http1_one_shot_test
+
+TEST(Http1ClientTest, OneShotDeliversACloseDelimitedResponseAtEof) {
+    using namespace http1_one_shot_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                outcome = std::make_shared<Outcome>();
+
+    qb::http::GET(qb::http::Request{{server.url("/close-delimited")}}, recorder(outcome), std::chrono::seconds(5));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return outcome->count > 0; }, std::chrono::seconds(3)));
+    drain_client_callbacks();
+
+    EXPECT_EQ(outcome->count, 1);
+    EXPECT_EQ(outcome->response.status(), qb::http::status::OK) << "a complete close-delimited response was answered as a failure";
+    EXPECT_EQ(outcome->response.body().as<std::string>(), "eof-body");
+}
+
+TEST(Http1ClientTest, OneShotDisposedBeforeAVerdictStillAnswersOnce) {
+    using namespace http1_one_shot_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                outcome = std::make_shared<Outcome>();
+
+    // The peer answers bytes that are not HTTP and keeps the connection open: the client's
+    // protocol fails, and the session is disposed with a protocol-error reason. The budget is
+    // shorter than the request timeout, so the answer cannot come from the timer.
+    qb::http::GET(qb::http::Request{{server.url("/garbage")}}, recorder(outcome), std::chrono::seconds(10));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return outcome->count > 0; }, std::chrono::seconds(3)))
+        << "the session was disposed and its callback never ran";
+    drain_client_callbacks();
+
+    EXPECT_EQ(outcome->count, 1);
+    EXPECT_EQ(outcome->response.status(), qb::http::status::BAD_GATEWAY);
+}
+
+TEST(Http1ClientTest, OneShotSuccessAndTimeoutAnswerExactlyOnce) {
+    using namespace http1_one_shot_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+
+    auto success = std::make_shared<Outcome>();
+    qb::http::GET(qb::http::Request{{server.url("/ping")}}, recorder(success), std::chrono::seconds(5));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return success->count > 0; }, std::chrono::seconds(3)));
+
+    auto timeout = std::make_shared<Outcome>();
+    qb::http::GET(qb::http::Request{{server.url("/never")}}, recorder(timeout), std::chrono::milliseconds(200));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return timeout->count > 0; }, std::chrono::seconds(3)));
+    drain_client_callbacks();
+
+    EXPECT_EQ(success->count, 1) << "the disconnect that follows a response answered a second time";
+    EXPECT_EQ(success->response.status(), qb::http::status::OK);
+    EXPECT_EQ(success->response.body().as<std::string>(), "pong");
+    EXPECT_EQ(timeout->count, 1) << "the disconnect that follows a timeout answered a second time";
+    EXPECT_EQ(timeout->response.status(), qb::http::status::GATEWAY_TIMEOUT);
+}
+
+// QB-494 through the one-shot session: a request-target the serializer refuses is answered
+// 400 by the client, once, and no byte of it reaches the peer. The serializer throws inside the
+// session's connect completion, which must not let the exception out of the event loop.
+TEST(Http1ClientTest, OneShotRefusesARequestTargetItCannotSerialize) {
+    using namespace http1_one_shot_test;
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    auto                outcome = std::make_shared<Outcome>();
+
+    qb::http::GET(qb::http::Request{{server.url("/q?a=1 b")}}, recorder(outcome), std::chrono::seconds(5));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return outcome->count > 0; }, std::chrono::seconds(3)));
+    drain_client_callbacks();
+
+    EXPECT_EQ(outcome->count, 1);
+    EXPECT_EQ(outcome->response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(server.request_count(), 0);
+}
+
+// ===========================================================================
+// The server's HTTP/1.1 response framing on a kept-alive connection (Huly QB-493).
+//
+// An empty chunked response must still end with its last-chunk, or the client waits for a
+// body that never comes. The response to HEAD keeps its framing headers but ends at its
+// header section — no last-chunk either; the session states that explicitly
+// (qb::http::MessageHead). It also used to add a Content-Length next to a declared
+// Transfer-Encoding for HEAD, which the serializer refuses: the connection was dropped.
+// ===========================================================================
+
+TEST(Http1ClientTest, EmptyChunkedResponseIsTerminatedOnAKeptAliveConnection) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto empty = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/empty-chunked")));
+    auto ping  = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(empty.status(), qb::http::status::OK);
+    EXPECT_TRUE(empty.body().empty());
+    EXPECT_EQ(ping.status(), qb::http::status::OK);
+    EXPECT_EQ(ping.body().template as<std::string>(), "pong");
+    EXPECT_EQ(server.connection_count(), 1) << "the empty chunked response did not end, so its connection could not be reused";
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, HeadOfAChunkedRouteEndsAtItsHeaderSection) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto head = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/chunked")));
+    auto get  = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/chunked")));
+    auto ping = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(head.status(), qb::http::status::OK);
+    EXPECT_EQ(head.header("Transfer-Encoding"), "chunked");
+    EXPECT_FALSE(head.has_header("Content-Length")) << "Content-Length next to Transfer-Encoding";
+    EXPECT_TRUE(head.body().empty());
+    EXPECT_EQ(get.status(), qb::http::status::OK);
+    EXPECT_EQ(get.body().template as<std::string>(), "chunked-body");
+    EXPECT_EQ(ping.status(), qb::http::status::OK);
+    EXPECT_EQ(server.connection_count(), 1) << "the HEAD response left bytes behind, or the connection was dropped";
+    drain_client_callbacks();
 }

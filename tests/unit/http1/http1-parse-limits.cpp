@@ -43,8 +43,10 @@
 #include <cstddef>
 #include <cstdio>
 #include <gtest/gtest.h>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <qbm/http/1.1/protocol/base.h>
 #include <qbm/http/http.h>
 
@@ -368,4 +370,108 @@ TEST_F(IncomingParserHappyPathTest, ResponseStatusCodeIsCaptured) {
     auto &msg = parser.get_parsed_message();
     EXPECT_EQ(msg.status(), 404);
     EXPECT_EQ(parser.content_length, 0u);
+}
+
+// ====================================================================
+// A copied or moved Parser parses into ITSELF (Huly QB-510)
+//
+// llhttp hands every callback the http_t* it is executing; the callbacks used to reach the
+// C++ object through http_t::data, which reset() pointed at `this`. The implicit copy and
+// move copied that pointer verbatim, so a copy kept writing into its SOURCE: what the copy
+// parsed never reached its own message, and once the source was gone the callbacks wrote
+// into a dead object. The callbacks now recover the Parser from the http_t* they are given,
+// which is the object being executed — whatever it was copied or moved from. Parser<Response>
+// keeps the URI semantics of a request (QB-351) out of the picture.
+// ====================================================================
+
+class ParserCopyMoveTest : public ::testing::Test {
+protected:
+    // Mid header block: X-First is parsed but not committed yet (a pair is committed on the next
+    // field), so the continuation must commit it into the parser that executes it.
+    const std::string head = "HTTP/1.1 200 OK\r\nX-First: 1\r\n";
+    const std::string tail = "X-Second: 2\r\nContent-Length: 0\r\n\r\n";
+
+    void
+    expect_owns_its_parse(qb::http::Parser<Response> &parser, const char *what) {
+        ASSERT_EQ(parser.parse(tail.data(), tail.size()), HPE_PAUSED) << what;
+        EXPECT_TRUE(parser.headers_completed()) << what;
+        auto &msg = parser.get_parsed_message();
+        EXPECT_EQ(msg.status(), 200) << what;
+        EXPECT_EQ(msg.header("X-First"), "1") << what << ": the pending pair was committed elsewhere";
+        EXPECT_EQ(msg.header("X-Second"), "2") << what << ": the continuation was parsed into another object";
+    }
+
+    static void
+    expect_untouched(qb::http::Parser<Response> &source, const char *what) {
+        EXPECT_FALSE(source.headers_completed()) << what << ": the other parser's continuation completed THIS one";
+        EXPECT_TRUE(source.get_parsed_message().headers().empty()) << what << ": the other parser's headers landed here";
+    }
+};
+
+TEST_F(ParserCopyMoveTest, ACopyParsesIntoItselfAndLeavesItsSourceAlone) {
+    qb::http::Parser<Response> source;
+    ASSERT_EQ(source.parse(head.data(), head.size()), HPE_OK);
+
+    qb::http::Parser<Response> copy(source);
+    expect_owns_its_parse(copy, "copy-constructed");
+    expect_untouched(source, "source of a copy");
+
+    // The source still owns its own, different continuation.
+    const std::string other = "X-Third: 3\r\nContent-Length: 0\r\n\r\n";
+    ASSERT_EQ(source.parse(other.data(), other.size()), HPE_PAUSED);
+    EXPECT_EQ(source.get_parsed_message().header("X-First"), "1");
+    EXPECT_EQ(source.get_parsed_message().header("X-Third"), "3");
+    EXPECT_FALSE(source.get_parsed_message().has_header("X-Second"));
+    EXPECT_FALSE(copy.get_parsed_message().has_header("X-Third"));
+}
+
+TEST_F(ParserCopyMoveTest, AssignmentAndMoveTransferTheParse) {
+    {
+        qb::http::Parser<Response> source;
+        ASSERT_EQ(source.parse(head.data(), head.size()), HPE_OK);
+        qb::http::Parser<Response> target;
+        target = source;
+        expect_owns_its_parse(target, "copy-assigned");
+        expect_untouched(source, "source of a copy assignment");
+    }
+    {
+        qb::http::Parser<Response> source;
+        ASSERT_EQ(source.parse(head.data(), head.size()), HPE_OK);
+        qb::http::Parser<Response> moved(std::move(source));
+        expect_owns_its_parse(moved, "move-constructed");
+    }
+    {
+        qb::http::Parser<Response> source;
+        ASSERT_EQ(source.parse(head.data(), head.size()), HPE_OK);
+        qb::http::Parser<Response> target;
+        target = std::move(source);
+        expect_owns_its_parse(target, "move-assigned");
+    }
+}
+
+// The lifetime half: the copy outlives its source. Under AddressSanitizer the old shape is a
+// heap-use-after-free inside the header callback.
+TEST_F(ParserCopyMoveTest, ACopyOutlivesItsSource) {
+    auto source = std::make_unique<qb::http::Parser<Response>>();
+    ASSERT_EQ(source->parse(head.data(), head.size()), HPE_OK);
+    qb::http::Parser<Response> copy(*source);
+    source.reset();
+    expect_owns_its_parse(copy, "copy of a destroyed source");
+}
+
+// A copy taken inside a chunked body keeps the body bytes already seen and accumulates the
+// rest into itself.
+TEST_F(ParserCopyMoveTest, ACopyTakenMidBodyFinishesTheBodyItself) {
+    qb::http::Parser<Response> source;
+    const std::string          headers = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    ASSERT_EQ(source.parse(headers.data(), headers.size()), HPE_PAUSED);
+    source.resume();
+    const std::string first = "5\r\nhel";
+    ASSERT_EQ(source.parse(first.data(), first.size()), HPE_OK);
+
+    qb::http::Parser<Response> copy(source);
+    const std::string          rest = "lo\r\n0\r\n\r\n";
+    ASSERT_EQ(copy.parse(rest.data(), rest.size()), HPE_CB_MESSAGE_COMPLETE);
+    EXPECT_EQ(copy.get_parsed_message().body().as<std::string>(), "hello");
+    EXPECT_EQ(source.get_parsed_message().body().size(), 0u) << "the copy completed the SOURCE's message";
 }

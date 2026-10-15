@@ -164,4 +164,30 @@ public:
     }
 };
 } // namespace internal
+
+/**
+ * @brief A message serialized without its content: the start line and the header section only.
+ *
+ * `out << MessageHead{msg}` writes what `out << msg` writes up to and including the empty line
+ * that ends the header section — the framing headers included — and nothing after it: no body,
+ * and no chunked last-chunk. Validation is the full serialization's; the body, if any, is ignored.
+ * Two uses:
+ *
+ * - **The response to a HEAD request** (RFC 9110 §9.3.2), whose framing headers describe the
+ *   content a GET would have carried. A `Response` does not know the method it answers, so the
+ *   HTTP/1.1 server session states the suppression this way for every HEAD request.
+ * - **A body you stream yourself**: write the head of a message that declares
+ *   `Transfer-Encoding: chunked`, then its `Chunk`s and the terminating `Chunk{}`. Serializing the
+ *   message itself writes a COMPLETE message instead: an empty chunked body is its last-chunk alone.
+ *
+ * @tparam Message `Request` or `Response`.
+ */
+template <typename Message>
+struct MessageHead {
+    const Message &message; ///< The message whose head is serialized; it must outlive this view.
+};
+
+/** @brief `MessageHead{msg}` deduces the message type. */
+template <typename Message>
+MessageHead(const Message &) -> MessageHead<Message>;
 } // namespace qb::http

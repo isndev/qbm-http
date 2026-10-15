@@ -646,3 +646,202 @@ TEST(Http1ProtocolFraming, LargeHeaderBlockInSmallSegmentsIsParsedOnce) {
     EXPECT_EQ(io.last_request->header("X-Pad-89"), std::string(8000, 'v'));
     EXPECT_EQ(io.last_request->headers().find("X-Pad-42")->second.size(), 1u) << "a header must be committed once, not once per re-parse";
 }
+
+// ===========================================================================
+// The typed Content-Type a dispatched message carries agrees with its raw header on
+// EVERY framing path.
+//
+// The header callbacks fill the raw map; the typed cache (content_type()) was refreshed
+// only by the parser's on_message_complete, which runs on the chunked path alone. The
+// Content-Length, empty-body, HEAD and close-delimited paths frame in the protocol and
+// hand the message over without that callback, so content_type() kept the defaults
+// whatever the peer sent (Huly QB-506). The refresh now happens where the header section
+// ends, which every path crosses. on_message_complete also re-wrote the header through
+// set_content_type(), adding an EMPTY Content-Type to a chunked message that had none.
+// ===========================================================================
+
+namespace {
+
+void
+expect_typed_content_type(qb::http::Headers const &msg, std::string_view type, std::string_view charset, const char *path) {
+    EXPECT_EQ(msg.content_type().type(), type) << path;
+    EXPECT_EQ(msg.content_type().charset(), charset) << path;
+}
+
+} // namespace
+
+TEST(Http1ProtocolFraming, TypedContentTypeMatchesTheRawHeaderOnEveryFramingPath) {
+    const std::string ct    = "Content-Type: application/problem+json; charset=utf-16\r\n";
+    const auto        typed = [](qb::http::Headers const &msg, const char *path) {
+        EXPECT_EQ(msg.header("Content-Type"), "application/problem+json; charset=utf-16") << path << ": raw header";
+        expect_typed_content_type(msg, "application/problem+json", "utf-16", path);
+    };
+
+    {
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, "POST /a HTTP/1.1\r\n" + ct + "Content-Length: 3\r\n\r\nabc");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_request.has_value());
+        typed(*io.last_request, "request, Content-Length");
+    }
+    {
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, "GET /b HTTP/1.1\r\n" + ct + "\r\n");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_request.has_value());
+        typed(*io.last_request, "request, no body");
+    }
+    {
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, "POST /c HTTP/1.1\r\n" + ct + "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_request.has_value());
+        typed(*io.last_request, "request, chunked (control)");
+        EXPECT_EQ(io.last_request->headers().at("content-type").size(), 1u);
+    }
+    {
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, "HTTP/1.1 200 OK\r\n" + ct + "Content-Length: 2\r\n\r\nok");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_response.has_value());
+        typed(*io.last_response, "response, Content-Length");
+    }
+    {
+        ClientFakeIO io;
+        io.body_forbidden = true;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, "HTTP/1.1 200 OK\r\n" + ct + "Content-Length: 42\r\n\r\n");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_response.has_value());
+        typed(*io.last_response, "response to HEAD");
+    }
+    {
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, "HTTP/1.1 200 OK\r\n" + ct + "\r\nclose-delimited");
+        ASSERT_EQ(step(proto, io), 0u);
+        proto.flush_eof();
+        ASSERT_TRUE(io.last_response.has_value());
+        typed(*io.last_response, "response, close-delimited");
+    }
+    {
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, "HTTP/1.1 200 OK\r\n" + ct + "Transfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n");
+        ASSERT_GT(step(proto, io), 0u);
+        ASSERT_TRUE(io.last_response.has_value());
+        typed(*io.last_response, "response, chunked (control)");
+    }
+}
+
+TEST(Http1ProtocolFraming, ConsecutiveMessagesEachCarryTheirOwnContentType) {
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "POST /1 HTTP/1.1\r\nContent-Type: text/csv; charset=iso-8859-1\r\nContent-Length: 1\r\n\r\nx"
+             "GET /2 HTTP/1.1\r\nHost: h\r\n\r\n"
+             "POST /3 HTTP/1.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\ny\r\n0\r\n\r\n"
+             "POST /4 HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nz\r\n0\r\n\r\n");
+
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_TRUE(io.last_request.has_value());
+    expect_typed_content_type(*io.last_request, "text/csv", "iso-8859-1", "first message");
+
+    ASSERT_GT(step(proto, io), 0u);
+    expect_typed_content_type(*io.last_request, qb::http::Headers::default_content_type, qb::http::Headers::default_charset,
+                              "second message, no Content-Type: the defaults, nothing left over");
+    EXPECT_FALSE(io.last_request->has_header("Content-Type"));
+
+    ASSERT_GT(step(proto, io), 0u);
+    expect_typed_content_type(*io.last_request, "application/json", qb::http::Headers::default_charset, "third message, chunked");
+
+    ASSERT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 4);
+    expect_typed_content_type(*io.last_request, qb::http::Headers::default_content_type, qb::http::Headers::default_charset,
+                              "fourth message, chunked without Content-Type");
+    EXPECT_FALSE(io.last_request->has_header("Content-Type")) << "a chunked message gained a Content-Type header the peer never sent";
+}
+
+// An empty chunked body is framed by its last-chunk alone (RFC 9112 §7.1), so what the
+// serializer emits for it must frame on the peer BEFORE the next message on the same
+// connection (Huly QB-493): without the last-chunk the peer reads the next message's
+// start line as a chunk size and the connection fails.
+TEST(Http1ProtocolFraming, EmptyChunkedMessagesFrameBeforeTheNextOne) {
+    {
+        qb::http::Request empty{qb::http::method::POST, {"http://example.test/empty"}};
+        empty.set_header("Transfer-Encoding", "chunked");
+        qb::http::Request next{qb::http::method::GET, {"http://example.test/next"}};
+
+        qb::allocator::pipe<char> wire;
+        ASSERT_NO_THROW(wire << empty << next);
+
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, std::string_view(wire.begin(), wire.size()));
+
+        ASSERT_GT(step(proto, io), 0u) << "the empty chunked request never completed";
+        ASSERT_TRUE(io.last_request.has_value());
+        EXPECT_EQ(io.last_request->uri().path(), "/empty");
+        EXPECT_EQ(io.last_request->body().size(), 0u);
+        ASSERT_GT(step(proto, io), 0u);
+        EXPECT_TRUE(proto.ok());
+        EXPECT_EQ(io.request_count, 2);
+        EXPECT_EQ(io.last_request->uri().path(), "/next");
+        EXPECT_EQ(io.input.size(), 0u);
+    }
+    {
+        qb::http::Response empty;
+        empty.status() = qb::http::status::OK;
+        empty.set_header("Transfer-Encoding", "chunked");
+        qb::http::Response next;
+        next.status() = qb::http::status::ACCEPTED;
+        next.body()   = "second";
+
+        qb::allocator::pipe<char> wire;
+        ASSERT_NO_THROW(wire << empty << next);
+
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, std::string_view(wire.begin(), wire.size()));
+
+        ASSERT_GT(step(proto, io), 0u) << "the empty chunked response never completed";
+        ASSERT_TRUE(io.last_response.has_value());
+        EXPECT_EQ(io.last_response->status(), 200);
+        EXPECT_EQ(io.last_response->body().size(), 0u);
+        ASSERT_GT(step(proto, io), 0u);
+        EXPECT_TRUE(proto.ok());
+        EXPECT_EQ(io.response_count, 2);
+        EXPECT_EQ(io.last_response->status(), 202);
+        EXPECT_EQ(io.last_response->body().as<std::string>(), "second");
+    }
+}
+
+// The other half of the same contract: a body streamed by hand writes the message's HEAD
+// (qb::http::MessageHead), then its chunks and the terminating Chunk{}. The peer frames it as
+// one message and the next one stays intact.
+TEST(Http1ProtocolFraming, AHandStreamedChunkedBodyFramesAfterItsHead) {
+    qb::http::Request upload{qb::http::method::POST, {"http://example.test/stream"}};
+    upload.set_header("Transfer-Encoding", "chunked");
+    qb::http::Request next{qb::http::method::GET, {"http://example.test/after"}};
+
+    qb::allocator::pipe<char> wire;
+    wire << qb::http::MessageHead{upload};
+    wire << qb::http::Chunk("part-1|", 7) << qb::http::Chunk("part-2", 6) << qb::http::Chunk();
+    wire << next;
+
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, std::string_view(wire.begin(), wire.size()));
+
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_TRUE(io.last_request.has_value());
+    EXPECT_EQ(io.last_request->uri().path(), "/stream");
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "part-1|part-2");
+    ASSERT_GT(step(proto, io), 0u);
+    EXPECT_TRUE(proto.ok());
+    EXPECT_EQ(io.request_count, 2);
+    EXPECT_EQ(io.last_request->uri().path(), "/after");
+}
