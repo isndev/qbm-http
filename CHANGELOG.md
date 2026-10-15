@@ -65,6 +65,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **HTTP dates refuse a fixed-width numeric field that is not all digits (Huly QB-599).** `08:4x:37` or a signed
   two-digit year used to parse (as `08:04:37`, or the year 1991 for `-9`); they now yield `nullopt`, as the
   `parse_http_date` contract promises for an unknown format. Cookie `Expires` and `If-Modified-Since` read through it.
+- **The HTTP/1.1 status line carries the registered reason phrase, and `Status::str()` returns it (Huly QB-1062).**
+  `400 BAD_REQUEST` and `101 SWITCHING_PROTOCOLS` were llhttp's enum identifiers; the line now reads
+  `400 Bad Request`, `101 Switching Protocols` -- the IANA registry's text (RFC 9110: 413 `Content Too Large`, 422
+  `Unprocessable Content`), a defining document's for 306, 418 and the unregistered codes llhttp maps. Behaviour
+  change, source compatible: `str()`, the string conversions, `std::to_string(Status)` and `operator<<` return that
+  phrase, as their documentation always said, instead of the identifier -- so does the logging middleware's
+  `"404 Not Found"`. The serializer writes it from a static table without building a string. Header names keep
+  going out in lower case, now documented: field names are case-insensitive, and `Headers` keys them folded.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete

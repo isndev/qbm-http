@@ -274,11 +274,12 @@ llm/qbm-http.llm.api.md	timing.h:158-158	304629e28bfb	timing_middleware(typename
 llm/qbm-http.llm.api.md	timing.h:41-41	a6ced6a34da4	class TimingMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	transform.h:128-128	6f3548185b74	transform_middleware(typename TransformMiddleware<SessionType>::Reque...
 llm/qbm-http.llm.api.md	transform.h:39-39	0a2fdfa9fa64	class TransformMiddleware final : public IMiddleware<SessionType> {
-llm/qbm-http.llm.api.md	types.h:306-306	f4d7c130f7eb	class Status {
-llm/qbm-http.llm.api.md	types.h:713-713	8b48cea2d2f3	constexpr char endl[] = "\r\n";
-llm/qbm-http.llm.api.md	types.h:721-721	544be3d5f78c	constexpr char sep = ' ';
-llm/qbm-http.llm.api.md	types.h:731-731	028e26dbdc36	enum DisconnectedReason : int {
-llm/qbm-http.llm.api.md	types.h:748-748	6c7c92a87174	struct hash<qb::http::method> {
+llm/qbm-http.llm.api.md	types.h:274-274	607d1d321772	class Method {
+llm/qbm-http.llm.api.md	types.h:509-509	f4d7c130f7eb	class Status {
+llm/qbm-http.llm.api.md	types.h:916-916	8b48cea2d2f3	constexpr char endl[] = "\r\n";
+llm/qbm-http.llm.api.md	types.h:924-924	544be3d5f78c	constexpr char sep = ' ';
+llm/qbm-http.llm.api.md	types.h:934-934	028e26dbdc36	enum DisconnectedReason : int {
+llm/qbm-http.llm.api.md	types.h:951-951	6c7c92a87174	struct hash<qb::http::method> {
 llm/qbm-http.llm.api.md	utility.h:258-260	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {
 llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {

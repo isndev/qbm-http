@@ -36,28 +36,231 @@ namespace detail {
 inline const std::string empty_string_value{};
 
 /**
- * @brief Reason phrase for an HTTP status code, or nullptr if the code is not one of the
- *        standard codes in llhttp's HTTP_STATUS_MAP.
+ * @brief Reason phrase for an HTTP status code, or nullptr if the code is not one llhttp's
+ *        HTTP_STATUS_MAP holds.
  *
- * llhttp's own `http_status_name()` calls `abort()` on any unmapped code — and its map is
- * sparse (e.g. 209-213, 227, 399, 512, 550 are absent). Because `Status` accepts any int
- * and a peer can put an arbitrary 3-digit code on the wire (llhttp's parser stores it raw),
- * stringifying such a status — on every response serialization, every access log, even the
- * HTTP/2 "invalid status code" warning — would `abort()` the whole process. This qb-owned
- * lookup reuses llhttp's authoritative map (so mapped codes yield byte-identical phrases)
- * but returns nullptr instead of aborting, letting callers fall back to "Unknown Status".
+ * The phrase the HTTP/1.1 status line carries (RFC 9112 §4) and every `Status` string
+ * conversion returns: the IANA HTTP Status Code Registry's text for a registered code (RFC 9110
+ * §15 names it -- 413 "Content Too Large", 422 "Unprocessable Content"); for 306, 418 (both
+ * "(Unused)" in the registry) and the unregistered codes llhttp also maps, the phrase of the
+ * document or vendor that defined them, else the identifier's words. llhttp's map spells only
+ * enum identifiers (`BAD_REQUEST`), which the status line carried until Huly QB-1062.
+ *
+ * The domain is exactly llhttp's map, which `StatusTest.EveryMappedCodeHasAReasonPhrase`
+ * holds the table to. llhttp's own `http_status_name()` calls `abort()` on a code outside it,
+ * and the map is sparse (209-213, 227, 399, 512, 550 are absent); `Status` accepts any int and
+ * a peer can put any 3-digit code on the wire, so a stringified status must never reach that
+ * call. This lookup returns nullptr instead, and callers fall back to "Unknown Status".
  */
 [[nodiscard]] inline const char *
 status_reason(int code) noexcept {
-#define QB_HTTP_STATUS_GEN(NUM, NAME, STRING) \
-    case NUM:                                 \
-        return #STRING;
     switch (code) {
-        HTTP_STATUS_MAP(QB_HTTP_STATUS_GEN)
+        // 1xx; 110-113, 199, 214 and 299 are the warn-codes of RFC 7234 §5.5, which llhttp maps too
+        case 100:
+            return "Continue";
+        case 101:
+            return "Switching Protocols";
+        case 102:
+            return "Processing";
+        case 103:
+            return "Early Hints";
+        case 110:
+            return "Response is Stale";
+        case 111:
+            return "Revalidation Failed";
+        case 112:
+            return "Disconnected Operation";
+        case 113:
+            return "Heuristic Expiration";
+        case 199:
+            return "Miscellaneous Warning";
+        // 2xx
+        case 200:
+            return "OK";
+        case 201:
+            return "Created";
+        case 202:
+            return "Accepted";
+        case 203:
+            return "Non-Authoritative Information";
+        case 204:
+            return "No Content";
+        case 205:
+            return "Reset Content";
+        case 206:
+            return "Partial Content";
+        case 207:
+            return "Multi-Status";
+        case 208:
+            return "Already Reported";
+        case 214:
+            return "Transformation Applied";
+        case 226:
+            return "IM Used";
+        case 299:
+            return "Miscellaneous Persistent Warning";
+        // 3xx
+        case 300:
+            return "Multiple Choices";
+        case 301:
+            return "Moved Permanently";
+        case 302:
+            return "Found";
+        case 303:
+            return "See Other";
+        case 304:
+            return "Not Modified";
+        case 305:
+            return "Use Proxy";
+        case 306:
+            return "Switch Proxy";
+        case 307:
+            return "Temporary Redirect";
+        case 308:
+            return "Permanent Redirect";
+        // 4xx
+        case 400:
+            return "Bad Request";
+        case 401:
+            return "Unauthorized";
+        case 402:
+            return "Payment Required";
+        case 403:
+            return "Forbidden";
+        case 404:
+            return "Not Found";
+        case 405:
+            return "Method Not Allowed";
+        case 406:
+            return "Not Acceptable";
+        case 407:
+            return "Proxy Authentication Required";
+        case 408:
+            return "Request Timeout";
+        case 409:
+            return "Conflict";
+        case 410:
+            return "Gone";
+        case 411:
+            return "Length Required";
+        case 412:
+            return "Precondition Failed";
+        case 413:
+            return "Content Too Large";
+        case 414:
+            return "URI Too Long";
+        case 415:
+            return "Unsupported Media Type";
+        case 416:
+            return "Range Not Satisfiable";
+        case 417:
+            return "Expectation Failed";
+        case 418:
+            return "I'm a teapot";
+        case 419:
+            return "Page Expired";
+        case 420:
+            return "Enhance Your Calm";
+        case 421:
+            return "Misdirected Request";
+        case 422:
+            return "Unprocessable Content";
+        case 423:
+            return "Locked";
+        case 424:
+            return "Failed Dependency";
+        case 425:
+            return "Too Early";
+        case 426:
+            return "Upgrade Required";
+        case 428:
+            return "Precondition Required";
+        case 429:
+            return "Too Many Requests";
+        case 430:
+            return "Request Header Fields Too Large";
+        case 431:
+            return "Request Header Fields Too Large";
+        case 440:
+            return "Login Time-out";
+        case 444:
+            return "No Response";
+        case 449:
+            return "Retry With";
+        case 450:
+            return "Blocked by Windows Parental Controls";
+        case 451:
+            return "Unavailable For Legal Reasons";
+        case 460:
+            return "Client Closed Load Balanced Request";
+        case 463:
+            return "Invalid X-Forwarded-For";
+        case 494:
+            return "Request Header Too Large";
+        case 495:
+            return "SSL Certificate Error";
+        case 496:
+            return "SSL Certificate Required";
+        case 497:
+            return "HTTP Request Sent to HTTPS Port";
+        case 498:
+            return "Invalid Token";
+        case 499:
+            return "Client Closed Request";
+        // 5xx
+        case 500:
+            return "Internal Server Error";
+        case 501:
+            return "Not Implemented";
+        case 502:
+            return "Bad Gateway";
+        case 503:
+            return "Service Unavailable";
+        case 504:
+            return "Gateway Timeout";
+        case 505:
+            return "HTTP Version Not Supported";
+        case 506:
+            return "Variant Also Negotiates";
+        case 507:
+            return "Insufficient Storage";
+        case 508:
+            return "Loop Detected";
+        case 509:
+            return "Bandwidth Limit Exceeded";
+        case 510:
+            return "Not Extended";
+        case 511:
+            return "Network Authentication Required";
+        case 520:
+            return "Web Server Returned an Unknown Error";
+        case 521:
+            return "Web Server Is Down";
+        case 522:
+            return "Connection Timed Out";
+        case 523:
+            return "Origin Is Unreachable";
+        case 524:
+            return "A Timeout Occurred";
+        case 525:
+            return "SSL Handshake Failed";
+        case 526:
+            return "Invalid SSL Certificate";
+        case 527:
+            return "Railgun Error";
+        case 529:
+            return "Site is overloaded";
+        case 530:
+            return "Site is frozen";
+        case 561:
+            return "Identity Provider Authentication Error";
+        case 598:
+            return "Network Read Timeout Error";
+        case 599:
+            return "Network Connect Timeout Error";
         default:
             return nullptr;
     }
-#undef QB_HTTP_STATUS_GEN
 }
 } // namespace detail
 

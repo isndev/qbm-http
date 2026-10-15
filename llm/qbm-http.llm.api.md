@@ -23,26 +23,26 @@ Every signature below is confirmed against the real headers under `qbm/http/src/
 
 # Namespace `qb::http` — core message types
 
-### `qb::http::Method` (alias `method`) — `types.h:71`
+### `qb::http::Method` (alias `method`) — `types.h:274`
 `class Method { enum class Value:int { GET, POST, DEL, ... }; constexpr Method(Value); constexpr Method(::http_method); explicit Method(std::string_view); operator ::http_method()/Value()/std::string()/std::string_view(); }`
 Value-type wrapper over llhttp `http_method`; case-insensitive string ctor; **`DEL` is DELETE** (alias `DELETE_METHOD`); static constants `Method::GET`, `Method::POST`, …
 Returns: a method value. Throws: nothing on enum ctors.
 Usage: `qb::http::method m = qb::http::method::GET;`
 
-### `qb::http::Status` (alias `status`) — `types.h:306`
+### `qb::http::Status` (alias `status`) — `types.h:509`
 `class Status { enum class Value:int { OK=200, NOT_FOUND=404, ... }; constexpr Status(Value); constexpr Status(::http_status); constexpr Status(int); constexpr int code() const; std::string_view str() const; operator std::string()/std::string_view()/::http_status()/Value(); }`
-Value-type wrapper over llhttp `http_status`; **default-constructs to 200 OK**; `code()` returns the numeric code; static constants `Status::OK`, `Status::NOT_FOUND`, …
+Value-type wrapper over llhttp `http_status`; **default-constructs to 200 OK**; `code()` returns the numeric code; static constants `Status::OK`, `Status::NOT_FOUND`, … `str()`, the string conversions, `std::to_string(Status)` and `operator<<` return the reason phrase the HTTP/1.1 status line carries: the IANA registry's text (`"Not Found"`, 413 `"Content Too Large"`), a defining document's for 306, 418 and the unregistered codes llhttp maps, `"Unknown Status"` for any other code -- not the enum identifier (`NOT_FOUND`) they returned before 3.3 (Huly QB-1062).
 Returns: a status value. Throws: nothing.
 Usage: `resp.status() = qb::http::status::NOT_FOUND;`
 
-### `qb::http::DisconnectedReason` — `types.h:731`
+### `qb::http::DisconnectedReason` — `types.h:934`
 `enum DisconnectedReason:int { ByUser=0, ByTimeout, ResponseTransmitted, ServerError, ByProtocolError, Undefined }`
 Reason codes supplied on HTTP session disconnect.
 
-### `qb::http::endl` / `sep` — `types.h:713` / `:721`
+### `qb::http::endl` / `sep` — `types.h:916` / `:924`
 `constexpr char endl[]="\r\n"; constexpr char sep=' ';` — HTTP CRLF terminator and SP separator.
 
-### std helpers — `types.h:748`
+### std helpers — `types.h:951`
 `template<> struct std::hash<qb::http::method>; template<> struct std::hash<qb::http::status>; std::string std::to_string(qb::http::method); std::string std::to_string(qb::http::status);`
 Make method/status usable as unordered-map keys and stringifiable.
 
@@ -62,7 +62,7 @@ Usage: `qb::http::Response resp{qb::http::status::OK}; resp.with_body("hi");`
 
 ### `qb::http::Headers` (alias `headers`) — `headers.h:153`
 `class Headers { headers_map_type& headers(); const std::string& header(name, idx=0) const; std::string header_or(name, std::string fallback, idx=0) const; bool has_header(name) const noexcept; qb::icase_unordered_map<std::string> attributes(name, idx=0, std::string_view default_to_parse="") const; void set_header(name,value); void add_header(name,value); void remove_header(name); void set_content_type(string_view); const ContentType& content_type() const; void refresh_content_type() noexcept; std::size_t header_count() const; bool exceeds_header_limit(max=100) const; }`
-Case-insensitive multi-value store; typed mutators keep the cached `ContentType` in sync — call `refresh_content_type()` after raw `headers()` mutation. `set_header` builds its new value before clearing the old ones, so the value may be a view of, or the `header()` reference to, the value it replaces (Huly QB-490); `remove_header` folds every name form, a `const std::string` included (QB-279). **Accessor model:** `header(name, idx)` returns a `const std::string&` bound to a process-wide static empty string on a miss — never a temporary, always safe to keep for the message's lifetime. For a custom fallback use the by-value `header_or(name, fallback, idx)` (no lifetime caveat). `attributes(name, ...)` parses the header value's `name=value; n2="q v"` params via `parse_header_attributes`.
+Case-insensitive multi-value store, keyed by the lower-cased name: iteration and the HTTP/1.1 serializer yield `content-type`, whatever case it was set in (field names are case-insensitive, RFC 9110 §5.1; HTTP/2 and HTTP/3 require lower case), values keep their bytes; typed mutators keep the cached `ContentType` in sync — call `refresh_content_type()` after raw `headers()` mutation. `set_header` builds its new value before clearing the old ones, so the value may be a view of, or the `header()` reference to, the value it replaces (Huly QB-490); `remove_header` folds every name form, a `const std::string` included (QB-279). **Accessor model:** `header(name, idx)` returns a `const std::string&` bound to a process-wide static empty string on a miss — never a temporary, always safe to keep for the message's lifetime. For a custom fallback use the by-value `header_or(name, fallback, idx)` (no lifetime caveat). `attributes(name, ...)` parses the header value's `name=value; n2="q v"` params via `parse_header_attributes`.
 `headers_map = qb::icase_unordered_map<std::vector<std::string>>` (`headers.h:52`).
 
 ### `qb::http::Headers::ContentType` — `headers.h:169`

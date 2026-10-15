@@ -138,7 +138,7 @@ Cookie attributes (`max_age`, `expires_in`, `Path`, `Domain`, `SameSite`) are co
 
 ## Headers
 
-`qb::http::Headers` is the shared header container, aliased as `qb::http::headers`. It is a **case-insensitive, multi-value** map: header names compare case-insensitively, and one name may hold several values (`Set-Cookie`, `Via`, `Accept-Encoding`, ...). The underlying type is `qb::icase_unordered_map<std::vector<std::string>>` (`qb::http::headers_map`).
+`qb::http::Headers` is the shared header container, aliased as `qb::http::headers`. It is a **case-insensitive, multi-value** map: header names compare case-insensitively, and one name may hold several values (`Set-Cookie`, `Via`, `Accept-Encoding`, ...). The underlying type is `qb::icase_unordered_map<std::vector<std::string>>` (`qb::http::headers_map`), which keys each field by its lower-cased name: iterating the map, and the HTTP/1.1 wire, give `content-type` whatever case you set it in. Field names are case-insensitive (RFC 9110 §5.1), HTTP/2 and HTTP/3 require lower case, and values keep their bytes.
 
 > Header values are owning `std::string`, not `std::string_view`. A zero-copy view mode existed historically but was retired: the qb input pipe relocates buffer bytes between reads, and the async request lifecycle (shared `Context`, middleware chain, coroutines) cannot guarantee a captured view outlives the socket read. Owning strings make the lifetime safe.
 
@@ -230,10 +230,11 @@ std::string_view reason = st.str();        // "Not Found"
 bool ok = (st == qb::http::status::OK);    // false
 ```
 
-Two practical notes from `types.h`:
+Three practical notes from `types.h`:
 
 - The DELETE verb is spelled **`qb::http::method::DEL`** (`DELETE` collides with the C++ `delete` keyword); `method::DELETE_METHOD` is a readable alias for the same value. A default-constructed `Method` is `UNINITIALIZED`.
 - A default-constructed `Status` is `200 OK`. `Status` constructs from an `int`, so `qb::http::Status{418}` is valid.
+- `str()`, the string conversions, `std::to_string` and `operator<<` give a `Status`'s reason phrase, the one the HTTP/1.1 status line carries: the IANA registry's text (`"Not Found"`, `"Content Too Large"` for 413), the defining document's for 306, 418 (`"I'm a teapot"`) and the unregistered codes llhttp maps, and `"Unknown Status"` for a code outside llhttp's map.
 
 The header also defines `qb::http::endl` (`"\r\n"`) and `qb::http::sep` (a space) for raw message assembly, plus `std::to_string(method|status)` overloads and `std::hash` specializations for both wrappers (all declared in namespace `std`).
 

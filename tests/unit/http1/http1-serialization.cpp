@@ -455,3 +455,63 @@ TEST(Http1Serialization, RequestRejectsBytesARequestTargetCannotCarry) {
         EXPECT_TRUE(wire.starts_with("GET /search?" + query + " HTTP/1.1\r\n")) << wire;
     }
 }
+
+// RFC 9112 §4: status-line = HTTP-version SP status-code SP [ reason-phrase ]. The phrase is
+// advisory -- a client SHOULD ignore it -- but people and tools read it, and what belongs there
+// is the IANA HTTP Status Code Registry's text (RFC 9110 §15), not the enum identifier llhttp's
+// status map spells: `400 BAD_REQUEST`, `101 SWITCHING_PROTOCOLS` (Huly QB-1062). A code no
+// table knows keeps a phrase the grammar admits.
+TEST(Http1Serialization, StatusLineCarriesTheRegisteredReasonPhrase) {
+    struct Case {
+        qb::http::Status status;
+        const char      *line;
+    };
+    const Case cases[] = {
+        {qb::http::status::OK, "HTTP/1.1 200 OK\r\n"},
+        {qb::http::status::SWITCHING_PROTOCOLS, "HTTP/1.1 101 Switching Protocols\r\n"},
+        {qb::http::status::NO_CONTENT, "HTTP/1.1 204 No Content\r\n"},
+        {qb::http::status::BAD_REQUEST, "HTTP/1.1 400 Bad Request\r\n"},
+        {qb::http::status::NOT_FOUND, "HTTP/1.1 404 Not Found\r\n"},
+        {qb::http::status::PAYLOAD_TOO_LARGE, "HTTP/1.1 413 Content Too Large\r\n"},
+        {qb::http::status::UNPROCESSABLE_ENTITY, "HTTP/1.1 422 Unprocessable Content\r\n"},
+        {qb::http::status::INTERNAL_SERVER_ERROR, "HTTP/1.1 500 Internal Server Error\r\n"},
+        {qb::http::status::HTTP_VERSION_NOT_SUPPORTED, "HTTP/1.1 505 HTTP Version Not Supported\r\n"},
+        {qb::http::Status{209}, "HTTP/1.1 209 Unknown Status\r\n"},
+    };
+    for (auto const &c : cases) {
+        qb::http::Response response;
+        response.status() = c.status;
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << response) << c.line;
+        const std::string wire{out.begin(), out.size()};
+        EXPECT_TRUE(wire.starts_with(c.line)) << "expected " << c.line << "got " << wire;
+    }
+}
+
+// Header names go on the wire in lower case, whatever case they were set in. Field names are
+// case-insensitive (RFC 9110 §5.1); Headers keys each field by its folded name, which is the
+// one lookup uses, the one HTTP/2 and HTTP/3 require (RFC 9113 §8.2.1, RFC 9114 §4.2), and the
+// one HTTP/1.1 writes. Values keep their bytes. The contract Huly QB-1062 asked to settle: kept
+// and documented, not a defect.
+TEST(Http1Serialization, HeaderNamesAreWrittenInLowerCase) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("X-Request-ID", "AbC-123");
+    response.add_header("Set-Cookie", "Session=XyZ");
+    response.body() = "ok";
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << response);
+    const std::string wire{out.begin(), out.size()};
+    EXPECT_NE(wire.find("\r\nx-request-id: AbC-123\r\n"), std::string::npos) << wire;
+    EXPECT_NE(wire.find("\r\nset-cookie: Session=XyZ\r\n"), std::string::npos) << wire;
+    EXPECT_EQ(wire.find("X-Request-ID"), std::string::npos) << wire;
+
+    qb::http::Request request{qb::http::method::POST, {"http://example.test/a"}};
+    request.set_header("Content-Type", "Text/Plain");
+    request.body() = "x";
+    qb::allocator::pipe<char> req_out;
+    ASSERT_NO_THROW(req_out << request);
+    const std::string req_wire{req_out.begin(), req_out.size()};
+    EXPECT_NE(req_wire.find("\r\ncontent-type: Text/Plain\r\n"), std::string::npos) << req_wire;
+    EXPECT_EQ(req_wire.find("Content-Type"), std::string::npos) << req_wire;
+}

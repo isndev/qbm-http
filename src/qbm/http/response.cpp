@@ -292,8 +292,8 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     out.reserve(estimated_size);
 
     // HTTP Status Line
-    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep
-        << std::to_string(r.status()) << qb::http::endl;
+    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
+        << qb::http::endl;
 
     // HTTP Headers
     for (const auto &it : r.headers()) {
