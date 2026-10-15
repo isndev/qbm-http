@@ -25,6 +25,7 @@
 #include <vector>      // For std::vector (used to store multiple header values)
 
 #include <qb/system/container/unordered_map.h> // For qb::icase_unordered_map
+#include <qb/utility/branch_hints.h>           // QB_COLD (the long-name lookups, Huly QB-1068)
 
 #include "./types.h"   // For common HTTP types (though not directly used in Headers API, often a peer include)
 #include "./utility.h" // For utility::split_string, utility::iequals, utility::trim_http_whitespace
@@ -290,24 +291,16 @@ protected:
     void derive_content_type() const noexcept;
 
     /**
-     * @brief The entry of `name` (any case), found without allocating, whatever its length: the map
-     *        folds a name of up to `lookup_fold_capacity` bytes on the stack; a longer one would be
-     *        converted into a `std::string`, so it is matched against each stored (lowercase) name
-     *        instead. The noexcept lookups go through here (Huly QB-1068).
+     * @brief Whether a field is named `name` (any case) when `name` is longer than the map folds on
+     *        the stack (`lookup_fold_capacity`): the map would convert it into a `std::string`, so it is
+     *        matched against each stored, already-lowercase name instead -- nothing allocated. Out of
+     *        line: no field in common use is that long (Huly QB-1068).
      */
-    [[nodiscard]] auto
-    find_without_allocating(std::string_view name) const noexcept {
-        if (name.size() <= headers_map_type::lookup_fold_capacity) {
-            return _headers.find(name);
-        }
-        auto it = _headers.cbegin();
-        for (; it != _headers.cend(); ++it) {
-            if (it->first.size() == name.size() && utility::iequals(it->first, name)) {
-                break;
-            }
-        }
-        return it;
-    }
+    [[nodiscard]] QB_COLD bool has_long_name(std::string_view name) const noexcept;
+
+    /// Erases the field named `name` (any case), `name` being longer than the map folds on the stack,
+    /// without allocating: see has_long_name (Huly QB-1068).
+    QB_COLD void erase_long_name(std::string_view name) noexcept;
 
 public:
     /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
@@ -438,7 +431,20 @@ public:
     requires std::is_convertible_v<const HeaderNameType &, std::string_view>
     [[nodiscard]] bool
     has_header(HeaderNameType &&name) const noexcept {
-        return find_without_allocating(std::string_view(name)) != _headers.cend();
+        // A name the map folds on the stack allocates nothing; a longer one would (Huly QB-1068). A
+        // string literal's length is known here, so its check costs nothing.
+        if constexpr (std::is_array_v<std::remove_reference_t<HeaderNameType>>) {
+            if constexpr (std::extent_v<std::remove_reference_t<HeaderNameType>> <= headers_map_type::lookup_fold_capacity + 1) {
+                return _headers.has(std::forward<HeaderNameType>(name));
+            } else {
+                return has_long_name(std::string_view(name));
+            }
+        } else {
+            if (std::string_view(name).size() <= headers_map_type::lookup_fold_capacity) [[likely]] {
+                return _headers.has(std::forward<HeaderNameType>(name));
+            }
+            return has_long_name(std::string_view(name));
+        }
     }
 
     /**
@@ -506,11 +512,16 @@ public:
         // Nothing allocated, so nothing thrown, whatever the name's length (Huly QB-1068): the map
         // folds a name of up to lookup_fold_capacity bytes on the stack, and a longer one -- no field
         // in common use is -- is matched against each stored name and erased by position.
-        const std::string_view key(name);
-        if (key.size() <= headers_map_type::lookup_fold_capacity) {
-            _headers.erase(key);
-        } else if (const auto it = find_without_allocating(key); it != _headers.cend()) {
-            _headers.erase(it);
+        if constexpr (std::is_array_v<std::remove_reference_t<HeaderNameType>>) {
+            if constexpr (std::extent_v<std::remove_reference_t<HeaderNameType>> <= headers_map_type::lookup_fold_capacity + 1) {
+                _headers.erase(std::forward<HeaderNameType>(name));
+            } else {
+                erase_long_name(std::string_view(name));
+            }
+        } else if (std::string_view(name).size() <= headers_map_type::lookup_fold_capacity) [[likely]] {
+            _headers.erase(std::forward<HeaderNameType>(name));
+        } else {
+            erase_long_name(std::string_view(name));
         }
         if (is_content_type) {
             _content_type_derived = false;

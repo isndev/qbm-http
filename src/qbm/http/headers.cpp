@@ -545,6 +545,33 @@ Headers::derive_content_type() const noexcept {
     _content_type_derived = true;
 }
 
+namespace {
+/// The entry of `name` among `headers`' (lowercase) names, matched without folding `name` into a string.
+template <typename Map>
+[[nodiscard]] auto
+find_by_scan(Map &headers, std::string_view name) noexcept {
+    auto it = headers.begin();
+    for (; it != headers.end(); ++it) {
+        if (it->first.size() == name.size() && utility::iequals(it->first, name)) {
+            break;
+        }
+    }
+    return it;
+}
+} // namespace
+
+bool
+Headers::has_long_name(std::string_view name) const noexcept {
+    return find_by_scan(_headers, name) != _headers.cend();
+}
+
+void
+Headers::erase_long_name(std::string_view name) noexcept {
+    if (const auto it = find_by_scan(_headers, name); it != _headers.end()) {
+        _headers.erase(it);
+    }
+}
+
 namespace detail {
 bool
 is_forbidden_trailer_field(std::string_view name) noexcept {

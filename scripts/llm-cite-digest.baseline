@@ -12,7 +12,7 @@
 # excerpt rather than as an opaque hash.  Fields: doc <TAB> cited-spec <TAB>
 # digest <TAB> excerpt.  Keyed WITHOUT the doc's own line number, so
 # re-flowing a paragraph does not re-key the file.
-llm/qbm-http.llm.api.md	body.cpp:675-697	0a49f9fa4b9b	template <>
+llm/qbm-http.llm.api.md	body.cpp:714-736	0a49f9fa4b9b	template <>
 llm/qbm-http.llm.api.md	body.h:253-253	cc499af9d486	static std::unique_ptr<qb::compression::compress_provider> get_compre...
 llm/qbm-http.llm.api.md	body.h:272-272	ee0ec258f912	std::size_t compress(std::string const &encoding);
 llm/qbm-http.llm.api.md	body.h:289-289	c60e797b9e48	static std::unique_ptr<qb::compression::decompress_provider> get_deco...
@@ -73,12 +73,12 @@ llm/qbm-http.llm.api.md	error_handling.h:54-54	f806429ff780	class ErrorHandlingM
 llm/qbm-http.llm.api.md	form.h:30-30	a1420e4d331e	class Form {
 llm/qbm-http.llm.api.md	handler_node.h:205-205	532ed46e8357	add_middleware(std::shared_ptr<IAsyncTask<Session>> middleware_task) {
 llm/qbm-http.llm.api.md	handler_node.h:84-84	361beee85d2c	join_paths(const std::string &parent, const std::string &segment) {
-llm/qbm-http.llm.api.md	headers.h:161-161	c2d70d82b78e	class Headers {
-llm/qbm-http.llm.api.md	headers.h:182-182	34482854bfbc	class ContentType {
-llm/qbm-http.llm.api.md	headers.h:37-37	7587644456e1	constexpr uint32_t ATTRIBUTE_NAME_MAX = 1024; // 1 Kilobyte
-llm/qbm-http.llm.api.md	headers.h:52-52	2e429ff5b2d6	using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
-llm/qbm-http.llm.api.md	headers.h:67-67	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...
-llm/qbm-http.llm.api.md	headers.h:97-97	f170c1837f39	[[nodiscard]] std::string accept_encoding();
+llm/qbm-http.llm.api.md	headers.h:162-162	c2d70d82b78e	class Headers {
+llm/qbm-http.llm.api.md	headers.h:183-183	34482854bfbc	class ContentType {
+llm/qbm-http.llm.api.md	headers.h:38-38	7587644456e1	constexpr uint32_t ATTRIBUTE_NAME_MAX = 1024; // 1 Kilobyte
+llm/qbm-http.llm.api.md	headers.h:53-53	2e429ff5b2d6	using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
+llm/qbm-http.llm.api.md	headers.h:68-68	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...
+llm/qbm-http.llm.api.md	headers.h:98-98	f170c1837f39	[[nodiscard]] std::string accept_encoding();
 llm/qbm-http.llm.api.md	http2.h:598-598	781e01bb02bf	listen(qb::io::uri uri, std::filesystem::path cert_file, std::filesys...
 llm/qbm-http.llm.api.md	http2.h:615-615	e840879d570a	listen_no_start(qb::io::uri uri, std::filesystem::path cert_file, std...
 llm/qbm-http.llm.api.md	http2.h:631-641	af88dc7f851b	template <typename Derived>

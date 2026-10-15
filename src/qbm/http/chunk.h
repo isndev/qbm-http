@@ -105,3 +105,28 @@ namespace qb::allocator {
 template <>
 pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
 } // namespace qb::allocator
+
+namespace qb::http {
+class Headers;
+
+namespace detail {
+/**
+ * @brief When a message's `Trailer` header announces fields, writes its header section, then its
+ *        chunked body: the announced fields a trailer section may carry (trailer_section_fields)
+ *        leave the header section and follow the last chunk, as HTTP/2 and HTTP/3 send them (Huly
+ *        QB-1067). A message without a `Trailer` header gets nothing written.
+ *
+ * The HTTP/1.1 serializers call it after the start line, for a complete chunked message only, and
+ * have validated every field already. Out of line and cold, the `Trailer` lookup included: few
+ * messages announce trailers, and the serializers' common path stays what it was.
+ *
+ * @param out Where the bytes go.
+ * @param message The message whose fields are written.
+ * @param body The message's body bytes.
+ * @param length How many of them form the body (one chunk; none for an empty body).
+ * @return true when the message was written; false, with nothing written, when it announces nothing.
+ */
+[[nodiscard]] bool write_trailed_chunked_message(qb::allocator::pipe<char> &out, const Headers &message, const qb::allocator::pipe<char> &body,
+                                                 std::size_t length);
+} // namespace detail
+} // namespace qb::http

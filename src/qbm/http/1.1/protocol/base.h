@@ -256,21 +256,20 @@ private:
     }
 
     /**
-     * @brief Stores the field the parser holds, if any: in the header section or, after it, in
-     *        the trailer section of a chunked message.
+     * @brief Stores the trailer field the parser holds, if any, into the message's headers.
      * @param parser Parser instance
      * @return 0, or the refusal of the message
      *
-     * A header-section field is stored when the next one begins or when the section ends; a
-     * trailer-section field when its value ends (on_value_end): the last one is
-     * followed by neither, and it was dropped (Huly QB-1067). A trailer field joins the message's
-     * headers, as HTTP/2 and HTTP/3 surface theirs; one a trailer section must not carry (framing,
-     * connection, routing, proxy authentication: detail::is_forbidden_trailer_field) refuses the
-     * message, as they refuse their stream -- merged, a trailer `Content-Length` would sit beside
-     * the chunked framing.
+     * A header-section field is stored when the next one begins or when the section ends (inline
+     * in on_header_field / on_headers_complete); a trailer-section field when its value ends, here
+     * through on_value_end: the last one is followed by neither, and it was dropped (Huly QB-1067).
+     * A trailer field joins the message's headers, as HTTP/2 and HTTP/3 surface theirs; one a
+     * trailer section must not carry (framing, connection, routing, proxy authentication:
+     * detail::is_forbidden_trailer_field) refuses the message, as they refuse their stream --
+     * merged, a trailer `Content-Length` would sit beside the chunked framing.
      */
     static int
-    store_pending_field(http_t *parser) {
+    store_trailer_field(http_t *parser) {
         auto *self = self_of(parser);
         if (self->_last_header_token != HeaderToken::VALUE || self->_last_header_key.empty()) {
             return 0;
@@ -278,7 +277,7 @@ private:
         if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
             return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
         }
-        if (self->_headers_completed && qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
+        if (qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
             return fail_with_reason(parser, "HTTP trailer section carries a field it must not (framing, connection, routing)");
         }
         self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
@@ -288,16 +287,18 @@ private:
     }
 
     /**
-     * @brief Header value complete callback (llhttp's on_header_value_complete): stores a trailer-section field as soon as its value
-     *        ends, so the last one is not lost and a refusal is the parser's error (a refusal
-     *        returned from on_message_complete would read as the completion llhttp signals there).
-     *        A header-section field keeps its lazy store (store_pending_field).
+     * @brief Header value complete callback (llhttp's on_header_value_complete) of a trailer section:
+     *        stores the field as soon as its value ends, so the last one is not lost and a refusal is
+     *        the parser's error (a refusal returned from on_message_complete would read as the
+     *        completion llhttp signals there). Installed only after the header section of a chunked
+     *        message (trailer_settings, by on_headers_complete): a header-section field keeps its lazy
+     *        store, inline in on_header_field / on_headers_complete, at no cost per field.
      * @param parser Parser instance
      * @return 0, or the refusal of the message
      */
     static int
     on_value_end(http_t *parser) {
-        return self_of(parser)->_headers_completed ? store_pending_field(parser) : 0;
+        return store_trailer_field(parser);
     }
 
     /**
@@ -314,8 +315,13 @@ private:
     static int
     on_header_field(http_t *parser, const char *at, size_t length) {
         auto *self = self_of(parser);
-        if (const int refused = store_pending_field(parser)) {
-            return refused;
+        if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
+            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+            }
+            self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+            self->_last_header_key.clear();
+            self->_last_header_value.clear();
         }
 
         if (self->_last_header_token != HeaderToken::FIELD) {
@@ -382,8 +388,13 @@ private:
     on_headers_complete(http_t *parser) {
         auto *self = self_of(parser);
         auto &msg  = self->msg;
-        if (const int refused = store_pending_field(parser)) {
-            return refused;
+        if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
+            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+            }
+            msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
+            self->_last_header_key.clear();
+            self->_last_header_value.clear();
         }
         self->_last_header_token = HeaderToken::NONE;
         msg.major_version        = parser->http_major;
@@ -395,6 +406,9 @@ private:
             if (!is_supported_transfer_encoding(msg)) {
                 return fail_with_reason(parser, "Unsupported HTTP Transfer-Encoding");
             }
+            // A chunked body may end with a trailer section: its fields are stored as their values end
+            // (trailer_settings, Huly QB-1067). Installed here, so no other message pays for it.
+            parser->settings = const_cast<http_settings_s *>(&trailer_settings);
         }
         if constexpr (MessageType::type == HTTP_REQUEST) {
             // llhttp uses ULLONG_MAX as "unknown length". For HTTP requests,
@@ -511,7 +525,40 @@ private:
         &Parser::default_http_cb,      // on method complete
         &Parser::default_http_cb,      // on version complete
         &Parser::default_http_cb,      // on header field complete
-        &Parser::on_value_end,         // on header value complete (stores a trailer field, Huly QB-1067)
+        &Parser::default_http_cb,      // on header value complete
+        &Parser::default_http_cb,      // on chunk extention name complete
+        &Parser::default_http_cb,      // on chunk extension value complete
+        &Parser::default_http_cb,      // on chunk header
+        &Parser::default_http_cb,      // on chunk complete
+        &Parser::default_http_cb       // on reset
+    };
+
+    /**
+     * @brief The settings of a chunked message's body and trailer section: settings, with on_value_end
+     *        storing each trailer field when its value ends. on_headers_complete installs them for a
+     *        chunked message; reset() restores settings (Huly QB-1067).
+     */
+    static const http_settings_s inline trailer_settings{
+        &Parser::default_http_cb,      // on message begin
+        &Parser::default_http_data_cb, // on protocol
+        &Parser::on_url,               // on url
+        &Parser::on_status,            // on status
+        &Parser::default_http_data_cb, // on method
+        &Parser::default_http_data_cb, // on version
+        &Parser::on_header_field,      // on header field
+        &Parser::on_header_value,      // on header value
+        &Parser::default_http_data_cb, // on chunk extention name
+        &Parser::default_http_data_cb, // on chunk extension value
+        &Parser::on_headers_complete,  // on headers complete
+        &Parser::on_body,              // on body
+        &Parser::on_message_complete,  // on message complete
+        &Parser::default_http_cb,      // on protocol complete
+        &Parser::default_http_cb,      // on url complete
+        &Parser::default_http_cb,      // on status complete
+        &Parser::default_http_cb,      // on method complete
+        &Parser::default_http_cb,      // on version complete
+        &Parser::default_http_cb,      // on header field complete
+        &Parser::on_value_end,         // on header value complete: stores the trailer field
         &Parser::default_http_cb,      // on chunk extention name complete
         &Parser::default_http_cb,      // on chunk extension value complete
         &Parser::default_http_cb,      // on chunk header

@@ -43,6 +43,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The HTTP/1.1 serializers validate each field once, and their refusals are out of line (QB-1066/1067/1068
+  follow-up).** Every header name and value was validated twice -- a first pass refused before anything was
+  written, a second one, with the same predicates, while writing, whose refusal could no longer be reached. The
+  second pass is gone, the refusals are cold out-of-line calls (messages unchanged), the trailer section is written
+  by an out-of-line function a message reaches only when it is chunked and announces trailers, and the parser
+  stores trailer fields through a callback installed for chunked messages only: a response costs about 27 % fewer
+  instructions to serialize, a request 23 %, and parsing what it did before these follow-ups.
 - **HTTP/1.1 chunked trailers follow the HTTP/2 and HTTP/3 contract (Huly QB-1067).** A complete chunked message
   writes the fields its `Trailer` header announces after the last chunk instead of in its header section (a field a
   trailer section must not carry stays in the head; a `MessageHead` keeps every field). The parser stores every
@@ -179,8 +186,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the only one, for a one-field trailer.
 - **A refused HTTP/1.1 serialization keeps what was queued before it (Huly QB-1066).** The serializers cleared the
   whole output pipe on a refusal, dropping the responses or requests queued ahead of the refused one -- a
-  pipelined response lost because the next was invalid. A refusal now takes back only what it wrote, and an
-  exception thrown while writing does the same. Behaviour change: the tests that pinned the clearing now pin this.
+  pipelined response lost because the next was invalid. Every refusal now comes before the first byte is
+  written, and none clears the pipe. Behaviour change: the tests that pinned the clearing now pin this.
 - **Serializing a `Request` without a method is refused instead of aborting the process (Huly QB-1066).** A
   default-constructed `Request` has `Method::UNINITIALIZED`, and the serializer named the method through llhttp's
   `http_method_name()`, whose switch ends in `abort()`. Such a request, or any method value llhttp does not map,
