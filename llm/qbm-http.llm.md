@@ -114,7 +114,7 @@ res.add_cookie("session", "abc123");                    // jar + matching Set-Co
 int code = res.status().code();                         // 200..., st.str() -> "OK"
 ```
 
-- `Body`/`Headers` are **base classes, not members**: call `req.set_header(...)` / `req.body()` directly. `headers()` returns the raw map for bulk inspection; after direct mutation call `refresh_content_type()`.
+- `Body`/`Headers` are **base classes, not members**: call `req.set_header(...)` / `req.body()` directly. `headers()` returns the raw map for bulk inspection; after direct mutation call `refresh_content_type()` (the typed `content_type()` is derived from the raw header on the next read, and only when read).
 - Body extraction is closed: only `std::string`, `std::string_view`, `qb::json`, `Multipart`, `Form` convert out; anything else is a compile error. Two accessors share that set — `as<T>()` **throws** on malformed input, `try_as<T>()` returns `std::optional<T>` and is `noexcept`. **Use `try_as<T>()` for anything a client sent you**, so a bad payload becomes a `nullopt` you turn into a 400 instead of an exception crossing your handler. Append/constructor accepts `Body`, `Chunk`, `Multipart`, `qb::json`, `std::string`, `std::string_view`, `std::vector<char>`, arithmetic values, built-in `char[N]` arrays, and `char*`/`const char*`; assignment has explicit support for `std::string`, `std::vector<char>`, `qb::json`, `Multipart`, `Form`, `std::string_view`, and `const char*`. `Form` is assignment-only; arithmetic is append-only.
 - **DELETE is `qb::http::method::DEL`** (`delete` is a keyword); `method::DELETE_METHOD` is an alias. Default `Method` is `UNINITIALIZED`; `Request{uri}` defaults to `GET`.
 
@@ -491,7 +491,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 ## Gotchas
 
 - **DELETE ⇒ `qb::http::method::DEL`** and `router().del(...)`. `method::DELETE` does not exist.
-- `Body`/`Headers` are base classes — `req.set_header(...)`/`req.body()`, not `req.headers().set(...)`. After mutating `headers()` directly, call `refresh_content_type()`.
+- `Body`/`Headers` are base classes — `req.set_header(...)`/`req.body()`, not `req.headers().set(...)`. After mutating `headers()` directly, call `refresh_content_type()`; `content_type()` derives itself from the raw header on the next read.
 - Request cookies need an explicit `req.parse_cookie_header()`; response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.

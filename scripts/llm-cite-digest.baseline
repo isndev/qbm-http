@@ -73,8 +73,8 @@ llm/qbm-http.llm.api.md	error_handling.h:54-54	f806429ff780	class ErrorHandlingM
 llm/qbm-http.llm.api.md	form.h:30-30	a1420e4d331e	class Form {
 llm/qbm-http.llm.api.md	handler_node.h:205-205	532ed46e8357	add_middleware(std::shared_ptr<IAsyncTask<Session>> middleware_task) {
 llm/qbm-http.llm.api.md	handler_node.h:84-84	361beee85d2c	join_paths(const std::string &parent, const std::string &segment) {
-llm/qbm-http.llm.api.md	headers.h:153-153	c2d70d82b78e	class Headers {
-llm/qbm-http.llm.api.md	headers.h:169-169	34482854bfbc	class ContentType {
+llm/qbm-http.llm.api.md	headers.h:161-161	c2d70d82b78e	class Headers {
+llm/qbm-http.llm.api.md	headers.h:182-182	34482854bfbc	class ContentType {
 llm/qbm-http.llm.api.md	headers.h:37-37	7587644456e1	constexpr uint32_t ATTRIBUTE_NAME_MAX = 1024; // 1 Kilobyte
 llm/qbm-http.llm.api.md	headers.h:52-52	2e429ff5b2d6	using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
 llm/qbm-http.llm.api.md	headers.h:67-67	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...

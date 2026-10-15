@@ -43,6 +43,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The typed `Content-Type` is derived from the raw header on first read, and nothing is allocated for the
+  defaults (Huly QB-506 follow-up).** `content_type()` parses the raw `Content-Type` header (its first value,
+  or the defaults) the first time it is read after a message was built, parsed, or had that header changed
+  through `set_header`, `add_header`, `remove_header` or `set_content_type`; `refresh_content_type()` only marks
+  it for re-derivation. The HTTP/1.1 parser no longer parses it for every header section it frames, nor does
+  `set_content_type` parse it (twice) at every call: a message whose typed Content-Type nobody reads never parses
+  it, and a reader pays one parse. A `ContentType` holds empty strings for the defaults and reports
+  `application/octet-stream` / `utf-8` from one process-wide `std::string` each, so constructing a message no
+  longer heap-allocates a 24-byte string it will most likely never show; `ContentType()` is the defaults,
+  `assign(value)` re-parses in place. `content_type()` is no longer `constexpr` (it could not be evaluated at
+  compile time before either). The derivation is a `const` read's side effect on `mutable` members; a message
+  is, like every qb object, used by one thread at a time.
 - **Serializing a `Request` or `Response` writes a COMPLETE message: an empty chunked body is its last-chunk (Huly
   QB-493).** A message declaring `Transfer-Encoding: chunked` with no body used to serialize as its header section
   alone, which left the peer waiting for a body that never came (RFC 9112 §7.1). Behaviour change, source compatible:

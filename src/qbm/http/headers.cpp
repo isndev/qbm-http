@@ -444,51 +444,51 @@ content_encoding(std::string_view accept_encoding_header) {
     return ""; // No suitable encoding found or compression disabled
 }
 
-std::pair<std::string, std::string>
-Headers::ContentType::parse(std::string_view content_type_str) {
+void
+Headers::ContentType::assign(std::string_view content_type_str) {
+    _type.clear();
+    _charset.clear();
     const auto semicolon_pos = content_type_str.find(';');
     const auto media_type =
         utility::trim_http_whitespace(semicolon_pos == std::string_view::npos ? content_type_str : content_type_str.substr(0, semicolon_pos));
     if (media_type.empty()) {
-        return {std::string(default_content_type), std::string(default_charset)};
+        return; // the defaults, reported from the shared strings
     }
-    std::pair<std::string, std::string> ret{std::string(media_type), std::string(default_charset)};
+    _type.assign(media_type);
 
     if (semicolon_pos != std::string_view::npos) {
         // The parameters' FIRST `charset` decides, and a malformed parameter list anywhere keeps the
         // default -- the rules of parse_header_attributes() and its map, read here without building the map:
-        // this runs for every received message that carries a Content-Type (Huly QB-506).
+        // this runs for every received message whose typed Content-Type is read (Huly QB-506).
+        const auto params = content_type_str.substr(semicolon_pos + 1);
         try {
-            const auto  params = content_type_str.substr(semicolon_pos + 1);
-            bool        seen   = false;
-            std::string charset;
+            bool seen = false;
             for_each_header_attribute(params.data(), params.size(), [&](std::string_view name, std::string &&value) {
                 if (!seen && utility::iequals(name, "charset")) {
-                    seen    = true;
-                    charset = std::move(value);
+                    seen     = true;
+                    _charset = std::move(value); // empty keeps the default
                 }
             });
-            if (!charset.empty()) {
-                ret.second = std::move(charset);
-            }
         } catch (...) {
-            // keep the default charset
+            _charset.clear(); // keep the default charset
         }
     }
+}
 
-    return ret;
+std::pair<std::string, std::string>
+Headers::ContentType::parse(std::string_view content_type_str) {
+    const ContentType parsed{content_type_str};
+    return {parsed.type(), parsed.charset()};
 }
 
 void
-Headers::refresh_content_type() noexcept {
-    const auto it = _headers.find("Content-Type");
-    if (it != _headers.end() && !it->second.empty()) {
-        _content_type = ContentType{it->second.front()};
-    } else if (_content_type.type() != default_content_type || _content_type.charset() != default_charset) {
-        // Absent: back to the defaults. A cache that already holds them (a fresh message, the
-        // common case for the HTTP/1.1 parser that calls this for every header section) is left
-        // alone rather than re-parsed into the same two strings.
-        _content_type = ContentType{default_content_type};
+Headers::derive_content_type() const noexcept {
+    const auto it = _headers.find(content_type_name);
+    if (it != _headers.cend() && !it->second.empty()) {
+        _content_type.assign(it->second.front());
+    } else {
+        _content_type = ContentType{}; // absent: the defaults, nothing allocated
     }
+    _content_type_derived = true;
 }
 } // namespace qb::http

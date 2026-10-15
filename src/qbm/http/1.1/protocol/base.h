@@ -328,13 +328,14 @@ private:
      * 1. Sets the HTTP version
      * 2. Reserves memory for the body based on Content-Length if available
      * 3. Sets the upgrade flag if applicable
-     * 4. Refreshes the message's typed Content-Type from its raw header
-     * 5. Marks headers as completed and pauses the parser
+     * 4. Marks headers as completed and pauses the parser
      *
      * The parser is paused to allow the application to process headers
-     * before continuing with the body. Every framing path crosses this point — the
-     * protocol frames Content-Length, empty, HEAD and close-delimited bodies itself and
-     * never reaches on_message_complete — so the typed Content-Type is set here.
+     * before continuing with the body. The message's typed Content-Type is set neither here
+     * nor anywhere else in the parser: `content_type()` derives it from the raw header on its
+     * first read (Huly QB-506), on every framing path -- the protocol frames Content-Length,
+     * empty, HEAD and close-delimited bodies itself and never reaches on_message_complete --
+     * and a message nobody asks never parses it.
      */
     static int
     on_headers_complete(http_t *parser) {
@@ -388,11 +389,8 @@ private:
             self->_chunked.reserve(
                 std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT));
         }
-        msg.upgrade    = static_cast<bool>(parser->upgrade);
-        msg.keep_alive = static_cast<bool>(http_should_keep_alive(parser));
-        // The typed cache follows the raw map on EVERY framing path, not only the chunked one
-        // that reaches on_message_complete (Huly QB-506).
-        msg.refresh_content_type();
+        msg.upgrade              = static_cast<bool>(parser->upgrade);
+        msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
         self->_headers_completed = true;
         return HPE_PAUSED;
     }
@@ -435,8 +433,8 @@ private:
      * 1. Moving the accumulated body data to the message body
      * 2. Returning 1 to signal message completion
      *
-     * The typed Content-Type was set when the header section ended (on_headers_complete); it is
-     * not re-derived here, so a message without a Content-Type does not gain an empty one.
+     * The typed Content-Type is derived from the raw header when first read; nothing is
+     * re-written here, so a message without a Content-Type does not gain an empty one.
      */
     static int
     on_message_complete(http_t *parser) {

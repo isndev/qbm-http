@@ -18,12 +18,13 @@ namespace internal {
 void
 MessageBase::reset() noexcept {
     this->Headers::_headers.clear();
-    this->Headers::_content_type = typename Headers::ContentType{};
-    major_version                = 1;
-    minor_version                = 1;
-    upgrade                      = false;
-    stream_id                    = 0;
-    keep_alive                   = false;
+    this->Headers::_content_type         = typename Headers::ContentType{};
+    this->Headers::_content_type_derived = false;
+    major_version                        = 1;
+    minor_version                        = 1;
+    upgrade                              = false;
+    stream_id                            = 0;
+    keep_alive                           = false;
 }
 
 } // namespace internal

@@ -177,6 +177,66 @@ TEST(HeadersUtility, ReplacingWholeHeaderMapRefreshesContentType) {
     EXPECT_EQ(response.content_type().charset(), "utf-16");
 }
 
+// The typed Content-Type is DERIVED from the raw map on first read: a message filled through the
+// raw map -- the HTTP/1.1 parser, a decoder, a bulk edit -- reports the header it carries without
+// anyone calling refresh_content_type(), a raw change AFTER a read waits for refresh_content_type()
+// (the documented contract), a typed mutator re-derives by itself, and the derivation state travels
+// with a copy (Huly QB-506 follow-up).
+TEST(HeadersUtility, TypedContentTypeDerivesFromTheRawMapOnFirstRead) {
+    qb::http::Headers headers;
+    headers.headers()["Content-Type"].push_back("text/plain; charset=iso-8859-1");
+    EXPECT_EQ(headers.content_type().type(), "text/plain") << "never refreshed, never read before: derived now";
+    EXPECT_EQ(headers.content_type().charset(), "iso-8859-1");
+
+    headers.headers()["Content-Type"].front() = "application/json";
+    EXPECT_EQ(headers.content_type().type(), "text/plain") << "a raw change after a read is cached until refresh_content_type()";
+    headers.refresh_content_type();
+    EXPECT_EQ(headers.content_type().type(), "application/json");
+    EXPECT_EQ(headers.content_type().charset(), qb::http::Headers::default_charset);
+
+    headers.headers()["Content-Type"].front() = "image/png";
+    const qb::http::Headers copy              = headers;
+    EXPECT_EQ(copy.content_type().type(), "application/json") << "the copy's cache is exactly as current as the source's";
+
+    headers.set_content_type("text/html; charset=utf-8");
+    EXPECT_EQ(headers.header("Content-Type"), "text/html; charset=utf-8") << "set_content_type writes the raw header";
+    EXPECT_EQ(headers.content_type().type(), "text/html") << "a typed mutator re-derives by itself";
+    EXPECT_EQ(headers.content_type().charset(), "utf-8");
+    headers.add_header("Content-Type", "text/plain");
+    EXPECT_EQ(headers.content_type().type(), "text/html") << "the first value decides";
+    headers.remove_header(std::string("CONTENT-TYPE"));
+    EXPECT_EQ(headers.content_type().type(), qb::http::Headers::default_content_type);
+}
+
+// The defaults are not stored per message: a message without a Content-Type, a typeless value and
+// a cleared ContentType all report `application/octet-stream` / `utf-8` from one process-wide
+// std::string each, so constructing a message allocates nothing for them.
+TEST(HeadersUtility, DefaultContentTypeIsOneProcessWideObject) {
+    qb::http::Headers a, b;
+    EXPECT_EQ(&a.content_type().type(), &b.content_type().type());
+    EXPECT_EQ(&a.content_type().charset(), &b.content_type().charset());
+    EXPECT_EQ(a.content_type().type(), qb::http::Headers::default_content_type);
+    EXPECT_EQ(a.content_type().charset(), qb::http::Headers::default_charset);
+
+    const qb::http::Headers::ContentType typeless{"; charset=utf-16"};
+    EXPECT_EQ(&typeless.type(), &a.content_type().type()) << "no type: the default itself, not a copy";
+    EXPECT_EQ(typeless.charset(), qb::http::Headers::default_charset) << "no type: the parameters are not read";
+
+    qb::http::Headers::ContentType ct{"text/html; charset=UTF-16"};
+    EXPECT_EQ(ct.type(), "text/html");
+    EXPECT_EQ(ct.charset(), "UTF-16");
+    ct.assign("");
+    EXPECT_EQ(&ct.type(), &a.content_type().type());
+    EXPECT_EQ(&ct.charset(), &a.content_type().charset());
+    ct.assign("application/json; charset=");
+    EXPECT_EQ(ct.type(), "application/json");
+    EXPECT_EQ(&ct.charset(), &a.content_type().charset()) << "an empty charset keeps the default";
+
+    const auto parsed = qb::http::Headers::ContentType::parse("");
+    EXPECT_EQ(parsed.first, qb::http::Headers::default_content_type) << "parse() still returns the defaults by value";
+    EXPECT_EQ(parsed.second, qb::http::Headers::default_charset);
+}
+
 TEST(HeadersUtility, ContentTypeParsesCaseInsensitiveQuotedCharset) {
     qb::http::Headers headers;
 

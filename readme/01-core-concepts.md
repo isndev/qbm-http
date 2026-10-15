@@ -172,11 +172,11 @@ const std::string &enc1 = req.header("Accept-Encoding", 1); // "deflate"
 | `header_count()` | number of distinct header names |
 | `exceeds_header_limit(max = 100)` | DoS guard; the parser caps inbound headers at `protocol_limits::MAX_HEADERS_COUNT` (100) |
 
-`header(...)` returns a reference, not a copy, and never throws on a missing name — it returns a stable reference to a process-wide static empty string. There is no fallback argument; for a custom default use `header_or(name, fallback)`, which returns `std::string` by value. If you mutate the map directly through `headers()`, call `refresh_content_type()` so the cached `Content-Type` helper stays correct; the typed setters keep it in sync automatically.
+`header(...)` returns a reference, not a copy, and never throws on a missing name — it returns a stable reference to a process-wide static empty string. There is no fallback argument; for a custom default use `header_or(name, fallback)`, which returns `std::string` by value. If you mutate the map directly through `headers()`, call `refresh_content_type()` so the cached `Content-Type` helper is re-derived on its next read; the typed setters do that themselves.
 
 ### The `Content-Type` helper
 
-`Headers` caches a parsed `Content-Type` so you do not re-parse the MIME type and charset on every read. `set_content_type(value)` updates both the raw header and the cached helper; `content_type()` returns the parsed view.
+`Headers` caches a parsed `Content-Type` so you do not re-parse the MIME type and charset on every read. The cache is lazy: `content_type()` derives it from the raw header (its first value, or the defaults) on the first read after the message was built, parsed or had that header changed, and a message whose typed `Content-Type` nobody reads never parses it. `set_content_type(value)` sets the raw header; `content_type()` returns the parsed view.
 
 <!-- src: qbm/http/tests/unit/message/headers-utility.cpp:126-129 -->
 ```cpp
@@ -271,7 +271,7 @@ HTTP/2 and HTTP/3 reuse the message model wholesale: HPACK/QPACK decode into the
 
 ## Pitfalls
 
-- **`Body`/`Headers` are base classes, not members.** Call `req.set_header(...)` and `req.body()` on the message directly. There is no `req.headers().set(...)` setter — `headers()` returns the raw map for inspection or bulk replacement, after which you call `refresh_content_type()`.
+- **`Body`/`Headers` are base classes, not members.** Call `req.set_header(...)` and `req.body()` on the message directly. There is no `req.headers().set(...)` setter — `headers()` returns the raw map for inspection or bulk replacement, after which you call `refresh_content_type()` (the typed `content_type()` re-derives on its next read).
 - **Request cookies need `parse_cookie_header()`.** The jar is empty until you parse. Reading `req.cookie("x")` before parsing returns `nullptr`.
 - **Editing a response cookie in place desyncs the header.** After mutating through `cookie(name)` (non-const) or the `cookies()` jar, call `update_cookie_header(name)` or `update_cookie_headers()`.
 - **DELETE is `method::DEL`.** `method::DELETE` does not exist; use `DEL` or the `DELETE_METHOD` alias.

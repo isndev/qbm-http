@@ -117,6 +117,14 @@ using headers_map = qb::icase_unordered_map<std::vector<std::string>>;
  */
 inline constexpr std::string_view default_user_agent = "qb/" QB_VERSION;
 
+namespace detail {
+/// `Headers::default_content_type`, as the `std::string` a typed `ContentType` returns by reference
+/// for a message that carries no type: one process-wide object, never built per message.
+inline const std::string default_content_type_string{"application/octet-stream"};
+/// `Headers::default_charset`, likewise.
+inline const std::string default_charset_string{"utf-8"};
+} // namespace detail
+
 /**
  * @brief Selects a suitable `Content-Encoding` for a response based on the client's `Accept-Encoding` header.
  *
@@ -165,6 +173,11 @@ public:
      *
      * This class provides convenient access to the main MIME type (e.g., `"text/html"`)
      * and the charset parameter (e.g., `"utf-8"`) from a `Content-Type` header string.
+     *
+     * The defaults are not stored: a default-constructed `ContentType`, or one parsed from a
+     * value without a type (or without a usable charset), holds empty strings and reports
+     * `Headers::default_content_type` / `Headers::default_charset` from one process-wide object
+     * each. Building one for a message that carries no `Content-Type` allocates nothing.
      */
     class ContentType {
     public:
@@ -184,17 +197,23 @@ public:
         [[nodiscard]] static std::pair<std::string, std::string> parse(std::string_view content_type_str);
 
     private:
-        /** @brief Pair storing the MIME type (`.first`) and charset (`.second`). */
-        std::pair<std::string, std::string> _type_charset;
+        /** @brief The MIME type; empty stands for `Headers::default_content_type`. */
+        std::string _type;
+        /** @brief The charset; empty stands for `Headers::default_charset`. */
+        std::string _charset;
 
     public:
+        /** @brief The defaults (`application/octet-stream`, `utf-8`): nothing parsed, nothing allocated. */
+        ContentType() noexcept = default;
+
         /**
          * @brief Constructs a `ContentType` object by parsing the given header string.
          * If `content_type_str` is empty, defaults are used.
          * @param content_type_str The `Content-Type` header string (as `std::string_view`).
          */
-        explicit ContentType(std::string_view content_type_str = "")
-            : _type_charset(parse(content_type_str)) {}
+        explicit ContentType(std::string_view content_type_str) {
+            assign(content_type_str);
+        }
 
         ContentType(const ContentType &) = default;
 
@@ -205,12 +224,19 @@ public:
         ContentType &operator=(ContentType &&) noexcept = default;
 
         /**
+         * @brief Re-parses this object from a `Content-Type` header value, reusing its storage.
+         * The grammar and the defaults are `parse()`'s.
+         * @param content_type_str The `Content-Type` header value; empty yields the defaults.
+         */
+        void assign(std::string_view content_type_str);
+
+        /**
          * @brief Gets the MIME type component of the Content-Type.
          * @return A constant reference to the MIME type string (e.g., `"text/html"`).
          */
         [[nodiscard]] const std::string &
         type() const noexcept {
-            return _type_charset.first;
+            return _type.empty() ? detail::default_content_type_string : _type;
         }
 
         /**
@@ -219,42 +245,62 @@ public:
          */
         [[nodiscard]] const std::string &
         charset() const noexcept {
-            return _type_charset.second;
+            return _charset.empty() ? detail::default_charset_string : _charset;
         }
     };
 
 protected:
     /** @brief The map storing all headers. Keys are case-insensitive header names. Values are vectors of `std::string`. */
     headers_map_type _headers;
-    /** @brief Parsed `Content-Type` header object, providing easy access to MIME type and charset. */
-    ContentType _content_type;
+    /**
+     * @brief The typed `Content-Type`, derived from the raw map on the first `content_type()` read
+     *        after a change (`_content_type_derived` says whether it is current). `mutable`: the
+     *        derivation is a read's side effect, and a message, like every qb object, is used by one
+     *        thread at a time.
+     */
+    mutable ContentType _content_type;
+    /** @brief Whether `_content_type` was derived from the current contents of `_headers`. */
+    mutable bool _content_type_derived = false;
 
+    /** @brief The header name the typed cache follows. */
+    static constexpr std::string_view content_type_name = "Content-Type";
+
+    /// Whether `name` is `Content-Type`, in any case: a literal of another length is decided at compile time.
+    template <std::size_t N>
+    [[nodiscard]] static constexpr bool
+    is_content_type_header(const char (&name)[N]) noexcept {
+        if constexpr (N - 1 != content_type_name.size()) {
+            return false;
+        } else {
+            return utility::iequals(std::string_view{name, N - 1}, content_type_name);
+        }
+    }
     template <typename HeaderNameType>
+    requires(!std::is_array_v<std::remove_cvref_t<HeaderNameType>>)
     [[nodiscard]] static bool
     is_content_type_header(const HeaderNameType &name) noexcept {
-        if constexpr (std::is_convertible_v<HeaderNameType, std::string_view>) {
-            return utility::iequals(std::string_view{name}, "Content-Type");
+        if constexpr (std::is_convertible_v<const HeaderNameType &, std::string_view>) {
+            return utility::iequals(std::string_view{name}, content_type_name);
         } else {
             return false;
         }
     }
 
+    /// Derives the typed `Content-Type` from the raw map: the first value of the header, or the defaults.
+    void derive_content_type() const noexcept;
+
 public:
     /** @brief Default constructor. Initializes an empty set of headers and a default `ContentType`. */
-    Headers() noexcept
-        : _content_type(default_content_type) {}
+    Headers() noexcept = default;
 
     /**
      * @brief Constructs `Headers` with an initial map of headers.
-     * The `Content-Type` member is initialized by parsing the "Content-Type" header from `initial_headers`,
-     * or defaults if not present.
+     * The typed `Content-Type` follows the "Content-Type" header of `initial_headers`, or the
+     * defaults if it is absent, when first read.
      * @param initial_headers A map of headers to initialize with. The map is moved.
      */
     explicit Headers(headers_map_type initial_headers)
-        : _headers(std::move(initial_headers))
-        , _content_type(default_content_type) {
-        refresh_content_type();
-    }
+        : _headers(std::move(initial_headers)) {}
 
     Headers(const Headers &) = default;
 
@@ -284,13 +330,18 @@ public:
     }
 
     /**
-     * @brief Re-parses the cached Content-Type helper from the raw header map.
+     * @brief Marks the typed Content-Type helper as out of date: the next `content_type()` read
+     *        re-derives it from the raw header map.
      *
      * Call this after direct mutation through `headers()`. The typed mutators
-     * (`set_content_type`, `set_header`, `add_header`, `remove_header`) keep it
-     * synchronized automatically.
+     * (`set_content_type`, `set_header`, `add_header`, `remove_header`) do it themselves, and a
+     * freshly constructed or parsed message derives on its first read, so the raw map is the
+     * source of truth and nothing is parsed for a message whose typed Content-Type nobody reads.
      */
-    void refresh_content_type() noexcept;
+    void
+    refresh_content_type() noexcept {
+        _content_type_derived = false;
+    }
 
     /**
      * @brief Retrieves the value of a specific header.
@@ -369,23 +420,31 @@ public:
     }
 
     /**
-     * @brief Sets the `Content-Type` header value and updates the internal parsed `_content_type`.
+     * @brief Sets the `Content-Type` header value; the typed `content_type()` follows it when next read.
      * Any existing `Content-Type` headers are replaced with this single value.
      * @param value The full `Content-Type` header value string (e.g., "text/html; charset=utf-8").
-     *              This `std::string_view` is used to parse the `ContentType` and to set the header.
+     *              It may be a view of the value this header already holds.
      */
     void
     set_content_type(std::string_view value) {
-        _content_type = ContentType{value};
         set_header("Content-Type", std::string(value));
     }
 
     /**
      * @brief Gets the parsed `ContentType` object, allowing easy access to MIME type and charset.
+     *
+     * Derived from the raw `Content-Type` header (its first value, or the defaults when it is
+     * absent) on the first read after the message was built, parsed or had that header changed
+     * through a typed mutator or `refresh_content_type()`; later reads return the cached object.
+     * A message whose typed Content-Type is never read never parses it.
+     *
      * @return A constant reference to the internal `ContentType` object.
      */
-    [[nodiscard]] constexpr const ContentType &
+    [[nodiscard]] const ContentType &
     content_type() const noexcept {
+        if (!_content_type_derived) [[unlikely]] {
+            derive_content_type();
+        }
         return _content_type;
     }
 
@@ -404,8 +463,8 @@ public:
         // Map/vector operations can allocate
         auto &values_vec = _headers[std::forward<HeaderNameType>(name)];
         values_vec.emplace_back(std::forward<HeaderValueType>(value));
-        if (is_content_type && values_vec.size() == 1) {
-            _content_type = ContentType{values_vec.front()};
+        if (is_content_type) {
+            _content_type_derived = false;
         }
     }
 
@@ -421,7 +480,7 @@ public:
         // Assuming icase_unordered_map::erase(key) is noexcept
         _headers.erase(std::forward<HeaderNameType>(name));
         if (is_content_type) {
-            _content_type = ContentType{default_content_type};
+            _content_type_derived = false;
         }
     }
 
@@ -447,7 +506,7 @@ public:
         values_vec.clear();
         values_vec.emplace_back(std::move(new_value));
         if (is_content_type) {
-            _content_type = ContentType{values_vec.front()};
+            _content_type_derived = false;
         }
     }
 
