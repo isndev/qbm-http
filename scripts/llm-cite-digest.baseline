@@ -192,10 +192,10 @@ llm/qbm-http.llm.api.md	sanitizer.h:68-68	2a870ccae1b3	namespace PredefinedSanit
 llm/qbm-http.llm.api.md	security_headers.h:283-283	28e523aa0686	class SecurityHeadersMiddleware final : public IMiddleware<SessionTyp...
 llm/qbm-http.llm.api.md	security_headers.h:408-408	22b70b4e395c	security_headers_middleware(const SecurityHeadersOptions &options = S...
 llm/qbm-http.llm.api.md	security_headers.h:53-53	1c8e83f82a6e	class SecurityHeadersOptions {
-llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:232-236	889fc62c5cea	Client::~Client() {
-llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::connect(ConnectionCallback callback) {
-llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
-llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
+llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:235-239	889fc62c5cea	Client::~Client() {
+llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:275-310	6211468140a7	Client::connect(ConnectionCallback callback) {
+llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:341-352	289b3dda3894	Client::disconnect() {
+llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:568-633	86e530f76222	Client::reset_deferred_connection_if_ready() {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:448-485	cc6007b23834	void
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
@@ -283,11 +283,11 @@ llm/qbm-http.llm.api.md	types.h:951-951	6c7c92a87174	struct hash<qb::http::metho
 llm/qbm-http.llm.api.md	utility.h:258-260	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {
 llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1284-1343	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
-llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:232-236	889fc62c5cea	Client::~Client() {
-llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:272-307	6211468140a7	Client::connect(ConnectionCallback callback) {
-llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:338-349	289b3dda3894	Client::disconnect() {
-llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:565-630	86e530f76222	Client::reset_deferred_connection_if_ready() {
-llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:690-749	9b0d7a6bfc68	Client::handle_connection_failure(std::string const &error) {
+llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:235-239	889fc62c5cea	Client::~Client() {
+llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:275-310	6211468140a7	Client::connect(ConnectionCallback callback) {
+llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:341-352	289b3dda3894	Client::disconnect() {
+llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:568-633	86e530f76222	Client::reset_deferred_connection_if_ready() {
+llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:693-752	9b0d7a6bfc68	Client::handle_connection_failure(std::string const &error) {
 llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:358-370	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
 llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:448-485	cc6007b23834	void
 llm/qbm-http.llm.md	src/qbm/http/2/client.h:457-482	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {

@@ -7,11 +7,12 @@
  *   - oversized URL / query / fragment handling,
  *   - oversized header name / value rejection,
  *   - CRLF header-injection rejection,
- *   - the "clear the pipe on failure" contract (no partial/poisoned output),
+ *   - the "write nothing on failure" contract (no partial/poisoned output, and what
+ *     was queued before the refused message kept -- Huly QB-1066),
  *   - the protocol_limits constant values.
  *
- * Oversized / malformed serialization fails with std::length_error and clears
- * the output pipe. These are pure unit tests: no event loop, no socket.
+ * Oversized / malformed serialization fails with std::length_error and writes
+ * nothing to the output pipe. These are pure unit tests: no event loop, no socket.
  *
  * qb - C++ Actor Framework
  * Copyright (C) 2011-2026 isndev (www.qbaf.io). All rights reserved.
@@ -181,7 +182,7 @@ TEST_F(RequestSerializeLimitsTest, Body10MBSucceeds) {
 // `tests/CMakeLists.txt` registers a dedicated ctest entry
 // (`qbm-http-test-unit-http1-serialize-limits-huge-body`) that sets it, so a plain `ctest` DOES run
 // this. `ctest -LE huge-body` opts back out. When enabled it proves serialization throws
-// std::length_error and clears the pipe.
+// std::length_error and writes nothing to the pipe.
 TEST_F(RequestSerializeLimitsTest, BodyExceedingLimitIsRejected) {
     if (const char *flag = std::getenv("QBM_HTTP_RUN_HUGE_BODY"); !flag || std::string(flag) == "0") {
         GTEST_SKIP() << "set QBM_HTTP_RUN_HUGE_BODY=1 to exercise the >100MB body rejection path "
@@ -271,13 +272,17 @@ TEST_F(RequestSerializeLimitsTest, HeaderValueInjectionIsRejected) {
     EXPECT_EQ(pipe.size(), 0u);
 }
 
-TEST_F(RequestSerializeLimitsTest, RejectedSerializationClearsExistingBufferContent) {
+// A refusal writes nothing of its own message and keeps what was queued before it: the pipe is a
+// session's output, and clearing it dropped the requests (or pipelined responses) ahead of the
+// refused one (Huly QB-1066; it used to be cleared, and this test pinned that).
+TEST_F(RequestSerializeLimitsTest, RejectedSerializationKeepsExistingBufferContent) {
     Request ok_req;
     ok_req.method() = method::GET;
     ok_req.uri()    = qb::io::uri("/ok");
     ok_req.set_header("X-Test", "ok");
     pipe.put(ok_req);
     ASSERT_GT(pipe.size(), 0u);
+    const std::string queued = pipe.str();
 
     Request bad_req;
     bad_req.method() = method::GET;
@@ -285,7 +290,7 @@ TEST_F(RequestSerializeLimitsTest, RejectedSerializationClearsExistingBufferCont
     bad_req.set_header(std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'), "value");
 
     EXPECT_THROW(pipe.put(bad_req), std::length_error);
-    EXPECT_EQ(pipe.size(), 0u);
+    EXPECT_EQ(pipe.str(), queued);
 }
 
 TEST_F(RequestSerializeLimitsTest, URLBoundaryAt8192Characters) {
@@ -323,14 +328,16 @@ TEST_F(RequestSerializeLimitsTest, EmptyRequestSucceeds) {
     EXPECT_NE(pipe.str().find("GET / HTTP/1.1\r\n"), std::string::npos);
 }
 
-TEST_F(RequestSerializeLimitsTest, FramingMismatchClearsExistingBufferBeforeWriting) {
+TEST_F(RequestSerializeLimitsTest, FramingMismatchWritesNothingAndKeepsExistingBufferContent) {
     // A body present while an explicit Content-Length disagrees is a framing
-    // error: serialization must reject and leave nothing partially written.
+    // error: serialization must reject and leave nothing partially written --
+    // and keep what was queued before it (Huly QB-1066).
     Request ok_req;
     ok_req.method() = method::GET;
     ok_req.uri()    = qb::io::uri("/ok");
     pipe.put(ok_req);
     ASSERT_GT(pipe.size(), 0u);
+    const std::string queued = pipe.str();
 
     Request bad_req;
     bad_req.method() = method::POST;
@@ -339,7 +346,7 @@ TEST_F(RequestSerializeLimitsTest, FramingMismatchClearsExistingBufferBeforeWrit
     bad_req.set_header("Content-Length", "1");
 
     EXPECT_THROW(pipe.put(bad_req), std::length_error);
-    EXPECT_EQ(pipe.size(), 0u);
+    EXPECT_EQ(pipe.str(), queued);
 }
 
 // ====================================================================
@@ -450,20 +457,22 @@ TEST_F(ResponseSerializeLimitsTest, SetCookieHeaderInjectionIsRejected) {
     EXPECT_EQ(pipe.size(), 0u);
 }
 
-TEST_F(ResponseSerializeLimitsTest, RejectedSerializationClearsExistingBufferContent) {
+// See RequestSerializeLimitsTest.RejectedSerializationKeepsExistingBufferContent (Huly QB-1066).
+TEST_F(ResponseSerializeLimitsTest, RejectedSerializationKeepsExistingBufferContent) {
     Response ok_resp;
     ok_resp.status() = status::OK;
     ok_resp.set_header("Content-Type", "text/plain");
     ok_resp.body() = "ok";
     pipe.put(ok_resp);
     ASSERT_GT(pipe.size(), 0u);
+    const std::string queued = pipe.str();
 
     Response bad_resp;
     bad_resp.status() = status::OK;
     bad_resp.set_header(std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H'), "value");
 
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
-    EXPECT_EQ(pipe.size(), 0u);
+    EXPECT_EQ(pipe.str(), queued);
 }
 
 TEST_F(ResponseSerializeLimitsTest, EmptyResponseSucceeds) {
@@ -474,12 +483,13 @@ TEST_F(ResponseSerializeLimitsTest, EmptyResponseSucceeds) {
     EXPECT_NE(pipe.str().find("HTTP/1.1 204"), std::string::npos);
 }
 
-TEST_F(ResponseSerializeLimitsTest, FramingMismatchClearsExistingBufferBeforeWriting) {
+TEST_F(ResponseSerializeLimitsTest, FramingMismatchWritesNothingAndKeepsExistingBufferContent) {
     Response ok_resp;
     ok_resp.status() = status::OK;
     ok_resp.body()   = "ok";
     pipe.put(ok_resp);
     ASSERT_GT(pipe.size(), 0u);
+    const std::string queued = pipe.str();
 
     Response bad_resp;
     bad_resp.status() = status::OK;
@@ -487,14 +497,14 @@ TEST_F(ResponseSerializeLimitsTest, FramingMismatchClearsExistingBufferBeforeWri
     bad_resp.set_header("Content-Length", "1");
 
     EXPECT_THROW(pipe.put(bad_resp), std::length_error);
-    EXPECT_EQ(pipe.size(), 0u);
+    EXPECT_EQ(pipe.str(), queued);
 }
 
 // ====================================================================
 // Content-Length header validity (distinct from the body/CL framing
 // mismatch above): an empty, non-numeric, or self-conflicting
 // Content-Length is rejected by declared_content_length() before framing,
-// and the pipe is cleared. Mirrored for Request and Response.
+// and nothing is written to the pipe. Mirrored for Request and Response.
 // ====================================================================
 
 TEST_F(RequestSerializeLimitsTest, RejectsEmptyContentLength) {

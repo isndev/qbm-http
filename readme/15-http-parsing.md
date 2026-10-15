@@ -251,7 +251,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: qbm/http/src/qbm/http/request.h:385; qbm/http/src/qbm/http/response.h:357; qbm/http/src/qbm/http/request.cpp:360-362; qbm/http/src/qbm/http/response.cpp:360-362 -->
+<!-- src: qbm/http/src/qbm/http/request.h:385; qbm/http/src/qbm/http/response.h:357; qbm/http/src/qbm/http/request.cpp:406-408; qbm/http/src/qbm/http/response.cpp:375-377 -->
 
 ```cpp
 template <>
@@ -263,7 +263,7 @@ qb::allocator::pipe<char> &
 qb::allocator::pipe<char>::put<qb::http::Response>(const qb::http::Response &r);
 ```
 
-These write the request line / status line, the headers, and the body to the output pipe — `out() << response_obj;` is how a session emits a response. The status line carries the code's reason phrase (`HTTP/1.1 404 Not Found`, `Status::str()`), and header names go out in lower case (`content-type: ...`), the form `Headers` keys them by. They add a `Content-Length` header when one is absent and the body is non-empty, and they enforce the same `protocol_limits`: serializing a message whose body, headers, or estimated wire size exceeds the limit throws `std::length_error`. Each writes a COMPLETE message: a chunked body ends with its last-chunk `0\r\n\r\n`, an empty one included. The request serializer also refuses, before writing anything, a request-target byte the request line cannot carry — SP, HTAB, CR, LF, NUL, any other control, DEL: `qb::io::uri` keeps the raw bytes of a query, so percent-encode them. See [the message body deep dive](./02-body-deep-dive.md) for how the body is laid out in the pipe.
+These write the request line / status line, the headers, and the body to the output pipe — `out() << response_obj;` is how a session emits a response. The status line carries the code's reason phrase (`HTTP/1.1 404 Not Found`, `Status::str()`), and header names go out in lower case (`content-type: ...`), the form `Headers` keys them by. They add a `Content-Length` header when one is absent and the body is non-empty, and they enforce the same `protocol_limits`: serializing a message whose body, headers, or estimated wire size exceeds the limit throws `std::length_error`. Each writes a COMPLETE message: a chunked body ends with its last-chunk `0\r\n\r\n`, an empty one included. The request serializer also refuses, before writing anything, a request-target byte the request line cannot carry — SP, HTAB, CR, LF, NUL, any other control, DEL: `qb::io::uri` keeps the raw bytes of a query, so percent-encode them — a method llhttp does not name (a default-constructed `Request` has none), and a URI that failed to parse; an empty path is sent as `/` (RFC 9112 §3.2.1). A refusal takes back only what it wrote: the pipe keeps the messages queued before it. See [the message body deep dive](./02-body-deep-dive.md) for how the body is laid out in the pipe.
 
 `out << qb::http::MessageHead{msg}` writes the start line and the header section and nothing after them — no body, no last-chunk — with the same validation. The HTTP/1.1 server session serializes every `HEAD` response that way, whatever framing headers it carries, and it is the head to write before a body you stream yourself as `Chunk`s.
 

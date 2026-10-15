@@ -160,6 +160,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A refused HTTP/1.1 serialization keeps what was queued before it (Huly QB-1066).** The serializers cleared the
+  whole output pipe on a refusal, dropping the responses or requests queued ahead of the refused one -- a
+  pipelined response lost because the next was invalid. A refusal now takes back only what it wrote, and an
+  exception thrown while writing does the same. Behaviour change: the tests that pinned the clearing now pin this.
+- **Serializing a `Request` without a method is refused instead of aborting the process (Huly QB-1066).** A
+  default-constructed `Request` has `Method::UNINITIALIZED`, and the serializer named the method through llhttp's
+  `http_method_name()`, whose switch ends in `abort()`. Such a request, or any method value llhttp does not map,
+  now throws `std::length_error`; so does an invalid URI. An empty path is sent as `/` (RFC 9112 §3.2.1), where
+  the request line read `GET  HTTP/1.1`.
+- **The persistent HTTP/1.1 client delivers a close-delimited response at the peer's close only (Huly QB-1066).**
+  It delivered the buffered body as complete on any disconnect, a read or message cap included; it now does so
+  only for a graceful close, as the one-shot client does, and the request fails otherwise.
 - **`Headers::remove_header` and `CookieJar::remove` find a name passed as a `const std::string` (Huly QB-279).**
   The case-insensitive map's `erase` looked that one key form up unfolded (fixed in qb's `icase_basic_map`), so the
   header or cookie stayed whenever the name passed had an upper-case letter.

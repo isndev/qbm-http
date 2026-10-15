@@ -29,7 +29,7 @@ Because `Chunk` does not own its bytes, the referenced memory must stay valid fo
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
 ```cpp
-// src: qbm/http/src/qbm/http/response.cpp:312-318
+// src: qbm/http/src/qbm/http/response.cpp:326-332
 if (transfer.chunked) {
     out << qb::http::endl;
     if (!content_suppressed) {                                       // false unless a MessageHead
@@ -40,7 +40,7 @@ if (transfer.chunked) {
 }
 ```
 
-So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:226-253`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
+So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *framing* (no `Content-Length`; the body arrives as chunks), but it does **not** let you trickle bytes to the client over time from a single handler. The handler still assembles the full body, then `ctx->complete()` serializes and sends it. The serializer also rejects contradictory framing: declaring both `Transfer-Encoding` and `Content-Length`, or chunked encoding on a status that must not carry a body, throws `std::length_error` (`qbm/http/src/qbm/http/response.cpp:255-272`) — which the server session catches and turns into a connection failure rather than letting it escape the noexcept I/O boundary.
 
 If you need true incremental, time-spaced delivery (server-sent events, a long-lived download generated on the fly), you have three options, in increasing order of fit:
 
@@ -114,7 +114,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
 - **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:298-323; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:313-337; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
 
 ### Never block the event loop
 
@@ -186,8 +186,8 @@ The retired `RequestView`/`ResponseView` types are not part of this API. For a p
 
 ## Pitfalls
 
-- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:312-318`). For real streaming use direct session writes, HTTP/2, or WebSocket.
-- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:247-249`). Set one framing mode, not both.
+- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:326-332`). For real streaming use direct session writes, HTTP/2, or WebSocket.
+- **Setting both `Content-Length` and `Transfer-Encoding`.** The response serializer throws `std::length_error`, which the session turns into a connection failure (`qbm/http/src/qbm/http/response.cpp:268-269`). Set one framing mode, not both.
 - **Blocking inside a handler.** It stalls every connection on that core. Defer with `qb::io::async::callback`, offload to a worker actor, or `co_await`.
 - **Forgetting `ctx->complete()`.** The request hangs until the inactivity timeout closes it. Terminal response helpers complete for you; raw `body =`/`status()` do not.
 - **Calling `complete()` from `cancel()`.** Contract violation — the `Context` manages its own finalization (`qbm/http/src/qbm/http/routing/async_task.h:65-79`).

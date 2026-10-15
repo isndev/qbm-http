@@ -200,8 +200,38 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
 }
 
 /**
+ * @brief Takes back what one serialization wrote when it refuses or throws, and nothing else.
+ *
+ * A session's output pipe already holds what was queued before this message -- pipelined responses,
+ * a request ahead of this one -- so a refusal rewinds to where this message began instead of
+ * clearing the pipe (Huly QB-1066). Armed on entry, committed once the message is complete; an
+ * exception thrown while writing (an allocation, a chunk) rewinds the same way.
+ */
+class serialization_rollback {
+    pipe<char>       &_out;
+    const std::size_t _mark;
+    bool              _committed = false;
+
+public:
+    explicit serialization_rollback(pipe<char> &out) noexcept
+        : _out(out)
+        , _mark(out.size()) {}
+    serialization_rollback(const serialization_rollback &)            = delete;
+    serialization_rollback &operator=(const serialization_rollback &) = delete;
+    ~serialization_rollback() {
+        if (!_committed)
+            _out.free_back(_out.size() - _mark);
+    }
+    void
+    commit() noexcept {
+        _committed = true;
+    }
+};
+
+/**
  * @brief The HTTP/1.1 serialization of a response, with or without its content.
- * @param out Where the bytes go. On a refusal it is cleared and nothing is emitted.
+ * @param out Where the bytes go. On a refusal, what this call wrote is taken back; what the pipe held
+ *        before it is kept.
  * @param r The response.
  * @param content_suppressed True for `MessageHead`: the status line and the header section only,
  *        framing headers included, and nothing after them -- no body, no chunked last-chunk (the
@@ -209,10 +239,10 @@ response_forbids_nonzero_content_length(qb::http::Response const &r) noexcept {
  */
 void
 serialize_response(pipe<char> &out, const qb::http::Response &r, const bool content_suppressed) {
+    serialization_rollback rollback{out};
     // SECURITY FIX: Validate body size to prevent DoS
     const std::size_t body_size = content_suppressed ? 0u : r.body().size();
     if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: body size (" + std::to_string(body_size)
                                 + ") exceeds "
                                   "qb::http::protocol_limits::MAX_BODY_SIZE ("
@@ -222,38 +252,26 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
 
     const auto length = body_size;
     if (length && response_must_not_carry_body(r)) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: this status code must not carry a body.");
     }
 
     const auto transfer = transfer_encoding(r);
     if (!transfer.ok) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: unsupported or malformed Transfer-Encoding.");
     }
     if (transfer.chunked && response_must_not_carry_body(r)) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: this status code must not declare Transfer-Encoding.");
     }
 
-    std::optional<std::uint64_t> content_length;
-    try {
-        content_length = declared_content_length(r);
-    } catch (...) {
-        out.clear();
-        throw;
-    }
+    const std::optional<std::uint64_t> content_length = declared_content_length(r);
 
     if (transfer.chunked && content_length) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: Content-Length is forbidden with Transfer-Encoding.");
     }
     if (response_forbids_nonzero_content_length(r) && content_length && *content_length != 0u) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: this status code must not declare a non-zero Content-Length.");
     }
     if (length && !transfer.chunked && content_length && *content_length != length) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: Content-Length does not match body size.");
     }
 
@@ -265,13 +283,11 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // Add headers size
     for (const auto &it : r.headers()) {
         if (!header_name_is_valid(it.first)) {
-            out.clear();
             throw std::length_error("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
         }
         estimated_size += it.first.size() + 2; // ": "
         for (const auto &value : it.second) {
             if (!header_value_is_valid(value)) {
-                out.clear();
                 throw std::length_error("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
             }
             estimated_size += value.size() + 2; // CRLF
@@ -283,7 +299,6 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // SECURITY FIX: Cap maximum serialized size to prevent overflow
     constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
     if (estimated_size > MAX_SERIALIZED_SIZE) {
-        out.clear();
         throw std::length_error("qb::http::Response serialization: estimated wire size exceeds internal cap (decompression "
                                 "or header explosion); refusing to allocate.");
     }
@@ -299,7 +314,6 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     for (const auto &it : r.headers()) {
         for (const auto &value : it.second) {
             if (!header_is_valid(it.first, value)) {
-                out.clear();
                 throw std::length_error("qb::http::Response serialization: invalid header name/value.");
             }
             out << it.first << ": " << value << qb::http::endl;
@@ -332,6 +346,7 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
         }
         out << qb::http::endl;
     }
+    rollback.commit();
 }
 } // namespace
 

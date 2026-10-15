@@ -18,8 +18,10 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include <qb/system/allocator/pipe.h>
 
@@ -481,8 +483,8 @@ TEST(Http1Serialization, RequestRejectsBytesARequestTargetCannotCarry) {
         EXPECT_FALSE(refused(good)) << "n=" << n << ": an all-printable query was refused";
     }
     // The four edges of the byte classes, inside the overlapped last block of a 33-byte query.
-    for (const auto &[byte, bad] : {std::pair{'\x20', true}, std::pair{'\x21', false}, std::pair{'\x7e', false}, std::pair{'\x7f', true},
-                                    std::pair{'\x80', false}}) {
+    for (const auto &[byte, bad] :
+         {std::pair{'\x20', true}, std::pair{'\x21', false}, std::pair{'\x7e', false}, std::pair{'\x7f', true}, std::pair{'\x80', false}}) {
         std::string query(33, 'q');
         query[20] = byte;
         EXPECT_EQ(refused(query), bad) << "byte 0x" << std::hex << (static_cast<unsigned>(byte) & 0xffu);
@@ -547,4 +549,115 @@ TEST(Http1Serialization, HeaderNamesAreWrittenInLowerCase) {
     const std::string req_wire{req_out.begin(), req_out.size()};
     EXPECT_NE(req_wire.find("\r\ncontent-type: Text/Plain\r\n"), std::string::npos) << req_wire;
     EXPECT_EQ(req_wire.find("Content-Type"), std::string::npos) << req_wire;
+}
+
+// A refused serialization takes back what IT wrote and nothing else: the pipe a session writes into
+// already holds the responses (or requests) queued before this one, and a refusal used to clear()
+// them all -- a pipelined response lost because the next one was invalid (Huly QB-1066). The
+// refusals cover the request-target, the framing and the header section, for a whole message and
+// for a MessageHead.
+TEST(Http1Serialization, ARefusalKeepsTheOutputQueuedBeforeIt) {
+    qb::http::Response queued;
+    queued.status() = qb::http::status::OK;
+    queued.body()   = "first";
+    qb::allocator::pipe<char> reference;
+    reference << queued;
+    const std::string before{reference.begin(), reference.size()};
+
+    const auto expect_kept = [&](auto const &message, const char *what) {
+        qb::allocator::pipe<char> out;
+        out << queued;
+        EXPECT_THROW(out << message, std::length_error) << what;
+        EXPECT_EQ(std::string(out.begin(), out.size()), before) << what << ": the queued response must survive the refusal";
+        // And the pipe stays usable: the next message lands right after the queued one.
+        out << queued;
+        EXPECT_EQ(std::string(out.begin(), out.size()), before + before) << what;
+    };
+
+    expect_kept(qb::http::Request{qb::http::method::GET, {"http://example.test/q?a=1 b"}}, "raw SP in the query");
+
+    qb::http::Response no_body;
+    no_body.status() = qb::http::status::NO_CONTENT;
+    no_body.body()   = "forbidden";
+    expect_kept(no_body, "a body on 204");
+
+    qb::http::Response injected;
+    injected.status() = qb::http::status::OK;
+    injected.set_header("X-Note", "a\r\nX-Injected: 1");
+    expect_kept(injected, "CR LF inside a response header value");
+    expect_kept(qb::http::MessageHead{injected}, "CR LF inside a response head");
+
+    qb::http::Request injected_request{qb::http::method::GET, {"http://example.test/"}};
+    injected_request.set_header("X-Note", "a\r\nX-Injected: 1");
+    expect_kept(injected_request, "CR LF inside a request header value");
+}
+
+// RFC 9112 §3.2.1: "If the target URI's path component is empty, the client MUST send "/" as the
+// path within the origin-form of request-target." qb::io::uri's parser already gives an
+// authority-only URI the path "/", but a default-constructed Request keeps a never-parsed URI whose
+// path is empty, and an invalid URI leaves the path empty too: the request line read
+// `GET  HTTP/1.1`, a request-target of nothing (Huly QB-1066). An empty path is sent as "/"; a URI
+// that failed to parse is refused, as a request the serializer cannot write -- sending it to "/"
+// instead would address a resource nobody named.
+TEST(Http1Serialization, AnEmptyPathIsSentAsSlash) {
+    struct Case {
+        const char *uri;
+        const char *line;
+    };
+    const Case cases[] = {
+        {"http://example.test", "GET / HTTP/1.1\r\n"},
+        {"http://example.test?a=1", "GET /?a=1 HTTP/1.1\r\n"},
+        {"http://example.test/x", "GET /x HTTP/1.1\r\n"},
+    };
+    for (auto const &c : cases) {
+        const qb::io::uri         target{c.uri};
+        qb::http::Request         request{qb::http::method::GET, target};
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << request) << c.uri;
+        const std::string wire{out.begin(), out.size()};
+        EXPECT_TRUE(wire.starts_with(c.line)) << c.uri << " -> " << wire;
+    }
+
+    qb::http::Request defaulted;
+    defaulted.method() = qb::http::method::GET;
+    ASSERT_TRUE(defaulted.uri().path().empty()) << "the premise: a default Request's URI has no path";
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << defaulted);
+    const std::string wire{out.begin(), out.size()};
+    EXPECT_TRUE(wire.starts_with("GET / HTTP/1.1\r\n")) << wire;
+
+    qb::http::Request invalid{qb::http::method::GET, qb::io::uri{"http://exa mple.test/x"}};
+    ASSERT_FALSE(invalid.uri().is_valid()) << "the premise: a URI that failed to parse";
+    qb::allocator::pipe<char> refused;
+    refused << "queued";
+    EXPECT_THROW(refused << invalid, std::length_error);
+    EXPECT_EQ(std::string(refused.begin(), refused.size()), "queued");
+}
+
+// A default-constructed Request has no method (Method::UNINITIALIZED), and the serializer named the
+// method through llhttp's http_method_name(), whose switch ends in `default: abort()`: serializing
+// `qb::http::Request{}` -- or any method value llhttp does not map -- killed the process instead of
+// refusing the message like every other request it cannot write (Huly QB-1066). Run in a child, so
+// the old abort is a failed expectation rather than a dead test binary.
+TEST(Http1Serialization, ARequestWithoutAMethodIsRefusedNotAborted) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(
+        {
+            qb::http::Request         request;
+            qb::allocator::pipe<char> out;
+            out << "queued";
+            try {
+                out << request;
+            } catch (const std::length_error &) {
+                std::_Exit(std::string(out.begin(), out.size()) == "queued" ? 0 : 2);
+            }
+            std::_Exit(3);
+        },
+        ::testing::ExitedWithCode(0), "");
+
+    // A mapped method keeps its exact token, M-SEARCH's hyphen included.
+    qb::http::Request         search{qb::http::method::MSEARCH, {"http://example.test/"}};
+    qb::allocator::pipe<char> out;
+    ASSERT_NO_THROW(out << search);
+    EXPECT_TRUE(std::string(out.begin(), out.size()).starts_with("M-SEARCH / HTTP/1.1\r\n"));
 }

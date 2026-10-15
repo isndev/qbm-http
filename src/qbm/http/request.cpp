@@ -135,6 +135,21 @@ raw_query_is_valid(std::string_view query) noexcept {
     return true;
 }
 
+/// The request-line token of @p m, from llhttp's method map; nullptr for a value the map does not
+/// hold (llhttp's own http_method_name() abort()s on one).
+[[nodiscard]] const char *
+method_token(const ::http_method m) noexcept {
+#define QB_HTTP_METHOD_TOKEN(NUM, NAME, STRING) \
+    case HTTP_##NAME:                           \
+        return #STRING;
+    switch (m) {
+        HTTP_ALL_METHOD_MAP(QB_HTTP_METHOD_TOKEN)
+        default:
+            return nullptr;
+    }
+#undef QB_HTTP_METHOD_TOKEN
+}
+
 struct transfer_encoding_result {
     bool ok      = true;
     bool chunked = false;
@@ -203,28 +218,69 @@ transfer_encoding(Message const &msg) noexcept {
 }
 
 /**
+ * @brief Takes back what one serialization wrote when it refuses or throws, and nothing else.
+ *
+ * A session's output pipe already holds what was queued before this message -- pipelined responses,
+ * a request ahead of this one -- so a refusal rewinds to where this message began instead of
+ * clearing the pipe (Huly QB-1066). Armed on entry, committed once the message is complete; an
+ * exception thrown while writing (an allocation, a chunk) rewinds the same way.
+ */
+class serialization_rollback {
+    pipe<char>       &_out;
+    const std::size_t _mark;
+    bool              _committed = false;
+
+public:
+    explicit serialization_rollback(pipe<char> &out) noexcept
+        : _out(out)
+        , _mark(out.size()) {}
+    serialization_rollback(const serialization_rollback &)            = delete;
+    serialization_rollback &operator=(const serialization_rollback &) = delete;
+    ~serialization_rollback() {
+        if (!_committed)
+            _out.free_back(_out.size() - _mark);
+    }
+    void
+    commit() noexcept {
+        _committed = true;
+    }
+};
+
+/**
  * @brief The HTTP/1.1 serialization of a request, with or without its content.
- * @param out Where the bytes go. On a refusal it is cleared and nothing is emitted.
+ * @param out Where the bytes go. On a refusal, what this call wrote is taken back; what the pipe held
+ *        before it is kept.
  * @param r The request.
  * @param head_only True for `MessageHead`: the request line and the header section only, and nothing
  *        after them -- no body, no chunked last-chunk. The body, if any, is ignored.
  */
 void
 serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_only) {
+    serialization_rollback rollback{out};
+    // The method token, from llhttp's method map; a value it does not name -- a default-constructed
+    // Request's Method::UNINITIALIZED -- is refused here: http_method_name() would abort() (Huly QB-1066).
+    const char *const method = method_token(r.method());
+    if (method == nullptr) {
+        throw std::length_error("qb::http::Request serialization: the request has no method llhttp can name.");
+    }
+    // A URI that failed to parse names no target; writing "/" for it would address a resource nobody
+    // named (Huly QB-1066).
+    if (!r.uri().is_valid()) {
+        throw std::length_error("qb::http::Request serialization: the request URI is invalid.");
+    }
+
     // SECURITY FIX: Validate URL size to prevent DoS
     const std::size_t path_size      = r.uri().path().size();
     const std::size_t query_size     = r.uri().encoded_queries().size();
     const std::size_t total_url_size = path_size + query_size;
 
     if (total_url_size > qb::http::protocol_limits::MAX_URL_LENGTH) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: URL length (" + std::to_string(total_url_size)
                                 + ") exceeds "
                                   "qb::http::protocol_limits::MAX_URL_LENGTH ("
                                 + std::to_string(qb::http::protocol_limits::MAX_URL_LENGTH) + ").");
     }
     if (!raw_query_is_valid(r.uri().encoded_queries())) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: the query carries SP, a control byte or DEL; "
                                 "percent-encode it.");
     }
@@ -232,7 +288,6 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // SECURITY FIX: Validate body size to prevent DoS
     const std::size_t body_size = head_only ? 0u : r.body().size();
     if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: body size (" + std::to_string(body_size)
                                 + ") exceeds "
                                   "qb::http::protocol_limits::MAX_BODY_SIZE ("
@@ -242,24 +297,15 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     const auto length   = body_size;
     const auto transfer = transfer_encoding(r);
     if (!transfer.ok) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: unsupported or malformed Transfer-Encoding.");
     }
 
-    std::optional<std::uint64_t> content_length;
-    try {
-        content_length = declared_content_length(r);
-    } catch (...) {
-        out.clear();
-        throw;
-    }
+    const std::optional<std::uint64_t> content_length = declared_content_length(r);
 
     if (transfer.chunked && content_length) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: Content-Length is forbidden with Transfer-Encoding.");
     }
     if (!head_only && !transfer.chunked && content_length && *content_length != length) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: Content-Length does not match body size.");
     }
 
@@ -271,13 +317,11 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // Add headers size
     for (const auto &it : r.headers()) {
         if (!header_name_is_valid(it.first)) {
-            out.clear();
             throw std::length_error("qb::http::Request serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
         }
         estimated_size += it.first.size() + 2; // ": "
         for (const auto &value : it.second) {
             if (!header_value_is_valid(value)) {
-                out.clear();
                 throw std::length_error("qb::http::Request serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
             }
             estimated_size += value.size() + 2; // CRLF
@@ -289,7 +333,6 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // SECURITY FIX: Cap maximum serialized size to prevent overflow
     constexpr std::size_t MAX_SERIALIZED_SIZE = 110 * 1024 * 1024; // 110MB (slightly above MAX_BODY_SIZE + headers)
     if (estimated_size > MAX_SERIALIZED_SIZE) {
-        out.clear();
         throw std::length_error("qb::http::Request serialization: estimated wire size exceeds internal cap; refusing to allocate.");
     }
 
@@ -298,7 +341,10 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
 
     // HTTP Request Line: METHOD PATH[?query] HTTP/VERSION.
     // URI fragments are client-side identifiers and are never sent in an HTTP request-target.
-    out << ::http_method_name(r.method()) << qb::http::sep << r.uri().path();
+    // An empty path is sent as "/" (RFC 9112 §3.2.1: the client MUST send "/" as the path of an
+    // origin-form whose URI has none) -- a default URI, or one naming only an authority (Huly QB-1066).
+    const std::string_view path = r.uri().path();
+    out << method << qb::http::sep << (path.empty() ? std::string_view{"/"} : path);
     if (!r.uri().encoded_queries().empty())
         out << "?" << r.uri().encoded_queries();
     out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
@@ -307,7 +353,6 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     for (const auto &it : r.headers()) {
         for (const auto &value : it.second) {
             if (!header_is_valid(it.first, value)) {
-                out.clear();
                 throw std::length_error("qb::http::Request serialization: invalid header name/value.");
             }
             out << it.first << ": " << value << qb::http::endl;
@@ -331,6 +376,7 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
         out << qb::http::endl << r.body().raw();
     } else
         out << qb::http::endl;
+    rollback.commit();
 }
 } // namespace
 
