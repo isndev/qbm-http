@@ -2984,7 +2984,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (server.h:1169-1174).
+// with INTERNAL_ERROR (server.h:1165-1170).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3012,7 +3012,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (server.h:1151-1156).
+// (server.h:1147-1152).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3032,7 +3032,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (server.h:1132-1135).
+// (server.h:1127-1130).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3052,7 +3052,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (server.h:1126-1131).
+// A non-numeric content-length response header is rejected (server.h:1121-1126).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3075,7 +3075,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:932-937).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:919-924).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3094,7 +3094,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (server.h:939-957).
+// on(WindowUpdateFrame) for stream 0 (server.h:926-944).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3287,7 +3287,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an idle (never-opened, lower-numbered) stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (server.h:275-278).
+// STREAM_CLOSED) on the connection-receive-window path (server.h:276-279).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -3310,7 +3310,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (server.h:271-273).
+// (server.h:272-274).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3327,7 +3327,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; server.h:1061-1071 else arm).
+// (no stream context to store into; server.h:1047-1057 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3346,7 +3346,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:968-980);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:955-967);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 

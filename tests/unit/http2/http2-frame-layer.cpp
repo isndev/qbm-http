@@ -892,7 +892,7 @@ TEST(HTTP2FramerDrive, InvalidPrefaceBytesAreProtocolError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- zero-payload frame dispatch (base.h:976-1048) -------------------------
+// --- zero-payload frame dispatch (base.h:1142-1221) ------------------------
 
 TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
     Http2FakeIO      io;
@@ -1001,7 +1001,7 @@ TEST(HTTP2FramerDrive, ZeroPayloadPingIsFrameSizeError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- CONTINUATION-required gate (base.h:604-613, 1036-1040) ----------------
+// --- CONTINUATION-required gate (base.h:604-613, 1189-1193) ----------------
 
 TEST(HTTP2FramerDrive, NonContinuationAfterIncompleteHeadersIsProtocolError) {
     Http2FakeIO      io;
@@ -1061,7 +1061,7 @@ TEST(HTTP2FramerDrive, HeadersSplitAcrossContinuationCompletes) {
     EXPECT_EQ(io.request_count, 1);
 }
 
-// --- HEADERS with PRIORITY flag (base.h:1144-1152) -------------------------
+// --- HEADERS with PRIORITY flag (base.h:1298-1306) -------------------------
 
 TEST(HTTP2FramerDrive, HeadersWithPriorityFlagParses) {
     Http2FakeIO      io;
@@ -1087,7 +1087,7 @@ TEST(HTTP2FramerDrive, HeadersWithPriorityFlagParses) {
     EXPECT_EQ(io.request_count, 1);
 }
 
-// --- padded frame validation (base.h:822-824, 1130) ------------------------
+// --- padded frame validation (base.h:822-824, 1284) ------------------------
 
 TEST(HTTP2FramerDrive, PaddedHeadersSuccessPathStripsPadding) {
     Http2FakeIO      io;
@@ -1149,7 +1149,7 @@ TEST(HTTP2FramerDrive, PaddedDataWithValidPaddingIsAccepted) {
     EXPECT_EQ(io.request_count, 1);
 }
 
-// --- GOAWAY with debug data (base.h:1300-1301) -----------------------------
+// --- GOAWAY with debug data (base.h:1448-1449) -----------------------------
 
 TEST(HTTP2FramerDrive, GoAwayWithDebugDataParses) {
     Http2FakeIO      io;
@@ -1171,7 +1171,7 @@ TEST(HTTP2FramerDrive, GoAwayWithDebugDataParses) {
     EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::NO_ERROR);
 }
 
-// --- WINDOW_UPDATE zero increment (base.h:1313-1314, 1326-1328) ------------
+// --- WINDOW_UPDATE zero increment (base.h:1461-1462, 1474-1476) ------------
 
 TEST(HTTP2FramerDrive, WindowUpdateZeroIncrementIsProtocolError) {
     Http2FakeIO      io;
@@ -1271,7 +1271,7 @@ TEST(HTTP2FramerDrive, ServerResponseLargeHeaderBlockSpansContinuation) {
     EXPECT_EQ(large_header->value, large_value);
 }
 
-// --- PUSH_PROMISE payload parse (base.h:1234-1264) -------------------------
+// --- PUSH_PROMISE payload parse (base.h:1385-1415) -------------------------
 
 TEST(HTTP2FramerDrive, PushPromisePayloadIsParsedThenRejectedByServer) {
     Http2FakeIO      io;
@@ -1311,7 +1311,7 @@ TEST(HTTP2FramerDrive, PaddedPushPromiseTooShortIsFrameSizeError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- zero-payload CONTINUATION dispatch (base.h:1036-1040) -----------------
+// --- zero-payload CONTINUATION dispatch (base.h:1189-1193) -----------------
 
 TEST(HTTP2FramerDrive, EmptyEndHeadersContinuationCompletesHeaderBlock) {
     Http2FakeIO      io;
@@ -1402,7 +1402,7 @@ TEST(HTTP2FramerDrive, ClientEmptyEndHeadersContinuationLeavesFramerReady) {
     EXPECT_TRUE(qb::http::test::output_has_frame(io.output, FT::PING)) << "the PING was answered";
 }
 
-// --- padded HEADERS failure path (base.h:1128-1130) ------------------------
+// --- padded HEADERS failure path (base.h:1282-1284) ------------------------
 
 TEST(HTTP2FramerDrive, PaddedHeadersPadLengthExceedsPayloadIsProtocolError) {
     Http2FakeIO      io;
