@@ -195,7 +195,7 @@ router().get("/api/cancel", [](auto ctx) {
 });
 ```
 
-`session::operator<<(qb::http::Response&)` validates the response before framing it: it rejects `stream_id == 0`, an out-of-range stream ID, or a status code outside `[100, 600)`, and it sets `content-length` automatically when the body is non-empty and no length was provided.
+`session::operator<<(qb::http::Response&)` validates the response before framing it: it rejects `stream_id == 0`, an out-of-range stream ID, or a status code outside `[100, 600)`, and it sets `content-length` automatically when the body is non-empty and no length was provided. A response to a `HEAD` request sends its headers — that `content-length` included — and ends the stream on them: the body a handler filled to compute the metadata is never sent as `DATA`, as on HTTP/1.1 and HTTP/3.
 <!-- src: qbm/http/src/qbm/http/2/http2.h:240-289 -->
 
 ## Server stream management
@@ -205,7 +205,7 @@ The server session and protocol handler enforce limits that protect against reso
 ### Concurrency limit
 
 The server advertises `SETTINGS_MAX_CONCURRENT_STREAMS = 50` to clients (reduced from 100 for DDoS resistance) and refuses new client streams with `RST_STREAM(REFUSED_STREAM)` once active client streams reach that cap. The persistent client caps its own outbound concurrency at 100 by default; configure it with `set_max_concurrent_streams`.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:448-454,1497; qbm/http/src/qbm/http/2/http2.h:65; qbm/http/src/qbm/http/2/client.h:216,406 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:448-454,1510; qbm/http/src/qbm/http/2/http2.h:65; qbm/http/src/qbm/http/2/client.h:216,406 -->
 
 ### Session timeout and stream cleanup
 
@@ -221,7 +221,7 @@ Connection and stream lifetimes are governed by four `qb::duration` constants in
 <!-- src: qbm/http/src/qbm/http/2/http2.h:61-71 -->
 
 These are real `qb::duration` values (`std::chrono::seconds`) — the protocol layer takes `qb::duration` throughout (`cleanup_idle_streams`, `StreamManager::CleanupCriteria`).
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1379-1380; qbm/http/src/qbm/http/2/protocol/stream.h:466-472 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1392-1393; qbm/http/src/qbm/http/2/protocol/stream.h:466-472 -->
 
 Completed-context collection runs from both the session's `pending_write` handler and full-output-drain `eos` handler. A context is eligible only when it is logically completed and `is_stream_closed` reports its native stream closed. Collection selects up to 32 stream IDs in a local array: 128 bytes of stack ID scratch, with no heap scratch for that selection. This batch size does not cap the context registry, and it changes neither the public API nor Session data members.
 
@@ -319,8 +319,8 @@ The coroutine `connect()` overload has **no default-argument callback overload**
 
 ### Server push
 
-The client advertises `SETTINGS_ENABLE_PUSH = 0` by default, so per RFC 9113 §8.4 it treats any received `PUSH_PROMISE` as a **connection error** and answers with `GOAWAY(PROTOCOL_ERROR)` — it does not RST the pushed stream and keep the connection alive. A server may itself send `SETTINGS_ENABLE_PUSH` only as 0: the client answers a 1 with `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §6.5.2). On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. Treat server push as advanced/optional rather than a primary feature.
-<!-- src: qbm/http/src/qbm/http/2/protocol/client.h:737-738,757-768; qbm/http/src/qbm/http/2/protocol/server.h:1254-1281,1495; qbm/http/src/qbm/http/2/protocol/frames.h:317-330 -->
+The client advertises `SETTINGS_ENABLE_PUSH = 0` by default, so per RFC 9113 §8.4 it treats any received `PUSH_PROMISE` as a **connection error** and answers with `GOAWAY(PROTOCOL_ERROR)` — it does not RST the pushed stream and keep the connection alive. A server may itself send `SETTINGS_ENABLE_PUSH` only as 0: the client answers a 1 with `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §6.5.2). On the server, push is **disabled by default** (`SETTINGS_ENABLE_PUSH = 0`) and there is no first-class router API for it; `ServerHttp2Protocol::send_push_promise` exists for low-level integration and additionally requires the peer to have enabled push and a valid even, non-zero promised stream ID, returning a `PushPromiseFailureReason` otherwise. A successful promise reserves the promised stream; answer it with `send_response(promised_stream_id, response)`, which opens it half-closed (remote) and closes it with the response's last frame. Treat server push as advanced/optional rather than a primary feature.
+<!-- src: qbm/http/src/qbm/http/2/protocol/client.h:737-738,757-768; qbm/http/src/qbm/http/2/protocol/server.h:1265-1292,1508; qbm/http/src/qbm/http/2/protocol/frames.h:317-330 -->
 
 ## Protocol-layer reference
 
@@ -339,7 +339,7 @@ You rarely touch these directly, but they are the public types behind the conven
 <!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,283,325,375,395,415,435,459; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
 
 The protocol enforces RFC 9113 validation you get for free: header names must be lowercase tokens with no NUL/CR/LF; requests require non-empty `:method`/`:scheme`/`:path` and `:authority` pseudo-headers ahead of regular headers; trailers may not carry pseudo-headers or hop-by-hop headers. A request body over `qb::http::protocol_limits::MAX_BODY_SIZE` is reset with `RST_STREAM(ENHANCE_YOUR_CALM)`, and an assembled header block over `qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE` (1 MB) closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,141-148,339-342,503-505,1609,1728; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,141-148,339-342,503-505,1622,1741; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->
 
 ## Pitfalls
 
@@ -362,7 +362,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **Coroutine `connect()` has no default callback.** For fire-and-forget, write `connect(nullptr)`; bare `connect()` is the coroutine awaiter overload.
   <!-- src: qbm/http/src/qbm/http/2/client.h:267-272 -->
 - **Server push is off by default and not a router feature.** Do not design around server-initiated pushes; the client advertises `SETTINGS_ENABLE_PUSH = 0` and tears the connection down with `GOAWAY(PROTOCOL_ERROR)` on any `PUSH_PROMISE` (RFC 9113 §8.4), and the server disables `SETTINGS_ENABLE_PUSH`.
-  <!-- src: qbm/http/src/qbm/http/2/protocol/client.h:737-738,757-768; qbm/http/src/qbm/http/2/protocol/server.h:1495 -->
+  <!-- src: qbm/http/src/qbm/http/2/protocol/client.h:737-738,757-768; qbm/http/src/qbm/http/2/protocol/server.h:1508 -->
 
 ## See also
 

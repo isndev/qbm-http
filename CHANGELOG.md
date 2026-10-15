@@ -115,6 +115,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 server responses: HEAD sends no DATA; a promised stream can be answered (Huly QB-527,
+  QB-529).** `send_response` took the body of a HEAD response as content and sent it in DATA
+  frames, while HTTP/1.1 and HTTP/3 strip it; a HEAD response now ends the stream on its HEADERS,
+  keeping the representation's `content-length` (RFC 9110 §9.3.2). After a successful
+  `send_push_promise`, its documented next step -- `send_response` on the promised stream --
+  refused the reserved state and reset the stream, so no promise could be fulfilled; the response
+  HEADERS now move the promised stream to half-closed (remote) and its end closes it (RFC 9113
+  §5.1, §8.4). The push API itself is unchanged (QB-102). Witnesses in
+  `tests/unit/http2/http2-protocol-state.cpp` and `http2-server-coverage-deep.cpp`.
 - **HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE reaches every sending stream; negative windows are a debt
   (Huly QB-528, QB-532).** The server applied a change of the peer's initial window size to OPEN,
   half-closed (local) and reserved streams but not to half-closed (remote) ones -- the state of a

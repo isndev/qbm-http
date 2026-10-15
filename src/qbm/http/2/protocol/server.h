@@ -1110,10 +1110,18 @@ public:
         stream.response_to_send   = http_response;
         stream.send_buffer_offset = 0;
 
-        if (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE or RESERVED_LOCAL state");
+        if (stream.state == Http2StreamConcreteState::IDLE) {
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE state");
             this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Sending response on stream in invalid state for response.");
             return false;
+        }
+        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
+            // A promised stream (send_push_promise) is answered here, its documented next step:
+            // sending its HEADERS moves it to half-closed (remote) -- the client never sends on a
+            // pushed stream -- and the response's END_STREAM closes it (RFC 9113 §5.1, §8.4; Huly
+            // QB-529).
+            stream.state               = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+            stream.end_stream_received = true;
         }
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
@@ -1191,7 +1199,10 @@ public:
         }
         uint8_t header_flags = 0;
 
-        bool has_body = !body_pipe.empty();
+        // A response to HEAD carries the representation's metadata -- content-length included --
+        // and no content (RFC 9110 §9.3.2): its HEADERS end the stream even when the handler filled
+        // the body to compute that metadata, as the HTTP/1.1 and HTTP/3 paths do (Huly QB-527).
+        bool has_body = !body_pipe.empty() && !response_to_head;
 
         if (!has_body) {
             header_flags |= FLAG_END_STREAM; // No body, HEADERS ends the stream
@@ -1291,6 +1302,8 @@ public:
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
         promised_stream.state            = Http2StreamConcreteState::RESERVED_LOCAL;
         promised_stream.parent_stream_id = associated_stream_id;
+        // The promised request's method: send_response() reads it (a pushed HEAD gets no body).
+        promised_stream.assembled_request.method() = promised_request_pseudo_headers.method();
 
         // Emplace the stream
         auto emp_res = _server_streams.emplace(promised_stream_id, std::move(promised_stream));

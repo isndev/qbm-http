@@ -201,28 +201,63 @@ TEST(HTTP2ServerProtocol, RejectsOutgoingResponseContentLengthMismatch) {
 }
 
 // ===========================================================================
-// Server: a HEAD response may carry content-length metadata with an empty body.
+// Server: a HEAD response carries the representation's metadata -- content-length
+// included -- and NO content (RFC 9110 §9.3.2): HEADERS with END_STREAM, never a
+// DATA frame, even when the handler filled the body to compute that metadata, as
+// HTTP/1.1 and HTTP/3 already do (Huly QB-527). The same body answering a GET is
+// sent (control).
 // ===========================================================================
-TEST(HTTP2ServerProtocol, AllowsHeadResponseContentLengthMetadata) {
-    Http2FakeIO                          io;
-    h2::ServerHttp2Protocol<Http2FakeIO> protocol(io);
+TEST(HTTP2ServerProtocol, HeadResponseCarriesLengthMetadataButNoData) {
+    struct Case {
+        const char *method;
+        std::string body;
+        const char *content_length;
+        bool        data_expected;
+    };
+    for (const Case &c : {Case{"HEAD", "", "123", false}, Case{"HEAD", "hello", "5", false}, Case{"GET", "hello", "5", true}}) {
+        Http2FakeIO                          io;
+        h2::ServerHttp2Protocol<Http2FakeIO> protocol(io);
 
-    h2::Http2FrameData<h2::HeadersFrame> headers;
-    headers.header.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
-    headers.header.flags = h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM;
-    headers.header.set_stream_id(1);
-    headers.payload.header_block_fragment =
-        encode_hpack_headers({{":method", "HEAD"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/head"}});
+        h2::Http2FrameData<h2::HeadersFrame> headers;
+        headers.header.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
+        headers.header.flags = h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM;
+        headers.header.set_stream_id(1);
+        headers.payload.header_block_fragment =
+            encode_hpack_headers({{":method", c.method}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/head"}});
 
-    protocol.on(std::move(headers));
-    ASSERT_EQ(io.request_count, 1);
+        protocol.on(std::move(headers));
+        ASSERT_EQ(io.request_count, 1);
+        io.output.reset();
 
-    qb::http::Response response;
-    response.status() = qb::http::status::OK;
-    response.set_header("content-length", "123");
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body()   = c.body;
+        response.set_header("content-length", c.content_length);
 
-    EXPECT_TRUE(protocol.send_response(1, response));
-    EXPECT_EQ(io.stream_error_count, 0);
+        EXPECT_TRUE(protocol.send_response(1, response)) << c.method << " body=" << c.body;
+        EXPECT_EQ(io.stream_error_count, 0);
+        const auto frames = qb::http::test::parse_emitted_frames(io.output);
+        ASSERT_FALSE(frames.empty());
+        EXPECT_EQ(frames.front().type, h2::FrameType::HEADERS);
+        std::size_t data_frames = 0;
+        for (const auto &f : frames) {
+            data_frames += f.type == h2::FrameType::DATA ? 1u : 0u;
+        }
+        EXPECT_EQ(data_frames > 0, c.data_expected) << c.method << " body=" << c.body;
+        EXPECT_EQ(static_cast<bool>(frames.front().flags & h2::FLAG_END_STREAM), !c.data_expected) << "HEADERS ends a HEAD response";
+        EXPECT_TRUE(protocol.is_stream_closed(1)) << c.method << " body=" << c.body;
+
+        // The metadata is the representation's: the content-length the handler set.
+        qb::protocol::hpack::Decoder                  decoder;
+        std::vector<qb::protocol::hpack::HeaderField> fields;
+        bool                                          incomplete = false;
+        ASSERT_TRUE(decoder.decode(qb::http::test::emitted_payload(io.output, frames.front()), fields, incomplete));
+        bool length_seen = false;
+        for (const auto &f : fields) {
+            length_seen = length_seen || (f.name == "content-length" && f.value == c.content_length);
+        }
+        EXPECT_TRUE(length_seen) << c.method << " body=" << c.body;
+    }
 }
 
 // ===========================================================================

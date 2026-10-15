@@ -1083,8 +1083,8 @@ Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_in
 - `template<typename StreamType> class StreamManager { struct CleanupCriteria{ qb::duration max_idle_time, max_age; bool cleanup_closed_streams, cleanup_reset_streams; uint32_t max_total_streams; }; std::size_t cleanup_streams(const CleanupCriteria&); StreamStats get_statistics() const; }` — **timeouts are `qb::duration`** (0 = no limit).
 - events: `struct Http2StreamErrorEvent{uint32_t stream_id; ErrorCode; std::string message;}`, `Http2GoAwayEvent{ErrorCode; uint32_t last_stream_id; std::string debug_data;}`, `Http2PushPromiseEvent{uint32_t associated/promised_stream_id; qb::http::Headers headers;}`, `Http2ConnectionErrorEvent{ErrorCode; std::string message; bool fatal;}`.
 - `template<typename IO_Handler> class ServerHttp2Protocol` (`src/qbm/http/2/protocol/server.h:77`) — non-copyable/non-movable:
-  - `bool send_response(uint32_t stream_id, const qb::http::Response&)`;
-  - `[[nodiscard]] std::optional<PushPromiseFailureReason> send_push_promise(uint32_t associated, uint32_t promised /*even, non-zero*/, qb::http::Request pseudo_headers)` (needs peer `SETTINGS_ENABLE_PUSH=1`);
+  - `bool send_response(uint32_t stream_id, const qb::http::Response&)` — a response to `HEAD` ends the stream on its HEADERS (no DATA, `content-length` kept);
+  - `[[nodiscard]] std::optional<PushPromiseFailureReason> send_push_promise(uint32_t associated, uint32_t promised /*even, non-zero*/, qb::http::Request pseudo_headers)` (needs peer `SETTINGS_ENABLE_PUSH=1`); on success answer the reserved stream with `send_response(promised, response)`;
   - `void send_rst_stream(uint32_t, ErrorCode, const std::string& msg="", bool close_context=true) noexcept`;
   - `uint32_t cleanup_idle_streams(qb::duration max_idle=std::chrono::seconds(30), qb::duration max_incomplete=std::chrono::seconds(10)) noexcept`;
   - `[[nodiscard]] bool is_stream_closed(uint32_t) const`; `static bool is_valid_header_field(const std::string& name, const std::string& value) noexcept`.
