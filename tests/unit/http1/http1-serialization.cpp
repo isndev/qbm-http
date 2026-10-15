@@ -454,6 +454,39 @@ TEST(Http1Serialization, RequestRejectsBytesARequestTargetCannotCarry) {
         const std::string wire{out.begin(), out.size()};
         EXPECT_TRUE(wire.starts_with("GET /search?" + query + " HTTP/1.1\r\n")) << wire;
     }
+
+    // The check walks the query sixteen bytes at a time (eight where SSE2 is not the baseline, a
+    // byte loop under eight) and re-reads the LAST block overlapped instead of looping over a tail:
+    // every length up to 40 with the bad byte at every position, and every all-good length, so no
+    // position falls between two blocks or past the last one.
+    const auto refused = [](const std::string &query) {
+        const qb::io::uri target{"http://example.test/s?" + query};
+        EXPECT_EQ(target.encoded_queries(), query);
+        qb::http::Request         request{qb::http::method::GET, target};
+        qb::allocator::pipe<char> out;
+        try {
+            out << request;
+        } catch (const std::length_error &) {
+            return out.size() == 0u;
+        }
+        return false;
+    };
+    for (std::size_t n = 1; n <= 40; ++n) {
+        for (std::size_t i = 0; i < n; ++i) {
+            std::string query(n, 'q');
+            query[i] = (i % 2) ? ' ' : '\x7f';
+            EXPECT_TRUE(refused(query)) << "n=" << n << ", the bad byte at " << i << " slipped through";
+        }
+        const std::string good(n, (n % 2) ? '~' : '!'); // 0x7E and 0x21: the two edges of what may travel
+        EXPECT_FALSE(refused(good)) << "n=" << n << ": an all-printable query was refused";
+    }
+    // The four edges of the byte classes, inside the overlapped last block of a 33-byte query.
+    for (const auto &[byte, bad] : {std::pair{'\x20', true}, std::pair{'\x21', false}, std::pair{'\x7e', false}, std::pair{'\x7f', true},
+                                    std::pair{'\x80', false}}) {
+        std::string query(33, 'q');
+        query[20] = byte;
+        EXPECT_EQ(refused(query), bad) << "byte 0x" << std::hex << (static_cast<unsigned>(byte) & 0xffu);
+    }
 }
 
 // RFC 9112 §4: status-line = HTTP-version SP status-code SP [ reason-phrase ]. The phrase is

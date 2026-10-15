@@ -69,6 +69,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   path characters already), so percent-encode them.
   Percent-encoded forms and every printable byte keep their exact bytes. A one-shot client answers such a request
   400 without sending it; the persistent client already answered a serialization failure 400.
+  The check takes sixteen bytes per step where SSE2 is the baseline (eight elsewhere) and re-reads the last block
+  overlapped instead of looping over a tail, so a query costs one block per sixteen bytes and nothing else.
 - **`Body::as<Multipart>()` refuses a document its closing delimiter does not end (Huly QB-491).** A body that stops
   inside a part or its headers now throws, and `try_as<Multipart>()` yields `nullopt`, instead of returning the
   parts read so far as a complete document. Bytes after the closing delimiter (the epilogue) stay ignored.

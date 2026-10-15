@@ -21,6 +21,15 @@
 #include <string_view>
 #include <vector>
 
+// The request-target check below takes sixteen bytes per step where SSE2 is the baseline (every x86-64
+// toolchain) and eight otherwise.
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+#define QB_HTTP_QUERY_CHECK_SSE2 1
+#else
+#define QB_HTTP_QUERY_CHECK_SSE2 0
+#endif
+
 namespace qb::http {
 
 void
@@ -77,19 +86,46 @@ header_is_valid(const std::string &name, const std::string &value) noexcept {
 // serializer's check (Huly QB-494).
 [[nodiscard]] bool
 raw_query_is_valid(std::string_view query) noexcept {
-    // Eight bytes per step on the serializer's path. Each test is the exact "some byte of the word is..."
-    // bit trick: `(x - 0x21..21) & ~x & 0x80..80` is non-zero iff a byte is below 0x21, and the same zero-byte
-    // test on `x ^ 0x7F..7F` iff a byte is 0x7F. A byte from 0x80 up passes both, as it must.
+    // On the serializer's path, so wide steps and no byte loop past the first word: the last step re-reads
+    // the tail overlapped (a byte checked twice is still checked), which keeps the step count at
+    // ceil(n / width) with no scalar epilogue.
+    const char *p = query.data();
+    std::size_t n = query.size();
+#if QB_HTTP_QUERY_CHECK_SSE2
+    if (n >= 16) {
+        // Sixteen bytes per step: a byte is refused iff max(byte, 0x20) == 0x20 (byte <= 0x20 unsigned)
+        // or byte == 0x7F. A byte from 0x80 up passes both, as it must.
+        const __m128i sp  = _mm_set1_epi8(0x20);
+        const __m128i del = _mm_set1_epi8(0x7f);
+        const auto    bad = [&](const char *at) noexcept {
+            const __m128i x   = _mm_loadu_si128(reinterpret_cast<const __m128i *>(at));
+            const __m128i low = _mm_cmpeq_epi8(_mm_max_epu8(x, sp), sp);
+            return _mm_movemask_epi8(_mm_or_si128(low, _mm_cmpeq_epi8(x, del))) != 0;
+        };
+        for (; n > 16; p += 16, n -= 16) {
+            if (bad(p))
+                return false;
+        }
+        return !bad(p + n - 16);
+    }
+#endif
+    // Eight bytes per step. Each test is the exact "some byte of the word is..." bit trick:
+    // `(x - 0x21..21) & ~x & 0x80..80` is non-zero iff a byte is below 0x21, and the same zero-byte test
+    // on `x ^ 0x7F..7F` iff a byte is 0x7F. A byte from 0x80 up passes both, as it must.
     constexpr std::uint64_t ones  = 0x0101010101010101ULL;
     constexpr std::uint64_t highs = 0x8080808080808080ULL;
-    const char             *p     = query.data();
-    std::size_t             n     = query.size();
-    for (; n >= 8; p += 8, n -= 8) {
+    const auto              bad8  = [](const char *at) noexcept {
         std::uint64_t x;
-        std::memcpy(&x, p, sizeof x);
+        std::memcpy(&x, at, sizeof x);
         const std::uint64_t del = x ^ (ones * 0x7f);
-        if ((((x - ones * 0x21) & ~x) | ((del - ones) & ~del)) & highs)
-            return false;
+        return ((((x - ones * 0x21) & ~x) | ((del - ones) & ~del)) & highs) != 0;
+    };
+    if (n >= 8) {
+        for (; n > 8; p += 8, n -= 8) {
+            if (bad8(p))
+                return false;
+        }
+        return !bad8(p + n - 8);
     }
     for (; n; ++p, --n) {
         const auto uc = static_cast<unsigned char>(*p);
