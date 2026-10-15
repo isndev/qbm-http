@@ -1301,35 +1301,73 @@ TEST(HTTP2ServerProtocol, LargeInboundDataTriggersServerWindowUpdates) {
 // (update_initial_peer_window_size delta path + pending flush).
 // ---------------------------------------------------------------------------
 
+// Both request shapes: a POST still OPEN, and the common case -- a request that
+// already ended (END_STREAM), leaving the stream HALF_CLOSED_REMOTE while its
+// response waits for credit. RFC 9113 §6.9.2 adjusts EVERY stream window by the
+// delta; HALF_CLOSED_REMOTE was skipped, so its response stayed stuck until a
+// stream WINDOW_UPDATE the client had no reason to send (Huly QB-528).
 TEST(HTTP2ServerProtocol, InitialWindowSizeIncreaseFlushesPendingStream) {
+    for (const bool request_ended : {false, true}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        // Start with a window of 0 so the server can send nothing on a new stream.
+        handshake_with_initial_window(protocol, io, 0);
+        ASSERT_TRUE(protocol.ok());
+
+        if (request_ended) {
+            open_get_stream_end_stream(protocol, io, 1, "/grow"); // HALF_CLOSED_REMOTE
+        } else {
+            open_post_stream_open(protocol, io, 1, "/grow"); // OPEN
+        }
+        ASSERT_TRUE(protocol.ok());
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.body()   = std::string(20, 'z');
+        ASSERT_TRUE(protocol.send_response(1, response));
+        // peer window is 0 -> nothing sent, body fully queued.
+        EXPECT_EQ(sum_data_bytes(io.output, 1), 0u);
+        EXPECT_FALSE(data_end_stream_seen(io.output, 1));
+
+        // Raise SETTINGS_INITIAL_WINDOW_SIZE to 1000: the +1000 delta reaches the
+        // stream's peer window (was 0) and the queued body is flushed, with no
+        // stream-level WINDOW_UPDATE.
+        push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1000}}));
+        drive(protocol, io);
+
+        EXPECT_TRUE(protocol.ok()) << "request_ended=" << request_ended;
+        EXPECT_EQ(sum_data_bytes(io.output, 1), 20u) << "request_ended=" << request_ended;
+        EXPECT_TRUE(data_end_stream_seen(io.output, 1)) << "request_ended=" << request_ended;
+    }
+}
+
+// A REDUCTION reaches the answering stream too, and may leave it in debt
+// (RFC 9113 §6.9.2: a negative window is legal and tracked). Window 100, body
+// 300: 100 octets leave. SETTINGS lowers the initial size to 50 -> window -50.
+// A stream WINDOW_UPDATE of 60 brings it to +10: exactly 10 more octets, not 60.
+TEST(HTTP2ServerProtocol, InitialWindowSizeReductionPutsAnAnsweringStreamInDebt) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
-    // Start with a window of 0 so the server can send nothing on a new stream.
-    handshake_with_initial_window(protocol, io, 0);
-    ASSERT_TRUE(protocol.ok());
-
-    // Open a POST stream that stays OPEN (no END_STREAM). update_initial_peer_
-    // window_size only adjusts OPEN / HALF_CLOSED_LOCAL / RESERVED_LOCAL streams.
-    open_post_stream_open(protocol, io, 1, "/grow");
+    handshake_with_initial_window(protocol, io, 100);
+    open_get_stream_end_stream(protocol, io, 1, "/debt");
     ASSERT_TRUE(protocol.ok());
 
     qb::http::Response response;
     response.status() = qb::http::status::OK;
-    response.body()   = std::string(20, 'z');
+    response.body()   = std::string(300, 'd');
     ASSERT_TRUE(protocol.send_response(1, response));
-    // peer window is 0 -> nothing sent, body fully queued.
-    EXPECT_EQ(sum_data_bytes(io.output, 1), 0u);
-    EXPECT_FALSE(data_end_stream_seen(io.output, 1));
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 100u);
 
-    // Raise SETTINGS_INITIAL_WINDOW_SIZE to 1000. update_initial_peer_window_size
-    // applies the +1000 delta to the open stream's peer_window_size (was 0) and
-    // flushes it.
-    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1000}}));
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 50}}));
     drive(protocol, io);
+    ASSERT_TRUE(protocol.ok()) << "a negative window is not an error";
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 100u);
 
+    make_window_update_frame(io, 1, 60);
+    drive(protocol, io);
     EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(sum_data_bytes(io.output, 1), 20u);
-    EXPECT_TRUE(data_end_stream_seen(io.output, 1));
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 110u) << "the debt of 50 is repaid first";
+    EXPECT_FALSE(data_end_stream_seen(io.output, 1));
 }
 
 // ---------------------------------------------------------------------------

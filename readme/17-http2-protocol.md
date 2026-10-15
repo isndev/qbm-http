@@ -84,7 +84,7 @@ HTTP/2 has two flow-control windows, both replenished by `WINDOW_UPDATE` frames:
 A sender must not emit DATA that would exceed *either* window. The protocol layer (`FlowControlManager`, `Http2StreamBase`) segments large bodies into DATA frames respecting the current windows, sends `WINDOW_UPDATE` once consumed bytes cross a threshold (half the initial window by default), and treats any window growing past `MAX_WINDOW_SIZE_LIMIT` (2³¹−1) as a `FLOW_CONTROL_ERROR`. None of this needs application code.
 
 Header blocks are not flow-controlled, but no frame may exceed the peer's `SETTINGS_MAX_FRAME_SIZE`: request and response headers, trailers in both directions and push promises larger than it are split over `CONTINUATION` frames. A request that announces trailers (a `Trailer` header) ends with its trailer block, which always follows the body's last `DATA` frame: trailers handed to `ClientHttp2Protocol::send_request_trailers` while part of the body still waits for window credit are kept and sent right after it.
-<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:65-103,156-163,229-256; qbm/http/src/qbm/http/2/protocol/frames.h:104,109 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:65-103,156-163,229-258; qbm/http/src/qbm/http/2/protocol/frames.h:104,109 -->
 
 ### Connection shutdown: GOAWAY and RST_STREAM
 
@@ -221,7 +221,7 @@ Connection and stream lifetimes are governed by four `qb::duration` constants in
 <!-- src: qbm/http/src/qbm/http/2/http2.h:61-71 -->
 
 These are real `qb::duration` values (`std::chrono::seconds`) — the protocol layer takes `qb::duration` throughout (`cleanup_idle_streams`, `StreamManager::CleanupCriteria`).
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1379-1380; qbm/http/src/qbm/http/2/protocol/stream.h:464-470 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:1379-1380; qbm/http/src/qbm/http/2/protocol/stream.h:466-472 -->
 
 Completed-context collection runs from both the session's `pending_write` handler and full-output-drain `eos` handler. A context is eligible only when it is logically completed and `is_stream_closed` reports its native stream closed. Collection selects up to 32 stream IDs in a local array: 128 bytes of stack ID scratch, with no heap scratch for that selection. This batch size does not cap the context registry, and it changes neither the public API nor Session data members.
 
@@ -336,7 +336,7 @@ You rarely touch these directly, but they are the public types behind the conven
 | `qb::protocol::http2::ErrorCode` | `src/qbm/http/2/protocol/frames.h` | RFC error codes (`NO_ERROR`, `PROTOCOL_ERROR`, `REFUSED_STREAM`, `CANCEL`, `ENHANCE_YOUR_CALM`, …). |
 | Events: `Http2StreamErrorEvent`, `Http2GoAwayEvent`, `Http2ConnectionErrorEvent`, `Http2PushPromiseEvent` | `src/qbm/http/2/protocol/stream.h` | Surfaced to the session/client via `on(...)` handlers. |
 
-<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,281,323,373,393,413,433,457; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/stream.h:46-55,64,117,283,325,375,395,415,435,459; qbm/http/src/qbm/http/2/protocol/frames.h:65-81 -->
 
 The protocol enforces RFC 9113 validation you get for free: header names must be lowercase tokens with no NUL/CR/LF; requests require non-empty `:method`/`:scheme`/`:path` and `:authority` pseudo-headers ahead of regular headers; trailers may not carry pseudo-headers or hop-by-hop headers. A request body over `qb::http::protocol_limits::MAX_BODY_SIZE` is reset with `RST_STREAM(ENHANCE_YOUR_CALM)`, and an assembled header block over `qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE` (1 MB) closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`.
 <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:46-58,141-148,339-342,503-505,1609,1728; qbm/http/src/qbm/http/2/protocol/base.h:85,88 -->

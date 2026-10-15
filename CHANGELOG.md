@@ -115,6 +115,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE reaches every sending stream; negative windows are a debt
+  (Huly QB-528, QB-532).** The server applied a change of the peer's initial window size to OPEN,
+  half-closed (local) and reserved streams but not to half-closed (remote) ones -- the state of a
+  response to a finished request -- so a response waiting for credit stayed stuck until a stream
+  WINDOW_UPDATE the client had no reason to send. Every stream that can still send now moves by
+  the delta (RFC 9113 §6.9.2), through `Http2StreamBase::update_peer_window_size`, which no longer
+  refuses a legal negative result nor a decrease near the 2^31-1 maximum; only a window pushed past
+  the maximum fails, unchanged. Witnesses in `tests/unit/http2/http2-server-protocol.cpp` and
+  `http2-stream-state.cpp`.
 - **HTTP/2 keeps the received compression state in step (Huly QB-533, QB-534).** A header block
   the HPACK decoder could not decode reset only its stream, and the connection decoded on with a
   dynamic table possibly changed by the fields ahead of the failure; it is now a connection

@@ -17,16 +17,17 @@ namespace qb::protocol::http2 {
 
 bool
 Http2StreamBase::update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept {
-    int64_t delta      = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
-    int64_t new_window = FlowControlManager::update_window_safe(peer_window_size, static_cast<uint32_t>(std::abs(delta)),
-                                                                static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT));
-
-    if (new_window == -1) {
+    // RFC 9113 §6.9.2: the window moves by the difference of the two initial sizes. A decrease
+    // can leave it negative -- a debt the sender tracks and repays before it sends again -- and
+    // is never an error; only a window pushed past 2^31-1 is (FLOW_CONTROL_ERROR), and then the
+    // window is left as it was (Huly QB-532). All values fit int64_t: |delta| < 2^32.
+    const int64_t delta      = static_cast<int64_t>(new_initial_size) - static_cast<int64_t>(old_initial_size);
+    const int64_t new_window = peer_window_size + delta;
+    if (new_window > static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT)) {
         return false; // Overflow
     }
-
-    peer_window_size = delta >= 0 ? new_window : peer_window_size + delta;
-    return peer_window_size >= 0;
+    peer_window_size = new_window;
+    return true;
 }
 
 void

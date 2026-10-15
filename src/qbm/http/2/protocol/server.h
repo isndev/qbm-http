@@ -2160,7 +2160,7 @@ private:
         // This `new_size` is client's SETTINGS_INITIAL_WINDOW_SIZE
         // It affects how much data *we* (server) can send on *new* streams initiated by client
         // or on PUSH_PROMISE streams we initiate.
-        int64_t delta             = static_cast<int64_t>(new_size) - static_cast<int64_t>(_initial_peer_window_size);
+        const uint32_t old_size   = _initial_peer_window_size;
         _initial_peer_window_size = new_size;
 
         // Snapshot stream ids first: try_send_pending_data_for_stream may flush a
@@ -2176,14 +2176,15 @@ private:
             if (it == _server_streams.end())
                 continue; // erased by an earlier flush in this loop
             Http2ServerStream &stream = it->second;
-            // Affects streams where server is sending data: OPEN, HALF_CLOSED_LOCAL (server sending, client receiving), RESERVED_LOCAL (for
-            // PUSH)
-            if (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL
-                || stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-                int64_t old_stream_peer_window = stream.peer_window_size;
-                stream.peer_window_size += delta;
+            // RFC 9113 §6.9.2 adjusts EVERY stream window the endpoint maintains, and the one that
+            // matters most is the stream answering a request that has already ended:
+            // HALF_CLOSED_REMOTE, the state of nearly every response. It used to be skipped, so a
+            // response waiting for credit stayed stuck until a stream WINDOW_UPDATE the client had
+            // no reason to send (Huly QB-528). Only a closed or reset stream sends nothing more.
+            if (stream.state != Http2StreamConcreteState::CLOSED && !stream.rst_stream_sent && !stream.rst_stream_received) {
+                const int64_t old_stream_peer_window = stream.peer_window_size;
 
-                if (stream.peer_window_size > static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT)) {
+                if (!stream.update_peer_window_size(new_size, old_size)) {
                     this->send_rst_stream(stream.id, ErrorCode::FLOW_CONTROL_ERROR,
                                           "Stream window overflow (server side) due to client SETTINGS_INITIAL_WINDOW_SIZE change");
                     this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR,

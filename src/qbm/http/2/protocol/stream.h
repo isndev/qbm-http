@@ -240,10 +240,12 @@ public:
     }
 
     /**
-     * @brief Update peer window size safely
+     * @brief Apply a SETTINGS_INITIAL_WINDOW_SIZE change to this stream's send window
+     * @details The window moves by `new - old`; a decrease may leave it negative, a legal debt
+     *          (RFC 9113 §6.9.2) during which nothing is sent.
      * @param new_initial_size New initial window size
      * @param old_initial_size Old initial window size
-     * @return true if update successful, false if overflow
+     * @return true if applied, false if the window would exceed 2^31-1 (it is then unchanged)
      */
     bool update_peer_window_size(uint32_t new_initial_size, uint32_t old_initial_size) noexcept;
 
