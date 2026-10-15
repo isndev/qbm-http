@@ -225,7 +225,8 @@ private:
         if (_pending_frames.size() >= _pending_cap) {
             // Drop the oldest frame rather than the newest — callers who
             // fall behind typically care more about the tail of the stream
-            // (close frames, latest state update) than the head.
+            // (close frames, latest state update) than the head. One pop
+            // suffices: set_pending_cap() keeps the queue within the cap.
             _pending_frames.pop_front();
         }
         _pending_frames.push_back(std::move(frame));
@@ -270,10 +271,18 @@ public:
      * dropped to make room for the new one. Setting the cap to 0 disables
      * buffering entirely — any frame received while no awaiter is parked
      * is then discarded.
+     *
+     * A lowered cap applies at once: a queue already above it loses its
+     * oldest frames, down to the cap, so it never holds more than the cap
+     * says (Huly QB-518). A cap of 0 is the exception: it only discards what
+     * arrives, and never purges the frames already buffered.
      */
     void
     set_pending_cap(std::size_t cap) noexcept {
         _pending_cap = cap;
+        while (cap != 0u && _pending_frames.size() > cap) {
+            _pending_frames.pop_front();
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -579,9 +588,11 @@ public:
      *
      * Invoked once, before the upgrade is accepted. Mutate `response` to
      * negotiate a subprotocol (`Sec-WebSocket-Protocol`) or extra headers.
-     * Return `false` to refuse the upgrade — in that case, set
-     * `response.status()` to a non-success code and the base will send it
-     * as-is before dropping the connection.
+     * Return `false` (or throw) to refuse the upgrade — in that case, set
+     * `response.status()` to an error (4xx/5xx) or a redirect (3xx) and the
+     * base sends the response as-is before dropping the connection. A refusal
+     * left with any status below 300 (the default 200 included) is answered
+     * `400 Bad Request`.
      */
     using HandshakeHook = std::function<bool(Self &session, qb::http::Request &request, qb::http::Response &response)>;
 
@@ -612,10 +623,29 @@ private:
             return; // Buffering disabled: frames arriving with no awaiter
                     // parked are silently discarded.
         }
+        // One pop suffices: set_pending_cap() keeps the queue within the cap.
         if (_pending_frames.size() >= _pending_cap) {
             _pending_frames.pop_front();
         }
         _pending_frames.push_back(std::move(frame));
+    }
+
+    /**
+     * @brief Send the refusal of an upgrade, then close once it is delivered.
+     *
+     * A refused handshake is answered with an error (RFC 6455 section 4.2.2) or sends the
+     * client elsewhere with a redirect (section 4.1): a status of 300 or more is kept as the
+     * hook or the validator set it. Anything below -- the 200 a `Response` starts with, a 101
+     * that would announce the upgrade the server is refusing, any 2xx -- becomes
+     * `400 Bad Request` (Huly QB-610).
+     */
+    void
+    refuse_upgrade(qb::http::Response &response) {
+        if (response.status().code() < 300) {
+            response.status() = qb::http::status::BAD_REQUEST;
+        }
+        *this << response;
+        this->close_after_deliver();
     }
 
     void
@@ -674,10 +704,17 @@ public:
      * @brief Change the maximum number of inbound frames buffered between
      *        two `next_frame()` calls. Default is 1024; set to 0 to
      *        disable buffering (frames with no awaiter are dropped).
+     *
+     * A lowered cap applies at once: a queue already above it loses its
+     * oldest frames, down to the cap (Huly QB-518). A cap of 0 only discards
+     * what arrives, and never purges the frames already buffered.
      */
     void
     set_pending_cap(std::size_t cap) noexcept {
         _pending_cap = cap;
+        while (cap != 0u && _pending_frames.size() > cap) {
+            _pending_frames.pop_front();
+        }
     }
 
     /**
@@ -740,22 +777,14 @@ public:
             }
         }
         if (!allowed) {
-            if (static_cast<int>(response.status()) == 0) {
-                response.status() = qb::http::status::BAD_REQUEST;
-            }
-            *this << response;
-            this->close_after_deliver();
+            refuse_upgrade(response);
             return false;
         }
 
         if (!this->template switch_protocol<WS_Protocol>(self(), request, response)) {
             // `switch_protocol` sets BAD_REQUEST on handshake failures; deliver
             // it before closing so clients get a concrete HTTP rejection.
-            if (static_cast<int>(response.status()) == 0) {
-                response.status() = qb::http::status::BAD_REQUEST;
-            }
-            *this << response;
-            this->close_after_deliver();
+            refuse_upgrade(response);
             return false;
         }
 

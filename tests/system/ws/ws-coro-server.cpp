@@ -31,7 +31,9 @@
  * @ingroup Http
  */
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <stdexcept>
@@ -183,6 +185,68 @@ public:
     void
     on(IOSession &) {}
 };
+
+// ---------------------------------------------------------------------------
+// Servers whose handshake hook refuses WITHOUT choosing an error status: it
+// returns false on the scratch response as constructed (whose status is 200),
+// it throws, it marks the refusal 101 or 200, or it redirects (a 3xx the base
+// must keep). Huly QB-610.
+// ---------------------------------------------------------------------------
+
+enum class Refusal { LeavesStatus, Throws, Claims101, Claims200, Redirects };
+
+template <Refusal R>
+class RefusingCoroServer;
+
+template <Refusal R>
+class RefusingCoroSession : public qb::http::ws::coro_session<RefusingCoroSession<R>, RefusingCoroServer<R>> {
+public:
+    using base = qb::http::ws::coro_session<RefusingCoroSession<R>, RefusingCoroServer<R>>;
+
+    explicit RefusingCoroSession(RefusingCoroServer<R> &s)
+        : base(s) {
+        this->set_handshake_hook([](RefusingCoroSession &, qb::http::Request &, qb::http::Response &res) -> bool {
+            if constexpr (R == Refusal::Throws) {
+                throw std::runtime_error("handshake hook failure");
+            } else if constexpr (R == Refusal::Claims101) {
+                res.status() = qb::http::status::SWITCHING_PROTOCOLS;
+            } else if constexpr (R == Refusal::Claims200) {
+                res.status() = qb::http::status::OK;
+            } else if constexpr (R == Refusal::Redirects) {
+                res.status() = qb::http::status::TEMPORARY_REDIRECT;
+                res.set_header("Location", "/elsewhere");
+            }
+            return false;
+        });
+    }
+
+    qb::io::async::task<void>
+    run() {
+        co_return; // Never reached — handshake is rejected.
+    }
+};
+
+template <Refusal R>
+class RefusingCoroServer : public qb::io::use<RefusingCoroServer<R>>::tcp::template server<RefusingCoroSession<R>> {};
+
+// The raw response to one upgrade request sent to a RefusingCoroServer<R>.
+template <Refusal R>
+std::string
+refused_upgrade_response() {
+    WsServerThread<RefusingCoroServer<R>> server{0};
+    qb::io::tcp::socket                   sock;
+    if (sock.connect(qb::io::uri{"tcp://localhost:" + std::to_string(server.port)}) != 0) {
+        ADD_FAILURE() << "could not connect to the refusing server";
+        return {};
+    }
+    (void) sock.set_nonblocking(true);
+    const std::string request = "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    sock.write(request.data(), request.size());
+    std::string response = read_http_response(sock);
+    sock.close();
+    return response;
+}
 
 // ---------------------------------------------------------------------------
 // Server that, after the first message, initiates a graceful close via the
@@ -373,6 +437,29 @@ TEST_F(WsCoroServer, CoroHandshakeHookRejectsWithHttpResponse) {
     EXPECT_NE(response.find("not allowed"), std::string::npos) << response;
     EXPECT_EQ(response.find("101"), std::string::npos) << response;
     sock.close();
+}
+
+// A refused upgrade is answered with an error, never with the 200 the scratch response starts with
+// (Huly QB-610). RFC 6455 section 4.2.2 has a server that declines the handshake answer with an
+// error status such as 400 or 403, and a redirect (3xx) is how a server sends the client elsewhere
+// (section 4.1). The base keeps a status of 300 or more as the hook set it, and answers 400 Bad
+// Request for anything below: a hook that returned false without a status, one that threw, and one
+// that claimed 101 or 200 on a refusal. The 403 the hook chooses is the test above.
+TEST_F(WsCoroServer, CoroHandshakeRefusalWithoutAnErrorStatusAnswers400) {
+    // The status code of the status line ("HTTP/1.1 400 ..."); the reason phrase is not the contract.
+    const auto status_of = [](std::string const &response) {
+        return response.substr(0, 12);
+    };
+
+    EXPECT_EQ(status_of(refused_upgrade_response<Refusal::LeavesStatus>()), "HTTP/1.1 400");
+    EXPECT_EQ(status_of(refused_upgrade_response<Refusal::Throws>()), "HTTP/1.1 400");
+    EXPECT_EQ(status_of(refused_upgrade_response<Refusal::Claims101>()), "HTTP/1.1 400");
+    EXPECT_EQ(status_of(refused_upgrade_response<Refusal::Claims200>()), "HTTP/1.1 400");
+
+    std::string redirect = refused_upgrade_response<Refusal::Redirects>();
+    EXPECT_EQ(status_of(redirect), "HTTP/1.1 307") << redirect;
+    std::transform(redirect.begin(), redirect.end(), redirect.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    EXPECT_NE(redirect.find("location: /elsewhere"), std::string::npos) << redirect;
 }
 
 TEST_F(WsCoroServer, CoroSessionClosesGracefully) {

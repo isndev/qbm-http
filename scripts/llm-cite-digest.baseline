@@ -262,10 +262,12 @@ llm/qbm-http.llm.api.md	src/qbm/http/validation/error.h:59-59	eb7ef79c20cd	class
 llm/qbm-http.llm.api.md	src/qbm/http/validation/request_validator.h:34-34	b035530a66ac	class RequestValidator {
 llm/qbm-http.llm.api.md	src/qbm/http/validation/schema_validator.h:162-168	971b4a08b5a3	/// Maximum schema nesting depth accepted by validate_recursive. Guar...
 llm/qbm-http.llm.api.md	src/qbm/http/validation/schema_validator.h:33-33	c7376d87da39	class SchemaValidator {
-llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:422-475	ffb2cde0e751	receive() {
-llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:496-496	4987b20f2b76	run_sync(Awaitable &&awaitable) -> decltype(qb::io::async::run_sync(s...
-llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:857-912	7d8e7ef59224	next_frame() {
-llm/qbm-http.llm.api.md	src/qbm/http/ws/ws.h:1995-1995	d07bdd6bc958	pipe<char> &pipe<char>::put<http::ws::Message>(const http::ws::Messag...
+llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:267-286	a798680e8553	/**
+llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:431-484	ffb2cde0e751	receive() {
+llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:505-505	4987b20f2b76	run_sync(Awaitable &&awaitable) -> decltype(qb::io::async::run_sync(s...
+llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:633-649	ad921ecf2abf	/**
+llm/qbm-http.llm.api.md	src/qbm/http/ws/coro.h:886-941	7d8e7ef59224	next_frame() {
+llm/qbm-http.llm.api.md	src/qbm/http/ws/ws.h:2015-2015	d07bdd6bc958	pipe<char> &pipe<char>::put<http::ws::Message>(const http::ws::Messag...
 llm/qbm-http.llm.api.md	static_files.h:281-281	54042745d08f	class StaticFilesMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	static_files.h:39-39	af53df5a0262	class StaticFilesOptions {
 llm/qbm-http.llm.api.md	static_files.h:807-807	fd04c6d311a6	static_files_middleware(StaticFilesOptions options, const std::string...
@@ -323,5 +325,5 @@ llm/qbm-http.llm.md	src/qbm/http/routing/middleware.h:58-61	b6254c5139b3	* @brie
 llm/qbm-http.llm.md	src/qbm/http/routing/path_parameters.h:32-57	ea8c81b1bdbf	class PathParameters {
 llm/qbm-http.llm.md	src/qbm/http/routing/router_core.h:419-428	e6cc4264fd81	}
 llm/qbm-http.llm.md	src/qbm/http/routing/router_core.h:84-90	49e409b4133c	get_retained_error_tasks(std::shared_ptr<const std::vector<std::share...
-llm/qbm-http.llm.md	src/qbm/http/ws/coro.h:422-475	ffb2cde0e751	receive() {
-llm/qbm-http.llm.md	src/qbm/http/ws/coro.h:857-912	7d8e7ef59224	next_frame() {
+llm/qbm-http.llm.md	src/qbm/http/ws/coro.h:431-484	ffb2cde0e751	receive() {
+llm/qbm-http.llm.md	src/qbm/http/ws/coro.h:886-941	7d8e7ef59224	next_frame() {

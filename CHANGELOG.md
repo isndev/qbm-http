@@ -45,6 +45,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   signature changes. `"jwt_payload"` holds `iss`, `sub`, `aud`, `jti` and `username` as the strings
   that were signed (a numeric-looking `sub` was a JSON number); HSTS is no longer sent on a plain-TCP
   connection for an absolute-form `https://` request target.
+- **A refused coroutine WebSocket upgrade left below 300 answers `400` (Huly QB-610).** No signature
+  change; a hook that refused with the default `200` (or a `101`) used to send it.
 - **HTTP coroutine and routing templates require consistent consumer headers (Huly QB-511, QB-535, QB-514, QB-498).**
   Context hook/cancellation bookkeeping, HTTP/2 reclamation state, and coroutine WebSocket waiter storage have changed privately.
   Public method signatures remain, but WebSocket receive and close methods return newly deduced concrete
@@ -116,6 +118,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A WebSocket protocol-error observer cannot terminate the process (Huly QB-516).** A frame
+  header the parser refuses fails the connection from `getMessageSize()`, which is `noexcept`. The
+  failure now marks the connection closed before any application code runs, queues its Close
+  once, and contains an exception from an `on(error)` observer of the I/O handler. The public
+  client already ran its `on_error` deferred, outside the parser.
+- **Lowering a coroutine WebSocket pending cap bounds the queue (Huly QB-518).** A queue already
+  above a lowered `set_pending_cap` kept its length, one pop per push; the setter now drops the
+  oldest frames down to the new cap at once, on `coro_client` and `coro_session`, and the arrival
+  path is unchanged. A cap of 0 still only discards arrivals and never purges what is buffered.
+- **A refused coroutine WebSocket upgrade answers an error (Huly QB-610).** A handshake hook that
+  returned `false` or threw without choosing a status answered `200 OK`, and one that left `101`
+  announced the upgrade it refused. A refusal with a status below 300 is now answered `400 Bad
+  Request`; 3xx, 4xx and 5xx are sent as set.
 - **A sub-millisecond rate-limit window ends at its own length (Huly QB-536).** The reset, the
   stale-entry sweep and `X-RateLimit-Reset` compared the elapsed time truncated to whole
   milliseconds, so a 500 us window never ended before 1 ms. They compare in the clock's own units.

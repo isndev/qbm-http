@@ -453,32 +453,52 @@ class base : public qb::io::async::AProtocol<IO_> {
      *     alive for an orderly TCP close.
      *   - `not_ok()` makes the protocol refuse any further inbound parsing.
      *
+     *   - The connection is failed BEFORE any application code runs: the
+     *     protocol is `not_ok()` and its reassembly state cleared first, so an
+     *     error observer that re-enters the parser finds it closed, and the
+     *     failure is reported exactly once.
+     *   - It never throws. It is reached from `getMessageSize()`, which is
+     *     `noexcept`: the Close frame is queued under a guard, and the
+     *     observer's own exception is contained here (Huly QB-516).
+     *
      * @param status The CloseStatus code.
      * @param reason The reason for closing.
      * @return The size of the input buffer, instructing the I/O layer to
      *         drop any unparsed bytes (the connection is now broken).
      */
     std::size_t
-    fail_connection(::qb::http::ws::CloseStatus status, std::string_view reason) {
+    fail_connection(::qb::http::ws::CloseStatus status, std::string_view reason) noexcept {
         if (this->ok()) {
-            ::qb::http::ws::MessageClose close_msg(status, reason);
-            if constexpr (!IO_::has_server) {
-                close_msg.masked = true;
-            }
-            this->_io << close_msg;
-            notify_protocol_error();
             this->not_ok();
             _message.reset();
             _data_opcode = 0;
+            try {
+                ::qb::http::ws::MessageClose close_msg(status, reason);
+                if constexpr (!IO_::has_server) {
+                    close_msg.masked = true;
+                }
+                this->_io << close_msg;
+            } catch (const std::exception &e) {
+                LOG_HTTP_WARN("WebSocket Close frame could not be queued: " << e.what());
+            } catch (...) {
+                LOG_HTTP_WARN("WebSocket Close frame could not be queued");
+            }
+            notify_protocol_error();
         }
         return this->_io.in().size();
     }
 
     void
-    notify_protocol_error() {
+    notify_protocol_error() noexcept {
         if constexpr (requires { typename IO_::error; }) {
             if constexpr (qb::has_on<IO_, typename IO_::error>) {
-                this->_io.on(typename IO_::error{});
+                try {
+                    this->_io.on(typename IO_::error{});
+                } catch (const std::exception &e) {
+                    LOG_HTTP_WARN("WebSocket protocol-error observer threw: " << e.what());
+                } catch (...) {
+                    LOG_HTTP_WARN("WebSocket protocol-error observer threw an unknown exception");
+                }
             }
         }
     }
