@@ -27,7 +27,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   constructors no longer reset the state the base constructor just built (an out-of-line call), so a
   parse costs 66-67 fewer instructions in total, a message built, moved twice, copied and destroyed
   141 fewer, and the HTTP/1.1 serializers, which reach the trailer path only for a chunked message,
-  5-24 fewer.
+  5-24 fewer. The serializers ask `qb::http::detail::writes_trailer_section` before they write a byte and
+  write the start line themselves in both cases, handing the rest of a trailed message to
+  `write_trailed_chunked_message` after it: the first shape wrote the start line through a second,
+  out-of-line writer in the same translation unit, which made MSVC stop inlining the status code's
+  `pipe<char>::operator<<` into `serialize_response` and re-allocate the header loop's registers
+  (`serialize_response` 529 to 495 instructions, `serialize_request` 585 to 443; g++ unaffected). With
+  one writer the two serializers are develop's instruction streams again (+9 instructions each, the
+  check) and run 2 to 35 fewer instructions a message than develop on g++ (callgrind, 20 000
+  messages of each of the four `http1-serialize` cells); on MSVC those cells sit within the spread of
+  their own layouts (a nop-shifted family of each side spans 4 to 8 %: `BM_Http1Serialize_HeaderBlock`
+  develop 280 to 304 ns), so no wall-clock difference can be read there.
 - **`qb::http::origin::authority(uri)`: the authority every protocol sends (Huly QB-1064).** One
   writer for the HTTP/1.1 and WebSocket `Host` value and the HTTP/2 and HTTP/3 `:authority`, which
   five places wrote (HTTP/1.1 `host_header_value`, the HTTP/2 client and its server's push promise,

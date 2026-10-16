@@ -12,7 +12,7 @@
 # excerpt rather than as an opaque hash.  Fields: doc <TAB> cited-spec <TAB>
 # digest <TAB> excerpt.  Keyed WITHOUT the doc's own line number, so
 # re-flowing a paragraph does not re-key the file.
-llm/qbm-http.llm.api.md	body.cpp:766-788	0a49f9fa4b9b	template <>
+llm/qbm-http.llm.api.md	body.cpp:769-791	0a49f9fa4b9b	template <>
 llm/qbm-http.llm.api.md	body.h:253-253	cc499af9d486	static std::unique_ptr<qb::compression::compress_provider> get_compre...
 llm/qbm-http.llm.api.md	body.h:272-272	ee0ec258f912	std::size_t compress(std::string const &encoding);
 llm/qbm-http.llm.api.md	body.h:289-289	c60e797b9e48	static std::unique_ptr<qb::compression::decompress_provider> get_deco...
@@ -23,7 +23,8 @@ llm/qbm-http.llm.api.md	body.h:439-443	b2f952bd08c2	template <>
 llm/qbm-http.llm.api.md	body.h:460-473	504f0d4dfa48	template <>
 llm/qbm-http.llm.api.md	body.h:57-57	7f9976a908fe	class Body {
 llm/qbm-http.llm.api.md	chunk.h:106-106	8b2020e847e8	pipe<char> &pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c);
-llm/qbm-http.llm.api.md	chunk.h:142-142	26d1e326e839	[[nodiscard]] bool write_trailed_chunked_message(qb::allocator::pipe<...
+llm/qbm-http.llm.api.md	chunk.h:133-133	8a9eaf17a4a0	[[nodiscard]] bool writes_trailer_section(const internal::MessageBase...
+llm/qbm-http.llm.api.md	chunk.h:150-150	4e151baec6a1	void write_trailed_chunked_message(qb::allocator::pipe<char> &out, co...
 llm/qbm-http.llm.api.md	chunk.h:32-32	50cb5b8d9d2c	class Chunk {
 llm/qbm-http.llm.api.md	compression.h:161-161	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	compression.h:40-40	d3a697e2ad5b	class CompressionOptions {

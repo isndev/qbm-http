@@ -130,16 +130,6 @@ header_value_is_valid(const std::string &value) noexcept {
     });
 }
 
-/// The status line serialize_response writes, for a response with a trailer section that
-/// write_trailed_chunked_message writes whole (Huly QB-1073). Out of line and cold: kept apart from
-/// the line serialize_response writes inline. Http1Serialization tests hold the two lines equal.
-QB_NOINLINE QB_COLD void
-write_status_line(pipe<char> &out, const qb::http::internal::MessageBase &message) {
-    const auto &r = static_cast<const qb::http::Response &>(message);
-    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
-        << qb::http::endl;
-}
-
 struct transfer_encoding_result {
     bool ok      = true;
     bool chunked = false;
@@ -297,19 +287,23 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     // clear() it, Huly QB-1066).
 
     // A complete chunked message with a trailer section -- the fields its `Trailer` header announces,
-    // its trailers() -- is written whole out of line instead, status line included, the trailer
-    // section after its last chunk as HTTP/2 and HTTP/3 send it (RFC 9112 §7.1.2, Huly QB-1067,
-    // QB-1073): it checks trailers() before writing a byte, and this common path stays what it was. A
-    // MessageHead writes no trailer section, so it keeps every field.
-    if (transfer.chunked && !content_suppressed
-        && qb::http::detail::write_trailed_chunked_message(out, r, &write_status_line, "qb::http::Response serialization", r.body().raw(),
-                                                           length)) {
-        return;
-    }
+    // its trailers() -- is asked for here, before a byte is written (a trailers() field that cannot
+    // travel refuses it), and written out of line after the status line: the trailer section after its
+    // last chunk, as HTTP/2 and HTTP/3 send it (RFC 9112 §7.1.2, Huly QB-1067, QB-1073). A MessageHead
+    // writes no trailer section, so it keeps every field. The status line is written once, below, for
+    // both: a second writer of it in this translation unit made MSVC stop inlining the status code's
+    // `operator<<` into this function and re-allocate the header loop's registers (+4 to +7 %).
+    const bool trailed =
+        transfer.chunked && !content_suppressed && qb::http::detail::writes_trailer_section(r, "qb::http::Response serialization");
 
-    // HTTP Status Line (write_status_line writes the same line for a message with a trailer section)
+    // HTTP Status Line
     out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
         << qb::http::endl;
+
+    if (trailed) [[unlikely]] {
+        qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length);
+        return;
+    }
 
     // HTTP Headers
     for (const auto &it : r.headers()) {

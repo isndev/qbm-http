@@ -160,20 +160,6 @@ method_token(const ::http_method m) noexcept {
 #undef QB_HTTP_METHOD_TOKEN
 }
 
-/// The request line serialize_request writes, for a request with a trailer section that
-/// write_trailed_chunked_message writes whole (Huly QB-1073). Out of line and cold: kept apart from
-/// the line serialize_request writes inline, which a second caller would make g++ stop inlining. The
-/// request was validated -- its method names a token. Http1Serialization tests hold the two lines equal.
-QB_NOINLINE QB_COLD void
-write_request_line(pipe<char> &out, const qb::http::internal::MessageBase &message) {
-    const auto            &r    = static_cast<const qb::http::Request &>(message);
-    const std::string_view path = r.uri().path();
-    out << method_token(r.method()) << qb::http::sep << (path.empty() ? std::string_view{"/"} : path);
-    if (!r.uri().encoded_queries().empty())
-        out << "?" << r.uri().encoded_queries();
-    out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
-}
-
 struct transfer_encoding_result {
     bool ok      = true;
     bool chunked = false;
@@ -333,26 +319,28 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // clear() it, Huly QB-1066).
 
     // A complete chunked message with a trailer section -- the fields its `Trailer` header announces,
-    // its trailers() -- is written whole out of line instead, request line included, the trailer
-    // section after its last chunk as HTTP/2 and HTTP/3 send it (RFC 9112 §7.1.2, Huly QB-1067,
-    // QB-1073): it checks trailers() before writing a byte, and this common path stays what it was. A
-    // MessageHead writes no trailer section, so it keeps every field.
-    if (transfer.chunked && !head_only
-        && qb::http::detail::write_trailed_chunked_message(out, r, &write_request_line, "qb::http::Request serialization", r.body().raw(),
-                                                           length)) {
-        return;
-    }
+    // its trailers() -- is asked for here, before a byte is written (a trailers() field that cannot
+    // travel refuses it), and written out of line after the request line: the trailer section after
+    // its last chunk, as HTTP/2 and HTTP/3 send it (RFC 9112 §7.1.2, Huly QB-1067, QB-1073). A
+    // MessageHead writes no trailer section, so it keeps every field. The request line is written
+    // once, below, for both: a second writer of it in this translation unit made MSVC stop inlining
+    // the header loop's `operator<<`s into this function (+3 % a message).
+    const bool trailed = transfer.chunked && !head_only && qb::http::detail::writes_trailer_section(r, "qb::http::Request serialization");
 
     // HTTP Request Line: METHOD PATH[?query] HTTP/VERSION.
     // URI fragments are client-side identifiers and are never sent in an HTTP request-target.
     // An empty path is sent as "/" (RFC 9112 §3.2.1: the client MUST send "/" as the path of an
     // origin-form whose URI has none) -- a default URI, or one naming only an authority (Huly QB-1066).
-    // write_request_line writes the same line for a message with a trailer section.
     const std::string_view path = r.uri().path();
     out << method << qb::http::sep << (path.empty() ? std::string_view{"/"} : path);
     if (!r.uri().encoded_queries().empty())
         out << "?" << r.uri().encoded_queries();
     out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
+
+    if (trailed) [[unlikely]] {
+        qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length);
+        return;
+    }
 
     // HTTP Headers
     for (const auto &it : r.headers()) {

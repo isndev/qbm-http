@@ -112,35 +112,42 @@ struct MessageBase;
 } // namespace internal
 
 namespace detail {
-/// Writes a message's start line (the request line or the status line) to `out`.
-using start_line_writer = void (*)(qb::allocator::pipe<char> &out, const internal::MessageBase &message);
+/**
+ * @brief Whether a complete chunked message writes a trailer section: it announces fields (a `Trailer`
+ *        header) or carries some (`trailers()`). The question the HTTP/1.1 serializers ask before they
+ *        write a byte, once they have validated the header section (Huly QB-1067, QB-1073).
+ *
+ * A field of `trailers()` that cannot travel -- one a trailer section must not carry
+ * (is_forbidden_trailer_field), or that no header field could be (not a token name, a value with CR,
+ * LF or another control byte, over the protocol_limits lengths) -- throws `std::length_error` here,
+ * so a refused message leaves the pipe as the serializer found it. Out of line and cold, the `Trailer`
+ * lookup included: few messages have trailers. The serializers write the start line themselves, in
+ * both cases -- a second writer of it in their translation unit made MSVC stop inlining the status
+ * code's `pipe<char>::operator<<` into them, 6 to 18 ns a message.
+ *
+ * @param message The message.
+ * @param serializer The refusal's prefix, e.g. "qb::http::Response serialization".
+ * @return true when the message writes a trailer section (write_trailed_chunked_message); false when
+ *         it neither announces nor carries a trailer field.
+ */
+[[nodiscard]] bool writes_trailer_section(const internal::MessageBase &message, const char *serializer);
 
 /**
- * @brief Writes a complete chunked message that has a trailer section, whole: its start line, its
- *        header section, its chunked body, its trailer section (detail::plan_outgoing_trailers) --
- *        the fields its `Trailer` header announces that a trailer section may carry leave the header
- *        section (Huly QB-1067), every field of its `trailers()` follows them, announced by a `Trailer`
- *        field when the message carries none (Huly QB-1073): the trailer section HTTP/2 and HTTP/3
- *        send.
+ * @brief Writes, after the start line the serializer wrote, the rest of a complete chunked message
+ *        that has a trailer section (writes_trailer_section): its header section, its chunked body,
+ *        its trailer section (detail::plan_outgoing_trailers) -- the fields its `Trailer` header
+ *        announces that a trailer section may carry leave the header section (Huly QB-1067), every
+ *        field of its `trailers()` follows them, announced by a `Trailer` field when the message
+ *        carries none (Huly QB-1073): the trailer section HTTP/2 and HTTP/3 send.
  *
- * The HTTP/1.1 serializers call it, for a complete chunked message only, before writing its start
- * line, once they have validated its header section. A field of `trailers()` that cannot travel --
- * one a trailer section must not carry (is_forbidden_trailer_field), or that no header field could be
- * (not a token name, a value with CR, LF or another control byte, over the protocol_limits lengths)
- * -- throws `std::length_error` before a byte is written. Out of line and cold, the `Trailer` lookup
- * included: few messages have trailers, and the serializers' common path stays what it was.
+ * Refuses nothing: writes_trailer_section did, before the start line. Out of line and cold.
  *
- * @param out Where the bytes go.
+ * @param out Where the bytes go, the start line already in it.
  * @param message The message whose fields are written.
- * @param start_line Writes the message's start line, as the serializer writes it.
- * @param serializer The refusal's prefix, e.g. "qb::http::Response serialization".
  * @param body The message's body bytes.
  * @param length How many of them form the body (one chunk; none for an empty body).
- * @return true when the message was written; false, with nothing written, when it neither announces
- *         nor carries a trailer field.
  */
-[[nodiscard]] bool write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::MessageBase &message,
-                                                 start_line_writer start_line, const char *serializer, const qb::allocator::pipe<char> &body,
-                                                 std::size_t length);
+void write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::MessageBase &message, const qb::allocator::pipe<char> &body,
+                                   std::size_t length);
 } // namespace detail
 } // namespace qb::http

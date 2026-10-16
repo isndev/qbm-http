@@ -115,8 +115,7 @@ check_trailer_section(const Headers &trailers, const char *serializer) {
 } // namespace
 
 QB_NOINLINE QB_COLD bool
-write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::MessageBase &message, const start_line_writer start_line,
-                              const char *serializer, const qb::allocator::pipe<char> &body, const std::size_t length) {
+writes_trailer_section(const internal::MessageBase &message, const char *serializer) {
     const bool carries = message.has_trailers();
     if (!carries && !message.has_header("Trailer")) {
         return false;
@@ -124,8 +123,13 @@ write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::Me
     if (carries) {
         check_trailer_section(message.trailers(), serializer);
     }
-    const auto plan = plan_outgoing_trailers(message, carries ? &message.trailers() : nullptr);
-    start_line(out, message);
+    return true;
+}
+
+QB_NOINLINE QB_COLD void
+write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::MessageBase &message, const qb::allocator::pipe<char> &body,
+                              const std::size_t length) {
+    const auto plan = plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
     for (const auto &it : message.headers()) {
         if (std::find(plan.moved.begin(), plan.moved.end(), it.first) != plan.moved.end()) {
             continue; // in the trailer section, below
@@ -147,7 +151,6 @@ write_trailed_chunked_message(qb::allocator::pipe<char> &out, const internal::Me
         out << name << ": " << value << qb::http::endl;
     }
     out << qb::http::endl;
-    return true;
 }
 } // namespace qb::http::detail
 
