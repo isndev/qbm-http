@@ -1,7 +1,7 @@
 /**
  * @file qbm/http/middleware/metrics.h
- * @brief `RequestMetrics`: an HTTP server's request counts and latencies, in the `qb::metrics` model
- *        (Huly QB-90, QB-154).
+ * @brief `RequestMetrics`: an HTTP server's request counts and latencies, in the `qb::metrics` model -- and
+ *        `metrics_handler`, the `/metrics` endpoint that exposes a scrape of every core (Huly QB-90, QB-154).
  *
  * `RequestMetrics` is a router observer (`Router::add_observer`), not a chain task: it sees every request the
  * router routes -- a 404, a 405, an error chain, a request whose client left -- and pays no allocation per
@@ -22,6 +22,7 @@
  */
 #pragma once
 
+#include <chrono>      // For std::chrono::seconds
 #include <cstddef>     // For std::size_t
 #include <cstdint>     // For std::uint64_t
 #include <memory>      // For std::shared_ptr, std::make_shared, std::unique_ptr
@@ -31,6 +32,7 @@
 #include <vector>      // For std::vector
 
 #include <qb/core/metrics.h>                   // For qb::metrics::snapshot
+#include <qb/core/metrics_registry.h>          // For qb::metrics::scrape, qb::metrics::Registry (metrics_handler)
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 #include <qb/system/time.h>                    // For qb::duration
 
@@ -181,5 +183,66 @@ request_metrics(RequestMetricsOptions options = {}) {
  * @param open The open connections (`session_count()` of the server).
  */
 void add_connections(qb::metrics::snapshot &snap, std::string_view protocol, std::size_t open);
+
+/**
+ * @brief Options of `metrics_handler`.
+ */
+struct MetricsEndpointOptions {
+    /// How long each core's registry has to answer: a core that does not is reported `qb_scrape_core_up{core} 0`.
+    qb::duration timeout = std::chrono::seconds(1);
+    /// The cores to scrape; empty (the default) scrapes every core of the engine (the actor's `getCoreSet()`).
+    std::vector<qb::CoreId> cores;
+
+    /// Sets `timeout`.
+    MetricsEndpointOptions &
+    with_timeout(qb::duration t) noexcept {
+        timeout = t;
+        return *this;
+    }
+    /// Sets `cores`.
+    MetricsEndpointOptions &
+    with_cores(std::vector<qb::CoreId> c) {
+        cores = std::move(c);
+        return *this;
+    }
+};
+
+/**
+ * @brief Answers `ctx` with `snap` in the Prometheus text format: 200, `Content-Type:
+ *        text/plain; version=0.0.4; charset=utf-8`, completed.
+ * @tparam SessionType The session type of the router.
+ * @param ctx The request's context.
+ * @param snap What to expose (a `qb::metrics::scrape()` result, or a snapshot of the application's own).
+ */
+template <typename SessionType>
+void
+metrics_response(Context<SessionType> &ctx, qb::metrics::snapshot const &snap) {
+    ctx.text(qb::metrics::write_text(snap), qb::http::status::OK, std::string(qb::metrics::text_content_type));
+}
+
+/**
+ * @brief A `GET` handler for a Prometheus endpoint: it scrapes every core's `qb::metrics::Registry` through the
+ *        registry of `actor`'s core and answers the text (`metrics_response`).
+ * @details A coroutine route handler: mount it on the router of an actor whose core has a registry --
+ *          `router().get("/metrics", qb::http::metrics_handler<S>(*this))`. The scrape is
+ *          `qb::metrics::scrape(actor, cores, timeout)`: a core that does not answer in time is reported down, never
+ *          an error; a core without a registry for `actor` answers 500. The endpoint exposes the process's internals:
+ *          mount it behind authentication or on a listener of its own -- nothing mounts it for you.
+ * @tparam SessionType The session type of the router.
+ * @param actor The actor whose router serves the route; it must outlive the router (it owns it, as a server does).
+ * @param options The timeout and the cores.
+ * @return The handler, for `router().get(path, ...)`.
+ */
+template <typename SessionType>
+[[nodiscard]] auto
+metrics_handler(qb::Actor &actor, MetricsEndpointOptions options = {}) {
+    return [&actor, options = std::move(options)](std::shared_ptr<Context<SessionType>> ctx) -> qb::io::async::task<void> {
+        // `actor` and `options` are read before the first suspension, `ctx` after it: the frame owns it.
+        auto                        scrape = options.cores.empty() ? qb::metrics::scrape(actor, actor.getCoreSet(), options.timeout)
+                                                                   : qb::metrics::scrape(actor, options.cores, options.timeout);
+        const qb::metrics::snapshot snap   = co_await std::move(scrape);
+        metrics_response(*ctx, snap);
+    };
+}
 
 } // namespace qb::http

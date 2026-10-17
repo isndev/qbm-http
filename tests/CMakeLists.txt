@@ -263,3 +263,4 @@ qhttp_test(unit middleware-request-id unit/middleware/middleware-request-id.cpp 
 qhttp_test(unit router-observer unit/routing/router-observer.cpp EXTRA_LABELS routing)
 qhttp_test(unit middleware-access-log unit/middleware/middleware-access-log.cpp EXTRA_LABELS middleware)
 qhttp_test(unit middleware-metrics unit/middleware/middleware-metrics.cpp EXTRA_LABELS middleware)
+qhttp_test(system metrics-endpoint system/middleware/metrics-endpoint.cpp EXTRA_LABELS middleware requires-multicore coroutine)

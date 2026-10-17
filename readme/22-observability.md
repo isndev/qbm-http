@@ -114,6 +114,36 @@ _source = getService<qb::metrics::Registry>()->add_source([this](qb::metrics::sn
     qb::http::add_connections(s, "http/1.1", session_count());
 });
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/metrics.h:125 (RequestMetrics), qbm/http/src/qbm/http/middleware/metrics.h:183 (add_connections) -->
+<!-- src: qbm/http/src/qbm/http/middleware/metrics.h:127 (RequestMetrics), qbm/http/src/qbm/http/middleware/metrics.h:185 (add_connections) -->
 
 Publishing through the core's registry (`add_source`) is what lets a scrape read the counts on their own core. One `RequestMetrics` per router; several servers on several cores each publish theirs, and a scrape sums the series they share. The ticket that asked for them called them `MetricsMiddleware` and `AccessLogMiddleware`: they are observers, not chain middleware, and are named for what they are.
+
+## The `/metrics` endpoint
+
+`metrics_handler<S>(actor, options)` is a coroutine route handler: it scrapes every core's `qb::metrics::Registry` through the registry of the actor's own core -- the core counters of each core, the sources each core's actors added, `RequestMetrics` among them -- and answers the Prometheus text format 0.0.4 (`metrics_response`: 200, `Content-Type: text/plain; version=0.0.4; charset=utf-8`). Nothing mounts it: it exposes the process's internals, so put it behind authentication or on a listener of its own.
+
+```cpp
+#include <qb/core/metrics_registry.h>
+#include <qbm/http/middleware/metrics.h>
+
+// main(): a registry on every core the scrape asks
+for (qb::CoreId core : {0, 1})
+    engine.addActor<qb::metrics::Registry>(core);
+
+// the server actor's onInit():
+router().get("/metrics", qb::http::metrics_handler<qb::http::DefaultSession>(
+                             *this, qb::http::MetricsEndpointOptions{}.with_timeout(std::chrono::milliseconds(500))));
+```
+<!-- src: qbm/http/src/qbm/http/middleware/metrics.h:238 (metrics_handler), qbm/http/src/qbm/http/middleware/metrics.h:190 (MetricsEndpointOptions) -->
+
+Each core is asked at the same time and has `timeout` to answer; a core that does not -- no registry there, or a handler holding its thread -- is `qb_scrape_core_up{core="N"} 0` in the answer, never an error, and `qb_scrape_duration_seconds` says how long the scrape took. `options.cores` limits the scrape to some cores; empty, it asks every core of the engine. A scrape from a core that has no registry is a `500`. Between two scrapes nothing runs: every counter stays a plain integer of the core that owns it, read on that core when the scrape asks (`qb/src/qb/core/metrics_registry.h`, and [the engine's counters](https://github.com/isndev/qb/blob/main/readme/4_qb_core/engine.md)).
+
+A Prometheus scrape configuration needs nothing else:
+
+```yaml
+scrape_configs:
+  - job_name: my-qb-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["localhost:8080"]
+```

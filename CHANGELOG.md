@@ -132,6 +132,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   first sighting; `collect(snapshot&)` describes them for a `qb::metrics::Registry` source. `add_connections(snapshot,
   protocol, open)` describes `qb_http_connections{protocol}`. Both listed in `middleware/all.h`.
 
+- **The `/metrics` endpoint: `metrics_handler<S>(actor, options)` and `metrics_response<S>(ctx, snapshot)` (Huly
+  QB-154).** `<qbm/http/middleware/metrics.h>`: a coroutine route handler that scrapes every core's
+  `qb::metrics::Registry` (`qb::metrics::scrape`, through the registry of the actor's own core) and answers the
+  Prometheus text format 0.0.4 (`Content-Type: text/plain; version=0.0.4; charset=utf-8`): the core counters of each
+  core, `RequestMetrics`, the sources of the other modules. A core that does not answer within
+  `MetricsEndpointOptions::timeout` is `qb_scrape_core_up{core} 0`, never an error. Opt-in and mounted explicitly:
+  the endpoint exposes the process's internals.
+
 ### Changed
 
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The

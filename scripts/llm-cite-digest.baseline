@@ -119,10 +119,13 @@ llm/qbm-http.llm.api.md	message_base.h:282-282	7b741bce3663	[[nodiscard]] const 
 llm/qbm-http.llm.api.md	message_base.h:286-286	f6f25d6828fb	has_trailers() const noexcept {
 llm/qbm-http.llm.api.md	message_base.h:302-302	6ca18d26bd18	void store_received_trailer(internal::MessageBase &message, std::stri...
 llm/qbm-http.llm.api.md	message_base.h:323-323	232b2c4cc0ba	struct MessageHead {
-llm/qbm-http.llm.api.md	metrics.h:125-125	cfe1c5e35968	class RequestMetrics final : public IRequestObserver<SessionType> {
-llm/qbm-http.llm.api.md	metrics.h:173-173	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
-llm/qbm-http.llm.api.md	metrics.h:183-183	f32148adbd80	void add_connections(qb::metrics::snapshot &snap, std::string_view pr...
-llm/qbm-http.llm.api.md	metrics.h:46-46	53a05190f5a2	struct RequestMetricsOptions {
+llm/qbm-http.llm.api.md	metrics.h:127-127	cfe1c5e35968	class RequestMetrics final : public IRequestObserver<SessionType> {
+llm/qbm-http.llm.api.md	metrics.h:175-175	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
+llm/qbm-http.llm.api.md	metrics.h:185-185	f32148adbd80	void add_connections(qb::metrics::snapshot &snap, std::string_view pr...
+llm/qbm-http.llm.api.md	metrics.h:190-190	a8b9de8ddb22	struct MetricsEndpointOptions {
+llm/qbm-http.llm.api.md	metrics.h:219-219	bf3ce98b966a	metrics_response(Context<SessionType> &ctx, qb::metrics::snapshot con...
+llm/qbm-http.llm.api.md	metrics.h:238-238	adf2abfb6e2e	metrics_handler(qb::Actor &actor, MetricsEndpointOptions options = {}) {
+llm/qbm-http.llm.api.md	metrics.h:48-48	53a05190f5a2	struct RequestMetricsOptions {
 llm/qbm-http.llm.api.md	middleware.h:183-183	39b0b601e6f2	class FunctionalMiddleware : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	middleware.h:75-75	9d3f7e3cfdb1	class MiddlewareTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	middleware/auth.h:44-44	96bf24b031fa	class AuthMiddleware final : public IMiddleware<SessionType> {
@@ -367,7 +370,8 @@ llm/qbm-http.llm.md	src/qbm/http/coro.h:232-259	898def4c2bda	using awaiter = htt
 llm/qbm-http.llm.md	src/qbm/http/coro.h:93-112	fdf69ed19bdc	explicit
 llm/qbm-http.llm.md	src/qbm/http/middleware/access_log.h:161-161	0b9d49616e2d	access_log(typename AccessLog<SessionType>::Sink sink, AccessLogForma...
 llm/qbm-http.llm.md	src/qbm/http/middleware/conditional.h:87-111	4a2fae499b3f	process(ContextPtr ctx) override {
-llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:173-173	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
+llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:175-175	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
+llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:238-238	adf2abfb6e2e	metrics_handler(qb::Actor &actor, MetricsEndpointOptions options = {}) {
 llm/qbm-http.llm.md	src/qbm/http/routing/async_task.h:92-115	4c8620673d9e	struct RouteNameArena {
 llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1349-1381	fb4cefc22f8a	cancel(const std::string &reason = "Cancelled by application") noexce...
 llm/qbm-http.llm.md	src/qbm/http/routing/context.h:230-256	e4efcd50c976	execute_hook_internal(HookPoint point) {

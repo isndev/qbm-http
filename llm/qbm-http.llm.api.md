@@ -375,13 +375,19 @@ Factory (`access_log.h:161`): `access_log<S>(sink, formatter = access_log_format
 Usage: `router.add_observer(qb::http::access_log<S>([](std::string_view l){ qb::io::cout() << l << '\n'; }, qb::http::access_log_format::json));`
 
 ## Request metrics — `src/qbm/http/middleware/metrics.h` (a router observer, QB-90/QB-154)
-### `qb::http::RequestMetricsOptions` — `metrics.h:46`
+### `qb::http::RequestMetricsOptions` — `metrics.h:48`
 `std::vector<double> buckets` (seconds; `qb::metrics::default_duration_buckets` by default); fluent `with_buckets(std::vector<double>)`.
-### `qb::http::RequestMetrics<S>` — `metrics.h:125`
+### `qb::http::RequestMetrics<S>` — `metrics.h:127`
 `explicit RequestMetrics(RequestMetricsOptions = {});` throws `std::invalid_argument` on empty, non-finite or non-ascending buckets. An `IRequestObserver<S>`: counts each request under its route PATTERN (`unmatched` for none), method and status; observes `RequestEnd::duration`. `void collect(qb::metrics::snapshot&) const` — `qb_http_requests_total{method,route,status}` (counter), `qb_http_request_duration_seconds{method,route}` (histogram with `_sum`), `qb_http_requests_in_flight` (gauge). `std::uint64_t count(method, std::string_view route, int status) const noexcept` (`route` empty = unmatched); `std::uint64_t in_flight() const noexcept`. Plain integers of the router's thread; one instance per router; a series allocated on first sighting only.
-Factory (`metrics.h:173`): `request_metrics<S>(RequestMetricsOptions = {})`. Publish it as a source of the core's `qb::metrics::Registry` (qb: `Registry::add_source`) whose callable calls `collect`.
-### `qb::http::add_connections` — `metrics.h:183`
+Factory (`metrics.h:175`): `request_metrics<S>(RequestMetricsOptions = {})`. Publish it as a source of the core's `qb::metrics::Registry` (qb: `Registry::add_source`) whose callable calls `collect`.
+### `qb::http::add_connections` — `metrics.h:185`
 `void add_connections(qb::metrics::snapshot&, std::string_view protocol, std::size_t open);` — `qb_http_connections{protocol}` (gauge).
+
+### `qb::http::MetricsEndpointOptions` — `metrics.h:190`
+`qb::duration timeout = 1s; std::vector<qb::CoreId> cores` (empty: every core, the actor's `getCoreSet()`); fluent `with_timeout(qb::duration) noexcept`, `with_cores(std::vector<qb::CoreId>)`.
+### `qb::http::metrics_handler<S>` / `metrics_response<S>` — `metrics.h:238` / `:219`
+`template<typename S> [[nodiscard]] auto metrics_handler(qb::Actor& actor, MetricsEndpointOptions = {})` — a coroutine route handler for `router().get("/metrics", ...)`: `co_await qb::metrics::scrape(actor, cores, timeout)` (every core's `qb::metrics::Registry`, through the registry of `actor`'s core), then `metrics_response`. A core that does not answer is `qb_scrape_core_up{core} 0`; no registry on `actor`'s core answers 500 (the scrape throws `std::logic_error`). `actor` must outlive the router (it owns it, as a server actor does). `template<typename S> void metrics_response(Context<S>&, qb::metrics::snapshot const&)` — 200, `Content-Type: text/plain; version=0.0.4; charset=utf-8`, the text, completed. Nothing mounts the endpoint for you: put it behind authentication or on a listener of its own.
+Usage: `router().get("/metrics", qb::http::metrics_handler<S>(*this, qb::http::MetricsEndpointOptions{}.with_timeout(500ms)));`
 
 ## Error handling — `src/qbm/http/middleware/error_handling.h`
 ### `qb::http::ErrorHandlingMiddleware<S>` — `error_handling.h:54`
