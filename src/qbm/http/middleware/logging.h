@@ -24,6 +24,7 @@
 #include "../response.h"           // For qb::http::Response
 #include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult, HookPoint
 #include "../types.h"              // For qb::http::status, http_method_to_string, std::to_string(qb::http::status)
+#include "./request_id.h"          // For qb::http::request_id_slot (the "[id] " prefix)
 
 namespace qb::http {
 /** @brief Defines the severity levels for logging messages used by `LoggingMiddleware`. */
@@ -45,6 +46,10 @@ enum class LogLevel {
  * Logging is performed via a user-provided `LogFunction` callback, allowing customization
  * of the logging destination and format. Different log levels can be specified for
  * request and response messages.
+ *
+ * A request that carries an id in `request_id_slot` -- a `RequestIdMiddleware` ran before this
+ * middleware -- is logged with `"[<id>] "` in front of both messages (Huly QB-166); without one
+ * the messages are `"Request: <METHOD> <path>"` and `"Response: <code> <reason>"`.
  *
  * @tparam SessionType The type of the session object managed by the router, used by `Context`.
  */
@@ -92,7 +97,7 @@ public:
     void
     process(ContextPtr ctx) override {
         // User log_fn can throw, add_lifecycle_hook might allocate
-        log_request(ctx->request());
+        log_request(ctx->request(), ctx->get_if(request_id_slot));
 
         // Log the response at PRE_RESPONSE_SEND so integration/server tests do not
         // depend on transport teardown timing to observe the response log.
@@ -107,8 +112,8 @@ public:
                     return;
 
                 const auto &response = ctx_ref.response();
-                std::string message =
-                    "Response: " + std::to_string(static_cast<int>(response.status())) + " " + std::to_string(response.status());
+                std::string message  = request_id_prefix(ctx_ref.get_if(request_id_slot)) + "Response: "
+                                       + std::to_string(static_cast<int>(response.status())) + " " + std::to_string(response.status());
                 try {
                     log_function(response_level, message);
                 } catch (...) {
@@ -137,14 +142,25 @@ public:
 
 private:
     /**
+     * @brief The prefix of a message about a request that has an id (`RequestIdMiddleware`): `"[<id>] "`;
+     *        empty without one.
+     * @param id The request's id (`ctx->get_if(request_id_slot)`), or null.
+     */
+    [[nodiscard]] static std::string
+    request_id_prefix(const std::string *id) {
+        return id ? "[" + *id + "] " : std::string{};
+    }
+
+    /**
      * @brief Logs information about the incoming HTTP request using the configured `_log_function`.
      * @param request The `Request` object to log.
+     * @param id The request's id when a `RequestIdMiddleware` ran before this middleware, or null.
      */
     void
-    log_request(const Request &request) {
+    log_request(const Request &request, const std::string *id) {
         if (!_log_function)
             return; // Should not happen due to constructor check
-        std::string message = "Request: " + format_request_info(request);
+        std::string message = request_id_prefix(id) + "Request: " + format_request_info(request);
         try {
             _log_function(_request_level, message);
         } catch (...) {

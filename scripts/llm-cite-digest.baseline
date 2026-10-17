@@ -104,8 +104,8 @@ llm/qbm-http.llm.api.md	jwt.h:542-542	a7b61a7b58c5	jwt_middleware(const std::str
 llm/qbm-http.llm.api.md	jwt.h:67-67	0612d8a3173b	enum class JwtError {
 llm/qbm-http.llm.api.md	jwt.h:79-79	e77bfeaeb6c4	struct JwtErrorInfo {
 llm/qbm-http.llm.api.md	jwt.h:90-90	7bccd936c589	class JwtMiddleware final : public IMiddleware<SessionType> {
-llm/qbm-http.llm.api.md	logging.h:213-213	2ed6bbecf69a	logging_middleware(typename LoggingMiddleware<SessionType>::LogFuncti...
-llm/qbm-http.llm.api.md	logging.h:52-52	77af1e5a45be	class LoggingMiddleware final : public IMiddleware<SessionType> {
+llm/qbm-http.llm.api.md	logging.h:229-229	2ed6bbecf69a	logging_middleware(typename LoggingMiddleware<SessionType>::LogFuncti...
+llm/qbm-http.llm.api.md	logging.h:57-57	77af1e5a45be	class LoggingMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	message_base.h:116-116	236b70d493e9	struct MessageBase
 llm/qbm-http.llm.api.md	message_base.h:274-274	09002bf53d92	trailers() {
 llm/qbm-http.llm.api.md	message_base.h:282-282	7b741bce3663	[[nodiscard]] const Headers &trailers() const noexcept;
@@ -160,6 +160,11 @@ llm/qbm-http.llm.api.md	request.h:396-396	3c9706b70dd0	pipe<char> &pipe<char>::p
 llm/qbm-http.llm.api.md	request.h:84-84	613e7625a2fd	explicit Request(qb::io::uri u, qb::icase_unordered_map<std::vector<s...
 llm/qbm-http.llm.api.md	request.h:86-86	5ff6ee93407d	, _method(Method::GET)
 llm/qbm-http.llm.api.md	request.h:98-98	cfe7f2bcfdc6	method() const noexcept {
+llm/qbm-http.llm.api.md	request_id.h:103-103	611a5a8716ed	class RequestIdMiddleware final : public IMiddleware<SessionType> {
+llm/qbm-http.llm.api.md	request_id.h:171-171	81c918e8c2f5	request_id_middleware(RequestIdOptions options = {}, std::string name...
+llm/qbm-http.llm.api.md	request_id.h:37-37	d9dcabc3b35d	inline constexpr Slot<std::string> request_id_slot{"request.id"};
+llm/qbm-http.llm.api.md	request_id.h:49-49	52598ed3de69	is_valid_request_id(std::string_view const id) noexcept {
+llm/qbm-http.llm.api.md	request_id.h:63-63	7ad150edd16e	struct RequestIdOptions {
 llm/qbm-http.llm.api.md	response.h:358-358	dbcf02d17bab	pipe<char> &pipe<char>::put<qb::http::Response>(const qb::http::Respo...
 llm/qbm-http.llm.api.md	response.h:36-36	3bbce570ed80	class Response : public internal::MessageBase {
 llm/qbm-http.llm.api.md	response.h:368-368	d4cfa8bc1ae1	pipe<char> &pipe<char>::put<qb::http::MessageHead<qb::http::Response>...

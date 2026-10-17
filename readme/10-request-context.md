@@ -167,6 +167,8 @@ bool present = ctx->has("request.id");                             // contains()
 ctx->remove("request.id");
 ```
 
+The shipped `RequestIdMiddleware` does exactly this for every request, under the same key through the typed slot `qb::http::request_id_slot` (`Slot<std::string>{"request.id"}`): see [request id](./08-standard-middleware.md#request-id).
+
 Why prefer slots: `ctx->set<int>("k", 1)` written one place and `ctx->get<std::size_t>("k")` read another **compiles and silently returns `std::nullopt`** at runtime. A slot makes that a compile error, documents at the declaration what gets stored under the key and by whom, and keeps the same `any_cast` read cost. Both APIs swallow `std::bad_any_cast` and return `nullopt` / `nullptr` on a type mismatch — a wrong-type read fails silently rather than throwing, which is exactly the footgun slots remove.
 
 <!-- src: qbm/http/src/qbm/http/routing/context.h:733-974; qbm/http/src/qbm/http/routing/slot.h:56-104 -->

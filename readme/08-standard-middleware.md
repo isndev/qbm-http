@@ -2,7 +2,7 @@
 
 > **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.2.1 (C++20 default, C++23 supported)
 
-The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
+The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, request ids, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
 
 **Prerequisites:** [the middleware model and chain order](./07-middleware.md), and [the request context](./10-request-context.md) for `ctx->set/get`. **See also:** [custom middleware](./09-custom-middleware.md), [authentication](./11-authentication.md), [validation](./12-validation.md), and the doc map [`README.md`](./README.md).
 
@@ -252,6 +252,33 @@ router.use(timing);
 
 The callback type is `TimingMiddleware<S>::TimingCallback = std::function<void(const std::chrono::milliseconds&)>`. The constructor throws `std::invalid_argument` if you pass a null callback.
 
+## Request id
+
+- **Header:** `<qbm/http/middleware/request_id.h>` · **Class:** `qb::http::RequestIdMiddleware<SessionType>`
+- **Purpose:** give every request an id, store it in the context for the handlers and the logs, and answer it in a response header (Huly QB-166).
+
+Each request gets a fresh random UUID version 4 (`qb::generate_random_uuid()`, 36 characters) unless the middleware is told to trust the client: with `trust_incoming_id()`, an id the client sent in the same header is adopted when it is 1 to 128 characters of `[A-Za-z0-9._-]` (`qb::http::is_valid_request_id`), and replaced by a fresh one otherwise. An id the client chose is not trusted by default, and a refused one is never echoed: the id goes into logs unchanged.
+
+```cpp
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/request_id.h>
+
+using MySession = qb::http::DefaultSession;
+
+router.use(qb::http::request_id_middleware<MySession>());                 // first: X-Request-ID, generated
+// behind a proxy that stamps its own id:
+// router.use(qb::http::request_id_middleware<MySession>(
+//     qb::http::RequestIdOptions{}.header("X-Correlation-ID").trust_incoming_id()));
+
+router.get("/orders/:id", [](auto ctx) {
+    const std::string *rid = ctx->get_if(qb::http::request_id_slot);    // never null after the middleware
+    ctx->json(qb::json{{"request_id", rid ? *rid : ""}});
+});
+```
+<!-- src: qbm/http/src/qbm/http/middleware/request_id.h:37 (request_id_slot), qbm/http/src/qbm/http/middleware/request_id.h:63 (RequestIdOptions), qbm/http/src/qbm/http/middleware/request_id.h:171 (request_id_middleware) -->
+
+The id is stored under `qb::http::request_id_slot` — a `Slot<std::string>` keyed `"request.id"`, the key [the request context](./10-request-context.md) uses for a hand-made id — and the response header (`X-Request-ID` unless `RequestIdOptions::header()` names another) is set as the middleware runs, so it is on the answer whatever the handler sends, a 404 or a 500 included. Install it first, as global middleware: the middleware before it see no id, and global middleware also runs for the 404 and 405 answers. A request the router answers before any chain runs (a path over its length limit) gets none. `LoggingMiddleware` prefixes both of its lines with `[<id>] ` when the slot is set. The id is a correlation, not a secret: the UUID comes from a `std::mt19937`. An empty header name throws `std::invalid_argument`.
+
 ## Static files
 
 - **Header:** `<qbm/http/middleware/static_files.h>` · **Class:** `qb::http::StaticFilesMiddleware<SessionType>`
@@ -399,10 +426,10 @@ Four more middleware ship for flow control and instrumentation. They take callab
 |---|---|---|---|
 | Conditional | `<qbm/http/middleware/conditional.h>` · `ConditionalMiddleware<S>` | `conditional_middleware<S>(predicate, if_middleware, else_middleware = nullptr)` | Run one of two child middleware on a `bool(Context)` predicate — the `if_middleware` branch when true, the optional `else_middleware` branch when false (continue otherwise). Throws `std::invalid_argument` if the predicate or `if_middleware` is null. |
 | Transform | `<qbm/http/middleware/transform.h>` · `TransformMiddleware<S>` | `transform_middleware<S>(request_transformer = nullptr)` | Apply a `RequestTransformer` to `ctx->request()` before the chain proceeds; a null transformer is a pass-through. |
-| Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
+| Logging | `<qbm/http/middleware/logging.h>` · `LoggingMiddleware<S>` | `logging_middleware<S>(log_fn, request_level = LogLevel::Info, response_level = LogLevel::Debug)` | Log request/response at configurable `LogLevel`s via a user `LogFunction`; both lines begin with `[<id>] ` when a [request id](#request-id) is set. Throws `std::invalid_argument` on a null log function; exceptions from the user function are suppressed. |
 | Error handling | `<qbm/http/middleware/error_handling.h>` · `ErrorHandlingMiddleware<S>` | `error_handling_middleware<S>(name = "ErrorHandlingMiddleware")` | Centralised error-to-response translation; register handlers for specific status codes / exception types with fluent setters. |
 
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:154, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:213, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:154, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:229, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
 
 Conditional selection is per context. Cancellation of a pending conditional request reaches its selected child, including a nested leaf, without re-evaluating the predicate or changing another context's selection. Completing or cancelling in the predicate prevents the old child from starting. See [Middleware](./07-middleware.md#conditional-middleware) for the cancellation boundary of a shared child instance.
 <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1268-1300 -->
@@ -443,7 +470,7 @@ auto rl   = mw::make<mw::tags::rate_limit_dev, MySession>();
 router.use(cors);
 router.use(rl);
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/make.h:287 (make<>); tags at qbm/http/src/qbm/http/middleware/make.h:62-109 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:295 (make<>); tags at qbm/http/src/qbm/http/middleware/make.h:63-111 -->
 
 The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above and live in `qb::http::middleware::tags`:
 
@@ -451,7 +478,7 @@ The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to th
 - **Compression:** `compression`, `compression_fast`, `compression_max`
 - **Rate limiting:** `rate_limit`, `rate_limit_dev`, `rate_limit_secure`
 - **Security & delivery:** `security_headers`, `static_files`
-- **Observability:** `logging`, `timing`
+- **Observability:** `logging`, `timing`, `request_id`
 - **Structural:** `transform`, `conditional`, `error_handling`
 - **SSL-gated (`QB_HAS_SSL`):** `jwt`, `auth`, `jwt_auth`, `role_auth`, `optional_auth`
 - **reCAPTCHA-gated (`QB_HTTP_HAS_RECAPTCHA_MIDDLEWARE`):** `recaptcha`, `recaptcha_v3`, `recaptcha_strict`
@@ -466,6 +493,7 @@ The `jwt`/`auth`/`jwt_auth`/`role_auth`/`optional_auth` tags are compiled only u
 | Rate limiting | `<qbm/http/middleware/rate_limit.h>` | none |
 | Timing | `<qbm/http/middleware/timing.h>` | none |
 | Logging | `<qbm/http/middleware/logging.h>` | none |
+| Request id | `<qbm/http/middleware/request_id.h>` | none |
 | Conditional | `<qbm/http/middleware/conditional.h>` | none |
 | Transform | `<qbm/http/middleware/transform.h>` | none |
 | Error handling | `<qbm/http/middleware/error_handling.h>` | none |

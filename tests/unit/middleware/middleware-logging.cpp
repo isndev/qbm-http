@@ -16,6 +16,7 @@
  */
 #include <gtest/gtest.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -290,4 +291,35 @@ TEST_F(LoggingMiddlewareTest, RequestLoggedOnceBeforeDownstreamMiddleware) {
     // so moving the request log after downstream cannot keep this green.
     EXPECT_EQ(_session->_order_trace, (std::vector<std::string>{"request-log", "downstream", "handler", "response-log"}));
     EXPECT_TRUE(_session->_final_handler_called);
+}
+
+// --- Request id (Huly QB-166) -------------------------------------------------
+
+TEST_F(LoggingMiddlewareTest, ARequestIdPrefixesBothLines) {
+    // A request that carries an id ("request.id", what RequestIdMiddleware stores) is logged with "[<id>] " in
+    // front of its two lines; the rest of each line is unchanged.
+    _router = std::make_unique<qb::http::Router<LoggingSession>>();
+    _router->use(
+        [](std::shared_ptr<qb::http::Context<LoggingSession>> ctx, std::function<void()> next) {
+            ctx->set<std::string>("request.id", "req-7");
+            next();
+        },
+        "SetsARequestId");
+    _router->use(qb::http::logging_middleware<LoggingSession>(_logger));
+    _router->get("/log_test", basic_handler());
+    _router->compile();
+    _session->reset();
+    _router->route(_session, create_request(qb::http::method::GET, "/log_test"));
+
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    EXPECT_EQ(_session->_log_entries[0].second, "[req-7] Request: GET /log_test");
+    EXPECT_EQ(_session->_log_entries[1].second.rfind("[req-7] Response: 200 ", 0), 0u) << _session->_log_entries[1].second;
+}
+
+TEST_F(LoggingMiddlewareTest, NoRequestIdNoPrefix) {
+    run_single_route(qb::http::logging_middleware<LoggingSession>(_logger), create_request(qb::http::method::GET, "/log_test"), "/log_test");
+
+    ASSERT_EQ(_session->_log_entries.size(), 2u);
+    EXPECT_EQ(_session->_log_entries[0].second, "Request: GET /log_test");
+    EXPECT_EQ(_session->_log_entries[1].second.rfind("Response: 200 ", 0), 0u) << _session->_log_entries[1].second;
 }

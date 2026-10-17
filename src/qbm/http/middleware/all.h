@@ -20,6 +20,7 @@
 #include "./error_handling.h"
 #include "./logging.h"
 #include "./rate_limit.h"
+#include "./request_id.h"
 #include "./timing.h"
 #include "./transform.h"
 #include "./validation.h"

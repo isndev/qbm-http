@@ -341,10 +341,20 @@ Usage: `router.use(qb::http::security_headers_middleware<S>());`
 Factories (`recaptcha.h:601`): `recaptcha_middleware<S>(RecaptchaOptions, name)`, `recaptcha_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_v3_middleware<S>(secret, min_score=0.5f, name)`, `recaptcha_strict_middleware<S>(secret, name)`. All throw `std::invalid_argument` on empty secret.
 
 ## Logging — `src/qbm/http/middleware/logging.h`
-### `qb::http::LoggingMiddleware<S>` — `logging.h:52`
-`enum class LogLevel{Debug,Info,Warning,Error}; using LogFunction=std::function<void(LogLevel,const std::string&)>; LoggingMiddleware(LogFunction log_fn, LogLevel req_level=Info, LogLevel res_level=Debug, std::string name="LoggingMiddleware") noexcept(false);` Throws `std::invalid_argument` if `log_fn` is null. Logs request on entry and response via a hook.
-Factory (`logging.h:213`): `logging_middleware<S>(log_fn, request_level=Info, response_level=Debug, name)`.
+### `qb::http::LoggingMiddleware<S>` — `logging.h:57`
+`enum class LogLevel{Debug,Info,Warning,Error}; using LogFunction=std::function<void(LogLevel,const std::string&)>; LoggingMiddleware(LogFunction log_fn, LogLevel req_level=Info, LogLevel res_level=Debug, std::string name="LoggingMiddleware") noexcept(false);` Throws `std::invalid_argument` if `log_fn` is null. Logs request on entry and response via a hook; both lines begin with `"[<id>] "` when `request_id_slot` is set (a `RequestIdMiddleware` ran first).
+Factory (`logging.h:229`): `logging_middleware<S>(log_fn, request_level=Info, response_level=Debug, name)`.
 Usage: `router.use(qb::http::logging_middleware<S>([](auto lvl,auto&m){ /*...*/ }));`
+
+## Request id — `src/qbm/http/middleware/request_id.h`
+### `qb::http::request_id_slot` — `request_id.h:37`
+`inline constexpr Slot<std::string> request_id_slot{"request.id"};` The request's id once `RequestIdMiddleware` ran: `ctx->get_if(qb::http::request_id_slot)` (`const std::string*`, null otherwise). `inline constexpr std::size_t max_request_id_length = 128;` `[[nodiscard]] constexpr bool is_valid_request_id(std::string_view) noexcept;` — 1..128 characters of `[A-Za-z0-9._-]` (`request_id.h:49`).
+### `qb::http::RequestIdOptions` — `request_id.h:63`
+Members `std::string header_name = "X-Request-ID"; bool trust_incoming = false;` Fluent: `header(std::string)`, `trust_incoming_id(bool = true) noexcept` (return `RequestIdOptions&`).
+### `qb::http::RequestIdMiddleware<S>` — `request_id.h:103`
+`explicit RequestIdMiddleware(RequestIdOptions options = {}, std::string name = "RequestIdMiddleware"); RequestIdOptions const& options() const noexcept;` Throws `std::invalid_argument` on an empty header name. `process()`: the client's id when `trust_incoming` and `is_valid_request_id`, else `uuids::to_string(qb::generate_random_uuid())` (UUID v4, 36 chars); sets the response header, stores the id under `request_id_slot`, `CONTINUE`. A refused id is never echoed. Install first, globally (runs for 404/405 too; not for a request the router answers before any chain).
+Factory (`request_id.h:171`): `request_id_middleware<S>(RequestIdOptions = {}, name = "RequestIdMiddleware")`; tag `qb::http::middleware::tags::request_id`.
+Usage: `router.use(qb::http::request_id_middleware<S>());`
 
 ## Error handling — `src/qbm/http/middleware/error_handling.h`
 ### `qb::http::ErrorHandlingMiddleware<S>` — `error_handling.h:54`
@@ -371,7 +381,7 @@ Usage: `router.use(qb::http::validation_middleware<S>(my_request_validator));`
 
 ## Generic builder — `src/qbm/http/middleware/make.h`
 `template<typename Tag, typename SessionType, typename... Args> [[nodiscard]] auto make(Args&&... args);` — namespace `qb::http::middleware`.
-Tag-dispatches to the right factory. Tags (namespace `qb::http::middleware::tags`): `auth, jwt_auth, role_auth, optional_auth, cors, cors_dev, cors_secure, compression, compression_fast, compression_max, logging, timing, rate_limit, rate_limit_dev, rate_limit_secure, security_headers, static_files, transform, conditional, error_handling, jwt, recaptcha, recaptcha_v3, recaptcha_strict`. Include `src/qbm/http/middleware/all.h` for everything (or `make.h`).
+Tag-dispatches to the right factory. Tags (namespace `qb::http::middleware::tags`): `auth, jwt_auth, role_auth, optional_auth, cors, cors_dev, cors_secure, compression, compression_fast, compression_max, logging, timing, request_id, rate_limit, rate_limit_dev, rate_limit_secure, security_headers, static_files, transform, conditional, error_handling, jwt, recaptcha, recaptcha_v3, recaptcha_strict`. Include `src/qbm/http/middleware/all.h` for everything (or `make.h`).
 Usage: `auto mw = qb::http::middleware::make<qb::http::middleware::tags::cors_secure, S>(std::vector<std::string>{"https://app"});`
 
 ---

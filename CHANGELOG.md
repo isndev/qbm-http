@@ -89,6 +89,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `tests/system/coro/coro-client-http1.cpp`; qb's `scripts/check-awaiter-tracking.py`, run over this module from the
   superproject, refuses an awaiter without it.
 
+- **`RequestIdMiddleware`: one id per request, generated or propagated, in the context and the
+  response (Huly QB-166).** `<qbm/http/middleware/request_id.h>`: `request_id_middleware<S>(options)`
+  (tag `middleware::tags::request_id`, listed in `all.h`) gives each request a random UUID version 4,
+  stores it under `qb::http::request_id_slot` (`Slot<std::string>`, the key `"request.id"`) and sets it
+  in the response header (`X-Request-ID`, `RequestIdOptions::header()` names another) before the
+  handler runs. The client's id is not trusted by default; with `trust_incoming_id()` it is adopted
+  only when it is 1 to 128 characters of `[A-Za-z0-9._-]` (`is_valid_request_id`), and replaced
+  otherwise -- never echoed, since the id goes into logs unchanged.
+
 ### Changed
 
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The
@@ -256,6 +265,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `tests/unit/middleware/middleware-compression.cpp` -- the three lists in every build (both codecs, neither, no
   compression), a browser's `Accept-Encoding` answered with the first codec of the default order and decoded, an
   unregistered name passed over -- which catches five defects planted one at a time.
+
+- **`LoggingMiddleware` prefixes its two lines with `[<id>] ` when the request has an id (Huly
+  QB-166).** When `request_id_slot` is set -- a `RequestIdMiddleware` ran before it -- the request and
+  response messages read `[<id>] Request: GET /path` and `[<id>] Response: 200 OK`; without an id they
+  are unchanged.
 
 ### Fixed
 
