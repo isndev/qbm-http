@@ -163,6 +163,8 @@ qb_register_module(
         src/qbm/http/middleware/recaptcha.cpp
         src/qbm/http/middleware/security_headers.cpp
         src/qbm/http/middleware/static_files.cpp
+        src/qbm/http/middleware/access_log.cpp
+        src/qbm/http/middleware/metrics.cpp
         ${QBM_HTTP_EXTRA_SOURCES}
     DEFINES
         QBM_HTTP_VERSION="${PROJECT_VERSION}"

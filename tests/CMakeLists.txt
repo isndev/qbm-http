@@ -261,3 +261,5 @@ endif()
 # --- observability (Huly QB-166, QB-90, QB-154) ---
 qhttp_test(unit middleware-request-id unit/middleware/middleware-request-id.cpp EXTRA_LABELS middleware)
 qhttp_test(unit router-observer unit/routing/router-observer.cpp EXTRA_LABELS routing)
+qhttp_test(unit middleware-access-log unit/middleware/middleware-access-log.cpp EXTRA_LABELS middleware)
+qhttp_test(unit middleware-metrics unit/middleware/middleware-metrics.cpp EXTRA_LABELS middleware)

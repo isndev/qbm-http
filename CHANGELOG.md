@@ -109,10 +109,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   chain, the early path-length 400, a client that left (`SESSION_GONE`) and a suppressed response (`SUPPRESSED`,
   at the context's destruction). `duration` runs from the router receiving the request to the response handed to
   the session (the protocol's serialization included, the transmission not). Unlike router lifecycle hooks, which
-  are copied into every context, an observer costs no allocation per request; a router with none pays a null-pointer
+  are copied into every context, an observer costs no allocation per request. A router with none pays a null-pointer
   test when it creates a context and one when it finalizes it (two instructions in
-  `Context::finalize_processing_internal`, g++-14 -O3), and the context grows by 40 bytes inside its existing
-  allocation. A request a session refuses before routing (414, 431, 413) reaches no observer.
+  `Context::finalize_processing_internal`, g++-14 -O3), the route pattern carried from the matched node, and the new
+  context members (40 bytes inside its existing allocation) initialised and destroyed: measured with callgrind on
+  g++-14 release against develop `d5f2d32`, a routed request costs 22 to 25 more instructions for a match (of 5 500
+  to 8 000, +0.3 to +0.4 %) and 6 more for a 404. A request a session refuses before routing (414, 431, 413)
+  reaches no observer.
+
+- **`AccessLog` and `RequestMetrics`: an access log and request metrics, as router observers (Huly QB-90).** The
+  ticket named them `AccessLogMiddleware` and `MetricsMiddleware`; they are observers (`Router::add_observer`), not
+  chain tasks, and are named for what they are: they see every request the router routes -- a 404, a 405, an error
+  chain, the early 400, a client that left -- once its response is decided, with no allocation per request.
+  `<qbm/http/middleware/access_log.h>`: `access_log<S>(sink, formatter)` writes one line per request to a sink, in
+  `access_log_format::common` or `combined` (Apache's lines, byte for byte, UTC, Apache's escaping) or `json` (one
+  object per line, with the request id `RequestIdMiddleware` gave the request, the route pattern, the duration and
+  the outcome); a formatter of your own receives an `AccessLogRecord`; the line buffer is reused; a throwing sink is
+  contained. `<qbm/http/middleware/metrics.h>`: `request_metrics<S>(options)` counts
+  `qb_http_requests_total{method,route,status}`, `qb_http_request_duration_seconds{method,route}` (a histogram,
+  `qb::metrics::default_duration_buckets` unless `with_buckets`) and `qb_http_requests_in_flight`, labelled by route
+  PATTERN (`unmatched` for none), never by raw path; plain integers of the router's thread, a series allocated on its
+  first sighting; `collect(snapshot&)` describes them for a `qb::metrics::Registry` source. `add_connections(snapshot,
+  protocol, open)` describes `qb_http_connections{protocol}`. Both listed in `middleware/all.h`.
 
 ### Changed
 

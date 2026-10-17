@@ -12,6 +12,12 @@
 # excerpt rather than as an opaque hash.  Fields: doc <TAB> cited-spec <TAB>
 # digest <TAB> excerpt.  Keyed WITHOUT the doc's own line number, so
 # re-flowing a paragraph does not re-key the file.
+llm/qbm-http.llm.api.md	access_log.h:161-161	0b9d49616e2d	access_log(typename AccessLog<SessionType>::Sink sink, AccessLogForma...
+llm/qbm-http.llm.api.md	access_log.h:40-40	921c4206c479	struct AccessLogRecord {
+llm/qbm-http.llm.api.md	access_log.h:58-58	563eb141bc35	using AccessLogFormatter = std::function<void(AccessLogRecord const &...
+llm/qbm-http.llm.api.md	access_log.h:68-68	fd6c78c20836	void common(AccessLogRecord const &record, std::string &line);
+llm/qbm-http.llm.api.md	access_log.h:77-77	266a11a00d07	void json(AccessLogRecord const &record, std::string &line);
+llm/qbm-http.llm.api.md	access_log.h:91-91	bc4c1d6ee7e0	class AccessLog final : public IRequestObserver<SessionType> {
 llm/qbm-http.llm.api.md	body.cpp:769-791	0a49f9fa4b9b	template <>
 llm/qbm-http.llm.api.md	body.h:253-253	cc499af9d486	static std::unique_ptr<qb::compression::compress_provider> get_compre...
 llm/qbm-http.llm.api.md	body.h:272-272	ee0ec258f912	std::size_t compress(std::string const &encoding);
@@ -113,6 +119,10 @@ llm/qbm-http.llm.api.md	message_base.h:282-282	7b741bce3663	[[nodiscard]] const 
 llm/qbm-http.llm.api.md	message_base.h:286-286	f6f25d6828fb	has_trailers() const noexcept {
 llm/qbm-http.llm.api.md	message_base.h:302-302	6ca18d26bd18	void store_received_trailer(internal::MessageBase &message, std::stri...
 llm/qbm-http.llm.api.md	message_base.h:323-323	232b2c4cc0ba	struct MessageHead {
+llm/qbm-http.llm.api.md	metrics.h:125-125	cfe1c5e35968	class RequestMetrics final : public IRequestObserver<SessionType> {
+llm/qbm-http.llm.api.md	metrics.h:173-173	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
+llm/qbm-http.llm.api.md	metrics.h:183-183	f32148adbd80	void add_connections(qb::metrics::snapshot &snap, std::string_view pr...
+llm/qbm-http.llm.api.md	metrics.h:46-46	53a05190f5a2	struct RequestMetricsOptions {
 llm/qbm-http.llm.api.md	middleware.h:183-183	39b0b601e6f2	class FunctionalMiddleware : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	middleware.h:75-75	9d3f7e3cfdb1	class MiddlewareTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	middleware/auth.h:44-44	96bf24b031fa	class AuthMiddleware final : public IMiddleware<SessionType> {
@@ -355,7 +365,9 @@ llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:93-115	13c1e3c6b3c8	if (callback) 
 llm/qbm-http.llm.md	src/qbm/http/coro.h:182-218	70a40f61a616	~http_awaiter() {
 llm/qbm-http.llm.md	src/qbm/http/coro.h:232-259	898def4c2bda	using awaiter = http_awaiter<T, std::function<void(std::function<void...
 llm/qbm-http.llm.md	src/qbm/http/coro.h:93-112	fdf69ed19bdc	explicit
+llm/qbm-http.llm.md	src/qbm/http/middleware/access_log.h:161-161	0b9d49616e2d	access_log(typename AccessLog<SessionType>::Sink sink, AccessLogForma...
 llm/qbm-http.llm.md	src/qbm/http/middleware/conditional.h:87-111	4a2fae499b3f	process(ContextPtr ctx) override {
+llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:173-173	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
 llm/qbm-http.llm.md	src/qbm/http/routing/async_task.h:92-115	4c8620673d9e	struct RouteNameArena {
 llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1349-1381	fb4cefc22f8a	cancel(const std::string &reason = "Cancelled by application") noexce...
 llm/qbm-http.llm.md	src/qbm/http/routing/context.h:230-256	e4efcd50c976	execute_hook_internal(HookPoint point) {

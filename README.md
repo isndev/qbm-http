@@ -264,7 +264,7 @@ These gates are real `#ifdef` boundaries in the headers, so feature availability
 
 ### Feature and build matrix
 
-<!-- src: qbm/http/CMakeLists.txt:55-61, :79-111, :181-183, qbm/http/src/qbm/http/http.h:43-53 -->
+<!-- src: qbm/http/CMakeLists.txt:55-61, :79-111, :183-185, qbm/http/src/qbm/http/http.h:43-53 -->
 
 | Capability | Header / namespace | Compile gate | Required dependency |
 |---|---|---|---|

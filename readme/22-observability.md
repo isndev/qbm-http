@@ -13,6 +13,8 @@ What a server says about the requests it answers, and how it says it without pay
 | Request id | `RequestIdMiddleware`: a chain middleware that gives each request an id, in the context (`request_id_slot`) and the response header | `router.use(...)`, first ([request id](./08-standard-middleware.md#request-id)) |
 | Route pattern | `ctx->route_pattern()`: the pattern of the route that matched (`/users/:id`), never the raw path | nothing: the router sets it |
 | Router observer | `IRequestObserver<S>`: told when each request is received and when its response is decided | `router.add_observer(...)` |
+| Access log | `AccessLog<S>`: one line per request, Apache common or combined, or JSON | `router.add_observer(qb::http::access_log<S>(sink))` |
+| Request metrics | `RequestMetrics<S>`: `qb_http_*` counts and durations by route pattern | `router.add_observer(...)`, published through a `qb::metrics::Registry` |
 
 A chain middleware runs inside the chain of the route that matched: it sees a request only when a chain runs, and to act after the response it registers a lifecycle hook per request. An observer is the router's: it sees every request the router creates a context for, once at each end, whatever chain ran or did not, and costs nothing per request beyond what it does itself.
 
@@ -62,4 +64,56 @@ A request a session answers without routing it reaches no observer: a request ov
 
 ### What an unobserved router pays
 
-Nothing it did not pay before but two tests of a null pointer per request, one when the router creates the context and one when the context is finalized, and the 16-byte store of the route pattern. The context grows by 40 bytes inside the allocation it already makes. A router with observers hands each context its observer list (one reference count), reads the monotonic clock when the request is received and when it ends, and makes one virtual call per observer at each end; nothing is allocated per request. Lifecycle hooks, by comparison, are copied into every context (a `std::function` each, and the hooks vector), and a duration measured with them needs its start time stored in the context's custom data.
+A test of a null pointer when the router creates the context and one when the context is finalized, the route pattern carried from the matched node to the context, and the new members of the context -- 40 bytes inside the allocation it already makes -- initialised and destroyed. Measured with callgrind on g++-14 (release), routing one request through a router of 19 routes costs 22 to 25 more instructions than before for a match (of 5 500 to 8 000: +0.3 to +0.4 %) and 6 more for a 404. A router with observers hands each context its observer list (one reference count), reads the monotonic clock when the request is received and when it ends, and makes one virtual call per observer at each end; nothing is allocated per request. Lifecycle hooks, by comparison, are copied into every context (a `std::function` each, and the hooks vector), and a duration measured with them needs its start time stored in the context's custom data.
+
+## The access log
+
+`AccessLog<S>` is an observer that writes one line per request to a sink -- a callable taking a `std::string_view`, without the line feed -- in the format a formatter gives it. Three formats ship (`qb::http::access_log_format`):
+
+| Format | Line |
+|---|---|
+| `common` | Apache's Common Log Format: `127.0.0.1 - - [10/Oct/2000:13:55:36 +0000] "GET /a?b=1 HTTP/1.1" 200 2326` |
+| `combined` (the default) | the common line, then `"<Referer>" "<User-Agent>"` (`-` when absent) |
+| `json` | one object per line: `time` (RFC 3339, UTC, milliseconds), `remote`, `method`, `target`, `protocol`, `status`, `bytes`, `duration_seconds`, `referer`, `user_agent`, `request_id`, `route` (`null` when no route matched), `outcome` |
+
+```cpp
+#include <qbm/http/middleware/access_log.h>
+#include <qbm/http/middleware/request_id.h>
+
+router().use(qb::http::request_id_middleware<qb::http::DefaultSession>());
+router().add_observer(qb::http::access_log<qb::http::DefaultSession>(
+    [](std::string_view line) { qb::io::cout() << line << '\n'; },
+    qb::http::access_log_format::json));
+```
+<!-- src: qbm/http/src/qbm/http/middleware/access_log.h:91 (AccessLog), qbm/http/src/qbm/http/middleware/access_log.h:161 (access_log) -->
+
+The line is written when the request's response is decided, with what that response really carries: its status, the size of its body, after the `PRE_RESPONSE_SEND` hooks (compression included). A request the router answered without a chain -- a 404, the early 400 -- is logged like any other; a request whose client left is logged with `outcome` `session_gone` in JSON. The time is when the router received the request (UTC); `%b` is `-` for an empty body. The common and combined lines are Apache's byte for byte -- tools parse them -- so they carry no request id; the JSON line does, and a formatter of your own receives every field (`AccessLogRecord`). The quoted fields of the Apache formats escape `"`, `\` and every non-printable byte (`\"`, `\\`, `\xhh`); JSON escapes `"`, `\` and control characters, and copies other bytes as they are. The client's address is its socket's peer (`ip()`, a system call a line), empty once the session is gone. The line is formatted into a buffer the instance reuses; an exception from the formatter or the sink is contained and logged.
+
+## Request metrics
+
+`RequestMetrics<S>` is an observer that counts the requests of its router in the `qb::metrics` model (`<qb/core/metrics.h>`):
+
+| Family | Type | Labels |
+|---|---|---|
+| `qb_http_requests_total` | counter | `method`, `route`, `status` |
+| `qb_http_request_duration_seconds` | histogram (`_bucket`, `_sum`, `_count`) | `method`, `route` |
+| `qb_http_requests_in_flight` | gauge | -- |
+| `qb_http_connections` (from `add_connections`) | gauge | `protocol` |
+
+`route` is the route pattern, `unmatched` for a request no route matched. The duration is `RequestEnd::duration` -- from the router receiving the request to the response handed to the session, transmission excluded -- in buckets of `qb::metrics::default_duration_buckets` (5 ms to 10 s) unless `RequestMetricsOptions::with_buckets` gives others. The counts are plain integers of the router's thread: a series is allocated the first time it is seen, and nothing after.
+
+```cpp
+#include <qb/core/metrics_registry.h>
+#include <qbm/http/middleware/metrics.h>
+
+// in the server actor's onInit(), on a core that has a qb::metrics::Registry:
+_metrics = qb::http::request_metrics<qb::http::DefaultSession>();
+router().add_observer(_metrics);
+_source = getService<qb::metrics::Registry>()->add_source([this](qb::metrics::snapshot &s) {
+    _metrics->collect(s);
+    qb::http::add_connections(s, "http/1.1", session_count());
+});
+```
+<!-- src: qbm/http/src/qbm/http/middleware/metrics.h:125 (RequestMetrics), qbm/http/src/qbm/http/middleware/metrics.h:183 (add_connections) -->
+
+Publishing through the core's registry (`add_source`) is what lets a scrape read the counts on their own core. One `RequestMetrics` per router; several servers on several cores each publish theirs, and a scrape sums the series they share. The ticket that asked for them called them `MetricsMiddleware` and `AccessLogMiddleware`: they are observers, not chain middleware, and are named for what they are.

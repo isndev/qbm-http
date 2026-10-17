@@ -356,7 +356,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<qbm/http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
   <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:597-603 -->
 - **The module is a compiled library, not header-only.** `src/qbm/http/2/http2.cpp` and `src/qbm/http/2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<qbm/http/http.h>`; do not `find_package` the headers alone.
-  <!-- src: qbm/http/CMakeLists.txt:79-87,114-166 -->
+  <!-- src: qbm/http/CMakeLists.txt:79-87,114-168 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).
   <!-- src: qbm/http/src/qbm/http/2/http2.h:259-267 -->
 - **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.

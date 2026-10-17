@@ -364,6 +364,25 @@ Members `std::string header_name = "X-Request-ID"; bool trust_incoming = false;`
 Factory (`request_id.h:171`): `request_id_middleware<S>(RequestIdOptions = {}, name = "RequestIdMiddleware")`; tag `qb::http::middleware::tags::request_id`.
 Usage: `router.use(qb::http::request_id_middleware<S>());`
 
+## Access log — `src/qbm/http/middleware/access_log.h` (a router observer, QB-90)
+### `qb::http::AccessLogRecord` — `access_log.h:40`
+`std::string_view remote_address, method, target, referer, user_agent, request_id, route; qb::wall_time received; int major_version, minor_version, status; std::uint64_t bytes; qb::duration duration; RequestOutcome outcome;` — views valid during the formatter call; `remote_address` empty when unknown, `route` empty for no match, `request_id` empty without `RequestIdMiddleware`.
+### Formats — `using AccessLogFormatter = std::function<void(AccessLogRecord const&, std::string& line)>;` (`access_log.h:58`)
+`qb::http::access_log_format::common` (`access_log.h:68`) — Apache CLF `%h %l %u %t "%r" %>s %b`, UTC, `-` for an empty body, `"`/`\`/non-printable escaped `\"`/`\\`/`\xhh`; `combined` — common + `"Referer" "User-Agent"` (`-` when absent); `json` (`access_log.h:77`) — one object: `time` (RFC 3339 UTC ms), `remote`, `method`, `target`, `protocol`, `status`, `bytes`, `duration_seconds`, `referer`, `user_agent`, `request_id`, `route` (`null` when none), `outcome` (`responded`/`session_gone`/`suppressed`). Each appends one line without a line feed.
+### `qb::http::AccessLog<S>` — `access_log.h:91`
+`using Sink = std::function<void(std::string_view)>; explicit AccessLog(Sink, AccessLogFormatter = access_log_format::combined);` Throws `std::invalid_argument` on an empty sink or formatter. An `IRequestObserver<S>`: writes one line per routed request when its response is decided (status, body size and headers as sent); reuses its line buffer; a throwing formatter/sink is contained and logged. The remote address costs a `getpeername` (`ip()`) per line.
+Factory (`access_log.h:161`): `access_log<S>(sink, formatter = access_log_format::combined)`.
+Usage: `router.add_observer(qb::http::access_log<S>([](std::string_view l){ qb::io::cout() << l << '\n'; }, qb::http::access_log_format::json));`
+
+## Request metrics — `src/qbm/http/middleware/metrics.h` (a router observer, QB-90/QB-154)
+### `qb::http::RequestMetricsOptions` — `metrics.h:46`
+`std::vector<double> buckets` (seconds; `qb::metrics::default_duration_buckets` by default); fluent `with_buckets(std::vector<double>)`.
+### `qb::http::RequestMetrics<S>` — `metrics.h:125`
+`explicit RequestMetrics(RequestMetricsOptions = {});` throws `std::invalid_argument` on empty, non-finite or non-ascending buckets. An `IRequestObserver<S>`: counts each request under its route PATTERN (`unmatched` for none), method and status; observes `RequestEnd::duration`. `void collect(qb::metrics::snapshot&) const` — `qb_http_requests_total{method,route,status}` (counter), `qb_http_request_duration_seconds{method,route}` (histogram with `_sum`), `qb_http_requests_in_flight` (gauge). `std::uint64_t count(method, std::string_view route, int status) const noexcept` (`route` empty = unmatched); `std::uint64_t in_flight() const noexcept`. Plain integers of the router's thread; one instance per router; a series allocated on first sighting only.
+Factory (`metrics.h:173`): `request_metrics<S>(RequestMetricsOptions = {})`. Publish it as a source of the core's `qb::metrics::Registry` (qb: `Registry::add_source`) whose callable calls `collect`.
+### `qb::http::add_connections` — `metrics.h:183`
+`void add_connections(qb::metrics::snapshot&, std::string_view protocol, std::size_t open);` — `qb_http_connections{protocol}` (gauge).
+
 ## Error handling — `src/qbm/http/middleware/error_handling.h`
 ### `qb::http::ErrorHandlingMiddleware<S>` — `error_handling.h:54`
 `using ErrorHandler=std::function<void(ContextPtr,const std::string&)>; using StatusHandler=std::function<void(ContextPtr)>; explicit ErrorHandlingMiddleware(std::string name="ErrorHandlingMiddleware") noexcept;` Fluent (return `ErrorHandlingMiddleware&`): `on_status(qb::http::status, StatusHandler); on_status_range(min_status, max_status, StatusHandler); on_any_error(ErrorHandler);` Centralises error-to-response translation. Put it in the router's error task chain: `process()` always completes the context, so mounting it as ordinary global middleware would terminate every normal request before its route handler.
