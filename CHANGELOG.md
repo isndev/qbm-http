@@ -798,7 +798,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   connection serves the next request; without the fix it is gone and the follow-up answers 503).
 - **The HTTP/2 client's automatic reconnection was immediate and unbounded, and started from
   inside the handler that observed the failure (Huly QB-103).** `attempt_reconnection()` called
-  `connect()` on the spot -- the `client.cpp:703` comment said "you might want exponential
+  `connect()` on the spot -- the [`2/client.cpp` L703](https://github.com/isndev/qbm-http/blob/438e977f167e057a757101bd4de504d407dd23de/src/qbm/http/2/client.cpp#L703) comment said "you might want exponential
   backoff" -- so a client with work pending against a server in incident reconnected as fast as
   the failure came back, for as long as its callbacks re-queued. Every attempt now fires from the
   client's own one-shot timer (the connect and request deadlines' mechanism), on the next pass at
