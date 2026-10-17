@@ -148,8 +148,19 @@ BM_Http3_MakeResponseHeaders(benchmark::State &state) {
 }
 
 // ===========================================================================
-// make_trailers — announced-trailer derivation + screen
+// plan_trailers + make_trailer_block — the trailer section a response sends:
+// announced-trailer derivation, screen, then its field block (the server's own
+// two steps since QB-1073; this cell measured make_trailers before)
 // ===========================================================================
+
+std::optional<h3detail::header_block>
+trailer_block(qb::http::Response const &res) {
+    const auto plan = h3detail::plan_trailers(res);
+    if (!plan) {
+        return std::nullopt;
+    }
+    return h3detail::make_trailer_block(*plan);
+}
 
 // Seed: MakeTrailersHonorsAnnouncedTrailers (announced + present valid).
 void
@@ -159,9 +170,9 @@ BM_Http3_MakeTrailers(benchmark::State &state) {
         res.status() = qb::http::status::OK;
         res.set_header("trailer", "x-checksum");
         res.set_header("x-checksum", "abc123");
-        auto probe = h3detail::make_trailers(res);
+        auto probe = trailer_block(res);
         if (!probe.has_value() || probe->nva.empty()) {
-            state.SkipWithError("make_trailers failed");
+            state.SkipWithError("trailer block failed");
             return;
         }
     }
@@ -174,7 +185,7 @@ BM_Http3_MakeTrailers(benchmark::State &state) {
         res.set_header("x-checksum", "abc123");
         state.ResumeTiming();
 
-        auto block = h3detail::make_trailers(res);
+        auto block = trailer_block(res);
         benchmark::DoNotOptimize(block);
         benchmark::ClobberMemory();
     }
