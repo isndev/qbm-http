@@ -3689,7 +3689,14 @@ TEST_F(Http3LoopbackTest, GracefulShutdownSendsTheNoticeThenTheFinalGoawayARound
     ASSERT_TRUE(peer.goaway_ids.empty());
 
     server->graceful_shutdown();
-    ASSERT_TRUE(pump([&] { return peer.closed; }));
+    // Pumped without pump()'s idle sleep: its 1 ms nap after a pass that invokes nothing is the server's minimal
+    // wait, so a pass that ran before the notice's datagram was readable let the final GOAWAY leave during the
+    // nap, and the peer then read both in consecutive passes -- the spacing measured was the harness's.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!peer.closed && std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    ASSERT_TRUE(peer.closed) << "the connection did not close within 5 s of graceful_shutdown()";
     ASSERT_EQ(peer.goaway_ids.size(), 2u);
     EXPECT_EQ(peer.goaway_ids[0], (std::uint64_t{1} << 62) - 4) << "the notice names the largest stream id";
     EXPECT_EQ(peer.goaway_ids[1], 0u) << "the final GOAWAY: no request was read";
