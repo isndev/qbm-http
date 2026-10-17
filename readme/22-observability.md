@@ -74,7 +74,7 @@ A test of a null pointer when the router creates the context and one when the co
 |---|---|
 | `common` | Apache's Common Log Format: `127.0.0.1 - - [10/Oct/2000:13:55:36 +0000] "GET /a?b=1 HTTP/1.1" 200 2326` |
 | `combined` (the default) | the common line, then `"<Referer>" "<User-Agent>"` (`-` when absent) |
-| `json` | one object per line: `time` (RFC 3339, UTC, milliseconds), `remote`, `method`, `target`, `protocol`, `status`, `bytes`, `duration_seconds`, `referer`, `user_agent`, `request_id`, `route` (`null` when no route matched), `outcome` |
+| `json` | one object per line: `time` (RFC 3339, UTC, milliseconds), `remote`, `method`, `target`, `protocol`, `status`, `bytes`, `duration_seconds` (rounded to the microsecond), `referer`, `user_agent`, `request_id`, `route` (`null` when no route matched), `outcome` |
 
 ```cpp
 #include <qbm/http/middleware/access_log.h>
@@ -85,9 +85,11 @@ router().add_observer(qb::http::access_log<qb::http::DefaultSession>(
     [](std::string_view line) { qb::io::cout() << line << '\n'; },
     qb::http::access_log_format::json));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/access_log.h:91 (AccessLog), qbm/http/src/qbm/http/middleware/access_log.h:161 (access_log) -->
+<!-- src: qbm/http/src/qbm/http/middleware/access_log.h:91 (AccessLog), qbm/http/src/qbm/http/middleware/access_log.h:160 (access_log) -->
 
 The line is written when the request's response is decided, with what that response really carries: its status, the size of its body, after the `PRE_RESPONSE_SEND` hooks (compression included). A request the router answered without a chain -- a 404, the early 400 -- is logged like any other; a request whose client left is logged with `outcome` `session_gone` in JSON. The time is when the router received the request (UTC); `%b` is `-` for an empty body. The common and combined lines are Apache's byte for byte -- tools parse them -- so they carry no request id; the JSON line does, and a formatter of your own receives every field (`AccessLogRecord`). The quoted fields of the Apache formats escape `"`, `\` and every non-printable byte (`\"`, `\\`, `\xhh`); JSON escapes `"`, `\` and control characters, and copies other bytes as they are. The client's address is its socket's peer (`ip()`, a system call a line), empty once the session is gone. The line is formatted into a buffer the instance reuses; an exception from the formatter or the sink is contained and logged.
+
+What a line costs, measured with callgrind on g++-14 (release) per request routed through a router of 19 routes, for a request with a query string, a 101-byte `User-Agent`, a `Referer` and a request id (16 150 instructions with no observer): `common` about +1 520 instructions, `combined` +2 040, `json` +2 440; for a request with none of those, +1 270, +1 370 and +1 740. That is the observer's two clock reads, the record -- three lookups: `Referer`, `User-Agent`, the request id -- and the line itself: it is built in a stack buffer and appended once to the reused one, the quoted fields are scanned sixteen bytes at a time (eight where SSE2 is not the baseline) and copied whole between the bytes they escape, and the formatted second is kept per thread and reformatted only when the second changes. Not counted, because it is the session's: the client's address, read from the socket per line (`ip()`: a `getpeername` and the address formatted into a new string).
 
 ## Request metrics
 
@@ -100,7 +102,7 @@ The line is written when the request's response is decided, with what that respo
 | `qb_http_requests_in_flight` | gauge | -- |
 | `qb_http_connections` (from `add_connections`) | gauge | `protocol` |
 
-`route` is the route pattern, `unmatched` for a request no route matched. The duration is `RequestEnd::duration` -- from the router receiving the request to the response handed to the session, transmission excluded -- in buckets of `qb::metrics::default_duration_buckets` (5 ms to 10 s) unless `RequestMetricsOptions::with_buckets` gives others. The counts are plain integers of the router's thread: a series is allocated the first time it is seen, and nothing after.
+`route` is the route pattern, `unmatched` for a request no route matched. The duration is `RequestEnd::duration` -- from the router receiving the request to the response handed to the session, transmission excluded -- in buckets of `qb::metrics::default_duration_buckets` (5 ms to 10 s) unless `RequestMetricsOptions::with_buckets` gives others. The counts are plain integers of the router's thread: a series is allocated the first time it is seen, and nothing after. Measured the same way, `RequestMetrics` costs about +530 instructions a request on the request above (+410 on a bare one): the observer's two clock reads, then the route's series found by its pattern (a hash of the pattern: about a hundred instructions), its count for the method and status, and its bucket.
 
 ```cpp
 #include <qb/core/metrics_registry.h>

@@ -70,9 +70,9 @@ void common(AccessLogRecord const &record, std::string &line);
 void combined(AccessLogRecord const &record, std::string &line);
 /**
  * @brief One JSON object per line: `time` (RFC 3339, UTC, milliseconds), `remote`, `method`, `target`,
- *        `protocol`, `status`, `bytes`, `duration_seconds`, `referer`, `user_agent`, `request_id`, `route`
- *        (`null` when no route matched) and `outcome` (`responded`, `session_gone`, `suppressed`). Strings are
- *        JSON-escaped (control characters as `\u00XX`); other bytes are copied as they are.
+ *        `protocol`, `status`, `bytes`, `duration_seconds` (rounded to the microsecond), `referer`, `user_agent`,
+ *        `request_id`, `route` (`null` when no route matched), `outcome` (`responded`, `session_gone`,
+ *        `suppressed`). Strings are JSON-escaped (control characters as `\u00XX`); other bytes are copied as is.
  */
 void json(AccessLogRecord const &record, std::string &line);
 } // namespace access_log_format
@@ -117,11 +117,10 @@ public:
                 if (auto const session = ctx.session())
                     remote = std::string(session->ip());
             }
-            const std::string method = std::to_string(request.method());
-            AccessLogRecord   record;
+            AccessLogRecord record;
             record.remote_address = remote;
             record.received       = qb::wall_now() - std::chrono::duration_cast<qb::wall_time::duration>(end.duration);
-            record.method         = method;
+            record.method         = std::string_view(request.method());
             record.target         = request.uri().source();
             record.major_version  = request.major_version;
             record.minor_version  = request.minor_version;

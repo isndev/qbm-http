@@ -130,7 +130,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qb::metrics::default_duration_buckets` unless `with_buckets`) and `qb_http_requests_in_flight`, labelled by route
   PATTERN (`unmatched` for none), never by raw path; plain integers of the router's thread, a series allocated on its
   first sighting; `collect(snapshot&)` describes them for a `qb::metrics::Registry` source. `add_connections(snapshot,
-  protocol, open)` describes `qb_http_connections{protocol}`. Both listed in `middleware/all.h`.
+  protocol, open)` describes `qb_http_connections{protocol}`. Both listed in `middleware/all.h`. Measured with
+  callgrind (g++-14 release, a router of 19 routes, a request with a query, a 101-byte `User-Agent`, a `Referer` and a
+  request id: 16 150 instructions with no observer): `common` about +1 520 instructions a request, `combined` +2 040,
+  `json` +2 440, `RequestMetrics` +530. The line is built in a stack buffer, its quoted fields are scanned sixteen
+  bytes at a time and copied whole between escapes, and its time is formatted once a second per thread; the JSON
+  `duration_seconds` is rounded to the microsecond.
 
 - **The `/metrics` endpoint: `metrics_handler<S>(actor, options)` and `metrics_response<S>(ctx, snapshot)` (Huly
   QB-154).** `<qbm/http/middleware/metrics.h>`: a coroutine route handler that scrapes every core's
