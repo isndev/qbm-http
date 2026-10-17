@@ -1453,21 +1453,11 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
     pump([&] { return done.load(); });
 
     ASSERT_TRUE(done.load());
-    // HTTP/3 enforces the server's max-body limit at the QUIC/nghttp3 transport
-    // layer: recv_data_cb (3/protocol/connection.h) detects the overflow
-    // while the body is still streaming in — before the request reaches the
-    // router — and the only RFC 9114-conformant action there is to RESET the
-    // request stream (NGHTTP3_H3_REQUEST_CANCELLED). There is no buffered request
-    // to answer with a synthesized 413 (unlike HTTP/1.1, which buffers the whole
-    // body and can return PAYLOAD_TOO_LARGE). The client observes the peer stream
-    // reset as a stream-closed-before-completion failure and surfaces its default
-    // BAD_GATEWAY (502) — see Client::on_http3_stream_closed -> fail_request
-    // (3/client.cpp, default status BAD_GATEWAY). So the pinned contract
-    // for an over-limit body in HTTP/3 is a client-side 502 via stream reset, NOT
-    // a 413 response. Until 3.2 the server ALSO closed the connection, and this
-    // assertion read 503 whenever the CONNECTION_CLOSE overtook the RESET_STREAM
-    // (see BodyOverLimitRefusesTheStreamNotTheConnection).
-    EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+    // The request declares 64 bytes against a cap of 8: the server answers 413 Content Too Large on the
+    // stream as soon as the header section is read, then STOP_SENDING(H3_NO_ERROR) asks the client to stop
+    // sending the rest (RFC 9114 section 4.1.1) -- the answer HTTP/1.1 and HTTP/2 give (Huly QB-168).
+    // Until 3.3 the stream was reset (H3_REQUEST_CANCELLED) and the client surfaced a 502.
+    EXPECT_EQ(response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
     EXPECT_EQ(client->get_active_request_count(), 0u);
     EXPECT_TRUE(server->is_open());
 
@@ -1487,8 +1477,9 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
 // What the limit refuses is a STREAM. The connection carries the client's other exchanges, and an
 // oversized upload used to take all of them down: the callback that saw the overflow failed, which
 // made the HTTP/3 engine's read fail, and the read's answer to that is CONNECTION_CLOSE. Here the
-// refused request is settled (502, a stream reset), and the SAME connection -- never reconnected,
-// its peak of one connection on the server proves it -- serves the next request.
+// refused request is settled (413 on its stream, Huly QB-168; a 502 stream reset until 3.3), and the
+// SAME connection -- never reconnected, its peak of one connection on the server proves it -- serves
+// the next request.
 TEST_F(Http3LoopbackTest, BodyOverLimitRefusesTheStreamNotTheConnection) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
@@ -1519,7 +1510,7 @@ TEST_F(Http3LoopbackTest, BodyOverLimitRefusesTheStreamNotTheConnection) {
         return response;
     };
 
-    EXPECT_EQ(post(64).status(), qb::http::status::BAD_GATEWAY);
+    EXPECT_EQ(post(64).status(), qb::http::status::PAYLOAD_TOO_LARGE);
 
     // Let a CONNECTION_CLOSE arrive if one was sent: it is what this test exists to refuse.
     const auto settle = std::chrono::steady_clock::now() + 150ms;

@@ -3128,7 +3128,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (server.h:1172-1177).
+// with INTERNAL_ERROR (server.h:1176-1181).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3156,7 +3156,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (server.h:1154-1159).
+// (server.h:1158-1163).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3176,7 +3176,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (server.h:1128-1131).
+// (server.h:1132-1135).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3196,7 +3196,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (server.h:1122-1127).
+// A non-numeric content-length response header is rejected (server.h:1126-1131).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3219,7 +3219,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:920-925).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:924-929).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3238,7 +3238,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (server.h:927-945).
+// on(WindowUpdateFrame) for stream 0 (server.h:931-949).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3471,7 +3471,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; server.h:1048-1058 else arm).
+// (no stream context to store into; server.h:1052-1062 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3490,7 +3490,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:956-968);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:960-972);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -3737,4 +3737,111 @@ TEST(HTTP2ServerProtocol, NegativeWindowBlocksSendsThenWindowUpdateResumesThem) 
     EXPECT_EQ(sum_data_bytes(io.output, 1), 600u);
     EXPECT_EQ(data_payload_bytes(io.output, 1), body.substr(1000));
     EXPECT_TRUE(data_end_stream_seen(io.output, 1));
+}
+
+// ===========================================================================
+// A request over the server's body cap is ANSWERED on its stream (Huly QB-168): 413 with END_STREAM,
+// then RST_STREAM(NO_ERROR) -- a complete response before the request is complete, which asks the client
+// to stop sending without an error (RFC 9113 §8.1). It used to be reset with ENHANCE_YOUR_CALM against
+// the HTTP/1.1 constant. The cap is the server's `max_body_size()`, read through the session's hook.
+// ===========================================================================
+
+namespace {
+
+/// The session's body-cap hook, set by the test.
+struct CappedHttp2FakeIO : Http2FakeIO {
+    std::size_t cap = qb::http::protocol_limits::MAX_BODY_SIZE;
+
+    [[nodiscard]] std::size_t
+    http_max_body_size() const noexcept {
+        return cap;
+    }
+};
+using CappedServerProtocol = qb::protocol::http2::ServerHttp2Protocol<CappedHttp2FakeIO>;
+
+void
+open_capped_post(CappedServerProtocol &protocol, CappedHttp2FakeIO &io, uint32_t stream_id, std::optional<std::size_t> content_length) {
+    std::vector<qb::protocol::hpack::HeaderField> headers{
+        {":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}
+    };
+    if (content_length)
+        headers.push_back({"content-length", std::to_string(*content_length)});
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, stream_id, encode_hpack_headers(headers));
+    drive(protocol, io);
+}
+
+/// The stream's one answer must be a 413 header block that ends it, followed by RST_STREAM(NO_ERROR).
+void
+expect_refused_413(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    const auto blocks = emitted_header_blocks(output, stream_id);
+    ASSERT_EQ(blocks.size(), 1u) << "the refused request is answered with one header block";
+    EXPECT_EQ(blocks.front().value(":status"), "413");
+    EXPECT_NE(blocks.front().flags & qb::protocol::http2::FLAG_END_STREAM, 0) << "the 413 is the whole response";
+    EXPECT_EQ(sum_data_bytes(output, stream_id), 0u);
+    const auto rst = last_rst_stream_error(output, stream_id);
+    ASSERT_TRUE(rst.has_value()) << "the client is asked to stop sending";
+    EXPECT_EQ(*rst, ErrorCode::NO_ERROR);
+}
+
+} // namespace
+
+TEST(HTTP2ServerProtocol, ABodyOverTheServerCapIsAnswered413ThenNoErrorReset) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.cap = 8;
+    do_handshake(protocol, io);
+
+    open_capped_post(protocol, io, 1, std::nullopt);
+    push_frame(io, FrameType::DATA, 0, 1, {'0', '1', '2', '3', '4', '5', '6', '7'}); // at the cap: accepted
+    drive(protocol, io);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "8 bytes of 8: not yet";
+    push_frame(io, FrameType::DATA, 0, 1, {'8'}); // the ninth byte
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok()) << "a stream is refused, not the connection";
+    EXPECT_EQ(io.request_count, 0) << "a refused request is never routed";
+    EXPECT_EQ(io.stream_error_count, 0) << "a NO_ERROR reset is not a stream error";
+    expect_refused_413(io.output, 1);
+
+    // What the client still had in flight for the stream is dropped, and the connection serves the next one.
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, {'9'});
+    open_capped_post(protocol, io, 3, 4);
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 3, {'a', 'b', 'c', 'd'});
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.last_request_stream_id, 3u);
+}
+
+// A declared content-length over the cap is answered before a byte of the body is read.
+TEST(HTTP2ServerProtocol, AContentLengthOverTheServerCapIsAnswered413BeforeTheBody) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.cap = 8;
+    do_handshake(protocol, io);
+
+    open_capped_post(protocol, io, 1, 8); // at the cap: the stream stays open, awaiting its body
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty());
+    open_capped_post(protocol, io, 3, 9);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 0);
+    expect_refused_413(io.output, 3);
+    EXPECT_FALSE(last_rst_stream_error(io.output, 1).has_value()) << "the request at the cap is untouched";
+}
+
+// The cap is the server's: read live, so the next request is judged under a new value; 0 means none.
+TEST(HTTP2ServerProtocol, TheServerCapIsReadLiveAndZeroMeansNone) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.cap = 0;
+    do_handshake(protocol, io);
+
+    open_capped_post(protocol, io, 1, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "no cap: past the default constant is accepted";
+
+    io.cap = 4;
+    open_capped_post(protocol, io, 3, 5);
+    expect_refused_413(io.output, 3);
 }

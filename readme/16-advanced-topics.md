@@ -24,7 +24,7 @@ qb::http::Chunk last;                                // size 0 -> end of stream
 
 Because `Chunk` does not own its bytes, the referenced memory must stay valid for as long as the chunk is serialized — exactly the lifetime discipline described under [`string_view` lifetime](#string_view-and-lifetime) below.
 
-**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection (`qbm/http/src/qbm/http/1.1/protocol/base.h:56-57,463-471`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message's `trailers()`, every one of them, and, for 3.x, the ordinary header API too, as HTTP/2's and HTTP/3's trailers do (Huly QB-1073); a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
+**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection, and a body over the server's cap (`set_max_body_size`) is answered `413` (`qbm/http/src/qbm/http/1.1/protocol/base.h:57-58,472-480`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message's `trailers()`, every one of them, and, for 3.x, the ordinary header API too, as HTTP/2's and HTTP/3's trailers do (Huly QB-1073); a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
 
 **Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
 
@@ -56,24 +56,27 @@ If you need true incremental, time-spaced delivery (server-sent events, a long-l
 
 The HTTP/1.1 server session (`internal::session` in `qbm/http/src/qbm/http/1.1/http.h`) owns the persistence decision per connection.
 
-**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:456-458`). The effective decision is `request.keep_alive || session_override`. After the response is fully transmitted (`event::eos`), the session either closes — `disconnect(DisconnectedReason::ResponseTransmitted)` — or stays open for the next request:
+**Keep-alive.** Two inputs decide whether a connection survives a response: the per-message `keep_alive` flag the parser computes from the request (llhttp's `http_should_keep_alive`, factoring HTTP version and the `Connection` header), and an application-level override you set with `session::keep_alive(bool)` (`qbm/http/src/qbm/http/1.1/http.h:514-516`). The effective decision is `request.keep_alive || session_override`. A response that does not keep the connection is published with `close_after_deliver()`: the io closes once it is delivered, after its peer (qb-io's lingering close, Huly QB-1089), so a client still sending reads it before the close; the session's `on(event::disconnected)` still reports `ResponseTransmitted`. After a response that keeps it (`event::eos`), the session starts the next pipelined request:
 
 ```cpp
-// src: qbm/http/src/qbm/http/1.1/http.h:349-353
+// src: qbm/http/src/qbm/http/1.1/http.h:393-400
 if (!_active_should_keep_alive) {
-    this->disconnect(DisconnectedReason::ResponseTransmitted);
+    // The io closes after this delivery (close_after_response()); a response that did not go through it
+    // still closes here, at once, as before.
+    if (!_closing)
+        this->disconnect(DisconnectedReason::ResponseTransmitted);
     return;
 }
 start_next_request_if_possible();
 ```
 
-The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:173-179`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
+The session also normalizes the outgoing `Connection` header for you: it adds `Connection: close` when the connection will not persist, and `Connection: keep-alive` for an HTTP/1.0 response that will (`qbm/http/src/qbm/http/1.1/http.h:186-192`). A response that itself carries `Connection: close` forces the connection shut regardless of the keep-alive inputs.
 
-**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:138,262-269`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
+**Pipelining.** While a response is in flight, further requests on the same connection queue rather than interleave. The queue is bounded by `session::max_pipelined_requests(std::size_t)` (default 128). Exceeding the cap disconnects the connection with `DisconnectedReason::ByProtocolError` (`qbm/http/src/qbm/http/1.1/http.h:138,306-313`). Each queued request is routed in order once the active context finishes (`start_next_request_if_possible`), so handlers for one connection never run concurrently — they are serialized on the session's I/O thread.
 
-**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:433`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
+**Inactivity timeout.** A session arms a 60-second inactivity timeout on construction (`setTimeout(std::chrono::seconds(60))`, `qbm/http/src/qbm/http/1.1/http.h:486`) and re-arms it on each write. On expiry it disconnects with `DisconnectedReason::ByTimeout` unless your session type defines an `on(event::timeout)` handler. Tune it from your session's constructor with `this->setTimeout(...)` (a qb-io facility; see the qb [`readme/`](https://github.com/isndev/qb/tree/main/readme/)).
 
-**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length` — the body's size becomes it unless the response already declares `Content-Length` or `Transfer-Encoding` — so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:163-171`). It serializes the reply as `qb::http::MessageHead{response}`: the header section only, so a chunked `HEAD` reply carries `Transfer-Encoding: chunked` and no last-chunk (`:195-198`).
+**HEAD requests.** The session strips the response body for a `HEAD` request while preserving `Content-Length` — the body's size becomes it unless the response already declares `Content-Length` or `Transfer-Encoding` — so a `HEAD` reply reports the size the corresponding `GET` would return without sending the bytes (`qbm/http/src/qbm/http/1.1/http.h:176-184`). It serializes the reply as `qb::http::MessageHead{response}`: the header section only, so a chunked `HEAD` reply carries `Transfer-Encoding: chunked` and no last-chunk (`:208-211`).
 
 ## Protocol upgrade: HTTP to WebSocket
 
@@ -116,7 +119,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
 - **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:796-836; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:912-952; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:318-348 -->
 
 ### Never block the event loop
 

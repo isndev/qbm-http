@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -146,6 +147,14 @@ private:
     fail_with_reason(http_t *parser, const char *reason) noexcept {
         http_set_error_reason(parser, reason);
         return HPE_USER;
+    }
+
+    /// Fails the message for a size limit and records the status it answers (refusal_status()): the
+    /// server's session answers it, then closes, instead of closing on silence (Huly QB-168).
+    static int
+    refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
+        self_of(parser)->_refusal_status = status;
+        return fail_with_reason(parser, reason);
     }
 
     static bool
@@ -428,8 +437,8 @@ private:
             }
         }
         if (parser->content_length != ULLONG_MAX) {
-            if (parser->content_length > protocol_limits::MAX_BODY_SIZE) {
-                return fail_with_reason(parser, "HTTP Content-Length exceeds configured body size limit");
+            if (parser->content_length > self->_max_body_size) {
+                return refuse_with_status(parser, "HTTP Content-Length exceeds configured body size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
             }
             // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()`
             // is MOVE-ASSIGNED from `_chunked` in on_message_complete, which deallocates whatever
@@ -466,8 +475,8 @@ private:
             return fail_with_reason(parser, "HTTP chunk exceeds configured chunk size limit");
         }
         const auto next_total = self->_body_bytes_seen + length;
-        if (next_total > protocol_limits::MAX_BODY_SIZE) {
-            return fail_with_reason(parser, "HTTP body exceeds configured size limit");
+        if (next_total > self->_max_body_size) {
+            return refuse_with_status(parser, "HTTP body exceeds configured size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
         }
         auto &chunked = self->_chunked;
         std::copy_n(at, length, chunked.allocate_back(length));
@@ -577,6 +586,10 @@ private:
     std::size_t               _header_pairs_seen = 0;     ///< Number of parsed header fields in the current message
     std::size_t               _body_bytes_seen   = 0;     ///< Total parsed body bytes for the current message
     std::size_t               _url_bytes_seen    = 0;     ///< Total URL bytes seen across fragmented on_url callbacks
+    /// The body cap of the next message: set_max_body_size(), where 0 means none -- stored as the largest size, so the
+    /// two checks stay one comparison each. Configuration, kept across reset().
+    std::size_t _max_body_size  = protocol_limits::MAX_BODY_SIZE;
+    int         _refusal_status = 0; ///< The status a limit breach of the current message answers (refusal_status())
 
 public:
     /**
@@ -646,6 +659,42 @@ public:
         _url_buffer.clear();
         _last_header_token = HeaderToken::NONE;
         _url_bytes_seen    = 0;
+        _refusal_status    = 0;
+    }
+
+    /**
+     * @brief Set the body cap of the messages parsed from now on.
+     * @param value The largest body accepted, in bytes; 0 means no cap of the parser's own.
+     *
+     * A declared `Content-Length` above it fails the message at the end of its header section,
+     * before a body byte is read; a chunked body fails when the bytes it delivered pass it. Both
+     * record HTTP 413 as the refusal_status(). The default is protocol_limits::MAX_BODY_SIZE. A
+     * server sets it before each request from its own value (`set_max_body_size`, Huly QB-168);
+     * reset() keeps it.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _max_body_size = value == 0 ? std::numeric_limits<std::size_t>::max() : value;
+    }
+
+    /**
+     * @brief The body cap set_max_body_size() installed; the largest size when there is none.
+     */
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return _max_body_size;
+    }
+
+    /**
+     * @brief The HTTP status a size-limit breach of the current message answers, or 0.
+     *
+     * Set when the parse failed on a cap the peer can be told about: 413 (Content Too Large) for a
+     * body over max_body_size(). 0 for any other failure -- a malformed message is not answered.
+     * reset() clears it.
+     */
+    [[nodiscard]] int
+    refusal_status() const noexcept {
+        return _refusal_status;
     }
 
     /**
@@ -742,6 +791,31 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     /// delivers the accumulated body on disconnect.
     bool _close_delimited = false;
 
+    /// True once a request was refused for a size limit (fail_message()): the stream has lost its framing
+    /// -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
+    bool _refused = false;
+
+    /// The message failed. A request refused for a size limit the server can answer (the parser's
+    /// refusal_status(), the io's `http1_refuse_request`) is handed to the io, which answers it and ends the
+    /// connection; what the peer sends next is dropped. Anything else -- a malformed message, an io that
+    /// cannot answer -- invalidates the protocol, which closes the connection, as it always did.
+    std::size_t
+    fail_message() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http1_refuse_request(qb::http::Status{}); }) {
+            if (const int status = _http_obj.refusal_status()) {
+                _refused      = true;
+                body_offset   = 0;
+                header_parsed = 0;
+                _http_obj.reset(); // the refused request: its header section, the body bytes it held
+                this->_io.in().reset();
+                this->_io.http1_refuse_request(qb::http::Status(status));
+                return 0;
+            }
+        }
+        this->not_ok();
+        return 0;
+    }
+
 protected:
     qb::http::Parser<std::remove_const_t<Trait>> _http_obj; ///< HTTP parser
 
@@ -818,6 +892,10 @@ public:
         //     linear and keeps llhttp's incremental state, which is
         //     what it is designed for.
         //
+        if (_refused) [[unlikely]] {
+            this->_io.in().reset(); // a refused request ends the connection: nothing after it is read
+            return 0;
+        }
         if (!_http_obj.headers_completed()) {
             const auto *const buf   = this->_io.in().begin();
             const auto        total = this->_io.in().size();
@@ -825,6 +903,12 @@ public:
             // calls, but the logical position of every unread byte relative to begin() is stable).
             if (total <= header_parsed) {
                 return 0;
+            }
+            if constexpr (requires(IO_Handler &io) { io.http_max_body_size(); }) {
+                // The body cap is read when a message begins, from the server's current value: a change
+                // applies to the next request, never to one half read (Huly QB-168).
+                if (header_parsed == 0)
+                    _http_obj.set_max_body_size(this->_io.http_max_body_size());
             }
             const auto ret = _http_obj.parse(buf + header_parsed, total - header_parsed);
             if (ret == HPE_OK) {
@@ -834,8 +918,7 @@ public:
                 return 0;
             }
             if (!_http_obj.headers_completed()) {
-                this->not_ok();
-                return 0;
+                return fail_message();
             }
             // `error_pos` is an absolute pointer into the same buffer, so it stays correct
             // regardless of where this pass started.
@@ -865,10 +948,9 @@ public:
             }
             if (ret == HPE_OK) {
                 body_offset = this->_io.in().size();
-            } else {
-                this->not_ok();
+                return 0;
             }
-            return 0;
+            return fail_message();
         }
 
         if constexpr (std::remove_const_t<Trait>::type == HTTP_RESPONSE) {
@@ -879,7 +961,7 @@ public:
             // untouched). We can't frame by size, so keep buffering and let flush_eof() deliver
             // the body on disconnect. Bound the accumulation so a server cannot stream forever.
             if (http_message_needs_eof(&_http_obj)) {
-                if (this->_io.in().size() - body_offset > ::qb::http::protocol_limits::MAX_BODY_SIZE) {
+                if (this->_io.in().size() - body_offset > _http_obj.max_body_size()) {
                     // Oversize: fail the message. Clear _close_delimited so flush_eof does NOT
                     // deliver the truncated buffer as a successful response — the caller must see
                     // a failed request, not a silently cut body. (The flag may already be set from
@@ -946,6 +1028,7 @@ public:
         body_offset      = 0;
         header_parsed    = 0;
         _close_delimited = false;
+        _refused         = false;
         _http_obj.reset();
     }
 };

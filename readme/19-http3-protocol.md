@@ -148,7 +148,9 @@ public:
 
 You can also subclass the server itself to add `on(...)` hooks for QUIC `connected` / `connection_closed` events — the server `dispatch` overrides invoke `static_cast<Derived&>(*this).on(ev)` when that method exists.
 
-The server caps inbound request bodies via `set_max_body_size` (default 64 MiB); a body exceeding the cap resets the stream with `NGHTTP3_H3_REQUEST_CANCELLED` rather than buffering unbounded data.
+The server caps inbound request bodies via `set_max_body_size` (default 64 MiB, 0 = none): a request over the cap -- a declared `content-length` once its header section is read, or the DATA that passes it -- is answered `413` on its stream, then STOP_SENDING with `H3_NO_ERROR` asks the client to stop sending the rest (RFC 9114 §4.1.1) -- the answer HTTP/1.1 and HTTP/2 give (Huly QB-168; a reset with `NGHTTP3_H3_REQUEST_CANCELLED`, a client's 502, until 3.3).
+
+<!-- src: qbm/http/src/qbm/http/3/protocol/connection.h:704-714 -->
 
 ## Client
 
@@ -252,14 +254,14 @@ ctx->complete();
 The adapter builds and checks the trailer section before it submits anything: a field the one trailer list forbids (`qb::http::detail::is_forbidden_trailer_field`) refuses a field of `trailers()`, and stays in the header block when only announced -- HTTP/3 refused that message, after its headers were queued. An announced field the message does not set, or an empty body, no longer refuses it either.
 
 Incoming trailers are in the message's `trailers()`, and, for 3.x, in its headers too; a trailer section carrying a forbidden field -- `host` and `te` included, which HTTP/3 accepted there -- refuses the stream.
-<!-- src: qbm/http/src/qbm/http/3/protocol/connection.h:390-413,1059-1078,1364-1412 -->
+<!-- src: qbm/http/src/qbm/http/3/protocol/connection.h:390-413,1097-1116,1402-1450 -->
 
 ## Dual stack
 
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:2752-2762 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:2743-2753 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -298,26 +300,26 @@ server->close();               // tear down the UDP endpoint
 ```
 
 On the **client** side, a server-initiated GOAWAY sets an internal shutdown flag. Its pending-request callbacks run with `503 Service Unavailable`, and new same-origin requests are rejected with `503` while shutdown is in progress. If one of those callbacks calls `client->disconnect()` during the native HTTP/3 read, `is_connected()` becomes false at once. GOAWAY can still invoke other pending-request callbacks during that read; destruction of the protocol, QUIC close and failure of still-active requests wait until the read returns. A `connect(callback)` attempted during that interval reports failure without starting a handshake, new requests receive an immediate `503`, and the explicit close starts no automatic reconnect.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:76-85,119-171,235-240,300-311,749-757,813-851; qbm/http/tests/system/http3/http3-loopback.cpp:1930-2020 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:76-85,119-171,235-240,300-311,749-757,813-851; qbm/http/tests/system/http3/http3-loopback.cpp:1921-2011 -->
 
 An ordinary `disconnect()` also marks the client down before it invokes failure callbacks. Connect and new request attempts from those callbacks get an immediate failure until the close finishes. A callback may release the last external `shared_ptr` to the client: event dispatch keeps the object alive through the endpoint's outer handler and releases it on a later loop turn. Explicit cancellation of an active request likewise retains the client through its callback and stream reset. The pending-request drain keeps the client alive too and rechecks the live protocol and connection before each submission, including after a failed submission calls user code.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:20-36,119-171,276-287,386-467,773-787,813-851,854-872; qbm/http/tests/system/http3/http3-loopback.cpp:2022-2047,2049-2096,3324-3350 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:20-36,119-171,276-287,386-467,773-787,813-851,854-872; qbm/http/tests/system/http3/http3-loopback.cpp:2013-2038,2040-2087,3315-3341 -->
 
 If the QUIC transport closes synchronously while submitting a queued request, the client completes that request with `503` even though it has left the pending queue and has not yet entered the active registry. This notification still runs if an old request's failure callback throws during teardown; the saved exception propagates afterward. During connect success or failure, the client notifies the other callbacks before propagating a callback exception. An explicit disconnect also completes transport cleanup before propagating it. A throw reached through nghttp3's native callback path becomes a protocol callback failure.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:119-171,386-467,470-527,545-595; qbm/http/src/qbm/http/3/protocol/connection.h:702-710; qbm/http/tests/system/http3/http3-loopback.cpp:2209-2286,2287-2331,2332-2423 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:119-171,386-467,470-527,545-595; qbm/http/src/qbm/http/3/protocol/connection.h:728-736; qbm/http/tests/system/http3/http3-loopback.cpp:2200-2277,2278-2322,2323-2414 -->
 
 If starting the QUIC connection fails, the connect timer expires, or the peer closes the connection, the client closes the old transport before reporting the failure. Old requests are retired before connection callbacks run, so work those callbacks queue belongs to a new attempt. On retry, qb-io refreshes the endpoint's internally owned native backend, binds its existing I/O watcher to the new UDP socket and starts it again.
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:93-115,500-542,623-640,783-810; qb/src/qb/io/async/quic/endpoint.h:98-135,478-507 -->
 
 If you disconnect while a connection attempt is still pending, that attempt's connection callbacks receive one failure. Its timeout is tied to the attempt it was armed for; if you connect again with a longer timeout, the cancelled attempt's timer does not end the new handshake.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:101-114,119-171,470-527,623-640; qbm/http/tests/system/http3/http3-loopback.cpp:2141-2171 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:101-114,119-171,470-527,623-640; qbm/http/tests/system/http3/http3-loopback.cpp:2132-2162 -->
 
 ## Limits and guards
 
 HTTP/3 enforces the same safety posture as HTTP/1.1 and HTTP/2, plus QUIC-specific guards:
 
 - **ALPN** must negotiate `h3`; otherwise the client fails the connection and the server closes it with `0x010c`.
-- **Body limits** are configurable with `set_max_body_size`; over-cap streams reset with `NGHTTP3_H3_REQUEST_CANCELLED` instead of buffering.
+- **Body limits** are configurable with `set_max_body_size`; an over-cap request is answered `413` then STOP_SENDING(`H3_NO_ERROR`) on the server, and an over-cap response resets its stream with `NGHTTP3_H3_REQUEST_CANCELLED` on the client, instead of buffering.
 - **Header and message validation** is strict, in two tiers. What this module checks beyond nghttp3 -- more than `MAX_HEADERS_COUNT` fields, a field value over `MAX_HEADER_VALUE_LENGTH`, a request method it does not know, a `trailer` field inside the trailer section -- refuses that **stream** with `NGHTTP3_H3_MESSAGE_ERROR` (RFC 9114 §4.1.2): a stream reset the client side settles as a `502`, the router never sees the message, and the other exchanges multiplexed on the connection keep flowing. What nghttp3's own validator rejects first -- pseudo-headers out of order, missing, duplicated or unknown (a request needs `:method`/`:scheme`/`:authority`/`:path`, a response a numeric `:status`), an uppercase or otherwise invalid field name, a field name over 256 bytes (its QPACK decoder's cap, below this module's `MAX_HEADER_NAME_LENGTH`), a connection-specific field, a `content-length` that is not a number or that the body does not match, a pseudo-header among the trailers -- comes back from `nghttp3_conn_read_stream2` as a negative read, by the library's contract a **connection** error after which only `nghttp3_conn_del` is legal: the connection closes, with the H3 error code nghttp3 infers (`H3_MESSAGE_ERROR`) as the QUIC application error code.
 - **Hop-by-hop headers** are rejected in HTTP/3 header blocks.
 - **Pending-request cap** bounds the client's queued + active requests; over-cap requests fail fast with `503`.

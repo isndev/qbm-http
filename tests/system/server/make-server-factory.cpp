@@ -31,6 +31,7 @@
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
  * @ingroup Http
  */
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -46,6 +47,7 @@
 #include <gtest/gtest-spi.h>
 
 #include <qb/io/async.h>
+#include <qb/io/tcp/socket.h>
 #include <qb/io/uri.h>
 
 #include <qbm/http/http.h>
@@ -60,6 +62,18 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+/// The request body cap the servers below set with `set_max_body_size` (Huly QB-168).
+constexpr std::size_t kBodyCap = 1024;
+
+/// A POST whose body is @p size bytes.
+[[maybe_unused]] qb::http::Request
+post_of(std::string const &url, std::size_t size) {
+    qb::http::Request request{{url}};
+    request.method() = qb::http::method::POST;
+    request.body()   = std::string(size, 'b');
+    return request;
+}
 
 // ===========================================================================
 // Plaintext HTTP/1.1 factory (UN-GATED — no SSL dependency)
@@ -130,6 +144,149 @@ TEST_F(HttpMakeServerTest, PingDefaultSessionHttpServer) {
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_http_default", response.body().as<std::string>());
     EXPECT_EQ(1, g_plain_server_requests.load());
+}
+
+/// What a raw client saw while it uploaded a request body: what the server sent before the
+/// connection ended, whether it ended on EOF, the error that ended the read if one did, and the
+/// error a send failed with -- a reset of the connection while the client was still sending.
+struct RawUpload {
+    std::string received;
+    bool        closed      = false;
+    int         read_error  = 0;
+    int         write_error = 0;
+    std::size_t sent        = 0;
+};
+
+/**
+ * Writes @p head, then up to @p body_bytes of body, as an uploading client does, and collects what
+ * the server sends until the connection ends or @p budget elapses. With @p read_after_upload the
+ * client reads nothing while it still has bytes to send -- a client that answers only once its
+ * request is out -- which is the deterministic shape of a server closing while bytes it never read
+ * are still arriving: the close becomes a reset, and a reset can take the answer with it.
+ */
+RawUpload
+raw_upload(std::uint16_t port, std::string const &head, std::size_t body_bytes, bool read_after_upload,
+           std::chrono::milliseconds budget = 10s) {
+    RawUpload           out;
+    qb::io::tcp::socket sock;
+    if (sock.connect_v4("127.0.0.1", port) != 0) {
+        ADD_FAILURE() << "the raw client could not connect";
+        return out;
+    }
+    (void) sock.set_nonblocking(true);
+    const std::string chunk(64 * 1024, 'x');
+    std::string       pending    = head;
+    std::size_t       body_sent  = 0;
+    bool              write_open = true;
+    char              buffer[4096];
+    const auto        deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool progressed = false;
+        if (write_open && pending.empty() && body_sent < body_bytes) {
+            const auto n = std::min(chunk.size(), body_bytes - body_sent);
+            pending.assign(chunk.data(), n);
+            body_sent += n;
+        }
+        if (write_open && !pending.empty()) {
+            const int written = sock.write(pending.data(), pending.size());
+            if (written > 0) {
+                out.sent += static_cast<std::size_t>(written);
+                pending.erase(0, static_cast<std::size_t>(written));
+                progressed = true;
+            } else if (written < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno())) {
+                out.write_error = qb::io::socket::get_last_errno();
+                write_open      = false; // the server reset the connection: nothing more can be sent
+            }
+        }
+        const bool uploading = write_open && (!pending.empty() || body_sent < body_bytes);
+        if (!read_after_upload || !uploading) {
+            const int got = sock.read(buffer, sizeof(buffer));
+            if (got > 0) {
+                out.received.append(buffer, static_cast<std::size_t>(got));
+                progressed = true;
+            } else {
+                // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
+                const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
+                if (error == 0) {
+                    out.closed = true;
+                    break;
+                }
+                if (!qb::io::socket::not_recv_error(error)) {
+                    out.read_error = error;
+                    break;
+                }
+            }
+        }
+        if (!progressed)
+            std::this_thread::sleep_for(1ms);
+    }
+    sock.close();
+    return out;
+}
+
+/// The head of a POST whose declared body is one byte over @p cap.
+std::string
+oversized_post_head(std::size_t cap) {
+    return "POST /ping HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(cap + 1) + "\r\n\r\n";
+}
+
+// A request declaring a body over the server's cap -- here the default, MAX_BODY_SIZE -- is answered
+// 413 with `Connection: close`, and the connection ends after it. It used to close with no answer at
+// all (Huly QB-168). The client keeps uploading meanwhile: the answer must reach it anyway, whether
+// it reads while it sends or only once it has stopped sending.
+TEST_F(HttpMakeServerTest, ARequestOverTheBodyCapIsAnswered413ThenClosed) {
+    struct Shape {
+        const char *name;
+        std::size_t upload;
+        bool        read_after_upload;
+    };
+    for (const Shape shape :
+         {Shape{"client sends the head only", 0, false}, Shape{"client reads while it uploads", 4 * 1024 * 1024, false},
+          Shape{"client reads after its upload", 4 * 1024 * 1024, true}}) {
+        SCOPED_TRACE(shape.name);
+        const auto head = oversized_post_head(qb::http::protocol_limits::MAX_BODY_SIZE);
+        const auto seen = raw_upload(_port, head, shape.upload, shape.read_after_upload);
+        EXPECT_EQ(seen.received.rfind("HTTP/1.1 413 ", 0), 0u)
+            << "no 413 reached the client (read error " << seen.read_error << ", " << seen.sent << " bytes sent): [" << seen.received << "]";
+        EXPECT_NE(seen.received.find("connection: close\r\n"), std::string::npos) << seen.received;
+        EXPECT_TRUE(seen.closed) << "the connection must end after the answer, on EOF (read error " << seen.read_error << ")";
+        // The server closes after its peer (qb-io's lingering close, Huly QB-1089): an upload in progress is never
+        // reset, and one that reads only afterwards runs out, read and dropped, before the connection ends.
+        EXPECT_EQ(seen.write_error, 0) << "the client was reset while it was still sending";
+        if (shape.read_after_upload) {
+            EXPECT_EQ(seen.sent, head.size() + shape.upload) << "the upload did not run out";
+        }
+    }
+    EXPECT_EQ(0, g_plain_server_requests.load()) << "a refused request is never routed";
+}
+
+// A body exactly at the default cap is served: make-server-factory-huge-body.cpp, its own binary (~200 MiB).
+
+// The server's own cap, `set_max_body_size`, through qb's own client: a body exactly at it is served, one
+// byte over is answered 413 -- and so is an upload of 4 MiB, whose client is still sending when the answer
+// comes (Huly QB-168).
+TEST(HttpServerBodyCap, TheCapIsTheServersSetMaxBodySize) {
+    qb::io::async::init();
+    PlainServerThread server([] { return qb::http::make_server(); },
+                             [](PlainServer &srv) -> bool {
+                                 srv.router().post("/echo", [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) {
+                                     ctx->text(std::to_string(ctx->request().body().size()));
+                                 });
+                                 srv.set_max_body_size(kBodyCap);
+                                 srv.router().compile();
+                                 if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                                     return false;
+                                 srv.start();
+                                 return true;
+                             });
+    ASSERT_TRUE(server.ready());
+    const auto url = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port()) + "/echo";
+
+    const auto at_cap = qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap), 5s)).response;
+    EXPECT_EQ(at_cap.status(), qb::http::status::OK);
+    EXPECT_EQ(at_cap.body().as<std::string>(), std::to_string(kBodyCap));
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap + 1), 5s)).response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, 4 * 1024 * 1024), 5s)).response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
 }
 
 std::mutex      g_probe_mutex;
@@ -228,6 +385,10 @@ protected:
                     ctx->response().body()   = "pong_https_default";
                     ctx->complete();
                 });
+                srv.router().post("/echo_ssl", [](std::shared_ptr<qb::http::Context<qb::http::ssl::DefaultSecureSession>> ctx) {
+                    ctx->text(std::to_string(ctx->request().body().size()));
+                });
+                srv.set_max_body_size(kBodyCap);
                 srv.router().compile();
                 if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
                     return false;
@@ -259,6 +420,17 @@ TEST_F(HttpsMakeServerTest, PingDefaultSessionHttpsServer) {
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_https_default", response.body().as<std::string>());
     EXPECT_EQ(1, g_https_server_requests.load());
+}
+
+// The same cap over TLS: the 413 reaches a client still uploading 4 MiB (Huly QB-168).
+TEST_F(HttpsMakeServerTest, TheCapIsTheServersSetMaxBodySize) {
+    const auto url    = base_url() + "/echo_ssl";
+    const auto at_cap = qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap), 5s, /*verify_peer=*/false)).response;
+    EXPECT_EQ(at_cap.status(), qb::http::status::OK);
+    EXPECT_EQ(at_cap.body().as<std::string>(), std::to_string(kBodyCap));
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap + 1), 5s, false)).response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, 4 * 1024 * 1024), 5s, false)).response.status(),
+              qb::http::status::PAYLOAD_TOO_LARGE);
 }
 
 TEST_F(HttpsMakeServerTest, MixedCaseHttpsOneShotUsesTlsTransport) {
@@ -315,6 +487,16 @@ protected:
                     ctx->response().body()   = "pong_http2_default";
                     ctx->complete();
                 });
+                srv.router().post("/echo_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                    ctx->text(std::to_string(ctx->request().body().size()));
+                });
+                // The connection a request came on, by its session's id: two answers name the same one only
+                // when no new connection was made between them.
+                srv.router().get("/session_http2", [](std::shared_ptr<qb::http::Context<qb::http2::DefaultSession>> ctx) {
+                    auto session = ctx->session();
+                    ctx->text(session ? uuids::to_string(session->id()) : std::string{});
+                });
+                srv.set_max_body_size(kBodyCap);
                 // A response larger than the default per-stream send window forces
                 // the factory-built server through its flow-control / pending-DATA
                 // path over a real socket.
@@ -456,6 +638,40 @@ TEST_F(Http2MakeServerTest, FactoryServerServesHttp1FallbackOverAlpn) {
     EXPECT_EQ(qb::http::status::OK, response.status());
     EXPECT_EQ("pong_http2_default", response.body().as<std::string>());
     EXPECT_EQ(1, g_http2_server_requests.load());
+}
+
+// The HTTP/2 server's cap, `set_max_body_size`: a body at it is served, one byte over is answered 413 on its
+// stream -- then RST_STREAM(NO_ERROR) -- and the SAME connection serves the next request (Huly QB-168).
+TEST_F(Http2MakeServerTest, TheCapIsTheServersSetMaxBodySizeAndTheConnectionGoesOn) {
+    auto client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(5s);
+    const auto url        = base_url() + "/echo_http2";
+    const auto connection = [&] {
+        return qb::http::run_sync(client->push_request(qb::http::Request{{base_url() + "/session_http2"}})).body().as<std::string>();
+    };
+    const auto before = connection();
+    ASSERT_FALSE(before.empty());
+
+    const auto at_cap = qb::http::run_sync(client->push_request(post_of(url, kBodyCap)));
+    EXPECT_EQ(at_cap.status(), qb::http::status::OK);
+    EXPECT_EQ(at_cap.body().as<std::string>(), std::to_string(kBodyCap));
+    EXPECT_EQ(qb::http::run_sync(client->push_request(post_of(url, kBodyCap + 1))).status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    EXPECT_EQ(qb::http::run_sync(client->push_request(post_of(url, 256 * 1024))).status(), qb::http::status::PAYLOAD_TOO_LARGE)
+        << "a body larger than a stream's flow-control window is refused too";
+
+    EXPECT_EQ(connection(), before) << "the refusals ended streams, never the connection";
+    client->disconnect();
+}
+
+// The HTTP/1.1 requests of the server's ALPN fallback are judged under the same cap, and answered 413 with
+// `Connection: close` -- read by a client still uploading (Huly QB-168).
+TEST_F(Http2MakeServerTest, TheHttp1FallbackAnswersOverTheCapWith413) {
+    const auto url = base_url() + "/echo_http2";
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap), 5s, false)).response.status(), qb::http::status::OK);
+    EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, 4 * 1024 * 1024), 5s, false)).response.status(),
+              qb::http::status::PAYLOAD_TOO_LARGE);
 }
 
 #endif // QB_HAS_SSL

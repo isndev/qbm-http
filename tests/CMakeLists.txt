@@ -187,6 +187,12 @@ qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cp
            DEFINES QBM_TEST_FACTORY_PLAINTEXT_ONLY EXTRA_LABELS http1)
 qhttp_test(system make-server-factory-tls system/server/make-server-factory.cpp REQUIRES ssl live
            DEFINES QBM_TEST_FACTORY_TLS_ONLY EXTRA_LABELS http1 http2 ssl)
+# A request body exactly at the default cap (MAX_BODY_SIZE, 100 MiB) must be served: its message was past the
+# transport's generic message cap and was cut with no answer (Huly QB-168). ~200 MiB of server memory, so the case
+# is its own binary, labelled `huge-body` like the serialization one above (`ctest -LE huge-body` drops it) -- a
+# binary, not another hand-written re-run: its ctest name stays a target name.
+qhttp_test(system make-server-factory-huge-body system/server/make-server-factory-huge-body.cpp REQUIRES live
+           EXTRA_LABELS http1 huge-body)
 qhttp_test(system listen-start-parity system/server/listen-start-parity.cpp REQUIRES live EXTRA_LABELS http1 http2)
 qhttp_test(system acceptor-disconnect system/server/acceptor-disconnect.cpp REQUIRES live EXTRA_LABELS http1 http2)
 qhttp_test(system middleware-pipeline-system system/middleware/middleware-pipeline-system.cpp REQUIRES live EXTRA_LABELS middleware)

@@ -665,27 +665,43 @@ TEST(Http3ConnectionDirect, AnAnnouncedForbiddenTrailerFieldStaysInTheHeaderSect
 }
 
 // =============================================================================
-// INBOUND BODY CAP — recv_data_cb resets a stream whose body exceeds the limit
+// INBOUND BODY CAP -- a request over the owner's cap is ANSWERED 413 on its stream (Huly QB-168)
 // =============================================================================
 
-/**
- * @test A request body exceeding the owner's cap is reset in recv_data_cb and never delivered
- * @brief When the Owner exposes max_http3_body_size() (detected via `requires`), recv_data_cb tracks the
- *        accumulating body and, once it would exceed the limit, calls reset_http3_stream with
- *        NGHTTP3_H3_REQUEST_CANCELLED and returns 0. The connection survives; that stream is reset
- *        (the owner records the reset) and never materialized into on_http3_request. This is the body-cap
- *        arm of recv_data_cb, only compiled in when the owner advertises a cap.
- */
-TEST(Http3ConnectionDirect, ServerResetsRequestWhoseBodyExceedsCap) {
-    // A server owner that advertises a tight body cap, so the recv_data_cb `requires` arm is compiled in.
-    struct CappedServerOwner : ServerOwner {
-        std::uint64_t
-        max_http3_body_size() const noexcept {
-            return 16; // bytes
-        }
-    };
-    using CappedServerConnection = connection<CappedServerOwner>;
+namespace {
 
+// A server owner that advertises a tight body cap, so the `requires` arms are compiled in.
+struct CappedServerOwner : ServerOwner {
+    std::uint64_t
+    max_http3_body_size() const noexcept {
+        return 16; // bytes
+    }
+};
+using CappedServerConnection = connection<CappedServerOwner>;
+
+[[nodiscard]] bool
+stopped_without_error(DirectOwnerBase const &owner, std::uint64_t stream_id) {
+    return std::any_of(owner.stops.begin(), owner.stops.end(),
+                       [&](auto const &s) { return s.first == stream_id && s.second == static_cast<std::uint64_t>(NGHTTP3_H3_NO_ERROR); });
+}
+
+[[nodiscard]] bool
+reset(DirectOwnerBase const &owner, std::uint64_t stream_id) {
+    return std::any_of(owner.resets.begin(), owner.resets.end(), [&](auto const &r) { return r.first == stream_id; });
+}
+
+} // namespace
+
+/**
+ * @test A request DECLARING a body over the owner's cap is answered 413, then STOP_SENDING(H3_NO_ERROR)
+ * @brief When the Owner exposes max_http3_body_size() (detected via `requires`), end_headers_cb compares the
+ *        declared content-length with it once the header section is materialized: over it, the request is
+ *        never handed to the owner; a complete 413 response is submitted on the stream, then the read side
+ *        is stopped with H3_NO_ERROR (RFC 9114 section 4.1.1) -- the answer HTTP/1.1 and HTTP/2 give. It was a
+ *        reset (H3_REQUEST_CANCELLED), a client's 502, until 3.3. The client decodes the 413; a request at
+ *        the cap, on the same connection, is served.
+ */
+TEST(Http3ConnectionDirect, ServerAnswersARequestDeclaringABodyOverTheCapWith413) {
     ClientOwner            client_owner;
     CappedServerOwner      server_owner;
     ClientConnection       client{client_owner, 1, ClientConnection::role::client};
@@ -704,9 +720,53 @@ TEST(Http3ConnectionDirect, ServerResetsRequestWhoseBodyExceedsCap) {
 
     EXPECT_TRUE(server_owner.requests.empty()) << "an over-cap request must not be delivered";
     EXPECT_EQ(server_owner.credit[0], request_wire[0]) << "discarded DATA still consumes QUIC connection credit";
-    const bool reset_request_stream =
-        std::any_of(server_owner.resets.begin(), server_owner.resets.end(), [](auto const &r) { return r.first == 0u; });
-    EXPECT_TRUE(reset_request_stream) << "recv_data_cb must reset the over-cap request stream";
+    EXPECT_TRUE(stopped_without_error(server_owner, 0)) << "the client is asked to stop sending, without an error";
+    EXPECT_FALSE(reset(server_owner, 0)) << "the request is answered, not reset";
+    ASSERT_EQ(client_owner.responses.size(), 1u) << "the client receives the answer";
+    EXPECT_EQ(client_owner.responses.front().status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    EXPECT_FALSE(server_owner.close.has_value()) << "the connection survives";
+
+    qb::http::Request at_cap{qb::http::method::POST, qb::io::uri("https://example.test/upload")};
+    at_cap.body() = std::string(16, 'C');
+    ASSERT_TRUE(client.submit_request(4, at_cap));
+    pump(client_owner, client, server_owner, server);
+    ASSERT_EQ(server_owner.requests.size(), 1u) << "a body exactly at the cap is served";
+    EXPECT_EQ(server_owner.requests.front().body().size(), 16u);
+}
+
+/**
+ * @test A body that passes the cap WITHOUT a declared content-length is answered 413 when it does
+ * @brief recv_data_cb tracks the accumulating body: 16 bytes of 16 pass, the 17th refuses the request --
+ *        never delivered, its read side stopped with H3_NO_ERROR after a complete response (FIN), no reset
+ *        -- and the bytes the peer still sends are dropped, their credit returned.
+ */
+TEST(Http3ConnectionDirect, ServerAnswersABodyPassingTheCapWith413) {
+    ClientOwner            client_owner;
+    CappedServerOwner      server_owner;
+    ClientConnection       client{client_owner, 1, ClientConnection::role::client};
+    CappedServerConnection server{server_owner, 1, CappedServerConnection::role::server};
+    ASSERT_TRUE(client.bind_local_streams());
+    ASSERT_TRUE(server.bind_local_streams());
+    pump(client_owner, client, server_owner, server);
+
+    auto fields      = request_fields("/upload");
+    fields[0].second = "POST";
+    server.read_stream(0, h3_headers_frame(0, fields), false);
+    server.read_stream(0, h3_data_frame(std::string(16, 'B')), false);
+    EXPECT_TRUE(server_owner.stops.empty()) << "16 bytes of 16: not yet";
+    server.read_stream(0, h3_data_frame("x"), false);
+
+    EXPECT_TRUE(server_owner.requests.empty());
+    EXPECT_TRUE(stopped_without_error(server_owner, 0));
+    EXPECT_FALSE(reset(server_owner, 0));
+    EXPECT_TRUE(std::any_of(server_owner.outbound.begin(), server_owner.outbound.end(), [](frame const &f) {
+        return f.stream_id == 0 && f.fin;
+    })) << "a complete response ends the stream";
+    const auto credit_before = server_owner.credit[0];
+    server.read_stream(0, h3_data_frame(std::string(32, 'C')), true); // in flight before the stop
+    EXPECT_TRUE(server_owner.requests.empty());
+    EXPECT_GT(server_owner.credit[0], credit_before) << "dropped bytes return their credit";
+    EXPECT_FALSE(server_owner.close.has_value());
 }
 
 // =============================================================================
@@ -1100,10 +1160,10 @@ TEST(Http3ConnectionDirect, AddAckOffsetZeroIsNoopNonZeroAccepted) {
 }
 
 /**
- * @test DATA arriving after a body limit reset restores connection credit once
- * @brief After a reset, nghttp3 may account later DATA in read_stream2 without
- *        another receive callback. The owner must receive exactly the wire byte
- *        count through that return value and the earlier callback credit together.
+ * @test DATA arriving after a body limit refusal restores connection credit once
+ * @brief After a refusal (a 413 and STOP_SENDING since 3.3, Huly QB-168; a reset before), nghttp3 may
+ *        account later DATA in read_stream2 without another receive callback. The owner must receive
+ *        exactly the wire byte count through that return value and the earlier callback credit together.
  */
 TEST(Http3ConnectionDirect, RefusedStreamCreditsSubsequentDataOnce) {
     struct CappedServerOwner : ServerOwner {
@@ -1125,8 +1185,9 @@ TEST(Http3ConnectionDirect, RefusedStreamCreditsSubsequentDataOnce) {
     ASSERT_TRUE(server.read_stream(0, first, false));
     ASSERT_TRUE(server.read_stream(0, second, false));
 
-    ASSERT_EQ(owner.resets.size(), 1u);
-    EXPECT_EQ(owner.resets.front().first, 0u);
+    EXPECT_TRUE(owner.resets.empty()) << "the request is answered, not reset";
+    ASSERT_EQ(owner.stops.size(), 1u);
+    EXPECT_EQ(owner.stops.front().first, 0u);
     EXPECT_TRUE(owner.requests.empty());
     EXPECT_EQ(owner.credit[0], headers.size() + first.size() + second.size());
 }

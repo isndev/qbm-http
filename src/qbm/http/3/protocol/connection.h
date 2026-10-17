@@ -687,6 +687,32 @@ private:
         _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_MESSAGE_ERROR);
     }
 
+    /**
+     * @brief Answer ONE request refused for a size limit on its own stream (Huly QB-168): a complete
+     *        response -- @p status, no content -- then STOP_SENDING with `H3_NO_ERROR`, which asks the
+     *        client to stop sending what is left of the request without an error (RFC 9114 §4.1.1). The
+     *        same answer HTTP/1.1 and HTTP/2 give; it used to be a reset (`H3_REQUEST_CANCELLED`), a
+     *        client's 502. The request is never handed to the owner and the connection keeps serving;
+     *        what the peer still has in flight is dropped (`refused`). The response is drained by
+     *        submit_response() before the read side stops. A response that cannot be submitted falls back
+     *        to the reset.
+     * @param stream_id The refused request stream (server role).
+     * @param st        Its state.
+     * @param status    The answer.
+     */
+    void
+    answer_refused_request(std::uint64_t stream_id, stream_state &st, qb::http::Status status) {
+        st.refused = true;
+        st.request.body().clear();
+        qb::http::Response response{status};
+        response.stream_id = stream_id;
+        if (!submit_response(stream_id, response)) {
+            _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+            return;
+        }
+        _owner.stop_http3_stream(_connection_id, stream_id, NGHTTP3_H3_NO_ERROR);
+    }
+
     [[nodiscard]] static connection *
     self(void *conn_user_data) noexcept {
         return static_cast<native_anchor *>(conn_user_data)->self;
@@ -787,15 +813,16 @@ private:
                     // oversized one. And since nothing holds a CONNECTION_CLOSE back while the pacer
                     // can hold the RESET_STREAM, the peer sometimes learned of the close first and
                     // reported a lost connection (503) where the contract names a stream reset (502).
-                    st.refused = true;
-                    if (me->_role == role::server) {
-                        st.request.body().clear();
-                    } else {
-                        st.response.body().clear();
-                    }
                     // The rejected payload still consumed connection-level QUIC flow
-                    // control. Return its credit before resetting the stream.
+                    // control. Return its credit before answering or resetting the stream.
                     me->_owner.extend_http3_stream_credit(me->_connection_id, static_cast<std::uint64_t>(stream_id), datalen);
+                    if (me->_role == role::server) {
+                        // A request is answered, 413, as HTTP/1.1 and HTTP/2 answer it (Huly QB-168).
+                        me->answer_refused_request(static_cast<std::uint64_t>(stream_id), st, qb::http::status::PAYLOAD_TOO_LARGE);
+                        return 0;
+                    }
+                    st.refused = true;
+                    st.response.body().clear();
                     me->_owner.reset_http3_stream(me->_connection_id, static_cast<std::uint64_t>(stream_id), NGHTTP3_H3_REQUEST_CANCELLED);
                     return 0;
                 }
@@ -865,6 +892,17 @@ private:
                 return 0;
             }
             st.main_headers_seen = true;
+            if constexpr (requires(Owner &owner) { owner.max_http3_body_size(); }) {
+                // A request declaring a body over the server's cap is answered before a byte of it is read, as
+                // HTTP/1.1 and HTTP/2 answer it (Huly QB-168).
+                if (me->_role == role::server && st.expected_content_length) {
+                    const auto limit = me->_owner.max_http3_body_size();
+                    if (limit != 0 && *st.expected_content_length > limit) {
+                        me->answer_refused_request(static_cast<std::uint64_t>(stream_id), st, qb::http::status::PAYLOAD_TOO_LARGE);
+                        return 0;
+                    }
+                }
+            }
             return 0;
         });
     }

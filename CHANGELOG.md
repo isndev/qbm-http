@@ -91,6 +91,31 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **A request over the body cap is answered `413 Content Too Large`, on HTTP/1.1, HTTP/2 and HTTP/3,
+  and the cap is the server's own `set_max_body_size` (Huly QB-168).** HTTP/1.1 closed the connection
+  with no answer at all: the parser refused the message and the protocol was invalidated. HTTP/2 reset
+  the stream with `ENHANCE_YOUR_CALM`, against the HTTP/1.1 constant; HTTP/3 reset it with
+  `H3_REQUEST_CANCELLED`, a client's 502. Now the answer is the same whatever the version: HTTP/1.1
+  sends `413` with `Connection: close` after every request the client sent before the refused one,
+  drops what the client sends meanwhile, and closes after that delivery -- after the client, through
+  qb-io's lingering close (Huly QB-1089), so a client still uploading reads the answer: on Windows a
+  client sending 4 MiB lost it 39 runs in 40 when the server closed at once; HTTP/2 answers `413` on
+  the stream, then `RST_STREAM(NO_ERROR)` (RFC 9113 §8.1), and the connection goes on; HTTP/3 answers
+  `413` on the stream, then STOP_SENDING with `H3_NO_ERROR` (RFC 9114 §4.1.1). A declared length over
+  the cap is answered before a byte of the body is read on all three. `set_max_body_size(std::size_t)`
+  / `max_body_size()` are new on the HTTP/1.1 and HTTP/2 servers -- the HTTP/3 server's name -- read
+  live (a request that begins after the call is judged under the new value), 0 meaning none; the
+  defaults are unchanged (`protocol_limits::MAX_BODY_SIZE`, 100 MiB; 64 MiB on HTTP/3). The HTTP/1.1
+  requests of the HTTP/2 server's ALPN fallback get the HTTP/1.1 answer. The HTTP/1.1 sessions no
+  longer apply the transport's generic message cap (`QB_MAX_MESSAGE_SIZE`): it cut, with no answer, a
+  request whose body was at the default cap -- its header section put the message past 100 MiB; the
+  protocol states its bounds and answers a breach. A `Connection: close` response, and the HTTP/2
+  server's HTTP/1.1 fallback, also close after the client now, through `close_after_deliver()`.
+  Witnesses: `qbm-http-test-unit-http1-protocol-framing`, `-unit-http2-server-protocol`,
+  `-unit-http2-server-coverage-deep`, `-system-make-server-factory-http1`,
+  `-system-make-server-factory-huge-body` (new, label `huge-body`), `-system-make-server-factory-tls`,
+  `-system-http3-connection-direct`, `-system-http3-loopback`.
+
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The
   three protocols kept three lists of the fields a trailer section must not carry, and each refused
   a field another accepted. `qb::http::detail::is_forbidden_trailer_field` is now the one list, their

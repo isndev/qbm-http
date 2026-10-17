@@ -136,6 +136,19 @@ private:
     bool                         _active_should_keep_alive{false};
     bool                         _keep_alive{false}; ///< Application override for persistent connections
     std::size_t                  _max_pipelined_requests{128};
+    int  _refusal_status{0}; ///< The answer owed to a request refused for a size limit, once the ones before it are answered
+    bool _closing{false};    ///< The connection's last response is published: the io closes once it is delivered
+
+    /// The connection's last response is published: the io closes once it is delivered -- after the peer, at most the
+    /// session's linger() later (qb-io close_after_deliver(), Huly QB-1089) -- so a peer still sending, a refused
+    /// upload's included, reads it before the close; disconnect() at its eos closed at once, which a peer still
+    /// sending turns into a reset that can destroy the response before it is read (Huly QB-168). What the peer
+    /// sends meanwhile is not read.
+    void
+    close_after_response() noexcept {
+        _closing = true;
+        this->close_after_deliver();
+    }
 
     [[nodiscard]] static bool
     has_connection_token(qb::http::Headers const &headers, std::string_view token) {
@@ -197,6 +210,8 @@ private:
             else
                 *this << response;
             this->updateTimeout();
+            if (!_active_should_keep_alive)
+                close_after_response();
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw: " << e.what());
             this->disconnect(DisconnectedReason::ServerError);
@@ -237,9 +252,38 @@ private:
         }
     }
 
+    /// Answers the request refused for a size limit (http1_refuse_request()): its status, an empty body,
+    /// `Connection: close`. on(eos) closes the connection once it is written.
+    void
+    send_refusal() {
+        const qb::http::Status status{_refusal_status};
+        _refusal_status = 0;
+        try {
+            Response response{status};
+            response.set_header("Connection", "close");
+            _active_request_method    = qb::http::method::GET; // the answer carries no body either way
+            _active_should_keep_alive = false;
+            _ready_response.reset();
+            *this << response;
+            this->updateTimeout();
+            close_after_response();
+        } catch (const std::exception &e) {
+            LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 refusal send threw: " << e.what());
+            this->disconnect(DisconnectedReason::ServerError);
+        } catch (...) {
+            LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 refusal send threw an unknown exception");
+            this->disconnect(DisconnectedReason::ServerError);
+        }
+    }
+
     void
     start_next_request_if_possible() {
-        if (_context || _pending_requests.empty()) {
+        if (_context) {
+            return;
+        }
+        if (_pending_requests.empty()) {
+            if (_refusal_status != 0) [[unlikely]]
+                send_refusal(); // every request received before the refused one is answered
             return;
         }
         auto request = std::move(_pending_requests.front());
@@ -347,7 +391,10 @@ private:
             _context.reset();
         }
         if (!_active_should_keep_alive) {
-            this->disconnect(DisconnectedReason::ResponseTransmitted);
+            // The io closes after this delivery (close_after_response()); a response that did not go through it
+            // still closes here, at once, as before.
+            if (!_closing)
+                this->disconnect(DisconnectedReason::ResponseTransmitted);
             return;
         }
         start_next_request_if_possible();
@@ -368,6 +415,7 @@ private:
         }
         _pending_requests.clear();
         _ready_response.reset();
+        _refusal_status = 0;
     }
 
     /**
@@ -379,6 +427,10 @@ private:
      */
     void
     on(qb::io::async::event::disconnected &&e) {
+        // The close that follows the last response (close_after_response()) ends without a reason of the io's own: it
+        // is still the one it always reported.
+        if (_closing && e.reason == 0)
+            e.reason = DisconnectedReason::ResponseTransmitted;
         if constexpr (qb::has_on<Derived, event::disconnected>) {
             static_cast<Derived &>(*this).on(event::disconnected{e.reason});
         } else {
@@ -404,6 +456,7 @@ private:
         }
         _pending_requests.clear();
         _ready_response.reset();
+        _refusal_status = 0;
     }
 
 public:
@@ -431,6 +484,11 @@ public:
         : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>(server) {
         LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 session created with 60s timeout.");
         this->setTimeout(std::chrono::seconds(60));
+        // The HTTP/1.1 protocol bounds every request itself -- its header limits, the server's body cap --
+        // and answers a breach. The transport's generic message cap (QB_MAX_MESSAGE_SIZE, 100 MiB) would
+        // cut a request the server accepts with no answer at all: a body at the default cap plus its
+        // header section is over it (Huly QB-168). The input-buffer cap (QB_MAX_READ_BUFFER_SIZE) stays.
+        this->set_max_message_size(std::numeric_limits<std::size_t>::max());
     }
 
     /**
@@ -460,6 +518,38 @@ public:
     void
     max_pipelined_requests(std::size_t value) noexcept {
         _max_pipelined_requests = value;
+    }
+
+    /**
+     * @brief Protocol hook: the body cap of the next request, the server's `max_body_size()` read live.
+     *
+     * The HTTP/1.1 protocol reads it when a request begins (Huly QB-168); a server without the setting
+     * keeps protocol_limits::MAX_BODY_SIZE. Public because the protocol detects it through a
+     * `requires`-expression, which would not see a private member.
+     */
+    [[nodiscard]] std::size_t
+    http_max_body_size() noexcept {
+        if constexpr (requires(Handler &h) { h.max_body_size(); })
+            return this->server().max_body_size();
+        else
+            return qb::http::protocol_limits::MAX_BODY_SIZE;
+    }
+
+    /**
+     * @brief Protocol hook: a request was refused for a size limit -- 413 for a body over the cap.
+     * @param status The status that answers it.
+     *
+     * The answer -- the status, an empty body, `Connection: close` -- goes out once every request
+     * received before the refused one is answered, so responses keep their order; the connection
+     * closes after it, and the protocol drops what the peer sends meanwhile (Huly QB-168). Public for
+     * the same reason as http_max_body_size().
+     */
+    void
+    http1_refuse_request(qb::http::Status status) noexcept {
+        LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request refused with " << status.code() << "; the connection closes after the answer.");
+        _refusal_status = status.code();
+        if (!_context && _pending_requests.empty())
+            send_refusal();
     }
 
     void
@@ -497,7 +587,8 @@ public:
     using Context    = typename qb::http::Context<Session>;
 
 private:
-    Router _router;
+    Router      _router;
+    std::size_t _max_body_size = qb::http::protocol_limits::MAX_BODY_SIZE;
 
 public:
     /**
@@ -508,6 +599,31 @@ public:
      * the server can handle requests.
      */
     io_handler() = default;
+
+    /**
+     * @brief Set the largest request body this server accepts, in bytes; 0 means no cap of its own.
+     *
+     * Same name and contract as the HTTP/3 server's. Read live: the next request a session begins
+     * is judged under the new value, one half read keeps the value it began with. A request over it
+     * -- a declared `Content-Length` above it, before a body byte is read, or a chunked body when it
+     * passes it -- is answered `413 Content Too Large` with `Connection: close`, after every request
+     * the client sent before it, and the connection closes (Huly QB-168; it closed without an answer
+     * until 3.3). The default is `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB). With 0 the
+     * transport's input-buffer cap (`QB_MAX_READ_BUFFER_SIZE`) is the only bound left.
+     * @param value The cap in bytes.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _max_body_size = value;
+    }
+
+    /**
+     * @brief The request body cap set_max_body_size() set; 0 when there is none.
+     */
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return _max_body_size;
+    }
 
     /**
      * @brief Access the router

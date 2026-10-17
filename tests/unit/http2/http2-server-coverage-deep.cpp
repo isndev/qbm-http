@@ -16,8 +16,8 @@
  *     > 1. Each maps to a specific GOAWAY ErrorCode.
  *   - request `te` header value-discrimination: `te: trailers` accepted (dispatched),
  *     any other `te` token -> PROTOCOL_ERROR stream error.
- *   - request `content-length` DECLARED above MAX_BODY_SIZE -> ENHANCE_YOUR_CALM
- *     (validates the header value, not the bytes, so it is cheap to reach).
+ *   - request `content-length` DECLARED above MAX_BODY_SIZE -> a 413 answer then RST_STREAM(NO_ERROR)
+ *     (validates the header value, not the bytes, so it is cheap to reach; Huly QB-168).
  *   - trailers whose content-length contradicts the delivered body -> PROTOCOL_ERROR.
  *   - send_response on a RESERVED_LOCAL (server-pushed) stream -> PROTOCOL_ERROR
  *     stream error (the RESERVED_LOCAL arm of the send-state guard).
@@ -295,13 +295,13 @@ TEST(HTTP2ServerCoverageDeep, RequestTeNonTrailersIsStreamProtocolError) {
 }
 
 // ===========================================================================
-// Request content-length DECLARED above MAX_BODY_SIZE -> ENHANCE_YOUR_CALM.
-// This validates the declared header value (a decimal string), not the actual
-// body bytes, so it is reachable without a multi-MB allocation. ENHANCE_YOUR_CALM
-// on the request path is not asserted anywhere else.
+// Request content-length DECLARED above MAX_BODY_SIZE -> answered 413, then RST_STREAM(NO_ERROR).
+// This validates the declared header value (a decimal string), not the actual body bytes, so it is
+// reachable without a multi-MB allocation. The default cap applies: this io reports none of its own.
+// It was reset with ENHANCE_YOUR_CALM until 3.3 (Huly QB-168).
 // ===========================================================================
 
-TEST(HTTP2ServerCoverageDeep, RequestContentLengthOverMaxBodySizeIsEnhanceYourCalm) {
+TEST(HTTP2ServerCoverageDeep, RequestContentLengthOverMaxBodySizeIsAnswered413) {
     Http2FakeIO    io;
     ServerProtocol server(io);
     handshake_default(server, io);
@@ -309,18 +309,25 @@ TEST(HTTP2ServerCoverageDeep, RequestContentLengthOverMaxBodySizeIsEnhanceYourCa
     // 999999999999 (~1 TB) vastly exceeds MAX_BODY_SIZE (100 MiB). Open a POST so
     // the content-length is meaningful; END_HEADERS without END_STREAM keeps the
     // stream awaiting the (never-sent) body, but the declared-length guard fires
-    // during header processing regardless.
+    // once the header block is validated regardless.
     const auto encoded = encode_hpack_headers(
         {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}, {"content-length", "999999999999"}});
     const std::size_t before = io.output.size();
     push_frame(io, FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, encoded);
     drive(server, io);
 
-    EXPECT_TRUE(server.ok()); // stream-level error
+    EXPECT_TRUE(server.ok()); // stream-level, the connection survives
     EXPECT_EQ(io.request_count, 0);
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::ENHANCE_YOUR_CALM);
-    EXPECT_NE(find_frame_offset(io.output, FrameType::RST_STREAM, before), SIZE_MAX);
+    EXPECT_EQ(io.stream_error_count, 0) << "a NO_ERROR reset is not a stream error";
+    const std::size_t headers_at = find_frame_offset(io.output, FrameType::HEADERS, before);
+    ASSERT_NE(headers_at, SIZE_MAX) << "the refused request is answered";
+    const std::size_t rst_at = find_frame_offset(io.output, FrameType::RST_STREAM, before);
+    ASSERT_NE(rst_at, SIZE_MAX);
+    EXPECT_LT(headers_at, rst_at) << "the answer, then the reset";
+    const auto rst_header = peek_frame_header(io.output, rst_at);
+    EXPECT_EQ(rst_header.get_stream_id(), 1u);
+    const auto *code = reinterpret_cast<const uint8_t *>(io.output.begin() + rst_at + h2::FRAME_HEADER_SIZE);
+    EXPECT_EQ(static_cast<ErrorCode>(h2::extract_uint32_be(code)), ErrorCode::NO_ERROR);
 }
 
 // ===========================================================================

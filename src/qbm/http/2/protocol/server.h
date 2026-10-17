@@ -335,12 +335,16 @@ public:
         _control_reply_count = 0;
 
         auto &body_pipe = stream.assembled_request.body().raw();
-        body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
-
-        if (body_pipe.size() > qb::http::protocol_limits::MAX_BODY_SIZE) {
-            this->send_rst_stream(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 request body exceeds configured limit");
+        if (body_pipe.size() + data_event.payload.data_payload.size() > max_request_body_size()) [[unlikely]] {
+            // Answered, not reset: 413 on the stream, then NO_ERROR (refuse_request, Huly QB-168), before the
+            // frame is appended. Its bytes are dropped with the rest; its connection credit comes back as a
+            // closed stream's does.
+            this->refuse_request(stream_id, qb::http::status::PAYLOAD_TOO_LARGE, "HTTP/2 request body exceeds configured limit");
+            this->conditionally_send_connection_window_update();
             return;
         }
+        body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
+
         if (stream.expected_content_length && body_pipe.size() > *stream.expected_content_length) {
             this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
             return;
@@ -1486,6 +1490,53 @@ public:
 
 private:
     /**
+     * @brief The request body cap: the server's `max_body_size()` (`set_max_body_size`, Huly QB-168), read
+     *        through the io when it has the hook, protocol_limits::MAX_BODY_SIZE otherwise; the largest
+     *        size when it is 0, which means no cap.
+     */
+    [[nodiscard]] std::size_t
+    max_request_body_size() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http_max_body_size(); }) {
+            const std::size_t cap = this->_io.http_max_body_size();
+            return cap == 0 ? std::numeric_limits<std::size_t>::max() : cap;
+        } else {
+            return qb::http::protocol_limits::MAX_BODY_SIZE;
+        }
+    }
+
+    /**
+     * @brief Answer a request refused for a size limit on its own stream (Huly QB-168): @p status with an
+     *        empty body and END_STREAM, then RST_STREAM(NO_ERROR), which asks the client to stop sending
+     *        what is left of the request without an error -- a complete response sent before the request
+     *        is (RFC 9113 §8.1). The request is never routed; the connection and its other streams go on.
+     *        A response that cannot be sent falls back to the stream error it replaces.
+     * @param stream_id The refused stream.
+     * @param status    The answer.
+     * @param reason    For the log.
+     */
+    void
+    refuse_request(uint32_t stream_id, qb::http::Status status, char const *reason) noexcept {
+        auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end())
+            return;
+        LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: request refused with " << status.code() << ": " << reason);
+        it->second.assembled_request.body().clear(); // what was received of the refused body
+        bool sent = false;
+        try {
+            sent = send_response(stream_id, qb::http::Response{status});
+        } catch (...) {
+            sent = false;
+        }
+        if (!sent) {
+            if (_server_streams.find(stream_id) != _server_streams.end())
+                this->on_stream_error(stream_id, ErrorCode::ENHANCE_YOUR_CALM, reason);
+            return;
+        }
+        if (_server_streams.find(stream_id) != _server_streams.end())
+            this->send_rst_stream(stream_id, ErrorCode::NO_ERROR, reason);
+    }
+
+    /**
      * @brief Initialize server's HTTP/2 settings to defaults
      */
     void
@@ -1712,12 +1763,7 @@ private:
                             this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers in HTTP/2 request");
                             return false;
                         }
-                        if (*parsed > qb::http::protocol_limits::MAX_BODY_SIZE) {
-                            this->on_stream_error(stream.id, ErrorCode::ENHANCE_YOUR_CALM,
-                                                  "HTTP/2 request content-length exceeds configured limit");
-                            return false;
-                        }
-                        stream.expected_content_length = *parsed;
+                        stream.expected_content_length = *parsed; // judged against the body cap once the block is valid
                     }
                     stream.assembled_request.add_header(name, value);
                 }
@@ -1754,6 +1800,12 @@ private:
                     return false;
                 }
                 this->dispatch_complete_request(stream.id, stream);
+            } else if (stream.expected_content_length && *stream.expected_content_length > max_request_body_size()) [[unlikely]] {
+                // A declared body over the cap is answered before a byte of it is read, like HTTP/1.1's
+                // (Huly QB-168): 413 on the stream, then NO_ERROR. A block that also ends the stream is a
+                // content-length mismatch above, malformed before it is too large.
+                this->refuse_request(stream.id, qb::http::status::PAYLOAD_TOO_LARGE, "HTTP/2 request content-length exceeds configured limit");
+                return false;
             }
 
         } else { // Trailers block

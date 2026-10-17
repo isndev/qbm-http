@@ -69,7 +69,7 @@ real target list for that reason; feeding the names straight to `ninja` fails on
 
 ### Daemons
 
-qbm-http needs none. Its 24 `REQUIRES live` tests bind a **loopback port they open themselves** — no
+qbm-http needs none. Its `REQUIRES live` tests bind a **loopback port they open themselves** — no
 PostgreSQL, no Redis, no network egress. (`REQUIRES live` on a qbm module means "this test needs a
 real socket", and for pgsql/redis it additionally means a reachable server.)
 

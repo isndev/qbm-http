@@ -1008,3 +1008,138 @@ TEST(Http1ProtocolFraming, TrailersContainerRoundTripsThroughAChunkedMessage) {
         EXPECT_TRUE(received.has_header("Trailer"));
     }
 }
+
+// ===========================================================================
+// A request over the server's body cap is ANSWERED, not dropped (Huly QB-168).
+//
+// The cap used to be the constant protocol_limits::MAX_BODY_SIZE, and a request over it failed the
+// parse, which invalidated the protocol: the connection closed with no response at all. The protocol
+// now reads the cap from its io when a request begins (`http_max_body_size()`, the server's
+// `set_max_body_size`) and hands a refusal to the io (`http1_refuse_request(413)`), which answers it
+// and closes; the bytes that follow are dropped. An io without the hook keeps the old contract.
+// ===========================================================================
+
+namespace {
+
+/// The server session's two hooks, observable: the cap it reports, the refusals it is handed.
+struct RefusingServerFakeIO {
+    using base_io_t = RefusingServerFakeIO;
+
+    qb::allocator::pipe<char>        input;
+    std::size_t                      cap           = qb::http::protocol_limits::MAX_BODY_SIZE;
+    int                              request_count = 0;
+    std::optional<qb::http::Request> last_request;
+    std::vector<int>                 refusals;
+
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+
+    [[nodiscard]] std::size_t
+    http_max_body_size() const noexcept {
+        return cap;
+    }
+
+    void
+    http1_refuse_request(qb::http::Status status) noexcept {
+        refusals.push_back(status.code());
+    }
+
+    void
+    on(qb::http::Request &&request) {
+        ++request_count;
+        last_request = std::move(request);
+    }
+};
+
+} // namespace
+
+// The default cap, a declared length one byte over it: refused at the end of the header section,
+// before a body byte is read, with 413 -- and the protocol stays valid, so the session can answer.
+TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody) {
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+
+    feed(io, "POST /upload HTTP/1.1\r\nHost: h\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)
+                 + "\r\n\r\nfirst body bytes");
+
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 0) << "a refused request is never dispatched";
+    ASSERT_EQ(io.refusals.size(), 1u) << "the request must be handed to the io for an answer, not dropped";
+    EXPECT_EQ(io.refusals.front(), 413);
+    EXPECT_TRUE(proto.ok()) << "the io answers before the connection ends: the protocol must stay valid";
+    EXPECT_EQ(io.input.size(), 0u) << "what followed the refused header section is dropped";
+}
+
+// The server's own cap, read live: a request AT it passes, one byte over is refused -- the declared
+// length and the bytes a chunked body delivers alike -- and a new value applies to the next request.
+TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    io.cap = 16;
+
+    feed(io, "POST /a HTTP/1.1\r\nContent-Length: 16\r\n\r\n0123456789abcdef");
+    EXPECT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 1) << "a body exactly at the cap is accepted";
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "0123456789abcdef");
+
+    io.cap = 8; // the server lowers it between two requests
+    feed(io, "POST /b HTTP/1.1\r\nContent-Length: 9\r\n\r\n012345678");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 1);
+    ASSERT_EQ(io.refusals, std::vector<int>{413}) << "the next request is judged under the new cap";
+    EXPECT_TRUE(proto.ok());
+
+    // Everything after the refusal is dropped, a complete valid request included: the connection
+    // has lost its framing (the refused body was never read) and ends with the answer.
+    feed(io, "GET /c HTTP/1.1\r\nHost: h\r\n\r\n");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.refusals.size(), 1u);
+    EXPECT_EQ(io.input.size(), 0u);
+}
+
+TEST(Http1ProtocolFraming, AChunkedBodyPassingTheCapIsRefusedWith413) {
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    io.cap = 8;
+
+    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 1) << "a chunked body exactly at the cap is accepted";
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "01234567");
+
+    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n01234\r\n");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_TRUE(io.refusals.empty()) << "5 bytes of 8: not yet";
+    feed(io, "4\r\n5678\r\n");
+    EXPECT_EQ(step(proto, io), 0u);
+    ASSERT_EQ(io.refusals, std::vector<int>{413}) << "the ninth byte passes the cap";
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_TRUE(proto.ok());
+}
+
+// 0 means no cap of the protocol's own: a length past the default constant is framed normally.
+TEST(Http1ProtocolFraming, AZeroCapLeavesTheBodyUnbounded) {
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    io.cap = 0;
+
+    feed(io, "POST /big HTTP/1.1\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\nxyz");
+    EXPECT_EQ(step(proto, io), 0u) << "the body is still arriving";
+    EXPECT_TRUE(io.refusals.empty());
+    EXPECT_TRUE(proto.ok());
+}
+
+// An io that cannot answer (no http1_refuse_request) keeps the contract it had: the protocol is
+// invalidated and the connection closes.
+TEST(Http1ProtocolFraming, AnIoThatCannotAnswerStillClosesOnAnOversizedRequest) {
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+
+    feed(io, "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n");
+    EXPECT_EQ(proto.getMessageSize(), 0u);
+    EXPECT_FALSE(proto.ok());
+    EXPECT_EQ(io.request_count, 0);
+}
