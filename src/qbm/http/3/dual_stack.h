@@ -20,6 +20,7 @@
 #endif
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -304,6 +305,51 @@ public:
     set_max_body_size(std::size_t value) noexcept {
         _http2->set_max_body_size(value);
         _http3->set_max_body_size(value);
+    }
+
+    /**
+     * @brief Drain both stacks with one deadline and one report (Huly QB-91).
+     *
+     * Runs the HTTP/2 server's drain() -- its listener closed, each connection ended in two GOAWAYs -- and the
+     * HTTP/3 server's -- the same in two GOAWAYs, a new connection refused with a GOAWAY naming stream 0 -- and
+     * reports once, on the servers' loop, when both have: `drain_outcome::drained` when both drained,
+     * `drain_outcome::deadline` when either met the deadline first.
+     * @param deadline   How long the connections of both stacks have, from now.
+     * @param on_drained Told how the drain ended; may be empty.
+     * @return False, and nothing changes, when either stack already drains.
+     */
+    bool
+    drain(qb::duration deadline, std::function<void(qb::http::drain_outcome)> on_drained = {}) {
+        if (_http2->draining() || _http3->draining()) {
+            return false;
+        }
+        struct joint_report {
+            int                                          left     = 2;
+            bool                                         deadline = false;
+            std::function<void(qb::http::drain_outcome)> on_drained;
+        };
+        auto joint        = std::make_shared<joint_report>();
+        joint->on_drained = std::move(on_drained);
+        auto report       = [joint](qb::http::drain_outcome outcome) {
+            if (outcome == qb::http::drain_outcome::deadline) {
+                joint->deadline = true;
+            }
+            if (--joint->left == 0 && joint->on_drained) {
+                auto done = std::move(joint->on_drained);
+                done(joint->deadline ? qb::http::drain_outcome::deadline : qb::http::drain_outcome::drained);
+            }
+        };
+        (void) _http2->drain(deadline, report);
+        (void) _http3->drain(deadline, report);
+        return true;
+    }
+
+    /**
+     * @brief Whether either stack drains (see drain()).
+     */
+    [[nodiscard]] bool
+    draining() const noexcept {
+        return _http2->draining() || _http3->draining();
     }
 
     /**

@@ -3383,3 +3383,317 @@ TEST_F(Http3LoopbackTest, CancelActiveRequestKeepsClientAliveThroughCallback) {
     EXPECT_TRUE(weak_client.expired());
     server->close();
 }
+
+// ---------------------------------------------------------------------------
+// Drain (Huly QB-91): the shutdown notice, the final GOAWAY two smoothed round trips later, the close once the last
+// request stream has closed and the GOAWAY is acknowledged -- and a connection made during the drain serves nothing.
+// ---------------------------------------------------------------------------
+
+// A request in flight when the drain begins is answered; the connection then closes, and the drain reports
+// `drained` once no connection is left -- not before the request is answered.
+TEST_F(Http3LoopbackTest, DrainAnswersTheRequestInFlightThenReportsDrained) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    bool               done = false;
+    qb::http::Response response;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    int  reports = 0;
+    auto outcome = qb::http::drain_outcome::deadline;
+    ASSERT_TRUE(server->drain(5s, [&](qb::http::drain_outcome o) {
+        outcome = o;
+        ++reports;
+    }));
+    EXPECT_TRUE(server->draining());
+    EXPECT_FALSE(server->drain(5s)) << "a drain begins once";
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(reports, 0) << "a request is still in flight";
+    EXPECT_FALSE(done);
+
+    held_context->text("held-ok");
+    held_context.reset();
+    ASSERT_TRUE(pump([&] { return done && reports == 1; }));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().as<std::string>(), "held-ok");
+    EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+    EXPECT_TRUE(pump([&] { return !client->is_connected(); }));
+
+    client->disconnect();
+    server->close();
+}
+
+// A request still unanswered at the deadline is abandoned: the connection is closed and the drain reports
+// `deadline`, not before it.
+TEST_F(Http3LoopbackTest, DrainDeadlineClosesTheConnectionsStillOpen) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    bool               done = false;
+    qb::http::Response response;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        done     = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    int        reports = 0;
+    auto       outcome = qb::http::drain_outcome::drained;
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(server->drain(300ms, [&](qb::http::drain_outcome o) {
+        outcome = o;
+        ++reports;
+    }));
+    ASSERT_TRUE(pump([&] { return reports == 1; }));
+    EXPECT_EQ(outcome, qb::http::drain_outcome::deadline);
+    EXPECT_GE(std::chrono::steady_clock::now() - started, 250ms) << "not before the deadline";
+    ASSERT_TRUE(pump([&] { return done; }));
+    EXPECT_NE(response.status(), qb::http::status::OK) << "the abandoned request is never answered";
+    EXPECT_TRUE(pump([&] { return !client->is_connected(); }));
+
+    held_context.reset();
+    client->disconnect();
+    server->close();
+}
+
+// A connection made while the server drains serves nothing: its GOAWAY, sent before any request stream is read,
+// names stream 0, so the request it sent in its first flight is rejected -- never handed to the router -- and it
+// closes once the GOAWAY is acknowledged. The drain still waits for the connection that was there before it.
+TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesTheRouter) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    int                                                           counted = 0;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().get("/count", [&](auto ctx) {
+        ++counted;
+        ctx->text("counted");
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto first = qb::http3::make_client(https_origin(port));
+    first->set_verify_peer(false);
+    bool first_done = false;
+    ASSERT_TRUE(first->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) { first_done = true; }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    int  reports = 0;
+    auto outcome = qb::http::drain_outcome::deadline;
+    ASSERT_TRUE(server->drain(5s, [&](qb::http::drain_outcome o) {
+        outcome = o;
+        ++reports;
+    }));
+
+    auto late = qb::http3::make_client(https_origin(port));
+    late->set_verify_peer(false);
+    bool               late_done = false;
+    qb::http::Response late_response;
+    ASSERT_TRUE(late->push_request(qb::http::Request{qb::io::uri("/count")}, [&](qb::http::Response res) {
+        late_response = std::move(res);
+        late_done     = true;
+    }));
+    ASSERT_TRUE(pump([&] { return late_done; }));
+    EXPECT_NE(late_response.status(), qb::http::status::OK);
+    EXPECT_EQ(counted, 0) << "the request of a connection made during the drain never reaches the router";
+    EXPECT_TRUE(pump([&] { return !late->is_connected(); })) << "and the connection is closed";
+    EXPECT_EQ(reports, 0) << "the connection there before the drain still has a request in flight";
+
+    held_context->text("held-ok");
+    held_context.reset();
+    ASSERT_TRUE(pump([&] { return first_done && reports == 1; }));
+    EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+    EXPECT_EQ(counted, 0);
+
+    first->disconnect();
+    late->disconnect();
+    server->close();
+}
+
+// A server with no connection reports `drained` before drain() returns.
+TEST_F(Http3LoopbackTest, DrainWithNoConnectionReportsAtOnce) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int  reports = 0;
+    auto outcome = qb::http::drain_outcome::deadline;
+    ASSERT_TRUE(server->drain(5s, [&](qb::http::drain_outcome o) {
+        outcome = o;
+        ++reports;
+    }));
+    EXPECT_EQ(reports, 1);
+    EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+    server->close();
+}
+
+// The dual-stack server drains both stacks and reports once: `deadline` when one of them met it -- here the HTTP/3
+// stack, whose request is held -- although the HTTP/2 stack drained at once.
+TEST_F(Http3LoopbackTest, DualStackDrainReportsOnceAndDeadlineWhenOneStackMetIt) {
+    const auto                                                    h2_port = next_tcp_port();
+    const auto                                                    h3_port = next_port();
+    auto                                                          server  = qb::http::make_dual_stack_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->http3_server().router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(h2_port)), qb::io::uri(https_origin(h3_port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(h3_port));
+    client->set_verify_peer(false);
+    bool done = false;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) { done = true; }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    int  reports = 0;
+    auto outcome = qb::http::drain_outcome::drained;
+    ASSERT_TRUE(server->drain(300ms, [&](qb::http::drain_outcome o) {
+        outcome = o;
+        ++reports;
+    }));
+    EXPECT_TRUE(server->draining());
+    EXPECT_FALSE(server->drain(300ms)) << "a drain begins once";
+    EXPECT_EQ(reports, 0) << "the HTTP/2 stack drained at once, the HTTP/3 one has not";
+    ASSERT_TRUE(pump([&] { return reports == 1; }));
+    EXPECT_EQ(outcome, qb::http::drain_outcome::deadline);
+    ASSERT_TRUE(pump([&] { return done; }));
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(reports, 1) << "one report";
+
+    held_context.reset();
+    client->disconnect();
+    server->close();
+    qb::io::async::listener::current.clear();
+}
+
+namespace http3_shutdown_wire_test {
+
+/// A bare QUIC peer offering h3: it reads what the server's control stream carries -- its GOAWAYs, and when each
+/// arrived -- and whether the connection closed. It opens no stream of its own. (qb-io reports no peer's
+/// CONNECTION_CLOSE code, so the H3_NO_ERROR it now carries is not read here.)
+class RawH3Peer : public qb::io::async::quic::endpoint {
+    std::string _control; ///< The bytes of the server's control stream (its first unidirectional stream, id 3)
+
+    static bool
+    varint(std::string const &bytes, std::size_t &at, std::uint64_t &value) {
+        if (at >= bytes.size())
+            return false;
+        const auto        first  = static_cast<std::uint8_t>(bytes[at]);
+        const std::size_t length = std::size_t{1} << (first >> 6);
+        if (at + length > bytes.size())
+            return false;
+        value = first & 0x3Fu;
+        for (std::size_t i = 1; i < length; ++i)
+            value = (value << 8) | static_cast<std::uint8_t>(bytes[at + i]);
+        at += length;
+        return true;
+    }
+
+    void
+    parse_goaways() {
+        std::size_t   at = 0;
+        std::uint64_t value;
+        if (!varint(_control, at, value) || value != 0x00)
+            return; // not a control stream (yet)
+        std::size_t seen = 0;
+        while (true) {
+            std::uint64_t type, length;
+            std::size_t   frame = at;
+            if (!varint(_control, frame, type) || !varint(_control, frame, length) || frame + length > _control.size())
+                return;
+            if (type == 0x07) {
+                std::size_t   id_at = frame;
+                std::uint64_t id    = 0;
+                (void) varint(_control, id_at, id);
+                if (++seen > goaway_ids.size()) {
+                    goaway_ids.push_back(id);
+                    goaway_arrivals.push_back(std::chrono::steady_clock::now());
+                }
+            }
+            at = frame + length;
+        }
+    }
+
+protected:
+    void
+    dispatch(qb::io::async::quic::event::connected const &) override {
+        connected = true;
+    }
+    void
+    dispatch(qb::io::async::quic::event::connection_closed const &) override {
+        closed = true;
+    }
+    void
+    dispatch(qb::io::async::quic::event::stream_data const &ev) override {
+        if (ev.id == 3) {
+            _control.append(ev.payload.data(), ev.payload.size());
+            parse_goaways();
+        }
+    }
+
+public:
+    bool                                               connected = false;
+    bool                                               closed    = false;
+    std::vector<std::uint64_t>                         goaway_ids;
+    std::vector<std::chrono::steady_clock::time_point> goaway_arrivals;
+
+    bool
+    open(std::string const &origin) {
+        qb::io::quic::tls_config tls;
+        tls.verify_peer = false;
+        return connect(qb::io::uri(origin), tls, {"h3"});
+    }
+};
+
+} // namespace http3_shutdown_wire_test
+
+// graceful_shutdown() in two phases (RFC 9114 section 5.2, Huly QB-91): the notice -- a GOAWAY naming the largest
+// stream id -- then, at least a millisecond later, the final GOAWAY naming the first request not read (0: none was
+// sent); the connection closes once that GOAWAY is acknowledged. Until 3.3 the two GOAWAYs went back to back, which
+// left no round trip for the requests already on their way.
+TEST_F(Http3LoopbackTest, GracefulShutdownSendsTheNoticeThenTheFinalGoawayARoundTripLater) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    http3_shutdown_wire_test::RawH3Peer peer;
+    ASSERT_TRUE(peer.open(https_origin(port)));
+    ASSERT_TRUE(pump([&] { return peer.connected; }));
+    const auto settle = std::chrono::steady_clock::now() + 50ms; // the server's control stream and SETTINGS
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    ASSERT_TRUE(peer.goaway_ids.empty());
+
+    server->graceful_shutdown();
+    ASSERT_TRUE(pump([&] { return peer.closed; }));
+    ASSERT_EQ(peer.goaway_ids.size(), 2u);
+    EXPECT_EQ(peer.goaway_ids[0], (std::uint64_t{1} << 62) - 4) << "the notice names the largest stream id";
+    EXPECT_EQ(peer.goaway_ids[1], 0u) << "the final GOAWAY: no request was read";
+    EXPECT_GE(peer.goaway_arrivals[1] - peer.goaway_arrivals[0], 500us) << "a round trip separates the two GOAWAYs";
+
+    server->close();
+}

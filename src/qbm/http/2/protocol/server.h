@@ -109,6 +109,16 @@ private:
     bool _connection_active           = true;  ///< Connection active flag
     bool _graceful_shutdown_initiated = false; ///< Graceful shutdown flag
 
+    /// A graceful shutdown this server began (RFC 9113 section 6.8, Huly QB-91): none; the notice sent -- a GOAWAY
+    /// naming the largest stream id, and a PING whose ACK is the round trip it waits for; or the final GOAWAY sent.
+    enum class shutdown_phase : std::uint8_t { none, notice, final_goaway };
+    shutdown_phase _shutdown_phase = shutdown_phase::none;
+
+    /// The opaque data of the notice's PING: an ACK carrying it ends the notice.
+    static constexpr std::array<uint8_t, 8> SHUTDOWN_PING_DATA{'q', 'b', '-', 'd', 'r', 'a', 'i', 'n'};
+    /// The largest stream id, which the notice's GOAWAY names: every stream the client opens is still served.
+    static constexpr uint32_t SHUTDOWN_NOTICE_LAST_STREAM_ID = 0x7FFFFFFFu;
+
     qb::protocol::hpack::Decoder _hpack_decoder; ///< HPACK decoder (F35 &mdash; owned by value)
     qb::protocol::hpack::Encoder _hpack_encoder; ///< HPACK encoder (F35 &mdash; owned by value)
 
@@ -195,6 +205,7 @@ public:
         _continuation_frame_count        = 0;
         _connection_active               = true;
         _graceful_shutdown_initiated     = false;
+        _shutdown_phase                  = shutdown_phase::none;
         _initial_settings_sent           = false;
 
         // Re-initialize our settings and derived values
@@ -237,21 +248,66 @@ public:
             return;
         }
 
-        if (!_initial_settings_sent) {
-            LOG_HTTP_DEBUG("Server: Sending initial SETTINGS frame");
-            Http2FrameData<SettingsFrame> settings_frame_data;
-            settings_frame_data.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
-            settings_frame_data.header.flags = 0;
-            settings_frame_data.header.set_stream_id(0);
+        send_initial_settings();
+    }
 
-            for (const auto &setting_pair : _our_settings) {
-                settings_frame_data.payload.entries.push_back({setting_pair.first, setting_pair.second});
-            }
+    /**
+     * @brief Begin a graceful shutdown of the connection (RFC 9113 section 6.8, Huly QB-91).
+     *
+     * Sends the notice: a GOAWAY naming the largest stream id with NO_ERROR -- the client stops opening streams,
+     * and none it opened is lost -- then a PING. The streams that reach the server until that PING's ACK are
+     * served as usual; the ACK, a round trip later, sends the final GOAWAY (complete_graceful_shutdown()). A
+     * client that never answers the PING keeps the connection in the notice: its owner's deadline completes it.
+     * The connection's SETTINGS go first when it had not sent them.
+     * @return False, and nothing is sent, when the connection is closing or a shutdown of this server's began.
+     */
+    bool
+    begin_graceful_shutdown() noexcept {
+        if (!this->ok() || !_connection_active || _shutdown_phase != shutdown_phase::none)
+            return false;
+        send_initial_settings();
+        _shutdown_phase = shutdown_phase::notice;
+        send_graceful_goaway(SHUTDOWN_NOTICE_LAST_STREAM_ID, "graceful shutdown notice");
+        Http2FrameData<PingFrame> ping;
+        ping.header.type  = static_cast<uint8_t>(FrameType::PING);
+        ping.header.flags = 0;
+        ping.header.set_stream_id(0);
+        ping.payload.opaque_data = SHUTDOWN_PING_DATA;
+        this->_io << ping;
+        LOG_HTTP_INFO("ServerHttp2Protocol: graceful shutdown notice sent (GOAWAY 2^31-1 + PING)");
+        return true;
+    }
 
-            this->_io << settings_frame_data;
-            _initial_settings_sent = true;
-            LOG_HTTP_DEBUG("Server: Initial SETTINGS frame sent successfully");
+    /**
+     * @brief Send the final GOAWAY of a graceful shutdown (RFC 9113 section 6.8, Huly QB-91): the last stream id
+     *        the client opened, NO_ERROR.
+     *
+     * A stream above it is refused (REFUSED_STREAM: the client may retry it elsewhere); the ones at or below it
+     * are served, and the connection closes when the last of them ends -- at once when none is open. Called on the
+     * ACK of the notice's PING, by a drain's deadline, or with no notice before for a connection that must serve
+     * nothing: its last id is then 0. A no-op once the final GOAWAY is sent or the connection is closing.
+     */
+    void
+    complete_graceful_shutdown() noexcept {
+        if (!this->ok() || !_connection_active || _shutdown_phase == shutdown_phase::final_goaway)
+            return;
+        send_initial_settings();
+        _shutdown_phase = shutdown_phase::final_goaway;
+        send_graceful_goaway(_last_client_initiated_stream_id, "graceful shutdown");
+        _graceful_shutdown_initiated = true;
+        LOG_HTTP_INFO("ServerHttp2Protocol: final GOAWAY sent, last stream id " << _last_client_initiated_stream_id);
+        if (this->are_all_relevant_streams_closed(_last_client_initiated_stream_id)) {
+            _connection_active = false;
+            this->not_ok(ErrorCode::NO_ERROR); // nothing left to serve: the connection closes once this is delivered
         }
+    }
+
+    /**
+     * @brief Whether a graceful shutdown of this server's waits for the ACK of its notice's PING.
+     */
+    [[nodiscard]] bool
+    graceful_shutdown_notice_pending() const noexcept {
+        return _shutdown_phase == shutdown_phase::notice;
     }
 
     /**
@@ -1007,10 +1063,11 @@ public:
         }
 
         if (header.flags & FLAG_ACK) {
-            // This is a PING ACK from client (server sent PING).
-            // QB_LOG_TRACE_PA(this->getName(), "Server: Received PING ACK from client.");
-            // TODO: Application could be notified, e.g. for RTT calculation if it sent the PING.
-            // This is an application integration point.
+            // The ACK of a shutdown notice's PING is the round trip RFC 9113 section 6.8 waits for: every stream the
+            // client opened before it saw the notice has reached us, and the final GOAWAY can name the last one
+            // (Huly QB-91). Any other ACK answers no PING of ours and is ignored.
+            if (_shutdown_phase == shutdown_phase::notice && ping_event.payload.opaque_data == SHUTDOWN_PING_DATA)
+                complete_graceful_shutdown();
         } else {
             // This is a PING from client, send PONG (PING with ACK).
             // Bound PONG amplification (CVE-2019-9512): control frames are exempt from HTTP/2
@@ -2145,6 +2202,45 @@ private:
         } else {
             LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream context not found for cleanup");
         }
+    }
+
+    /**
+     * @brief Send the connection's SETTINGS -- the server preface -- unless they were sent.
+     */
+    void
+    send_initial_settings() noexcept {
+        if (_initial_settings_sent)
+            return;
+        LOG_HTTP_DEBUG("Server: Sending initial SETTINGS frame");
+        Http2FrameData<SettingsFrame> settings_frame_data;
+        settings_frame_data.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
+        settings_frame_data.header.flags = 0;
+        settings_frame_data.header.set_stream_id(0);
+
+        for (const auto &setting_pair : _our_settings) {
+            settings_frame_data.payload.entries.push_back({setting_pair.first, setting_pair.second});
+        }
+
+        this->_io << settings_frame_data;
+        _initial_settings_sent = true;
+        LOG_HTTP_DEBUG("Server: Initial SETTINGS frame sent successfully");
+    }
+
+    /**
+     * @brief Send a GOAWAY of a graceful shutdown: NO_ERROR, the connection kept (Huly QB-91).
+     * @param last_stream_id The last client stream the server may process.
+     * @param debug_message  Its debug data.
+     */
+    void
+    send_graceful_goaway(uint32_t last_stream_id, std::string_view debug_message) noexcept {
+        Http2FrameData<GoAwayFrame> goaway;
+        goaway.header.type  = static_cast<uint8_t>(FrameType::GOAWAY);
+        goaway.header.flags = 0;
+        goaway.header.set_stream_id(0);
+        goaway.payload.last_stream_id = last_stream_id;
+        goaway.payload.error_code     = ErrorCode::NO_ERROR;
+        goaway.payload.additional_debug_data.assign(debug_message.begin(), debug_message.end());
+        this->_io << goaway;
     }
 
     /**

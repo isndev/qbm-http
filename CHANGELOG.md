@@ -23,6 +23,29 @@ All notable changes to the qbm-http module are documented here. The format is ba
   drain closed while idle or aborted at the deadline. `drain_outcome` is meant for the HTTP/2 and
   HTTP/3 servers' drains too. Witness: `qbm-http-test-system-server-drain`.
 
+- **`drain(deadline, on_drained)` on the HTTP/2, HTTP/3 and dual-stack servers: each connection ends
+  in two GOAWAYs (Huly QB-91; RFC 9113 §6.8, RFC 9114 §5.2).** The contract is the HTTP/1.1 server's:
+  one report, on the server's loop, `drain_outcome::drained` when no connection is left or
+  `deadline` when the deadline came first, before `drain()` returns when none is open; `draining()`
+  tells; a second call returns false. HTTP/2 closes its listener and sends each connection a GOAWAY
+  naming the largest stream id and a PING; on the PING's ACK, a round trip later, the final GOAWAY
+  names the last stream the client opened -- the streams up to it are served, one above it is
+  refused (`REFUSED_STREAM`) -- and the connection closes after its last stream. A connection whose
+  TLS handshake ends during the drain serves nothing: its one GOAWAY names stream 0; an HTTP/1.1
+  connection of the ALPN fallback that has received nothing closes. At the deadline a connection
+  that never answered the PING is sent the final GOAWAY and closed once it is delivered, within
+  qb-io's linger bound. HTTP/3 sends the notice, a GOAWAY naming the largest stream id, then the
+  final GOAWAY two smoothed round trips later (the endpoint's largest RTT, as qb-io keeps none per
+  connection; at least 1 ms, at most the deadline), and closes each connection once its last
+  request stream has and its GOAWAY is acknowledged; a connection that completes its handshake
+  during the drain is sent a GOAWAY naming stream 0 before any request stream is read, so every
+  request on it is rejected without reaching the router, and closed once that GOAWAY is
+  acknowledged. The UDP endpoint stays bound until `close()` (refusing in the QUIC handshake is Huly
+  QB-1098). The dual-stack server drains both stacks with one deadline and reports once,
+  `deadline` when either met it. `ServerHttp2Protocol::begin_graceful_shutdown()` and
+  `complete_graceful_shutdown()` are the two HTTP/2 phases. Witnesses:
+  `qbm-http-test-system-server-drain-h2`, `-unit-http2-server-protocol`, `-system-http3-loopback`.
+
 - **`trailers()`: a message's trailer section, kept apart from its header fields, on HTTP/1.1,
   HTTP/2 and HTTP/3 (Huly QB-1073; RFC 9110 §6.5).** `Request` and `Response` gain
   `Headers &trailers()`, `const Headers &trailers() const noexcept` and `bool has_trailers() const
@@ -105,6 +128,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The HTTP/3 server's `graceful_shutdown()` sends its two GOAWAYs a round trip apart (Huly QB-91;
+  RFC 9114 §5.2).** It sent the shutdown notice and the final GOAWAY back to back, which left the
+  requests already on their way no time to arrive before the final GOAWAY rejected them: the
+  notice goes first, the final GOAWAY two smoothed round trips later (at least 1 ms), and the call
+  returns at once. Unlike `drain()`, it serves a connection made afterwards and reports nothing.
+  Witness: `qbm-http-test-system-http3-loopback`
+  (`GracefulShutdownSendsTheNoticeThenTheFinalGoawayARoundTripLater`, red on the previous tip: the two
+  GOAWAYs arrived together).
 - **A request over the body cap is answered `413 Content Too Large`, on HTTP/1.1, HTTP/2 and HTTP/3,
   and the cap is the server's own `set_max_body_size` (Huly QB-168).** HTTP/1.1 closed the connection
   with no answer at all: the parser refused the message and the protocol was invalidated. HTTP/2 reset
@@ -318,6 +349,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **An HTTP/3 graceful close could overtake its GOAWAY, and carried no HTTP/3 code (Huly QB-91).** A
+  shutting-down connection with no request open was closed as soon as the final GOAWAY was handed
+  to QUIC; `CONNECTION_CLOSE` overtakes the stream data QUIC still holds and is never retransmitted,
+  so the client could miss the one frame that tells it which requests were never processed. The
+  close now waits until the peer has acknowledged the control stream that carries the GOAWAY, and
+  carries `H3_NO_ERROR` (0x100) instead of 0, which is no HTTP/3 error code. Not witnessed by a
+  test: a loopback loses no packet, and qb-io does not report the code of a peer's
+  `CONNECTION_CLOSE`.
 - **Benchmark workload oracles (Huly QB-584, QB-585).** The fragmented HTTP/1.1
   driver resumes at the parser's actual pause position, including the remaining
   body bytes in the same fragment. Untimed probes check the complete message,

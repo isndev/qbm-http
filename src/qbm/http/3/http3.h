@@ -36,6 +36,7 @@
 #include <qb/system/container/unordered_set.h>
 
 #include "../1.1/http.h"
+#include "../detail/drain.h"
 #include "../routing/router.h"
 #include "protocol/connection.h"
 
@@ -263,6 +264,11 @@ private:
     qb::unordered_map<stream_key, std::shared_ptr<SessionType>, stream_key_hash> _sessions;
     qb::unordered_set<std::uint64_t>                                             _shutdown_connections;
     std::vector<std::uint64_t>                                                   _closed_connections;
+    /// Connections sent the shutdown notice that wait for their final GOAWAY (Huly QB-91), and its timer.
+    qb::unordered_set<std::uint64_t>              _noticed_connections;
+    std::unique_ptr<qb::http::detail::loop_timer> _notice_timer;
+    qb::http::detail::drain_state                 _drain;                  ///< drain(), begun once, reported once
+    bool                                          _drain_aborting = false; ///< The deadline closes what is open
     // >0 while an HTTP/3 read (nghttp3_conn_read_stream2) is on the stack. A request callback
     // reached from that read can synchronously fail a connection — a send larger than the QUIC
     // TX cap makes the backend queue a close and reentrantly deliver dispatch(connection_closed),
@@ -313,7 +319,10 @@ private:
     // neither holds back, overtakes it. Closing as soon as no handler context was left truncated every response
     // wider than one flight, and on a real round trip any response at all (the pacer alone defers
     // the second packet). A session lives until its QUIC stream closes, which the transport reports
-    // once the peer has acknowledged the last byte: that is the event to wait for.
+    // once the peer has acknowledged the last byte: that is the event to wait for. The GOAWAY is
+    // waited for the same way: the close comes once the peer has acknowledged the control stream that
+    // carries it, or the client could miss the one frame that says which requests were never processed
+    // (Huly QB-91). The close carries H3_NO_ERROR; it carried 0, which is no HTTP/3 code, until 3.3.
     void
     maybe_finish_graceful_shutdown(std::uint64_t connection_id) {
         auto it = _shutdown_connections.find(connection_id);
@@ -323,9 +332,102 @@ private:
         if (has_sessions(connection_id)) {
             return;
         }
+        if (auto *conn = connection(connection_id); conn && !conn->control_stream_acknowledged()) {
+            return; // dispatch(stream_data_acked) calls again
+        }
         // Once: several streams can close in one batch of transport events.
         _shutdown_connections.erase(it);
-        close_http3_connection(connection_id, 0, "HTTP/3 graceful shutdown");
+        close_http3_connection(connection_id, NGHTTP3_H3_NO_ERROR, "HTTP/3 graceful shutdown");
+    }
+
+    [[nodiscard]] bool
+    closing(std::uint64_t connection_id) const noexcept {
+        return std::find(_closed_connections.begin(), _closed_connections.end(), connection_id) != _closed_connections.end();
+    }
+
+    /// How long the shutdown notice waits before the final GOAWAY (Huly QB-91): two smoothed round trips -- the
+    /// endpoint's largest, as qb-io keeps no smaller one per connection -- and at least 1 ms.
+    [[nodiscard]] qb::duration
+    shutdown_notice_wait() const noexcept {
+        const auto rtt = std::chrono::microseconds(static_cast<std::int64_t>(this->stats().smoothed_rtt_us));
+        return std::max<qb::duration>(2 * rtt, std::chrono::milliseconds(1));
+    }
+
+    /// Phase 1 of the shutdown (RFC 9114 section 5.2, Huly QB-91): a GOAWAY naming the largest stream id on every
+    /// connection that has none, so that clients stop opening requests and none they opened is lost; the timer of
+    /// the final GOAWAY comes shutdown_notice_wait() later, or at @p cap.
+    void
+    begin_shutdown_notices(qb::duration cap) {
+        std::vector<std::uint64_t> connection_ids;
+        connection_ids.reserve(_connections.size());
+        for (auto const &[connection_id, _] : _connections) {
+            if (_shutdown_connections.find(connection_id) == _shutdown_connections.end()
+                && _noticed_connections.find(connection_id) == _noticed_connections.end() && !closing(connection_id)) {
+                connection_ids.push_back(connection_id);
+            }
+        }
+        for (auto connection_id : connection_ids) {
+            if (auto *conn = connection(connection_id); conn && conn->submit_shutdown_notice()) {
+                _noticed_connections.insert(connection_id);
+            }
+        }
+        if (_noticed_connections.empty()) {
+            return;
+        }
+        const auto wait = std::min(shutdown_notice_wait(), cap);
+        if (_notice_timer) {
+            _notice_timer->restart(wait); // never released: this may run from its own action
+        } else {
+            _notice_timer = std::make_unique<qb::http::detail::loop_timer>(wait, [this]() noexcept { send_final_goaways(); });
+        }
+    }
+
+    /// Phase 2 (Huly QB-91): the final GOAWAY on every connection that had the notice -- the requests it read are
+    /// served, any above it rejected -- and each closes when its last request stream has.
+    void
+    send_final_goaways() noexcept {
+        std::vector<std::uint64_t> connection_ids(_noticed_connections.begin(), _noticed_connections.end());
+        _noticed_connections.clear();
+        for (auto connection_id : connection_ids) {
+            send_final_goaway(connection_id);
+        }
+    }
+
+    void
+    send_final_goaway(std::uint64_t connection_id) {
+        auto *conn = connection(connection_id);
+        if (!conn || _shutdown_connections.find(connection_id) != _shutdown_connections.end() || closing(connection_id)) {
+            return;
+        }
+        _shutdown_connections.insert(connection_id); // first: a close the GOAWAY's send causes erases it
+        (void) conn->shutdown();
+        maybe_finish_graceful_shutdown(connection_id);
+    }
+
+    void
+    drain_deadline_reached() noexcept {
+        if (!_drain.pending()) {
+            return;
+        }
+        _drain_aborting = true; // the closes below reap connections: the report is the deadline's
+        std::vector<std::uint64_t> connection_ids;
+        connection_ids.reserve(_connections.size());
+        for (auto const &[connection_id, _] : _connections) {
+            if (!closing(connection_id)) {
+                connection_ids.push_back(connection_id);
+            }
+        }
+        _noticed_connections.clear();
+        for (auto connection_id : connection_ids) {
+            if (auto *conn = connection(connection_id); conn && _shutdown_connections.find(connection_id) == _shutdown_connections.end()) {
+                _shutdown_connections.insert(connection_id);
+                (void) conn->shutdown(); // the final GOAWAY the notice was waiting for
+            }
+            close_http3_connection(connection_id, NGHTTP3_H3_NO_ERROR, "HTTP/3 drain deadline");
+        }
+        _drain_aborting = false;
+        LOG_HTTP_WARN("HTTP/3 drain deadline reached: the connections still open are closed.");
+        _drain.report(qb::http::drain_outcome::deadline, "HTTP/3");
     }
 
     [[nodiscard]] std::shared_ptr<SessionType>
@@ -351,7 +453,16 @@ protected:
             close_http3_connection(ev.connection_id, 0x010c, "HTTP/3 ALPN mismatch");
             return;
         }
-        (void) ensure_connection(ev.connection_id);
+        auto &conn = ensure_connection(ev.connection_id);
+        if (_drain.started()) {
+            // The server drains: this connection serves nothing. Its GOAWAY, sent before any request stream is
+            // read, names stream 0 -- no request was processed, the client may retry every one elsewhere -- and
+            // nghttp3 rejects each that comes; the connection closes, H3_NO_ERROR, once the GOAWAY is acknowledged
+            // (Huly QB-91).
+            _shutdown_connections.insert(ev.connection_id);
+            (void) conn.shutdown();
+            maybe_finish_graceful_shutdown(ev.connection_id);
+        }
         if constexpr (requires(Derived &derived, qb::io::async::quic::event::connected const &e) { derived.on(e); }) {
             static_cast<Derived &>(*this).on(ev);
         }
@@ -371,6 +482,7 @@ protected:
             _closed_connections.push_back(ev.connection_id);
         }
         _shutdown_connections.erase(ev.connection_id);
+        _noticed_connections.erase(ev.connection_id);
         if constexpr (requires(Derived &derived, qb::io::async::quic::event::connection_closed const &e) { derived.on(e); }) {
             static_cast<Derived &>(*this).on(ev);
         }
@@ -409,6 +521,9 @@ protected:
     dispatch(qb::io::async::quic::event::stream_data_acked const &ev) override {
         if (auto *conn = connection(ev.connection_id)) {
             conn->add_ack_offset(ev.id, ev.bytes);
+            if (!_shutdown_connections.empty()) {
+                maybe_finish_graceful_shutdown(ev.connection_id); // the GOAWAY's ACK may be what it waited for
+            }
         }
     }
 
@@ -447,6 +562,9 @@ protected:
             _connections.erase(connection_id);
         }
         _closed_connections.clear();
+        if (_drain.pending() && !_drain_aborting && _connections.empty()) {
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/3");
+        }
     }
 
 public:
@@ -558,30 +676,72 @@ public:
     }
 
     /**
-     * @brief Begin HTTP/3 graceful shutdown of all connections.
+     * @brief Begin HTTP/3 graceful shutdown of the connections open now, in two phases (RFC 9114 section 5.2,
+     *        Huly QB-91).
      *
-     * Submits a shutdown notice (GOAWAY) on each connection and closes at once those
-     * with no request stream open; the others close when their last request stream
-     * does — after the handler has answered AND the peer has acknowledged the
-     * response, so a response in flight is delivered, not cut by the close.
+     * Each connection is sent the shutdown notice -- a GOAWAY naming the largest stream id: the client stops
+     * opening requests, and none it opened is lost -- then, two smoothed round trips later (at least 1 ms), the
+     * final GOAWAY naming the first request it has not read: one at or above it is rejected (H3_REQUEST_REJECTED,
+     * safe to retry), the others are served. A connection closes, H3_NO_ERROR, once its last request stream has
+     * -- after the handler has answered AND the peer has acknowledged the response -- and the peer has
+     * acknowledged the GOAWAY. The call returns at once: keep the loop running until they are gone.
+     *
+     * Unlike drain(), a connection that arrives afterwards is served, and nothing reports the end. Until 3.3 the
+     * two GOAWAYs went back to back, which left no round trip for the requests already on their way, and the
+     * close carried 0, which is no HTTP/3 code.
      */
     void
     graceful_shutdown() {
-        std::vector<std::uint64_t> connection_ids;
-        connection_ids.reserve(_connections.size());
-        for (auto const &[connection_id, _] : _connections) {
-            connection_ids.push_back(connection_id);
+        begin_shutdown_notices(qb::duration::max());
+    }
+
+    /**
+     * @brief Drain the server (Huly QB-91): end every connection gracefully, serve none that arrives, and report
+     *        when no connection is left or @p deadline came.
+     *
+     * - Each connection open now shuts down as graceful_shutdown() does: the notice, then -- two smoothed round
+     *   trips later, at least 1 ms, at most @p deadline -- the final GOAWAY; it closes once its last request
+     *   stream has and its GOAWAY is acknowledged.
+     * - A connection that completes its handshake during the drain, or after it, serves nothing: its GOAWAY,
+     *   sent before any request stream is read, names stream 0 -- no request was processed, the client may retry
+     *   every one elsewhere -- every request on it is rejected (H3_REQUEST_REJECTED) without reaching the router,
+     *   and it closes, H3_NO_ERROR, once the GOAWAY is acknowledged. The UDP endpoint stays bound until close():
+     *   refusing a connection in the QUIC handshake itself is Huly QB-1098.
+     * - @p on_drained runs once, on the server's loop: with `drain_outcome::drained` when no connection is left,
+     *   or with `drain_outcome::deadline` when @p deadline came first -- then each connection still open is sent
+     *   its final GOAWAY, unless it was, and closed, H3_NO_ERROR, abandoning its requests. With no connection
+     *   open the report comes before drain() returns; a deadline of zero or less ends the drain at once. Do not
+     *   destroy the server from @p on_drained.
+     *
+     * Same contract as the HTTP/1.1 and HTTP/2 servers' drain().
+     * @param deadline   How long the connections have, from now.
+     * @param on_drained Told how the drain ended; may be empty.
+     * @return False when a drain is already under way: the call changes nothing.
+     */
+    bool
+    drain(qb::duration deadline, std::function<void(qb::http::drain_outcome)> on_drained = {}) {
+        if (!_drain.begin(std::move(on_drained))) {
+            return false;
         }
-        for (auto connection_id : connection_ids) {
-            auto *conn = connection(connection_id);
-            if (!conn) {
-                continue;
-            }
-            (void) conn->submit_shutdown_notice();
-            (void) conn->shutdown();
-            _shutdown_connections.insert(connection_id);
-            maybe_finish_graceful_shutdown(connection_id);
+        if (_connections.empty()) {
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/3");
+            return true;
         }
+        if (deadline <= qb::duration::zero()) {
+            drain_deadline_reached();
+            return true;
+        }
+        begin_shutdown_notices(deadline);
+        _drain.arm_deadline(deadline, [this]() noexcept { drain_deadline_reached(); });
+        return true;
+    }
+
+    /**
+     * @brief Whether drain() was called (the drain may be over: see its callback).
+     */
+    [[nodiscard]] bool
+    draining() const noexcept {
+        return _drain.started();
     }
 
     /**

@@ -47,6 +47,7 @@
 #include <qb/io/protocol/handshake.h>
 // Re-using HTTP/1.1 Request/Response structures as a base
 #include "../1.1/http.h"
+#include "../detail/drain.h"
 // HTTP/2 protocol implementations
 #include "./protocol/client.h"
 #include "./protocol/server.h"
@@ -115,6 +116,10 @@ private:
 
     std::chrono::steady_clock::time_point _last_stream_cleanup; ///< Last time we cleaned up idle streams
     bool                                  _reclaiming_completed_contexts{false};
+    /// The TLS handshake the session starts in: with HTTP/2 and the HTTP/1.1 fallback, the protocols an HTTP drain
+    /// knows (http2_speaks_http()).
+    qb::io::async::IProtocol const *_handshake_protocol{nullptr};
+    bool                            _draining{false}; ///< The server drains (http2_begin_drain(), Huly QB-91)
 
     void
     reclaim_completed_stream_contexts() noexcept {
@@ -226,7 +231,7 @@ public:
         , _http2_protocol(nullptr)
         , _last_stream_cleanup(std::chrono::steady_clock::now()) {
         LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 internal::session (server-side) created.");
-        this->template switch_protocol<qb::io::protocol::handshake<session<Derived, Handler>>>(*this);
+        _handshake_protocol = this->template switch_protocol<qb::io::protocol::handshake<session<Derived, Handler>>>(*this);
         this->setTimeout(constants::DEFAULT_SESSION_TIMEOUT);
         // Both protocols this session runs bound their messages themselves -- HTTP/2 frames by the frame
         // size it advertises, the HTTP/1.1 fallback by its header limits and the server's body cap -- and
@@ -318,6 +323,68 @@ public:
     }
 
     /**
+     * @brief Server hook (Huly QB-91): whether the session still speaks HTTP -- its TLS handshake, HTTP/2 or the
+     *        HTTP/1.1 fallback. A session switched to another protocol is out of an HTTP drain.
+     */
+    [[nodiscard]] bool
+    http2_speaks_http() const noexcept {
+        auto const *current = this->protocol();
+        return current == _handshake_protocol || current == _http2_protocol || current == _http1_protocol;
+    }
+
+    /**
+     * @brief Server hook (Huly QB-91): the server drains.
+     *
+     * - HTTP/2: the graceful shutdown of RFC 9113 section 6.8 begins -- the notice (GOAWAY naming the largest
+     *   stream id, then a PING), and on the PING's ACK the final GOAWAY with the last stream the client opened;
+     *   the connection closes when its last stream has ended.
+     * - The HTTP/1.1 fallback, one exchange per connection: an exchange under way closes the connection after its
+     *   answer, as always; a session that has received nothing closes now, gracefully (qb-io's lingering close).
+     * - In the TLS handshake: it ends first. Then HTTP/2 is refused at once -- the final GOAWAY names stream 0:
+     *   no stream of the client's is processed, and it may retry them elsewhere -- and HTTP/1.1 serves its one
+     *   exchange.
+     */
+    void
+    http2_begin_drain() noexcept {
+        if (_draining)
+            return;
+        _draining = true;
+        if (!http2_speaks_http() || this->lingering())
+            return;
+        if (_http2_protocol && this->protocol() == _http2_protocol) {
+            if (_http2_protocol->begin_graceful_shutdown())
+                this->ready_to_write();
+            return;
+        }
+        if (_http1_protocol && this->protocol() == _http1_protocol) {
+            if (!_contexts.empty() || this->in().size() != 0)
+                return; // an exchange under way: its answer closes the connection
+            this->close_after_deliver();
+            this->ready_to_write(); // nothing to deliver: the write path closes at once, after the client
+        }
+    }
+
+    /**
+     * @brief Server hook (Huly QB-91): the drain's deadline came.
+     *
+     * An HTTP/2 connection is sent its final GOAWAY -- unless it was -- and closes once that is delivered: what
+     * is still open is abandoned, and the client learns which of its streams were never processed. A peer that
+     * does not read cannot hold it past qb-io's linger bound (set_linger()); with no linger bound it is aborted,
+     * as any other session.
+     */
+    void
+    http2_abort_drain() noexcept {
+        if (_http2_protocol && this->protocol() == _http2_protocol && _http2_protocol->ok() && this->linger() > qb::duration::zero()) {
+            _http2_protocol->complete_graceful_shutdown();
+            this->close_after_deliver();
+            this->setTimeout(this->linger());
+            this->ready_to_write();
+            return;
+        }
+        this->disconnect(qb::http::DisconnectedReason::ServerDraining);
+    }
+
+    /**
      * @brief Protocol hook of the HTTP/1.1 fallback: a request was refused for a limit (414, 431 or 413,
      *        Huly QB-168, QB-94).
      * @param status The status that answers it.
@@ -354,6 +421,12 @@ public:
         if (alpn_proto == "h2") {
             LOG_HTTP_DEBUG_PA(this->id(), "Switching to HTTP/2 protocol.");
             _http2_protocol = this->template switch_protocol<Http2Protocol>(*this);
+            // The server drains: the connection serves nothing. Its final GOAWAY names stream 0, so the client
+            // knows none of its streams was processed (Huly QB-91).
+            if (_draining && _http2_protocol) {
+                _http2_protocol->complete_graceful_shutdown();
+                this->ready_to_write();
+            }
         } else {
             LOG_HTTP_DEBUG_PA(this->id(), "Switching to HTTP/1.1 protocol.");
             _http1_protocol = this->template switch_protocol<Http1Protocol>(*this);
@@ -664,11 +737,116 @@ class server
         LOG_HTTP_WARN("HTTP/2 server disconnected. Reason: " << event.reason);
     }
 
+    qb::http::detail::drain_state _drain; ///< drain() (Huly QB-91): begun once -- the listener closed -- reported once
+
+    /// The sessions a drain waits for: those still speaking HTTP, lingering ones included (they are closing).
+    [[nodiscard]] std::size_t
+    http_sessions_left() noexcept {
+        std::size_t left = 0;
+        for (auto const &[id, session] : this->sessions()) {
+            if (session && session->http2_speaks_http())
+                ++left;
+        }
+        return left;
+    }
+
+    void
+    drain_deadline_reached() noexcept {
+        if (!_drain.pending())
+            return;
+        for (auto const &[id, session] : this->sessions()) {
+            if (session && session->http2_speaks_http())
+                session->http2_abort_drain();
+        }
+        LOG_HTTP_WARN("HTTP/2 drain deadline reached: the connections still open are closed.");
+        _drain.report(qb::http::drain_outcome::deadline, "HTTP/2");
+    }
+
 public:
     /**
      * @brief Construct HTTP/2 server
      */
     server() = default;
+
+    /**
+     * @brief Drain the server (Huly QB-91): stop taking connections, end each one gracefully, and report when
+     *        every HTTP session has closed or @p deadline came.
+     *
+     * - The listening socket is closed: a new connection is refused, and the port is free.
+     * - An HTTP/2 connection shuts down in two phases (RFC 9113 section 6.8): a GOAWAY naming the largest stream
+     *   id with NO_ERROR -- the client stops opening streams, and none it opened is lost -- and a PING; on the
+     *   PING's ACK, a round trip later, the final GOAWAY names the last stream the client opened. The streams up
+     *   to it are served, one above it is refused (REFUSED_STREAM, safe to retry elsewhere), and the connection
+     *   closes when its last stream has ended.
+     * - A connection still in its TLS handshake finishes it; then HTTP/2 is refused at once (the final GOAWAY
+     *   names stream 0) and HTTP/1.1 serves its one exchange. An HTTP/1.1 connection of the ALPN fallback that has
+     *   received nothing closes now; one at work closes after its answer, as always.
+     * - @p on_drained runs once, on the server's loop: with `drain_outcome::drained` when the last HTTP session
+     *   has closed -- a lingering one counts until it is gone -- or with `drain_outcome::deadline` when
+     *   @p deadline came first. Then each HTTP/2 connection is sent its final GOAWAY, if the PING was never
+     *   answered, and closes once it is delivered (within qb-io's linger bound), abandoning what is open; any
+     *   other session is aborted. With no HTTP session open the report comes before drain() returns; a deadline
+     *   of zero or less ends the drain at once.
+     *
+     * Same contract as the HTTP/1.1 server's drain(). The server cannot listen again afterwards.
+     * @param deadline   How long the connections have, from now.
+     * @param on_drained Told how the drain ended; may be empty.
+     * @return False when a drain is already under way: the call changes nothing.
+     */
+    bool
+    drain(qb::duration deadline, std::function<void(qb::http::drain_outcome)> on_drained = {}) {
+        if (!_drain.begin(std::move(on_drained)))
+            return false;
+        this->stop();              // the accept watcher
+        this->transport().close(); // and the listening socket: a new connection is refused
+        for (auto const &[id, session] : this->sessions()) {
+            if (session)
+                session->http2_begin_drain();
+        }
+        if (http_sessions_left() == 0) {
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/2");
+            return true;
+        }
+        if (deadline <= qb::duration::zero()) {
+            drain_deadline_reached();
+            return true;
+        }
+        _drain.arm_deadline(deadline, [this]() noexcept { drain_deadline_reached(); });
+        return true;
+    }
+
+    /**
+     * @brief Whether drain() was called (the drain may be over: see its callback).
+     */
+    [[nodiscard]] bool
+    draining() const noexcept {
+        return _drain.started();
+    }
+
+    /**
+     * @brief Session hook: a session of this server is gone. The base forgets it; a drain that waited for it may end.
+     * @param ident The session's id.
+     */
+    void
+    disconnected(qb::uuid ident) {
+        qb::io::async::io_handler<Derived, Session>::disconnected(ident);
+        if (_drain.pending() && http_sessions_left() == 0)
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/2");
+    }
+
+    /**
+     * @brief Extract a session's transport, as io_handler::extractSession does. A drain that waited for that
+     *        session may end: it is no longer this server's (Huly QB-91).
+     * @param ident The session's id.
+     * @return The transport and whether the session was found.
+     */
+    [[nodiscard]] std::pair<typename Session::transport_io_type, bool>
+    extractSession(qb::uuid const &ident) {
+        auto extracted = qb::io::async::io_handler<Derived, Session>::extractSession(ident);
+        if (_drain.pending() && http_sessions_left() == 0)
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/2");
+        return extracted;
+    }
 
     /**
      * @brief Bind the listening socket **and start accepting**.

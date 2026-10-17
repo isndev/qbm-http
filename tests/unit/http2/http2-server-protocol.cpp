@@ -3128,7 +3128,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (server.h:1176-1181).
+// with INTERNAL_ERROR (server.h:1233-1238).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3156,7 +3156,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (server.h:1158-1163).
+// (server.h:1215-1220).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3176,7 +3176,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (server.h:1132-1135).
+// (server.h:1189-1192).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3196,7 +3196,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (server.h:1126-1131).
+// A non-numeric content-length response header is rejected (server.h:1183-1188).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3219,7 +3219,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:924-929).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (server.h:980-985).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3238,7 +3238,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (server.h:931-949).
+// on(WindowUpdateFrame) for stream 0 (server.h:987-1005).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3431,7 +3431,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an idle (never-opened, lower-numbered) stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (server.h:277-280).
+// STREAM_CLOSED) on the connection-receive-window path (server.h:333-336).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -3454,7 +3454,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (server.h:273-275).
+// (server.h:329-331).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3471,7 +3471,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; server.h:1052-1062 else arm).
+// (no stream context to store into; server.h:1109-1119 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3490,7 +3490,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:960-972);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (server.h:1016-1028);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -3992,4 +3992,172 @@ TEST(HTTP2ServerProtocol, TheDefaultFieldValueLimitIsTheHttp1Constant) {
     ASSERT_EQ(blocks.size(), 1u) << "it is answered";
     EXPECT_EQ(blocks.front().value(":status"), "431");
     EXPECT_TRUE(protocol.ok()) << "a stream is refused, not the connection";
+}
+
+// ===========================================================================
+// Graceful shutdown in two phases (RFC 9113 section 6.8, Huly QB-91): the notice -- GOAWAY naming the largest
+// stream id, and a PING -- then, on the PING's ACK, the final GOAWAY naming the last stream the client opened.
+// ===========================================================================
+
+namespace {
+
+struct EmittedGoaway {
+    uint32_t  last_stream_id = 0;
+    ErrorCode error          = ErrorCode::NO_ERROR;
+};
+
+// The GOAWAY frames emitted at or after `from_offset`, in order.
+[[nodiscard]] std::vector<EmittedGoaway>
+emitted_goaways(const qb::allocator::pipe<char> &output, std::size_t from_offset = 0) {
+    std::vector<EmittedGoaway> goaways;
+    for (const auto &frame : parse_emitted_frames(output)) {
+        if (frame.type != FrameType::GOAWAY || frame.payload_offset < from_offset || frame.payload_length < 8) {
+            continue;
+        }
+        const auto payload = emitted_payload(output, frame);
+        goaways.push_back(
+            {qb::protocol::http2::extract_uint32_be(payload.data()) & 0x7FFFFFFFu,
+             static_cast<ErrorCode>(qb::protocol::http2::extract_uint32_be(payload.data() + 4))});
+    }
+    return goaways;
+}
+
+// The payload of the first PING without ACK emitted at or after `from_offset`.
+[[nodiscard]] std::optional<std::vector<uint8_t>>
+emitted_ping(const qb::allocator::pipe<char> &output, std::size_t from_offset = 0) {
+    for (const auto &frame : parse_emitted_frames(output)) {
+        if (frame.type == FrameType::PING && frame.payload_offset >= from_offset && (frame.flags & qb::protocol::http2::FLAG_ACK) == 0) {
+            return emitted_payload(output, frame);
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+// A stream the client opens between the two GOAWAYs is served; the final GOAWAY names it; a stream above it is
+// refused; the connection closes when the last stream it names has been answered.
+TEST(HTTP2ServerProtocol, GracefulShutdownServesAStreamOpenedBetweenTheTwoGoaways) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/before");
+    ASSERT_EQ(io.request_count, 1);
+
+    const auto notice_at = io.output.size();
+    ASSERT_TRUE(protocol.begin_graceful_shutdown());
+    EXPECT_TRUE(protocol.graceful_shutdown_notice_pending());
+    EXPECT_FALSE(protocol.begin_graceful_shutdown()) << "a shutdown begins once";
+    const auto notice = emitted_goaways(io.output, notice_at);
+    ASSERT_EQ(notice.size(), 1u);
+    EXPECT_EQ(notice[0].last_stream_id, 0x7FFFFFFFu) << "the notice names the largest stream id";
+    EXPECT_EQ(notice[0].error, ErrorCode::NO_ERROR);
+    const auto ping = emitted_ping(io.output, notice_at);
+    ASSERT_TRUE(ping.has_value()) << "the notice is followed by a PING";
+    ASSERT_EQ(ping->size(), 8u);
+    EXPECT_TRUE(protocol.ok());
+
+    open_get_stream_end_stream(protocol, io, 3, "/between");
+    EXPECT_EQ(io.request_count, 2) << "a stream opened after the notice, before the PING's ACK, is served";
+    EXPECT_EQ(io.last_request_stream_id, 3u);
+    EXPECT_FALSE(last_rst_stream_error(io.output, 3).has_value());
+
+    const auto final_at = io.output.size();
+    push_frame(io, FrameType::PING, qb::protocol::http2::FLAG_ACK, 0, *ping);
+    drive(protocol, io);
+    const auto final_goaway = emitted_goaways(io.output, final_at);
+    ASSERT_EQ(final_goaway.size(), 1u) << "the PING's ACK sends the final GOAWAY";
+    EXPECT_EQ(final_goaway[0].last_stream_id, 3u) << "it names the last stream the client opened";
+    EXPECT_EQ(final_goaway[0].error, ErrorCode::NO_ERROR);
+    EXPECT_FALSE(protocol.graceful_shutdown_notice_pending());
+    EXPECT_TRUE(protocol.ok()) << "streams 1 and 3 are still to be answered";
+
+    open_get_stream_end_stream(protocol, io, 5, "/after");
+    EXPECT_EQ(io.request_count, 2) << "a stream above the final GOAWAY's id is never routed";
+    EXPECT_EQ(last_rst_stream_error(io.output, 5), ErrorCode::REFUSED_STREAM);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::NO_CONTENT;
+    EXPECT_TRUE(protocol.send_response(1, response));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_FALSE(protocol.send_response(3, response)) << "the last answer completes the shutdown";
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::NO_ERROR);
+}
+
+// A PING ACK that does not carry the notice's data answers no PING of the server's: the notice goes on.
+TEST(HTTP2ServerProtocol, GracefulShutdownIgnoresAnAckOfAnotherPing) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.begin_graceful_shutdown());
+
+    const auto before = io.output.size();
+    push_frame(io, FrameType::PING, qb::protocol::http2::FLAG_ACK, 0, {1, 2, 3, 4, 5, 6, 7, 8});
+    drive(protocol, io);
+    EXPECT_TRUE(emitted_goaways(io.output, before).empty());
+    EXPECT_TRUE(protocol.graceful_shutdown_notice_pending());
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A client that never answers the PING stays in the notice; the owner's deadline completes the shutdown, and the
+// final GOAWAY still names the last stream it opened. Completing twice sends one final GOAWAY.
+TEST(HTTP2ServerProtocol, GracefulShutdownWithoutAPingAckCompletesWhenItsOwnerSays) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.begin_graceful_shutdown());
+    open_get_stream_end_stream(protocol, io, 1, "/held");
+    ASSERT_EQ(io.request_count, 1);
+
+    const auto final_at = io.output.size();
+    protocol.complete_graceful_shutdown();
+    protocol.complete_graceful_shutdown();
+    const auto final_goaway = emitted_goaways(io.output, final_at);
+    ASSERT_EQ(final_goaway.size(), 1u);
+    EXPECT_EQ(final_goaway[0].last_stream_id, 1u);
+    EXPECT_FALSE(protocol.graceful_shutdown_notice_pending());
+    EXPECT_TRUE(protocol.ok()) << "stream 1 is still open";
+}
+
+// A connection that must serve nothing -- one that reaches HTTP/2 while its server drains -- is sent the final
+// GOAWAY at once, naming stream 0, after the SETTINGS the server preface owes; with no stream open it closes.
+TEST(HTTP2ServerProtocol, AFinalGoawayBeforeAnyStreamNamesStreamZeroAndCloses) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    protocol.complete_graceful_shutdown();
+
+    const auto frames = parse_emitted_frames(io.output);
+    ASSERT_GE(frames.size(), 2u);
+    EXPECT_EQ(frames[0].type, FrameType::SETTINGS) << "the server preface comes first";
+    const auto goaways = emitted_goaways(io.output);
+    ASSERT_EQ(goaways.size(), 1u);
+    EXPECT_EQ(goaways[0].last_stream_id, 0u) << "no stream of the client's was processed";
+    EXPECT_EQ(goaways[0].error, ErrorCode::NO_ERROR);
+    EXPECT_FALSE(protocol.ok()) << "nothing is open: the connection closes once this is delivered";
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), ErrorCode::NO_ERROR);
+}
+
+// The notice before the client preface sends the server preface first, once: the preface that arrives later does
+// not send a second SETTINGS.
+TEST(HTTP2ServerProtocol, AShutdownNoticeBeforeThePrefaceSendsTheSettingsOnce) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    ASSERT_TRUE(protocol.begin_graceful_shutdown());
+    const auto frames = parse_emitted_frames(io.output);
+    ASSERT_EQ(frames.size(), 3u);
+    EXPECT_EQ(frames[0].type, FrameType::SETTINGS);
+    EXPECT_EQ(frames[1].type, FrameType::GOAWAY);
+    EXPECT_EQ(frames[2].type, FrameType::PING);
+
+    do_handshake(protocol, io);
+    std::size_t settings = 0;
+    for (const auto &frame : parse_emitted_frames(io.output)) {
+        if (frame.type == FrameType::SETTINGS && (frame.flags & qb::protocol::http2::FLAG_ACK) == 0)
+            ++settings;
+    }
+    EXPECT_EQ(settings, 1u);
+    EXPECT_TRUE(protocol.ok());
 }

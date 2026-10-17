@@ -38,6 +38,7 @@
 #include <optional>
 #include <string_view>
 #include "../coro.h"
+#include "../detail/drain.h"
 #include "../logger.h"
 #include "../origin.h"
 #include "../routing.h"
@@ -773,26 +774,7 @@ class server
         LOG_HTTP_WARN("HTTP/1.1 server disconnected. Reason: " << event.reason);
     }
 
-    /// The bound of a drain (Huly QB-167). Its callback only reports the deadline: the server, which owns it, is never
-    /// destroyed from under it, and it is stopped -- never released -- once the drain ends.
-    class drain_deadline : public qb::io::async::with_timeout<drain_deadline> {
-        server &_owner;
-
-    public:
-        drain_deadline(server &owner, qb::duration bound)
-            : qb::io::async::with_timeout<drain_deadline>(bound)
-            , _owner(owner) {}
-
-        void
-        on(qb::io::async::event::timer const &) noexcept {
-            _owner.drain_deadline_reached();
-        }
-    };
-
-    bool                                         _draining   = false; ///< drain() was called: the listener is closed
-    bool                                         _drain_done = false; ///< on_drained ran (or there was none to run)
-    std::function<void(qb::http::drain_outcome)> _on_drained;
-    std::unique_ptr<drain_deadline>              _drain_deadline;
+    qb::http::detail::drain_state _drain; ///< drain() (Huly QB-167): begun once -- the listener closed -- reported once
 
     /// Whether the session type has the drain's hooks (this module's session does; a bare qb-io session served by this
     /// server does not, and is waited for as it is, then aborted at the deadline).
@@ -818,28 +800,8 @@ class server
     }
 
     void
-    finish_drain(qb::http::drain_outcome outcome) noexcept {
-        if (_drain_done)
-            return;
-        _drain_done = true;
-        if (_drain_deadline)
-            _drain_deadline->setTimeout(qb::duration::zero()); // stopped, not released: this may be its own callback
-        auto on_drained = std::move(_on_drained);
-        _on_drained     = nullptr;
-        if (on_drained) {
-            try {
-                on_drained(outcome);
-            } catch (const std::exception &e) {
-                LOG_HTTP_ERROR("HTTP/1.1 drain callback threw: " << e.what());
-            } catch (...) {
-                LOG_HTTP_ERROR("HTTP/1.1 drain callback threw an unknown exception");
-            }
-        }
-    }
-
-    void
     drain_deadline_reached() noexcept {
-        if (_drain_done)
+        if (!_drain.pending())
             return;
         for (auto const &[id, session] : this->sessions()) {
             if constexpr (drainable_sessions) {
@@ -850,7 +812,7 @@ class server
             }
         }
         LOG_HTTP_WARN("HTTP/1.1 drain deadline reached: the sessions still open are aborted.");
-        finish_drain(qb::http::drain_outcome::deadline);
+        _drain.report(qb::http::drain_outcome::deadline, "HTTP/1.1");
     }
 
 public:
@@ -890,10 +852,8 @@ public:
      */
     bool
     drain(qb::duration deadline, std::function<void(qb::http::drain_outcome)> on_drained = {}) {
-        if (_draining)
+        if (!_drain.begin(std::move(on_drained)))
             return false;
-        _draining   = true;
-        _on_drained = std::move(on_drained);
         this->stop();              // the accept watcher
         this->transport().close(); // and the listening socket: a new connection is refused
         if constexpr (drainable_sessions) {
@@ -903,14 +863,14 @@ public:
             }
         }
         if (http_sessions_left() == 0) {
-            finish_drain(qb::http::drain_outcome::drained);
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/1.1");
             return true;
         }
         if (deadline <= qb::duration::zero()) {
             drain_deadline_reached();
             return true;
         }
-        _drain_deadline = std::make_unique<drain_deadline>(*this, deadline);
+        _drain.arm_deadline(deadline, [this]() noexcept { drain_deadline_reached(); });
         return true;
     }
 
@@ -919,7 +879,7 @@ public:
      */
     [[nodiscard]] bool
     draining() const noexcept {
-        return _draining;
+        return _drain.started();
     }
 
     /**
@@ -929,8 +889,8 @@ public:
     void
     disconnected(qb::uuid ident) {
         qb::io::async::io_handler<Derived, Session>::disconnected(ident);
-        if (_draining && !_drain_done && http_sessions_left() == 0)
-            finish_drain(qb::http::drain_outcome::drained);
+        if (_drain.pending() && http_sessions_left() == 0)
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/1.1");
     }
 
     /**
@@ -943,8 +903,8 @@ public:
     [[nodiscard]] std::pair<typename Session::transport_io_type, bool>
     extractSession(qb::uuid const &ident) {
         auto extracted = qb::io::async::io_handler<Derived, Session>::extractSession(ident);
-        if (_draining && !_drain_done && http_sessions_left() == 0)
-            finish_drain(qb::http::drain_outcome::drained);
+        if (_drain.pending() && http_sessions_left() == 0)
+            _drain.report(qb::http::drain_outcome::drained, "HTTP/1.1");
         return extracted;
     }
 

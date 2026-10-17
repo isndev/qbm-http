@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -578,6 +579,12 @@ private:
     qb::unordered_map<std::uint64_t, std::unique_ptr<stream_state>> _streams;
     bool                                                            _local_streams_bound = false;
     bool                                                            _shutdown_started    = false;
+    /// The control stream, which carries SETTINGS and every GOAWAY, and its bytes handed to QUIC and acknowledged
+    /// by the peer: a GOAWAY is known to have arrived once they are equal (control_stream_acknowledged(), Huly
+    /// QB-91). The stream is opened first, so it never holds this sentinel once bound.
+    std::uint64_t _control_stream_id   = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t _control_bytes_sent  = 0;
+    std::uint64_t _control_bytes_acked = 0;
     // Liveness flag for reentrancy-safe teardown. drain() forwards bytes to the owner,
     // which can SYNCHRONOUSLY destroy this connection (the owner erases it from its
     // _connections map when the transport reports a close mid-send). drain() captures a
@@ -1297,6 +1304,7 @@ public:
             return false;
         if (nghttp3_conn_bind_qpack_streams(_conn, static_cast<int64_t>(qpack_encoder), static_cast<int64_t>(qpack_decoder)) != 0)
             return false;
+        _control_stream_id   = control;
         _local_streams_bound = true;
         drain();
         return true;
@@ -1355,7 +1363,23 @@ public:
     add_ack_offset(std::uint64_t stream_id, std::uint64_t bytes) {
         if (bytes != 0) {
             (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
+            if (stream_id == _control_stream_id)
+                _control_bytes_acked += bytes;
         }
+    }
+
+    /**
+     * @brief Whether the peer has acknowledged every byte of the control stream handed to QUIC -- among them the
+     *        GOAWAYs (Huly QB-91).
+     *
+     * A connection that closes with a GOAWAY just sent waits for this: CONNECTION_CLOSE overtakes the stream
+     * data QUIC still holds and is never retransmitted, so closing earlier can leave the client without the
+     * GOAWAY that tells it which requests were never processed. The stream's credit never holds a GOAWAY back:
+     * it carries a few dozen bytes for the connection's whole life.
+     */
+    [[nodiscard]] bool
+    control_stream_acknowledged() const noexcept {
+        return _control_bytes_acked >= _control_bytes_sent;
     }
 
     /**
@@ -1398,10 +1422,13 @@ public:
     /**
      * @brief Send a GOAWAY shutdown notice without closing the connection.
      * @return @c true on success (output is drained); @c false if nghttp3 rejects
-     *         the notice.
+     *         the notice, or the control stream is not bound.
      */
     bool
     submit_shutdown_notice() {
+        if (!_local_streams_bound) {
+            return false; // no control stream to carry it (nghttp3 asserts one)
+        }
         if (nghttp3_conn_submit_shutdown_notice(_conn) != 0) {
             return false;
         }
@@ -1415,10 +1442,14 @@ public:
      * Marks the connection as shutting down so ::is_drained can later report
      * completion, then drains any resulting output.
      *
-     * @return @c true on success; @c false if nghttp3 rejects the shutdown.
+     * @return @c true on success; @c false if nghttp3 rejects the shutdown, or the
+     *         control stream is not bound.
      */
     bool
     shutdown() {
+        if (!_local_streams_bound) {
+            return false; // no control stream to carry it (nghttp3 asserts one)
+        }
         _shutdown_started = true;
         if (nghttp3_conn_shutdown(_conn) != 0) {
             return false;
@@ -1618,6 +1649,8 @@ public:
                     return;
             }
             (void) nghttp3_conn_add_write_offset(_conn, stream_id, accepted);
+            if (static_cast<std::uint64_t>(stream_id) == _control_stream_id)
+                _control_bytes_sent += accepted;
             if (fin) {
                 auto &st = state_for(static_cast<std::uint64_t>(stream_id));
                 if (!st.output_drained) {
