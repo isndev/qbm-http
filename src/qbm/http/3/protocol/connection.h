@@ -50,6 +50,7 @@
 #include <nghttp3/nghttp3.h>
 #include <openssl/rand.h>
 #include <qb/system/container/unordered_map.h>
+#include <qb/utility/branch_hints.h> // QB_NOINLINE
 
 #include "../../1.1/protocol/base.h"
 #include "../../headers.h"
@@ -1361,11 +1362,14 @@ public:
      */
     void
     add_ack_offset(std::uint64_t stream_id, std::uint64_t bytes) {
-        if (bytes != 0) {
-            (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
-            if (stream_id == _control_stream_id)
-                _control_bytes_acked += bytes;
+        if (bytes == 0)
+            return;
+        if (stream_id == _control_stream_id) [[unlikely]] {
+            control_stream_acked(bytes);
+            return;
         }
+        // Last, so it stays a tail call: the ACK of a request stream pays one comparison for the control stream.
+        (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(stream_id), bytes);
     }
 
     /**
@@ -1380,6 +1384,25 @@ public:
     [[nodiscard]] bool
     control_stream_acknowledged() const noexcept {
         return _control_bytes_acked >= _control_bytes_sent;
+    }
+
+    /**
+     * @brief The peer acknowledged control-stream bytes -- a GOAWAY among them, maybe (Huly QB-91).
+     *
+     * Counts them, hands them to nghttp3, then, once the connection is shutting down, tells the owner through its
+     * optional @c on_http3_control_stream_acked hook: the close may have been waiting for exactly this. Out of
+     * line, so the ACK of a request stream does not pay for it; the hook may destroy this connection, so nothing
+     * follows it.
+     * @param bytes The newly acknowledged bytes (not zero).
+     */
+    QB_NOINLINE void
+    control_stream_acked(std::uint64_t bytes) {
+        _control_bytes_acked += bytes;
+        (void) nghttp3_conn_add_ack_offset(_conn, static_cast<int64_t>(_control_stream_id), bytes);
+        if constexpr (requires(Owner &owner, std::uint64_t connection_id) { owner.on_http3_control_stream_acked(connection_id); }) {
+            if (_shutdown_started)
+                _owner.on_http3_control_stream_acked(_connection_id);
+        }
     }
 
     /**

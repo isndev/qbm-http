@@ -333,7 +333,7 @@ private:
             return;
         }
         if (auto *conn = connection(connection_id); conn && !conn->control_stream_acknowledged()) {
-            return; // dispatch(stream_data_acked) calls again
+            return; // on_http3_control_stream_acked() calls again
         }
         // Once: several streams can close in one batch of transport events.
         _shutdown_connections.erase(it);
@@ -520,10 +520,7 @@ protected:
     void
     dispatch(qb::io::async::quic::event::stream_data_acked const &ev) override {
         if (auto *conn = connection(ev.connection_id)) {
-            conn->add_ack_offset(ev.id, ev.bytes);
-            if (!_shutdown_connections.empty()) {
-                maybe_finish_graceful_shutdown(ev.connection_id); // the GOAWAY's ACK may be what it waited for
-            }
+            conn->add_ack_offset(ev.id, ev.bytes); // a shutting-down connection's GOAWAY ACK: on_http3_control_stream_acked
         }
     }
 
@@ -850,6 +847,16 @@ public:
         if (auto it = _sessions.find(key); it != _sessions.end()) {
             it->second->mark_response_sent();
         }
+        maybe_finish_graceful_shutdown(connection_id);
+    }
+
+    /**
+     * @brief Protocol callback: the peer acknowledged control-stream bytes of a connection that is shutting down
+     *        (Huly QB-91). Its close may have been waiting for the GOAWAY to arrive (maybe_finish_graceful_shutdown).
+     * @param connection_id Owning QUIC connection.
+     */
+    void
+    on_http3_control_stream_acked(std::uint64_t connection_id) {
         maybe_finish_graceful_shutdown(connection_id);
     }
 

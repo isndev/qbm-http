@@ -506,7 +506,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the
   stream then `RST_STREAM(NO_ERROR)`, h3 on the stream then STOP_SENDING(`H3_NO_ERROR`) (Huly QB-168, QB-94; until 3.3
   h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:680-682; 2/http2.h:661-663;
-  3/http3.h:600-602)_
+  3/http3.h:597-599)_
 - To stop an HTTP/1.1 server, `drain(deadline, on_drained)`: the listener closes, idle sessions close, busy ones answer
   what they received -- the last answer `Connection: close` -- and `on_drained` reports `drained` or `deadline` once,
   on the server's loop (Huly QB-167). WebSocket sessions are outside it: an extracted or upgraded session is neither
@@ -517,7 +517,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   above the final id is refused, safe to retry; a connection that reaches HTTP/2 or HTTP/3 during the drain gets only
   a GOAWAY naming stream 0. The HTTP/3 server's `graceful_shutdown()` runs the same two phases with no report and
   serves a connection made afterwards; `drain(deadline, on_drained)` is the call that stops a server.
-  _(2/http2.h:797; 3/http3.h:722; 3/dual_stack.h:322)_
+  _(2/http2.h:797; 3/http3.h:719; 3/dual_stack.h:322)_
 - `verify_peer` defaults to `true`; disable only for trusted/self-signed endpoints, and set it before connecting on persistent clients.
 - Validation `validate()` mutates the request; type-gated rules pass silently for the wrong kind (assert `type` first).
 - `PRE_ROUTING` is observable only via `router().add_lifecycle_hook(...)`, not a per-context hook.
