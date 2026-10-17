@@ -20,7 +20,7 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:813-816 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:840-843 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -94,19 +94,19 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:864-870,942-952; qbm/http/src/qbm/http/1.1/client.cpp:149-163,372-390; qbm/http/src/qbm/http/headers.cpp:320-325 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:891-897,969-979; qbm/http/src/qbm/http/1.1/client.cpp:149-163,372-390; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:191-203,760-769; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:912-919; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:939-946; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
 
 ## One-shot callback client (HTTP/1.1)
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:938-953,1033-1048,1083-1088 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:965-980,1060-1075,1110-1115 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -150,7 +150,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1219-1224 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1246-1251 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -203,7 +203,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1219-1224 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1246-1251 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));

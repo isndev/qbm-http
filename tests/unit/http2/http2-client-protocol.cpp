@@ -1695,12 +1695,24 @@ TEST(HTTP2ClientProtocol, AnnouncedTrailersWaitForTheBlockedBodyAndEndTheStreamO
 // indexing of V + 8 octets ('{' has a 15-bit Huffman code, so the value stays
 // raw; "x-a" too) -> V = 16376 fills one frame exactly, V = 16377 needs two.
 // ===========================================================================
+namespace {
+/// A server io with no request limits: the case pins the CLIENT's framing of a 16 KiB trailer value, which the
+/// default limits (an 8 KiB field value, Huly QB-94) would answer 431 on the receiving side.
+struct UnlimitedHttp2FakeIO : Http2FakeIO {
+    [[nodiscard]] qb::http::request_limits const &
+    http_request_limits() const noexcept {
+        static constexpr qb::http::request_limits none{0, 0, 0, 0, 0, 0};
+        return none;
+    }
+};
+} // namespace
+
 TEST(HTTP2ClientProtocol, RequestTrailerBlockIsSplitAtThePeerMaxFrameSize) {
     for (const std::size_t value_size : {std::size_t{16376}, std::size_t{16377}}) {
-        Http2ClientFakeIO                          io;
-        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
-        Http2FakeIO                                server_io;
-        h2::ServerHttp2Protocol<Http2FakeIO>       server(server_io);
+        Http2ClientFakeIO                             io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO>    protocol(io);
+        UnlimitedHttp2FakeIO                          server_io;
+        h2::ServerHttp2Protocol<UnlimitedHttp2FakeIO> server(server_io);
 
         qb::http::Request req;
         req.method() = qb::http::method::POST;

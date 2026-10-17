@@ -3743,18 +3743,19 @@ TEST(HTTP2ServerProtocol, NegativeWindowBlocksSendsThenWindowUpdateResumesThem) 
 // A request over the server's body cap is ANSWERED on its stream (Huly QB-168): 413 with END_STREAM,
 // then RST_STREAM(NO_ERROR) -- a complete response before the request is complete, which asks the client
 // to stop sending without an error (RFC 9113 §8.1). It used to be reset with ENHANCE_YOUR_CALM against
-// the HTTP/1.1 constant. The cap is the server's `max_body_size()`, read through the session's hook.
+// the HTTP/1.1 constant. The cap is the server's `max_body_size()`, read through the session's hook
+// (`http_request_limits()`, Huly QB-94).
 // ===========================================================================
 
 namespace {
 
-/// The session's body-cap hook, set by the test.
+/// The session's request-limits hook, set by the test.
 struct CappedHttp2FakeIO : Http2FakeIO {
-    std::size_t cap = qb::http::protocol_limits::MAX_BODY_SIZE;
+    qb::http::request_limits limits;
 
-    [[nodiscard]] std::size_t
-    http_max_body_size() const noexcept {
-        return cap;
+    [[nodiscard]] qb::http::request_limits const &
+    http_request_limits() const noexcept {
+        return limits;
     }
 };
 using CappedServerProtocol = qb::protocol::http2::ServerHttp2Protocol<CappedHttp2FakeIO>;
@@ -3788,7 +3789,7 @@ expect_refused_413(const qb::allocator::pipe<char> &output, uint32_t stream_id) 
 TEST(HTTP2ServerProtocol, ABodyOverTheServerCapIsAnswered413ThenNoErrorReset) {
     CappedHttp2FakeIO    io;
     CappedServerProtocol protocol(io);
-    io.cap = 8;
+    io.limits.max_body_size = 8;
     do_handshake(protocol, io);
 
     open_capped_post(protocol, io, 1, std::nullopt);
@@ -3817,7 +3818,7 @@ TEST(HTTP2ServerProtocol, ABodyOverTheServerCapIsAnswered413ThenNoErrorReset) {
 TEST(HTTP2ServerProtocol, AContentLengthOverTheServerCapIsAnswered413BeforeTheBody) {
     CappedHttp2FakeIO    io;
     CappedServerProtocol protocol(io);
-    io.cap = 8;
+    io.limits.max_body_size = 8;
     do_handshake(protocol, io);
 
     open_capped_post(protocol, io, 1, 8); // at the cap: the stream stays open, awaiting its body
@@ -3835,13 +3836,160 @@ TEST(HTTP2ServerProtocol, AContentLengthOverTheServerCapIsAnswered413BeforeTheBo
 TEST(HTTP2ServerProtocol, TheServerCapIsReadLiveAndZeroMeansNone) {
     CappedHttp2FakeIO    io;
     CappedServerProtocol protocol(io);
-    io.cap = 0;
+    io.limits.max_body_size = 0;
     do_handshake(protocol, io);
 
     open_capped_post(protocol, io, 1, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
     EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "no cap: past the default constant is accepted";
 
-    io.cap = 4;
+    io.limits.max_body_size = 4;
     open_capped_post(protocol, io, 3, 5);
     expect_refused_413(io.output, 3);
+}
+
+// ===========================================================================
+// The server's request limits on HTTP/2 (Huly QB-94), each in both polarities: a request exactly at a
+// limit is routed, one over is answered on its stream -- 414 for `:path`, 431 for a field name, a field
+// value or a section's field count -- then RST_STREAM(NO_ERROR), the connection going on. HTTP/2 had no
+// such limits but the 1 MiB HPACK header list, which stays. A malformed field stays the stream error it is.
+// ===========================================================================
+
+namespace {
+
+/// A request on @p stream_id: GET @p path with @p fields after the pseudo-headers, ending the stream.
+void
+open_limited_get(CappedServerProtocol &protocol, CappedHttp2FakeIO &io, uint32_t stream_id, std::string const &path,
+                 std::vector<qb::protocol::hpack::HeaderField> const &fields = {}) {
+    std::vector<qb::protocol::hpack::HeaderField> headers{
+        {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}
+    };
+    headers.insert(headers.end(), fields.begin(), fields.end());
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, stream_id,
+               encode_hpack_headers(headers));
+    drive(protocol, io);
+}
+
+/// The stream's one answer is a @p status header block that ends it, followed by RST_STREAM(NO_ERROR).
+void
+expect_refused_with(const qb::allocator::pipe<char> &output, uint32_t stream_id, std::string const &status) {
+    const auto blocks = emitted_header_blocks(output, stream_id);
+    ASSERT_EQ(blocks.size(), 1u) << "the refused request is answered with one header block";
+    EXPECT_EQ(blocks.front().value(":status"), status);
+    EXPECT_NE(blocks.front().flags & qb::protocol::http2::FLAG_END_STREAM, 0) << "the answer is the whole response";
+    EXPECT_EQ(sum_data_bytes(output, stream_id), 0u);
+}
+
+} // namespace
+
+TEST(HTTP2ServerProtocol, ThePathLimitIsAnswered414OnTheStream) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_url_length = 16;
+    do_handshake(protocol, io);
+
+    open_limited_get(protocol, io, 1, "/" + std::string(15, 'a'));
+    EXPECT_EQ(io.request_count, 1) << "a :path of exactly 16 bytes is routed";
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty());
+
+    open_limited_get(protocol, io, 3, "/" + std::string(16, 'a'));
+    EXPECT_TRUE(protocol.ok()) << "a stream is refused, not the connection";
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.stream_error_count, 0);
+    expect_refused_with(io.output, 3, "414");
+}
+
+TEST(HTTP2ServerProtocol, TheFieldLimitsAreAnswered431OnTheStream) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_header_name_length  = 8;
+    io.limits.max_header_value_length = 8;
+    io.limits.max_headers_count       = 2;
+    do_handshake(protocol, io);
+
+    open_limited_get(protocol, io, 1, "/", {{"x-abcdef", "12345678"}, {"x-b", "2"}});
+    EXPECT_EQ(io.request_count, 1) << "a name and a value of exactly 8 bytes, 2 fields: routed";
+
+    open_limited_get(protocol, io, 3, "/", {{"x-abcdefg", "1"}});
+    expect_refused_with(io.output, 3, "431");
+    open_limited_get(protocol, io, 5, "/", {{"x-v", "123456789"}});
+    expect_refused_with(io.output, 5, "431");
+    open_limited_get(protocol, io, 7, "/", {{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}});
+    expect_refused_with(io.output, 7, "431");
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1) << "a refused request is never routed";
+    EXPECT_EQ(io.stream_error_count, 0) << "an answered refusal is not a stream error";
+    for (uint32_t sid : {3u, 5u, 7u}) {
+        const auto rst = last_rst_stream_error(io.output, sid);
+        EXPECT_TRUE(!rst.has_value() || *rst == ErrorCode::NO_ERROR) << "stream " << sid;
+    }
+
+    open_limited_get(protocol, io, 9, "/after");
+    EXPECT_EQ(io.request_count, 2) << "the connection serves the next request";
+}
+
+// The trailer section is held to the same field limits, its count its own.
+TEST(HTTP2ServerProtocol, ATrailerSectionOverTheFieldLimitsIsAnswered431) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_headers_count = 2;
+    do_handshake(protocol, io);
+
+    open_capped_post(protocol, io, 1, std::nullopt); // no field: the header section is well under
+    push_frame(io, FrameType::DATA, 0, 1, {'a', 'b', 'c'});
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers({{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}));
+    drive(protocol, io);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 0);
+    expect_refused_with(io.output, 1, "431");
+
+    open_capped_post(protocol, io, 3, std::nullopt);
+    push_frame(io, FrameType::DATA, 0, 3, {'a'});
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
+               encode_hpack_headers({{"x-a", "1"}, {"x-b", "2"}}));
+    drive(protocol, io);
+    EXPECT_EQ(io.request_count, 1) << "2 trailer fields are at the limit";
+}
+
+// A field that is malformed AND over a limit is a malformed field: the stream error, never a 431.
+TEST(HTTP2ServerProtocol, AMalformedFieldOverTheLimitsStaysAStreamError) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_header_name_length = 4;
+    do_handshake(protocol, io);
+
+    open_limited_get(protocol, io, 1, "/", {{"X-Upper-Case", "1"}});
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1) << "an uppercase name is malformed (RFC 9113 section 8.2.1)";
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered";
+}
+
+// The default limits are the HTTP/1.1 constants, on a server that never set its own (Huly QB-94): a field value of
+// exactly MAX_HEADER_VALUE_LENGTH is routed, one byte more is answered 431 on its stream. HTTP/2 had no field
+// limit but the 1 MiB HPACK header list, and routed it.
+TEST(HTTP2ServerProtocol, TheDefaultFieldValueLimitIsTheHttp1Constant) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    const auto get_with_value = [&](uint32_t stream_id, std::size_t size) {
+        std::vector<qb::protocol::hpack::HeaderField> headers{
+            {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}, {"x-v", std::string(size, 'v')}
+        };
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, stream_id,
+                   encode_hpack_headers(headers));
+        drive(protocol, io);
+    };
+
+    get_with_value(1, qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH);
+    EXPECT_EQ(io.request_count, 1) << "a value of exactly the limit is routed";
+
+    get_with_value(3, qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1);
+    EXPECT_EQ(io.request_count, 1) << "one byte over is never routed";
+    const auto blocks = emitted_header_blocks(io.output, 3);
+    ASSERT_EQ(blocks.size(), 1u) << "it is answered";
+    EXPECT_EQ(blocks.front().value(":status"), "431");
+    EXPECT_TRUE(protocol.ok()) << "a stream is refused, not the connection";
 }

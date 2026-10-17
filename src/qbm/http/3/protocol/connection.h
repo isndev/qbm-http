@@ -276,12 +276,13 @@ is_valid_header_field(std::string_view name, std::string_view value) noexcept {
  * @param name  Field name; may be a pseudo-header (leading ':') but the part
  *              after any leading colon must be a non-empty lowercase token.
  * @param value Field value; same control-character rules as outgoing fields.
- * @return @c true if the received field is well-formed and within limits.
+ * @return @c true if the received field is well-formed. Its lengths are the caller's: the connection judges
+ *         them against the request limits (a server's `request_limits()`, Huly QB-94), which a breach answers
+ *         rather than resets.
  */
 inline bool
 is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
-    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+    if (name.empty()) {
         return false;
     }
 
@@ -546,13 +547,17 @@ public:
 
 private:
     struct stream_state {
-        qb::http::Request            request;
-        qb::http::Response           response;
-        detail::header_block         incoming_headers;
-        nghttp3_data_reader          reader{read_data_cb};
-        std::string                  tx_body;
-        std::size_t                  tx_offset              = 0;
-        std::size_t                  incoming_header_fields = 0;
+        qb::http::Request    request;
+        qb::http::Response   response;
+        detail::header_block incoming_headers;
+        nghttp3_data_reader  reader{read_data_cb};
+        std::string          tx_body;
+        std::size_t          tx_offset              = 0;
+        std::size_t          incoming_header_fields = 0;
+        /// A field of the section being read passed the server's request limits (Huly QB-94): answered 431 once
+        /// the section is known well-formed. Its `:path` passed them: 414.
+        bool                         fields_over_limits = false;
+        bool                         path_over_limit    = false;
         std::optional<std::uint64_t> expected_content_length;
         bool                         main_headers_seen     = false;
         bool                         response_headers_seen = false;
@@ -713,6 +718,20 @@ private:
         _owner.stop_http3_stream(_connection_id, stream_id, NGHTTP3_H3_NO_ERROR);
     }
 
+    /**
+     * @brief The request limits a server's owner sets (`http3_request_limits()`, Huly QB-94), normalized -- each 0
+     *        ("none") read as the largest size; `protocol_limits`' constants for a client, or an owner without
+     *        the hook.
+     */
+    [[nodiscard]] qb::http::request_limits
+    request_limits_in_force() const noexcept {
+        if constexpr (requires(Owner const &owner) { owner.http3_request_limits(); }) {
+            if (_role == role::server)
+                return _owner.http3_request_limits().normalized();
+        }
+        return qb::http::request_limits{}.normalized();
+    }
+
     [[nodiscard]] static connection *
     self(void *conn_user_data) noexcept {
         return static_cast<native_anchor *>(conn_user_data)->self;
@@ -854,6 +873,8 @@ private:
             auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
             st.incoming_headers       = {};
             st.incoming_header_fields = 0;
+            st.fields_over_limits     = false;
+            st.path_over_limit        = false;
             return 0;
         });
     }
@@ -869,10 +890,26 @@ private:
             }
             auto header_name  = detail::rcbuf_to_string(name);
             auto header_value = detail::rcbuf_to_string(value);
-            if (++st.incoming_header_fields > qb::http::protocol_limits::MAX_HEADERS_COUNT
-                || !detail::is_valid_incoming_header_field(header_name, header_value)) {
-                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // too many fields, or a malformed one: this stream
+            if (!detail::is_valid_incoming_header_field(header_name, header_value)) {
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a malformed field: this stream
                 return 0;
+            }
+            // The field limits are of regular fields, as HTTP/1.1 and HTTP/2 apply them: pseudo-headers are the request
+            // line, whose `:path` has the target's limit below.
+            const auto limits = me->request_limits_in_force();
+            const bool pseudo = header_name.front() == ':';
+            if (!pseudo
+                && (++st.incoming_header_fields > limits.max_headers_count || header_name.size() > limits.max_header_name_length
+                    || header_value.size() > limits.max_header_value_length)) [[unlikely]] {
+                if (me->_role != role::server) {
+                    me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a response over the limits: this stream
+                    return 0;
+                }
+                st.fields_over_limits = true; // a request: answered 431 at the end of its section (Huly QB-94)
+                return 0;
+            }
+            if (header_name == ":path" && header_value.size() > limits.max_url_length) [[unlikely]] {
+                st.path_over_limit = true; // answered 414 at the end of the section, once it is known well-formed
             }
             st.incoming_headers.add(std::move(header_name), std::move(header_value));
             return 0;
@@ -892,6 +929,13 @@ private:
                 return 0;
             }
             st.main_headers_seen = true;
+            if (me->_role == role::server && (st.path_over_limit || st.fields_over_limits)) [[unlikely]] {
+                // A request over the server's limits is answered, as HTTP/1.1 and HTTP/2 answer it (Huly QB-94).
+                me->answer_refused_request(static_cast<std::uint64_t>(stream_id), st,
+                                           st.path_over_limit ? qb::http::status::URI_TOO_LONG
+                                                              : qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+                return 0;
+            }
             if constexpr (requires(Owner &owner) { owner.max_http3_body_size(); }) {
                 // A request declaring a body over the server's cap is answered before a byte of it is read, as
                 // HTTP/1.1 and HTTP/2 answer it (Huly QB-168).
@@ -913,6 +957,7 @@ private:
             auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
             st.incoming_headers       = {};
             st.incoming_header_fields = 0;
+            st.fields_over_limits     = false;
             return 0;
         });
     }
@@ -927,6 +972,10 @@ private:
             }
             if (!me->materialize_trailers(st)) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed trailers: this stream, not the connection
+                return 0;
+            }
+            if (me->_role == role::server && st.fields_over_limits) [[unlikely]] {
+                me->answer_refused_request(static_cast<std::uint64_t>(stream_id), st, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
                 return 0;
             }
             return 0;

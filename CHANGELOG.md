@@ -116,6 +116,26 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `-system-make-server-factory-huge-body` (new, label `huge-body`), `-system-make-server-factory-tls`,
   `-system-http3-connection-direct`, `-system-http3-loopback`.
 
+- **The request limits are the server's, set at run time, and every version answers a request over one
+  the same way (Huly QB-94).** `qb::http::request_limits` -- the target, a field name, a field value,
+  the regular fields of a section, an HTTP/1.1 chunk, the body; each defaults to its
+  `protocol_limits` constant, 0 means none -- is set with `set_request_limits()` / read with
+  `request_limits()` on the HTTP/1.1, HTTP/2, HTTP/3 and dual-stack servers (`set_max_body_size()`
+  stays, for the body alone) and read as each request arrives. The answers: `414 URI Too Long` for
+  the target, `431 Request Header Fields Too Large` for a field name, a field value or a section's
+  field count, `413 Content Too Large` for the body or a chunk. HTTP/1.1 sends it with
+  `Connection: close` after every request received before it and closes after the client; it used
+  to close with no answer for all but the body, against constants. HTTP/2 answers on the stream then
+  `RST_STREAM(NO_ERROR)`; it had no field limit at all but the 1 MiB HPACK header list, which stays,
+  so a request with a field value past 8 KiB, or more than 100 fields, that HTTP/2 used to route is
+  now answered `431` under the defaults. HTTP/3 answers on the stream then STOP_SENDING(`H3_NO_ERROR`)
+  once the section is known well-formed; it reset the stream (a client's 502). A trailer section
+  counts its fields on its own on HTTP/1.1 too, as HTTP/2 and HTTP/3 count theirs, and HTTP/3 counts
+  regular fields only, as the other two do. Clients read responses under the defaults. Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing`, `-unit-http2-server-protocol`,
+  `-system-http3-connection-direct`, `-system-make-server-factory-http1`,
+  `-system-make-server-factory-tls`, `-system-http3-loopback`.
+
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The
   three protocols kept three lists of the fields a trailer section must not carry, and each refused
   a field another accepted. `qb::http::detail::is_forbidden_trailer_field` is now the one list, their

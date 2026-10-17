@@ -818,52 +818,59 @@ expect_server_refused_stream_and_serves_next(Pair &pair, std::size_t states_befo
 } // namespace
 
 /**
- * @test A request over MAX_HEADERS_COUNT fields refuses the stream only; one at the limit is served
- * @brief nghttp3 has no field-count limit, so recv_header_cb's count is the only one: 101 fields
- *        (pseudo-headers included) are refused at the 101st -- the stream reset, the connection kept
- *        -- and a request of exactly 100 fields on the same connection is decoded whole. The limit, in
- *        both polarities.
+ * @test A request over MAX_HEADERS_COUNT regular fields is answered 431; one at the limit is served
+ * @brief nghttp3 has no field-count limit, so recv_header_cb's count is the only one, of REGULAR fields
+ *        as HTTP/1.1 and HTTP/2 count them (the pseudo-headers are the request line): 101 are answered
+ *        431 once the section ends -- STOP_SENDING(H3_NO_ERROR), no reset, the connection kept (Huly
+ *        QB-94: the default limits are the server's too; it was a reset until 3.3) -- and a request of
+ *        exactly 100 on the same connection is decoded whole. The limit, in both polarities.
  */
-TEST(Http3ConnectionDirect, TooManyRequestHeaderFieldsRefuseTheStreamNotTheConnection) {
-    Pair       pair;
-    const auto states = pair.server.stream_state_count();
-    auto       fields = request_fields();
-    for (std::size_t i = fields.size(); i < qb::http::protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
+TEST(Http3ConnectionDirect, TooManyRequestHeaderFieldsAreAnswered431NotTheConnection) {
+    Pair pair;
+    auto fields = request_fields();
+    for (std::size_t i = 0; i < qb::http::protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
         fields.emplace_back("x-" + std::to_string(i), "v");
     }
-    ASSERT_EQ(fields.size(), qb::http::protocol_limits::MAX_HEADERS_COUNT + 1);
     pair.server.read_stream(0, h3_headers_frame(0, fields), true);
-    expect_server_refused_stream_and_serves_next(pair, states);
+    EXPECT_TRUE(pair.server_owner.requests.empty()) << "a refused request must never reach the owner";
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered, then asked to stop without an error";
+    EXPECT_FALSE(reset(pair.server_owner, 0));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
 
     // The positive control: exactly the limit, on the same connection, is served whole.
     auto at_limit = request_fields("/at-limit");
-    for (std::size_t i = at_limit.size(); i < qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
+    for (std::size_t i = 0; i < qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
         at_limit.emplace_back("x-" + std::to_string(i), "v");
     }
-    ASSERT_EQ(at_limit.size(), qb::http::protocol_limits::MAX_HEADERS_COUNT);
     pair.server.read_stream(8, h3_headers_frame(8, at_limit), true);
-    ASSERT_EQ(pair.server_owner.requests.size(), 2u);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
     EXPECT_EQ(pair.server_owner.requests.back().uri().path(), "/at-limit");
-    EXPECT_EQ(pair.server_owner.resets.size(), 1u) << "a request at the limit is not refused";
+    EXPECT_TRUE(pair.server_owner.resets.empty()) << "a request at the limit is not refused";
     EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
 /**
- * @test A field value over MAX_HEADER_VALUE_LENGTH refuses the stream only
+ * @test A field value over MAX_HEADER_VALUE_LENGTH is answered 431
  * @brief nghttp3 bounds the whole field section (the advertised 64 KiB) and checks the value's bytes,
- *        never one value's length below its own 64 KiB cap: is_valid_incoming_header_field's limit is
- *        the only one. (A NAME over this module's limit never gets here: nghttp3's QPACK decoder caps
- *        a name at 256 bytes and answers with a connection error first.) The field that follows the
- *        over-long value arrives on a refused stream and is dropped.
+ *        never one value's length below its own 64 KiB cap: the request limits are the only ones. (A
+ *        NAME over this module's limit never gets here: nghttp3's QPACK decoder caps a name at 256 bytes
+ *        and answers with a connection error first.) The request is answered 431 once its section ends
+ *        -- STOP_SENDING(H3_NO_ERROR), no reset, the connection kept (Huly QB-94; a reset until 3.3) --
+ *        and the next request on the connection is served.
  */
-TEST(Http3ConnectionDirect, AnOverLongRequestFieldValueRefusesTheStreamNotTheConnection) {
-    Pair       pair;
-    const auto states = pair.server.stream_state_count();
-    auto       fields = request_fields();
+TEST(Http3ConnectionDirect, AnOverLongRequestFieldValueIsAnswered431NotTheConnection) {
+    Pair pair;
+    auto fields = request_fields();
     fields.emplace_back("x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
     fields.emplace_back("x-after", "2");
     pair.server.read_stream(0, h3_headers_frame(0, fields), true);
-    expect_server_refused_stream_and_serves_next(pair, states);
+    EXPECT_TRUE(pair.server_owner.requests.empty()) << "a refused request must never reach the owner";
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, 0));
+    EXPECT_FALSE(reset(pair.server_owner, 0));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+
+    pair.server.read_stream(4, h3_headers_frame(4, request_fields("/next")), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "the connection serves the next request";
 }
 
 /**
@@ -1193,3 +1200,134 @@ TEST(Http3ConnectionDirect, RefusedStreamCreditsSubsequentDataOnce) {
 }
 
 #endif // QBM_HTTP_HAS_HTTP3
+
+// =============================================================================
+// THE SERVER'S REQUEST LIMITS (Huly QB-94): A REQUEST OVER ONE IS ANSWERED, AS ON HTTP/1.1 AND HTTP/2
+// =============================================================================
+//
+// An owner that exposes http3_request_limits() (the server, set_request_limits) has them applied to the
+// field sections the connection reads: a `:path` over max_url_length is answered 414, a regular field's
+// name or value over its limit, or a section with more regular fields than max_headers_count, 431 -- once
+// the section is known well-formed -- then STOP_SENDING(H3_NO_ERROR), the connection kept. Each limit in
+// both polarities: exactly at it, the request is served.
+
+namespace {
+
+struct LimitedServerOwner : ServerOwner {
+    qb::http::request_limits limits;
+
+    [[nodiscard]] qb::http::request_limits const &
+    http3_request_limits() const noexcept {
+        return limits;
+    }
+};
+using LimitedServerConnection = connection<LimitedServerOwner>;
+
+/// A client and a limited server, connected: requests go through the client, so the answer is decoded.
+struct LimitedPair {
+    ClientOwner             client_owner;
+    LimitedServerOwner      server_owner;
+    ClientConnection        client{client_owner, 1, ClientConnection::role::client};
+    LimitedServerConnection server{server_owner, 1, LimitedServerConnection::role::server};
+
+    explicit LimitedPair(qb::http::request_limits limits) {
+        server_owner.limits = limits;
+        EXPECT_TRUE(client.bind_local_streams());
+        EXPECT_TRUE(server.bind_local_streams());
+        pump(client_owner, client, server_owner, server);
+    }
+
+    /// Submits @p request on @p stream_id and runs the exchange.
+    void
+    exchange(std::uint64_t stream_id, qb::http::Request request) {
+        ASSERT_TRUE(client.submit_request(stream_id, request));
+        pump(client_owner, client, server_owner, server);
+    }
+};
+
+qb::http::Request
+get_to(std::string const &path) {
+    return qb::http::Request{qb::http::method::GET, qb::io::uri("https://example.test" + path)};
+}
+
+/// The request on @p stream_id was answered @p status, then its read side stopped without an error.
+void
+expect_answered(LimitedPair const &pair, std::uint64_t stream_id, qb::http::Status status) {
+    ASSERT_FALSE(pair.client_owner.responses.empty()) << "the client receives the answer";
+    EXPECT_EQ(pair.client_owner.responses.back().status(), status);
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, stream_id)) << "the client is asked to stop sending, without an error";
+    EXPECT_FALSE(reset(pair.server_owner, stream_id)) << "the request is answered, not reset";
+    EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
+}
+
+} // namespace
+
+TEST(Http3ConnectionDirect, ServerAnswersAPathOverItsLimitWith414) {
+    qb::http::request_limits limits;
+    limits.max_url_length = 16;
+    LimitedPair pair{limits};
+
+    pair.exchange(0, get_to("/" + std::string(15, 'a')));
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "a :path of exactly 16 bytes is served";
+
+    pair.exchange(4, get_to("/" + std::string(16, 'a')));
+    EXPECT_EQ(pair.server_owner.requests.size(), 1u) << "a refused request is never delivered";
+    expect_answered(pair, 4, qb::http::status::URI_TOO_LONG);
+}
+
+TEST(Http3ConnectionDirect, ServerAnswersFieldsOverTheLimitsWith431) {
+    qb::http::request_limits limits;
+    limits.max_header_name_length  = 8;
+    limits.max_header_value_length = 8;
+    limits.max_headers_count       = 2;
+    LimitedPair pair{limits};
+
+    auto at_limits = get_to("/at");
+    at_limits.set_header("x-abcdef", "12345678");
+    at_limits.set_header("x-b", "2");
+    pair.exchange(0, at_limits);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "a name and a value of exactly 8 bytes, 2 fields: served";
+
+    auto long_name = get_to("/");
+    long_name.set_header("x-abcdefg", "1");
+    pair.exchange(4, long_name);
+    expect_answered(pair, 4, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+
+    auto long_value = get_to("/");
+    long_value.set_header("x-v", "123456789");
+    pair.exchange(8, long_value);
+    expect_answered(pair, 8, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+
+    auto many = get_to("/");
+    many.set_header("x-a", "1");
+    many.set_header("x-b", "2");
+    many.set_header("x-c", "3");
+    pair.exchange(12, many);
+    expect_answered(pair, 12, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+
+    EXPECT_EQ(pair.server_owner.requests.size(), 1u) << "no refused request is delivered";
+    EXPECT_EQ(pair.client_owner.responses.size(), 3u);
+}
+
+// The trailer section is held to the same field limits, its count its own; the frames are sent raw, as a
+// client that sends trailers would.
+TEST(Http3ConnectionDirect, ServerAnswersATrailerSectionOverTheFieldLimitsWith431) {
+    qb::http::request_limits limits;
+    limits.max_headers_count = 2;
+    LimitedPair pair{limits};
+
+    auto fields      = request_fields("/upload");
+    fields[0].second = "POST";
+    pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+    pair.server.read_stream(0, h3_data_frame("abc"), false);
+    pair.server.read_stream(0, h3_headers_frame(0, {{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}), true);
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, 0));
+    EXPECT_FALSE(reset(pair.server_owner, 0));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+
+    pair.server.read_stream(4, h3_headers_frame(4, fields), false);
+    pair.server.read_stream(4, h3_data_frame("abc"), false);
+    pair.server.read_stream(4, h3_headers_frame(4, {{"x-a", "1"}, {"x-b", "2"}}), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "2 trailer fields are at the limit";
+}

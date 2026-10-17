@@ -270,8 +270,13 @@ private:
     // read is on the stack calls nghttp3_conn_del mid-read (use-after-free), so
     // after_dispatch_events DEFERS the reap while this is >0; dispatch(stream_data) reaps once
     // the outermost read unwinds.
-    int         _read_depth    = 0;
-    std::size_t _max_body_size = 64 * 1024 * 1024;
+    int _read_depth = 0;
+    /// set_request_limits(): `protocol_limits`' defaults, but a body limit of this server's own 64 MiB.
+    qb::http::request_limits _request_limits = [] {
+        qb::http::request_limits limits;
+        limits.max_body_size = 64 * 1024 * 1024;
+        return limits;
+    }();
 
     [[nodiscard]] h3_connection *
     connection(std::uint64_t connection_id) noexcept {
@@ -458,19 +463,57 @@ public:
     }
 
     /**
-     * @brief Set the maximum accepted request body size.
+     * @brief Set the limits this server applies to every request it reads (Huly QB-94); 0 in any of them means
+     *        no limit of that kind.
+     *
+     * Same call on the HTTP/1.1, HTTP/2 and dual-stack servers. Read live: a request whose header section
+     * ends after the call is judged under the new limits. A request over a limit is answered on its stream --
+     * `414 URI Too Long` for its `:path`, `431 Request Header Fields Too Large` for a field name, a field value
+     * or the number of fields of its header or trailer section, `413 Content Too Large` for a declared
+     * `content-length` or for DATA that passes the body limit -- then STOP_SENDING with `H3_NO_ERROR` asks the
+     * client to stop sending the rest (RFC 9114 §4.1.1); the connection keeps serving. The fields were reset
+     * with H3_MESSAGE_ERROR against constants until 3.3. The defaults are `qb::http::protocol_limits`'
+     * constants, with a body limit of 64 MiB. nghttp3 bounds a field section by itself before these: a
+     * QPACK-decoded name past 256 bytes, or a section past the 64 KiB this server advertises, is a connection
+     * error.
+     * @param limits The limits.
+     */
+    void
+    set_request_limits(qb::http::request_limits const &limits) noexcept {
+        _request_limits = limits;
+    }
+
+    /**
+     * @brief The limits set_request_limits() set, as given (0 = none).
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    request_limits() const noexcept {
+        return _request_limits;
+    }
+
+    /**
+     * @brief Set the request body limit alone, in bytes; 0 means none (set_request_limits() for the rest).
      * @param value Maximum body size in bytes.
      */
     void
     set_max_body_size(std::size_t value) noexcept {
-        _max_body_size = value;
+        _request_limits.max_body_size = value;
     }
     /**
-     * @brief Current maximum accepted request body size, in bytes.
+     * @brief Current request body limit, in bytes; 0 when there is none.
      */
     [[nodiscard]] std::size_t
     max_http3_body_size() const noexcept {
-        return _max_body_size;
+        return _request_limits.max_body_size;
+    }
+
+    /**
+     * @brief Connection hook: the limits of the requests this server reads (Huly QB-94). Public because the
+     *        connection detects it through a `requires`-expression.
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    http3_request_limits() const noexcept {
+        return _request_limits;
     }
 
     /**

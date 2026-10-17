@@ -1490,14 +1490,27 @@ public:
 
 private:
     /**
-     * @brief The request body cap: the server's `max_body_size()` (`set_max_body_size`, Huly QB-168), read
-     *        through the io when it has the hook, protocol_limits::MAX_BODY_SIZE otherwise; the largest
-     *        size when it is 0, which means no cap.
+     * @brief The request limits in force: the server's `request_limits()` (`set_request_limits`, Huly QB-94), read
+     *        through the io when it has the hook, the defaults otherwise -- normalized, each 0 ("none") read as
+     *        the largest size.
+     */
+    [[nodiscard]] qb::http::request_limits
+    request_limits_in_force() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http_request_limits(); }) {
+            return this->_io.http_request_limits().normalized();
+        } else {
+            return qb::http::request_limits{}.normalized();
+        }
+    }
+
+    /**
+     * @brief The request body limit alone (`set_max_body_size`, Huly QB-168), read on every DATA frame: the largest
+     *        size when it is 0, which means none.
      */
     [[nodiscard]] std::size_t
     max_request_body_size() noexcept {
-        if constexpr (requires(IO_Handler &io) { io.http_max_body_size(); }) {
-            const std::size_t cap = this->_io.http_max_body_size();
+        if constexpr (requires(IO_Handler &io) { io.http_request_limits(); }) {
+            const std::size_t cap = this->_io.http_request_limits().max_body_size;
             return cap == 0 ? std::numeric_limits<std::size_t>::max() : cap;
         } else {
             return qb::http::protocol_limits::MAX_BODY_SIZE;
@@ -1505,7 +1518,7 @@ private:
     }
 
     /**
-     * @brief Answer a request refused for a size limit on its own stream (Huly QB-168): @p status with an
+     * @brief Answer a request refused for a limit on its own stream (Huly QB-168, QB-94): @p status with an
      *        empty body and END_STREAM, then RST_STREAM(NO_ERROR), which asks the client to stop sending
      *        what is left of the request without an error -- a complete response sent before the request
      *        is (RFC 9113 §8.1). The request is never routed; the connection and its other streams go on.
@@ -1686,6 +1699,13 @@ private:
         _current_header_block_fragment.clear(); // Clear for next use
         stream.expecting_continuation = false;
 
+        // The server's request limits (Huly QB-94), read once per block: a field name, a field value or a field
+        // count over them is answered 431, a `:path` over its own 414 -- once the block is known well-formed, a
+        // malformed one staying the stream error it is.
+        const qb::http::request_limits limits             = request_limits_in_force();
+        std::size_t                    fields             = 0;
+        bool                           fields_over_limits = false;
+
         if (!is_trailers_block) { // Main headers (request)
             stream.headers_received_main = true;
             // Validate pseudo-headers and convert to qb::http::Request components
@@ -1753,6 +1773,11 @@ private:
                         this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
+                    if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
+                        || ++fields > limits.max_headers_count) [[unlikely]] {
+                        fields_over_limits = true; // answered 431 once the block is known well-formed
+                        continue;
+                    }
                     if (name == "content-length") {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
@@ -1779,6 +1804,15 @@ private:
             }
             if (!authority_sv || authority_sv.value().empty()) {
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing or empty :authority pseudo-header.");
+                return false;
+            }
+            if (path_sv.value().size() > limits.max_url_length) [[unlikely]] {
+                this->refuse_request(stream.id, qb::http::status::URI_TOO_LONG, "HTTP/2 :path exceeds configured size limit");
+                return false;
+            }
+            if (fields_over_limits) [[unlikely]] {
+                this->refuse_request(stream.id, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                                     "HTTP/2 request header fields exceed configured limits");
                 return false;
             }
 
@@ -1826,6 +1860,11 @@ private:
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
                     return false;
                 }
+                if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
+                    || ++fields > limits.max_headers_count) [[unlikely]] {
+                    fields_over_limits = true; // answered 431 once the section is known well-formed
+                    continue;
+                }
                 // To the request's trailers(), and its header fields for 3.x (Huly QB-1073).
                 qb::http::detail::store_received_trailer(stream.assembled_request, name, value);
             }
@@ -1838,6 +1877,11 @@ private:
             }
             if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                return false;
+            }
+            if (fields_over_limits) [[unlikely]] {
+                this->refuse_request(stream.id, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                                     "HTTP/2 request trailer fields exceed configured limits");
                 return false;
             }
 

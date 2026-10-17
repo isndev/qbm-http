@@ -300,23 +300,26 @@ public:
     }
 
     /**
-     * @brief Protocol hook: the request body cap, the server's `max_body_size()` read live (Huly QB-168).
+     * @brief Protocol hook: the request limits, the server's `request_limits()` read live (Huly QB-168, QB-94).
      *
-     * Read by both protocols this session can run: HTTP/2 on every DATA frame and at the end of a
-     * request's header block, the HTTP/1.1 fallback when a request begins. Public because the
-     * protocols detect it through a `requires`-expression, which would not see a private member.
+     * Read by both protocols this session can run: HTTP/2 when a request's header block ends and on every
+     * DATA frame, the HTTP/1.1 fallback when a request begins. A server without the setting keeps the
+     * defaults, `protocol_limits`' constants. Public because the protocols detect it through a
+     * `requires`-expression, which would not see a private member.
      */
-    [[nodiscard]] std::size_t
-    http_max_body_size() noexcept {
-        if constexpr (requires(Handler &h) { h.max_body_size(); })
-            return this->server().max_body_size();
-        else
-            return qb::http::protocol_limits::MAX_BODY_SIZE;
+    [[nodiscard]] qb::http::request_limits const &
+    http_request_limits() noexcept {
+        if constexpr (requires(Handler &h) { h.request_limits(); }) {
+            return this->server().request_limits();
+        } else {
+            static constexpr qb::http::request_limits defaults{};
+            return defaults;
+        }
     }
 
     /**
-     * @brief Protocol hook of the HTTP/1.1 fallback: a request was refused for a size limit (413 for a body
-     *        over the cap, Huly QB-168).
+     * @brief Protocol hook of the HTTP/1.1 fallback: a request was refused for a limit (414, 431 or 413,
+     *        Huly QB-168, QB-94).
      * @param status The status that answers it.
      *
      * Answered with the status, an empty body and `Connection: close`, and on(eos) closes the connection,
@@ -551,8 +554,8 @@ public:
     using Router = typename qb::http::Router<Session>;
 
 private:
-    Router      _router; ///< HTTP router
-    std::size_t _max_body_size = qb::http::protocol_limits::MAX_BODY_SIZE;
+    Router                   _router; ///< HTTP router
+    qb::http::request_limits _request_limits{};
 
 public:
     io_handler() {}
@@ -567,29 +570,52 @@ public:
     }
 
     /**
-     * @brief Set the largest request body this server accepts, in bytes; 0 means no cap of its own.
+     * @brief Set the limits this server applies to every request it reads, over both protocols it speaks
+     *        (Huly QB-94); 0 in any of them means no limit of that kind.
      *
-     * Same name and contract as the HTTP/1.1 and HTTP/3 servers'. Read live: a request that begins
-     * after the call is judged under the new value. A request over it -- a declared `content-length`
-     * above it, before a byte of the body is read, or a body whose DATA frames pass it -- is answered
-     * `413 Content Too Large` on its stream, then RST_STREAM(NO_ERROR) asks the client to stop sending
-     * the rest (RFC 9113 §8.1); the connection and its other streams go on. It was reset with
-     * ENHANCE_YOUR_CALM against the HTTP/1.1 constant until 3.3 (Huly QB-168). The HTTP/1.1 requests
-     * of this server's ALPN fallback get the HTTP/1.1 answer: 413, `Connection: close`. The default is
-     * `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB).
-     * @param value The cap in bytes.
+     * Same call on the HTTP/1.1, HTTP/3 and dual-stack servers. Read live: a request that begins after the
+     * call is judged under the new limits. An HTTP/2 request over a limit is answered on its stream -- `414
+     * URI Too Long` for its `:path`, `431 Request Header Fields Too Large` for a field name, a field value or
+     * the number of fields of its header or trailer section, `413 Content Too Large` for a declared
+     * `content-length` (before a byte of the body is read) or for DATA that passes the body limit -- then
+     * RST_STREAM(NO_ERROR) asks the client to stop sending the rest (RFC 9113 §8.1); the connection and its
+     * other streams go on. Until 3.3 the body was reset with ENHANCE_YOUR_CALM against the HTTP/1.1 constant
+     * and the fields had no limit but the 1 MiB HPACK header list, which stays. The HTTP/1.1 requests of this
+     * server's ALPN fallback get the HTTP/1.1 answers. The defaults are `qb::http::protocol_limits`' constants.
+     * @param limits The limits.
      */
     void
-    set_max_body_size(std::size_t value) noexcept {
-        _max_body_size = value;
+    set_request_limits(qb::http::request_limits const &limits) noexcept {
+        _request_limits = limits;
     }
 
     /**
-     * @brief The request body cap set_max_body_size() set; 0 when there is none.
+     * @brief The limits set_request_limits() set, as given (0 = none).
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    request_limits() const noexcept {
+        return _request_limits;
+    }
+
+    /**
+     * @brief Set the request body limit alone, in bytes; 0 means none (set_request_limits() for the rest).
+     *
+     * Same name and contract as the HTTP/1.1 and HTTP/3 servers' (Huly QB-168): a request over it is answered
+     * `413 Content Too Large`, as set_request_limits() says. The default is
+     * `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB).
+     * @param value The limit in bytes.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _request_limits.max_body_size = value;
+    }
+
+    /**
+     * @brief The request body limit; 0 when there is none.
      */
     [[nodiscard]] std::size_t
     max_body_size() const noexcept {
-        return _max_body_size;
+        return _request_limits.max_body_size;
     }
 };
 

@@ -521,28 +521,31 @@ public:
     }
 
     /**
-     * @brief Protocol hook: the body cap of the next request, the server's `max_body_size()` read live.
+     * @brief Protocol hook: the limits of the next request, the server's `request_limits()` read live.
      *
-     * The HTTP/1.1 protocol reads it when a request begins (Huly QB-168); a server without the setting
-     * keeps protocol_limits::MAX_BODY_SIZE. Public because the protocol detects it through a
-     * `requires`-expression, which would not see a private member.
+     * The HTTP/1.1 protocol reads them when a request begins (Huly QB-168, QB-94); a server without
+     * the setting keeps the defaults, `protocol_limits`' constants. Public because the protocol detects
+     * it through a `requires`-expression, which would not see a private member.
      */
-    [[nodiscard]] std::size_t
-    http_max_body_size() noexcept {
-        if constexpr (requires(Handler &h) { h.max_body_size(); })
-            return this->server().max_body_size();
-        else
-            return qb::http::protocol_limits::MAX_BODY_SIZE;
+    [[nodiscard]] qb::http::request_limits const &
+    http_request_limits() noexcept {
+        if constexpr (requires(Handler &h) { h.request_limits(); }) {
+            return this->server().request_limits();
+        } else {
+            static constexpr qb::http::request_limits defaults{};
+            return defaults;
+        }
     }
 
     /**
-     * @brief Protocol hook: a request was refused for a size limit -- 413 for a body over the cap.
+     * @brief Protocol hook: a request was refused for a limit -- 414 for its target, 431 for its fields,
+     *        413 for its body or a chunk (the parser's refusal_status()).
      * @param status The status that answers it.
      *
      * The answer -- the status, an empty body, `Connection: close` -- goes out once every request
      * received before the refused one is answered, so responses keep their order; the connection
      * closes after it, and the protocol drops what the peer sends meanwhile (Huly QB-168). Public for
-     * the same reason as http_max_body_size().
+     * the same reason as http_request_limits().
      */
     void
     http1_refuse_request(qb::http::Status status) noexcept {
@@ -587,8 +590,8 @@ public:
     using Context    = typename qb::http::Context<Session>;
 
 private:
-    Router      _router;
-    std::size_t _max_body_size = qb::http::protocol_limits::MAX_BODY_SIZE;
+    Router                   _router;
+    qb::http::request_limits _request_limits{};
 
 public:
     /**
@@ -601,28 +604,52 @@ public:
     io_handler() = default;
 
     /**
-     * @brief Set the largest request body this server accepts, in bytes; 0 means no cap of its own.
+     * @brief Set the limits this server applies to every request it reads (Huly QB-94); 0 in any of them means
+     *        no limit of that kind.
      *
-     * Same name and contract as the HTTP/3 server's. Read live: the next request a session begins
-     * is judged under the new value, one half read keeps the value it began with. A request over it
-     * -- a declared `Content-Length` above it, before a body byte is read, or a chunked body when it
-     * passes it -- is answered `413 Content Too Large` with `Connection: close`, after every request
-     * the client sent before it, and the connection closes (Huly QB-168; it closed without an answer
-     * until 3.3). The default is `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB). With 0 the
-     * transport's input-buffer cap (`QB_MAX_READ_BUFFER_SIZE`) is the only bound left.
-     * @param value The cap in bytes.
+     * Same call on the HTTP/2, HTTP/3 and dual-stack servers. Read live: the next request a session begins is
+     * judged under the new limits, one half read keeps the ones it began with. A request over a limit is
+     * answered with `Connection: close`, after every request the client sent before it, and the connection
+     * closes after that answer: `414 URI Too Long` for its target, `431 Request Header Fields Too Large` for a
+     * field name, a field value or the number of fields (trailer fields included), `413 Content Too Large` for
+     * its body -- a declared `Content-Length` before a body byte is read, a chunked body when it passes the
+     * limit -- or one chunk. Until 3.3 each closed the connection with no answer, against constants. The
+     * defaults are `qb::http::protocol_limits`' constants. With a body limit of 0 the transport's input-buffer
+     * cap (`QB_MAX_READ_BUFFER_SIZE`) is the only bound left on a body.
+     * @param limits The limits.
      */
     void
-    set_max_body_size(std::size_t value) noexcept {
-        _max_body_size = value;
+    set_request_limits(qb::http::request_limits const &limits) noexcept {
+        _request_limits = limits;
     }
 
     /**
-     * @brief The request body cap set_max_body_size() set; 0 when there is none.
+     * @brief The limits set_request_limits() set, as given (0 = none).
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    request_limits() const noexcept {
+        return _request_limits;
+    }
+
+    /**
+     * @brief Set the request body limit alone, in bytes; 0 means none (set_request_limits() for the rest).
+     *
+     * Same name and contract as the HTTP/3 server's (Huly QB-168): a request over it is answered `413 Content
+     * Too Large`, as set_request_limits() says. The default is `qb::http::protocol_limits::MAX_BODY_SIZE`
+     * (100 MiB).
+     * @param value The limit in bytes.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _request_limits.max_body_size = value;
+    }
+
+    /**
+     * @brief The request body limit; 0 when there is none.
      */
     [[nodiscard]] std::size_t
     max_body_size() const noexcept {
-        return _max_body_size;
+        return _request_limits.max_body_size;
     }
 
     /**

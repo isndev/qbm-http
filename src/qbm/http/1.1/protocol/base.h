@@ -39,7 +39,8 @@
  * - **RFC Compliant**: Based on HTTP/1.1 specifications (RFC 7230-7235)
  * - **DoS Resistant**: Prevent resource exhaustion attacks
  * - **Production Ready**: Used by major web servers (nginx, Apache)
- * - **Configurable**: Can be adjusted at compile time if needed
+ * - **Configurable**: they are the defaults of `qb::http::request_limits`, which a server takes at run time
+ *   (`set_request_limits`, Huly QB-94); a client reads its responses under these values
  */
 namespace qb::http::protocol_limits {
 /** @brief Maximum URL length (8KB) - per RFC 7230 guidance for URI length */
@@ -75,6 +76,41 @@ constexpr std::size_t MAX_BODY_SIZE = 100 * 1024 * 1024;
  */
 constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
+
+namespace qb::http {
+/**
+ * @brief The limits a server applies to every request it reads, on HTTP/1.1, HTTP/2 and HTTP/3 alike (Huly QB-94).
+ * @details A value type: a server keeps one (`set_request_limits` / `request_limits()` on the HTTP/1.1, HTTP/2,
+ *          HTTP/3 and dual-stack servers) and reads it as each request arrives, so a change applies to the
+ *          requests that follow, never to one half read. 0 means no limit of that kind. A request over a limit is
+ *          answered, never dropped: `414 URI Too Long` for the target, `431 Request Header Fields Too Large` for a
+ *          field name, a field value or the number of regular fields of a section (the header section, the
+ *          trailer section), `413 Content Too Large` for the body or -- HTTP/1.1 only -- a chunk. HTTP/1.1 then
+ *          closes the connection after that answer, HTTP/2 resets the stream with NO_ERROR, HTTP/3 sends
+ *          STOP_SENDING with H3_NO_ERROR. The defaults are `protocol_limits`' constants; the HTTP/3 server's
+ *          body default is its own 64 MiB. Clients read responses under the defaults. HTTP/2 keeps its 1 MiB
+ *          HPACK header-list cap (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`) under these.
+ */
+struct request_limits {
+    std::size_t max_url_length          = protocol_limits::MAX_URL_LENGTH;          ///< the request target, in bytes (414)
+    std::size_t max_header_name_length  = protocol_limits::MAX_HEADER_NAME_LENGTH;  ///< one field name, in bytes (431)
+    std::size_t max_header_value_length = protocol_limits::MAX_HEADER_VALUE_LENGTH; ///< one field value, in bytes (431)
+    std::size_t max_headers_count       = protocol_limits::MAX_HEADERS_COUNT;       ///< regular fields per section (431)
+    std::size_t max_chunk_size          = protocol_limits::MAX_CHUNK_SIZE;          ///< one chunk, HTTP/1.1 (413)
+    std::size_t max_body_size           = protocol_limits::MAX_BODY_SIZE;           ///< the whole body, in bytes (413)
+
+    /// The same limits with every 0 ("none") read as the largest size, so each check stays one comparison.
+    [[nodiscard]] constexpr request_limits
+    normalized() const noexcept {
+        constexpr auto none = [](std::size_t v) noexcept {
+            return v == 0 ? std::numeric_limits<std::size_t>::max() : v;
+        };
+        return {none(max_url_length),    none(max_header_name_length), none(max_header_value_length),
+                none(max_headers_count), none(max_chunk_size),         none(max_body_size)};
+    }
+};
+} // namespace qb::http
+
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
 #include "../../headers.h"      // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
@@ -224,14 +260,14 @@ private:
         if constexpr (MessageType::type == HTTP_REQUEST) {
             auto      *self          = self_of(parser);
             const auto next_url_size = self->_url_bytes_seen + length;
-            if (next_url_size > protocol_limits::MAX_URL_LENGTH) {
-                return fail_with_reason(parser, "HTTP URL exceeds configured size limit");
+            if (next_url_size > self->_limits.max_url_length) {
+                return refuse_with_status(parser, "HTTP URL exceeds configured size limit", HTTP_STATUS_URI_TOO_LONG);
             }
             auto &msg    = self->msg;
             msg.method() = static_cast<http_method>(parser->method);
             if (self->_url_bytes_seen == 0) {
                 self->_url_buffer.clear();
-                self->_url_buffer.reserve(std::min(next_url_size, protocol_limits::MAX_URL_LENGTH));
+                self->_url_buffer.reserve(std::min(next_url_size, protocol_limits::MAX_URL_LENGTH)); // a hint, not the limit
             }
             self->_url_buffer.append(at, length);
             self->_url_bytes_seen = next_url_size;
@@ -285,8 +321,8 @@ private:
         if (self->_last_header_token != HeaderToken::VALUE || self->_last_header_key.empty()) {
             return 0;
         }
-        if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-            return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+        if (self->_last_header_value.size() > self->_limits.max_header_value_length) {
+            return refuse_with_status(parser, "HTTP header value exceeds configured size limit", HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
         }
         if (qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
             return fail_with_reason(parser, "HTTP trailer section carries a field it must not (framing, connection, routing)");
@@ -327,8 +363,9 @@ private:
     on_header_field(http_t *parser, const char *at, size_t length) {
         auto *self = self_of(parser);
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
-            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+            if (self->_last_header_value.size() > self->_limits.max_header_value_length) {
+                return refuse_with_status(parser, "HTTP header value exceeds configured size limit",
+                                          HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
             self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
             self->_last_header_key.clear();
@@ -336,15 +373,15 @@ private:
         }
 
         if (self->_last_header_token != HeaderToken::FIELD) {
-            if (++self->_header_pairs_seen > protocol_limits::MAX_HEADERS_COUNT) {
-                return fail_with_reason(parser, "HTTP header count exceeds configured limit");
+            if (++self->_header_pairs_seen > self->_limits.max_headers_count) {
+                return refuse_with_status(parser, "HTTP header count exceeds configured limit", HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
             self->_last_header_key.clear();
         }
 
         self->_last_header_key.append(at, length);
-        if (self->_last_header_key.size() > protocol_limits::MAX_HEADER_NAME_LENGTH) {
-            return fail_with_reason(parser, "HTTP header name exceeds configured size limit");
+        if (self->_last_header_key.size() > self->_limits.max_header_name_length) {
+            return refuse_with_status(parser, "HTTP header name exceeds configured size limit", HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
         }
         self->_last_header_token = HeaderToken::FIELD;
         return 0;
@@ -368,8 +405,8 @@ private:
             self->_last_header_value.clear();
         }
         self->_last_header_value.append(at, length);
-        if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-            return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+        if (self->_last_header_value.size() > self->_limits.max_header_value_length) {
+            return refuse_with_status(parser, "HTTP header value exceeds configured size limit", HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
         }
         self->_last_header_token = HeaderToken::VALUE;
         return 0;
@@ -400,14 +437,16 @@ private:
         auto *self = self_of(parser);
         auto &msg  = self->msg;
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
-            if (self->_last_header_value.size() > protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-                return fail_with_reason(parser, "HTTP header value exceeds configured size limit");
+            if (self->_last_header_value.size() > self->_limits.max_header_value_length) {
+                return refuse_with_status(parser, "HTTP header value exceeds configured size limit",
+                                          HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
             msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
             self->_last_header_key.clear();
             self->_last_header_value.clear();
         }
         self->_last_header_token = HeaderToken::NONE;
+        self->_header_pairs_seen = 0; // a trailer section counts its fields on its own, as HTTP/2 and HTTP/3 do (Huly QB-94)
         msg.major_version        = parser->http_major;
         msg.minor_version        = parser->http_minor;
         if (msg.has_header("Transfer-Encoding")) {
@@ -437,7 +476,7 @@ private:
             }
         }
         if (parser->content_length != ULLONG_MAX) {
-            if (parser->content_length > self->_max_body_size) {
+            if (parser->content_length > self->_limits.max_body_size) {
                 return refuse_with_status(parser, "HTTP Content-Length exceeds configured body size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
             }
             // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()`
@@ -471,11 +510,11 @@ private:
     static int
     on_body(http_t *parser, const char *at, size_t length) {
         auto *self = self_of(parser);
-        if (length > protocol_limits::MAX_CHUNK_SIZE) {
-            return fail_with_reason(parser, "HTTP chunk exceeds configured chunk size limit");
+        if (length > self->_limits.max_chunk_size) {
+            return refuse_with_status(parser, "HTTP chunk exceeds configured chunk size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
         }
         const auto next_total = self->_body_bytes_seen + length;
-        if (next_total > self->_max_body_size) {
+        if (next_total > self->_limits.max_body_size) {
             return refuse_with_status(parser, "HTTP body exceeds configured size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
         }
         auto &chunked = self->_chunked;
@@ -586,10 +625,10 @@ private:
     std::size_t               _header_pairs_seen = 0;     ///< Number of parsed header fields in the current message
     std::size_t               _body_bytes_seen   = 0;     ///< Total parsed body bytes for the current message
     std::size_t               _url_bytes_seen    = 0;     ///< Total URL bytes seen across fragmented on_url callbacks
-    /// The body cap of the next message: set_max_body_size(), where 0 means none -- stored as the largest size, so the
-    /// two checks stay one comparison each. Configuration, kept across reset().
-    std::size_t _max_body_size  = protocol_limits::MAX_BODY_SIZE;
-    int         _refusal_status = 0; ///< The status a limit breach of the current message answers (refusal_status())
+    /// The limits of the next message: set_request_limits(), normalized (a 0 "none" stored as the largest size, so
+    /// each check stays one comparison). Configuration, kept across reset().
+    qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
+    int                      _refusal_status = 0; ///< The status a limit breach of the current message answers (refusal_status())
 
 public:
     /**
@@ -663,34 +702,50 @@ public:
     }
 
     /**
-     * @brief Set the body cap of the messages parsed from now on.
-     * @param value The largest body accepted, in bytes; 0 means no cap of the parser's own.
+     * @brief Set the limits of the messages parsed from now on (Huly QB-94).
+     * @param limits The limits; a 0 in any of them means no limit of that kind.
      *
-     * A declared `Content-Length` above it fails the message at the end of its header section,
-     * before a body byte is read; a chunked body fails when the bytes it delivered pass it. Both
-     * record HTTP 413 as the refusal_status(). The default is protocol_limits::MAX_BODY_SIZE. A
-     * server sets it before each request from its own value (`set_max_body_size`, Huly QB-168);
-     * reset() keeps it.
+     * A breach fails the message and records the status that answers it as the refusal_status():
+     * 414 for the request target, 431 for a field name, a field value or the field count (trailer
+     * fields included), 413 for a chunk or the body -- a declared `Content-Length` above the body
+     * limit at the end of the header section, before a body byte is read; a chunked body when the
+     * bytes it delivered pass it. The defaults are `protocol_limits`' constants. A server installs
+     * its own before each request (`set_request_limits`); reset() keeps them.
+     */
+    void
+    set_request_limits(qb::http::request_limits const &limits) noexcept {
+        _limits = limits.normalized();
+    }
+
+    /**
+     * @brief The limits set_request_limits() installed, each "none" read as the largest size.
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    request_limits() const noexcept {
+        return _limits;
+    }
+
+    /**
+     * @brief Set the body limit alone (set_request_limits() for the rest); 0 means none (Huly QB-168).
      */
     void
     set_max_body_size(std::size_t value) noexcept {
-        _max_body_size = value == 0 ? std::numeric_limits<std::size_t>::max() : value;
+        _limits.max_body_size = value == 0 ? std::numeric_limits<std::size_t>::max() : value;
     }
 
     /**
-     * @brief The body cap set_max_body_size() installed; the largest size when there is none.
+     * @brief The body limit installed; the largest size when there is none.
      */
     [[nodiscard]] std::size_t
     max_body_size() const noexcept {
-        return _max_body_size;
+        return _limits.max_body_size;
     }
 
     /**
-     * @brief The HTTP status a size-limit breach of the current message answers, or 0.
+     * @brief The HTTP status a limit breach of the current message answers, or 0.
      *
-     * Set when the parse failed on a cap the peer can be told about: 413 (Content Too Large) for a
-     * body over max_body_size(). 0 for any other failure -- a malformed message is not answered.
-     * reset() clears it.
+     * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
+     * 431 or 413. 0 for any other failure -- a malformed message is not answered. reset() clears it.
      */
     [[nodiscard]] int
     refusal_status() const noexcept {
@@ -904,11 +959,11 @@ public:
             if (total <= header_parsed) {
                 return 0;
             }
-            if constexpr (requires(IO_Handler &io) { io.http_max_body_size(); }) {
-                // The body cap is read when a message begins, from the server's current value: a change
-                // applies to the next request, never to one half read (Huly QB-168).
+            if constexpr (requires(IO_Handler &io) { io.http_request_limits(); }) {
+                // The limits are read when a message begins, from the server's current value: a change
+                // applies to the next request, never to one half read (Huly QB-168, QB-94).
                 if (header_parsed == 0)
-                    _http_obj.set_max_body_size(this->_io.http_max_body_size());
+                    _http_obj.set_request_limits(this->_io.http_request_limits());
             }
             const auto ret = _http_obj.parse(buf + header_parsed, total - header_parsed);
             if (ret == HPE_OK) {

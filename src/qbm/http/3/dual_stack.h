@@ -277,6 +277,36 @@ public:
     }
 
     /**
+     * @brief Set the request limits of both stacks (Huly QB-94): the HTTP/2 server's -- which its HTTP/1.1
+     *        fallback reads too -- and the HTTP/3 server's, so a request is judged the same on every version.
+     * @param limits The limits; 0 in any of them means no limit of that kind. The HTTP/3 server's own 64 MiB
+     *        body default gives way to the body limit given here.
+     */
+    void
+    set_request_limits(qb::http::request_limits const &limits) noexcept {
+        _http2->set_request_limits(limits);
+        _http3->set_request_limits(limits);
+    }
+
+    /**
+     * @brief The HTTP/2 stack's request limits. The HTTP/3 stack's (`http3_server().request_limits()`) are the
+     *        same once set_request_limits() has run; before, they differ by the HTTP/3 body default, 64 MiB.
+     */
+    [[nodiscard]] qb::http::request_limits const &
+    request_limits() const noexcept {
+        return _http2->request_limits();
+    }
+
+    /**
+     * @brief Set the request body limit of both stacks alone, in bytes; 0 means none.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _http2->set_max_body_size(value);
+        _http3->set_max_body_size(value);
+    }
+
+    /**
      * @brief Listen on both stacks.
      *
      * Binds the HTTP/2 server to @p tcp_tls_uri and the HTTP/3 server to @p quic_uri, both

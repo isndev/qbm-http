@@ -1474,6 +1474,50 @@ TEST_F(Http3LoopbackTest, ServerRejectsRequestBodyOverLimit) {
     server->close();
 }
 
+// The server's request limits (`set_request_limits`, Huly QB-94) over a real QUIC connection: a `:path` and a
+// field value exactly at their limits are served, one byte over each is answered on its stream -- 414, 431 --
+// and the same client serves the next request.
+TEST_F(Http3LoopbackTest, ServerAnswersRequestsOverItsLimits) {
+    const auto               port   = next_port();
+    auto                     server = qb::http3::make_server();
+    qb::http::request_limits limits;
+    limits.max_url_length          = 64;
+    limits.max_header_value_length = 64;
+    server->set_request_limits(limits);
+    server->router().get("/limits", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "ok";
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    const auto send = [&](qb::http::Request request) {
+        return qb::http::run_sync(client->push_request(std::move(request)));
+    };
+    const auto target = [](std::size_t size) {
+        std::string t = "/limits?q=";
+        t += std::string(size - t.size(), 'a');
+        return qb::io::uri(t);
+    };
+
+    EXPECT_EQ(send(qb::http::Request{target(64)}).status(), qb::http::status::OK);
+    EXPECT_EQ(send(qb::http::Request{target(65)}).status(), qb::http::status::URI_TOO_LONG);
+    qb::http::Request at_limit{qb::io::uri("/limits")};
+    at_limit.set_header("x-v", std::string(64, 'v'));
+    EXPECT_EQ(send(std::move(at_limit)).status(), qb::http::status::OK);
+    qb::http::Request over{qb::io::uri("/limits")};
+    over.set_header("x-v", std::string(65, 'v'));
+    EXPECT_EQ(send(std::move(over)).status(), qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+    EXPECT_EQ(send(qb::http::Request{qb::io::uri("/limits")}).status(), qb::http::status::OK) << "the connection serves the next request";
+    EXPECT_TRUE(server->is_open());
+
+    client->disconnect();
+    server->close();
+}
+
 // What the limit refuses is a STREAM. The connection carries the client's other exchanges, and an
 // oversized upload used to take all of them down: the callback that saw the overflow failed, which
 // made the HTTP/3 engine's read fail, and the read's answer to that is CONNECTION_CLOSE. Here the

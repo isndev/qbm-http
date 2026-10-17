@@ -1014,19 +1014,19 @@ TEST(Http1ProtocolFraming, TrailersContainerRoundTripsThroughAChunkedMessage) {
 //
 // The cap used to be the constant protocol_limits::MAX_BODY_SIZE, and a request over it failed the
 // parse, which invalidated the protocol: the connection closed with no response at all. The protocol
-// now reads the cap from its io when a request begins (`http_max_body_size()`, the server's
-// `set_max_body_size`) and hands a refusal to the io (`http1_refuse_request(413)`), which answers it
+// now reads the cap from its io when a request begins (`http_request_limits()`, the server's
+// `set_request_limits` / `set_max_body_size`) and hands a refusal to the io (`http1_refuse_request(413)`), which answers it
 // and closes; the bytes that follow are dropped. An io without the hook keeps the old contract.
 // ===========================================================================
 
 namespace {
 
-/// The server session's two hooks, observable: the cap it reports, the refusals it is handed.
+/// The server session's two hooks, observable: the limits it reports, the refusals it is handed.
 struct RefusingServerFakeIO {
     using base_io_t = RefusingServerFakeIO;
 
     qb::allocator::pipe<char>        input;
-    std::size_t                      cap           = qb::http::protocol_limits::MAX_BODY_SIZE;
+    qb::http::request_limits         limits;
     int                              request_count = 0;
     std::optional<qb::http::Request> last_request;
     std::vector<int>                 refusals;
@@ -1036,9 +1036,9 @@ struct RefusingServerFakeIO {
         return input;
     }
 
-    [[nodiscard]] std::size_t
-    http_max_body_size() const noexcept {
-        return cap;
+    [[nodiscard]] qb::http::request_limits const &
+    http_request_limits() const noexcept {
+        return limits;
     }
 
     void
@@ -1077,14 +1077,14 @@ TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody
 TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {
     RefusingServerFakeIO                             io;
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
-    io.cap = 16;
+    io.limits.max_body_size = 16;
 
     feed(io, "POST /a HTTP/1.1\r\nContent-Length: 16\r\n\r\n0123456789abcdef");
     EXPECT_GT(step(proto, io), 0u);
     ASSERT_EQ(io.request_count, 1) << "a body exactly at the cap is accepted";
     EXPECT_EQ(io.last_request->body().as<std::string>(), "0123456789abcdef");
 
-    io.cap = 8; // the server lowers it between two requests
+    io.limits.max_body_size = 8; // the server lowers it between two requests
     feed(io, "POST /b HTTP/1.1\r\nContent-Length: 9\r\n\r\n012345678");
     EXPECT_EQ(step(proto, io), 0u);
     EXPECT_EQ(io.request_count, 1);
@@ -1103,7 +1103,7 @@ TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {
 TEST(Http1ProtocolFraming, AChunkedBodyPassingTheCapIsRefusedWith413) {
     RefusingServerFakeIO                             io;
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
-    io.cap = 8;
+    io.limits.max_body_size = 8;
 
     feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
     EXPECT_GT(step(proto, io), 0u);
@@ -1124,7 +1124,7 @@ TEST(Http1ProtocolFraming, AChunkedBodyPassingTheCapIsRefusedWith413) {
 TEST(Http1ProtocolFraming, AZeroCapLeavesTheBodyUnbounded) {
     RefusingServerFakeIO                             io;
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
-    io.cap = 0;
+    io.limits.max_body_size = 0;
 
     feed(io, "POST /big HTTP/1.1\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\nxyz");
     EXPECT_EQ(step(proto, io), 0u) << "the body is still arriving";
@@ -1142,4 +1142,150 @@ TEST(Http1ProtocolFraming, AnIoThatCannotAnswerStillClosesOnAnOversizedRequest) 
     EXPECT_EQ(proto.getMessageSize(), 0u);
     EXPECT_FALSE(proto.ok());
     EXPECT_EQ(io.request_count, 0);
+}
+
+// ===========================================================================
+// The server's request limits (Huly QB-94), each in both polarities: a request exactly at a limit is
+// served, one byte (or one field) over is handed to the io for its answer -- 414 for the target, 431
+// for a field name, a field value or a section's field count, 413 for a chunk. They used to be
+// constants, and a breach closed the connection with no answer. A trailer section counts its fields on
+// its own, as HTTP/2 and HTTP/3 count theirs; 0 means no limit of that kind.
+// ===========================================================================
+
+namespace {
+
+/// What one exchange under @p limits produced: the requests dispatched, the refusals handed to the io.
+struct LimitOutcome {
+    int              requests = 0;
+    std::vector<int> refusals;
+    bool             ok = true;
+};
+
+LimitOutcome
+serve_under(qb::http::request_limits const &limits, std::string const &wire) {
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    io.limits = limits;
+    feed(io, wire);
+    while (step(proto, io) > 0) {
+    }
+    return {io.request_count, io.refusals, proto.ok()};
+}
+
+std::string
+get_request(std::string const &target, std::string const &fields = "") {
+    return "GET " + target + " HTTP/1.1\r\nHost: h\r\n" + fields + "\r\n";
+}
+
+} // namespace
+
+TEST(Http1ProtocolFraming, TheTargetLimitIsAnswered414) {
+    qb::http::request_limits limits;
+    limits.max_url_length = 16;
+
+    const auto at = serve_under(limits, get_request("/" + std::string(15, 'a')));
+    EXPECT_EQ(at.requests, 1) << "a target of exactly 16 bytes is served";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto over = serve_under(limits, get_request("/" + std::string(16, 'a')));
+    EXPECT_EQ(over.requests, 0);
+    EXPECT_EQ(over.refusals, std::vector<int>{414});
+    EXPECT_TRUE(over.ok) << "the io answers before the connection ends";
+}
+
+TEST(Http1ProtocolFraming, TheFieldNameLimitIsAnswered431) {
+    qb::http::request_limits limits;
+    limits.max_header_name_length = 8;
+
+    const auto at = serve_under(limits, get_request("/", "x-abcdef: v\r\n"));
+    EXPECT_EQ(at.requests, 1) << "a name of exactly 8 bytes is served";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto over = serve_under(limits, get_request("/", "x-abcdefg: v\r\n"));
+    EXPECT_EQ(over.requests, 0);
+    EXPECT_EQ(over.refusals, std::vector<int>{431});
+}
+
+TEST(Http1ProtocolFraming, TheFieldValueLimitIsAnswered431) {
+    qb::http::request_limits limits;
+    limits.max_header_value_length = 8;
+
+    const auto at = serve_under(limits, get_request("/", "x-v: 12345678\r\n"));
+    EXPECT_EQ(at.requests, 1) << "a value of exactly 8 bytes is served";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto over = serve_under(limits, get_request("/", "x-v: 123456789\r\n"));
+    EXPECT_EQ(over.requests, 0);
+    EXPECT_EQ(over.refusals, std::vector<int>{431});
+
+    // The last field of the section is judged at its end, not only when the next one begins.
+    const auto last = serve_under(limits, "GET / HTTP/1.1\r\nx-v: 123456789\r\n\r\n");
+    EXPECT_EQ(last.refusals, std::vector<int>{431});
+}
+
+TEST(Http1ProtocolFraming, TheFieldCountLimitIsAnswered431) {
+    qb::http::request_limits limits;
+    limits.max_headers_count = 3;
+
+    const auto at = serve_under(limits, get_request("/", "a: 1\r\nb: 2\r\n")); // Host, a, b
+    EXPECT_EQ(at.requests, 1) << "exactly 3 fields are served";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto over = serve_under(limits, get_request("/", "a: 1\r\nb: 2\r\nc: 3\r\n"));
+    EXPECT_EQ(over.requests, 0);
+    EXPECT_EQ(over.refusals, std::vector<int>{431});
+}
+
+TEST(Http1ProtocolFraming, TheChunkLimitIsAnswered413) {
+    qb::http::request_limits limits;
+    limits.max_chunk_size = 8;
+
+    const auto at = serve_under(limits, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
+    EXPECT_EQ(at.requests, 1) << "a chunk of exactly 8 bytes is served";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto over = serve_under(limits, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n012345678\r\n0\r\n\r\n");
+    EXPECT_EQ(over.requests, 0);
+    EXPECT_EQ(over.refusals, std::vector<int>{413});
+}
+
+// A trailer section is a section of its own: its field count starts again, its fields are held to the same
+// name and value limits, and a breach there is answered 431 too.
+TEST(Http1ProtocolFraming, ATrailerSectionIsHeldToTheFieldLimitsOnItsOwn) {
+    qb::http::request_limits limits;
+    limits.max_headers_count       = 2;
+    limits.max_header_value_length = 8;
+    const std::string head         = "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n"; // 1 field
+
+    const auto at = serve_under(limits, head + "x-a: 1\r\nx-b: 12345678\r\n\r\n");
+    EXPECT_EQ(at.requests, 1) << "1 header field, then 2 trailer fields: each section within its limit";
+    EXPECT_TRUE(at.refusals.empty());
+
+    const auto count_over = serve_under(limits, head + "x-a: 1\r\nx-b: 2\r\nx-c: 3\r\n\r\n");
+    EXPECT_EQ(count_over.requests, 0);
+    EXPECT_EQ(count_over.refusals, std::vector<int>{431});
+
+    const auto value_over = serve_under(limits, head + "x-a: 123456789\r\n\r\n");
+    EXPECT_EQ(value_over.requests, 0);
+    EXPECT_EQ(value_over.refusals, std::vector<int>{431});
+}
+
+// 0 means no limit of that kind: a target and a value past the default constants are served.
+TEST(Http1ProtocolFraming, ZeroRequestLimitsMeanNone) {
+    qb::http::request_limits limits{0, 0, 0, 0, 0, 0};
+
+    const auto out =
+        serve_under(limits, get_request("/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH, 'u'),
+                                        "x-v: " + std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v') + "\r\n"));
+    EXPECT_EQ(out.requests, 1);
+    EXPECT_TRUE(out.refusals.empty());
+}
+
+// The defaults are the constants: a server that never set its limits answers a target one byte past
+// MAX_URL_LENGTH with 414 (it used to close with no answer).
+TEST(Http1ProtocolFraming, TheDefaultLimitsAreTheConstants) {
+    const auto at = serve_under({}, get_request("/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 1, 'u')));
+    EXPECT_EQ(at.requests, 1);
+    const auto over = serve_under({}, get_request("/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH, 'u')));
+    EXPECT_EQ(over.refusals, std::vector<int>{414});
 }

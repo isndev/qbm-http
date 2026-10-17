@@ -289,6 +289,82 @@ TEST(HttpServerBodyCap, TheCapIsTheServersSetMaxBodySize) {
     EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, 4 * 1024 * 1024), 5s)).response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
 }
 
+/// A request target of exactly @p size bytes on @p origin: `/limits?q=` padded.
+[[maybe_unused]] std::string
+target_of(std::string const &origin, std::size_t size) {
+    std::string target = "/limits?q=";
+    target += std::string(size - target.size(), 'a');
+    return origin + target;
+}
+
+// The server's request limits (`set_request_limits`, Huly QB-94), through qb's own client: a target and a field
+// value exactly at their limits are served, one byte over each is answered -- 414, 431 -- where the connection
+// used to close with no answer.
+TEST(HttpServerRequestLimits, TheLimitsAreTheServersAndEachBreachIsAnswered) {
+    qb::io::async::init();
+    PlainServerThread server([] { return qb::http::make_server(); },
+                             [](PlainServer &srv) -> bool {
+                                 srv.router().get("/limits",
+                                                  [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) { ctx->text("ok"); });
+                                 qb::http::request_limits limits;
+                                 limits.max_url_length          = 64;
+                                 limits.max_header_value_length = 64;
+                                 srv.set_request_limits(limits);
+                                 srv.router().compile();
+                                 if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                                     return false;
+                                 srv.start();
+                                 return true;
+                             });
+    ASSERT_TRUE(server.ready());
+    const auto origin = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port());
+    const auto get    = [](qb::http::Request request) {
+        return qb::http::run_sync(qb::http::GET(std::move(request), 5s)).response;
+    };
+
+    EXPECT_EQ(get(qb::http::Request{{target_of(origin, 64)}}).status(), qb::http::status::OK);
+    EXPECT_EQ(get(qb::http::Request{{target_of(origin, 65)}}).status(), qb::http::status::URI_TOO_LONG);
+
+    qb::http::Request at_limit{{origin + "/limits"}};
+    at_limit.set_header("x-v", std::string(64, 'v'));
+    EXPECT_EQ(get(std::move(at_limit)).status(), qb::http::status::OK);
+    qb::http::Request over{{origin + "/limits"}};
+    over.set_header("x-v", std::string(65, 'v'));
+    EXPECT_EQ(get(std::move(over)).status(), qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+}
+
+// The default limits are the constants (Huly QB-94): a server that never set its own serves a target and a field
+// value exactly at them, and answers one byte past each -- 414, 431 -- where it closed with no answer until 3.3.
+TEST(HttpServerRequestLimits, TheDefaultLimitsAreAnswered) {
+    qb::io::async::init();
+    PlainServerThread server([] { return qb::http::make_server(); },
+                             [](PlainServer &srv) -> bool {
+                                 srv.router().get("/limits",
+                                                  [](std::shared_ptr<qb::http::Context<qb::http::DefaultSession>> ctx) { ctx->text("ok"); });
+                                 srv.router().compile();
+                                 if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                                     return false;
+                                 srv.start();
+                                 return true;
+                             });
+    ASSERT_TRUE(server.ready());
+    const auto origin = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port());
+    const auto get    = [](qb::http::Request request) {
+        return qb::http::run_sync(qb::http::GET(std::move(request), 5s)).response;
+    };
+
+    EXPECT_EQ(get(qb::http::Request{{target_of(origin, qb::http::protocol_limits::MAX_URL_LENGTH)}}).status(), qb::http::status::OK);
+    EXPECT_EQ(get(qb::http::Request{{target_of(origin, qb::http::protocol_limits::MAX_URL_LENGTH + 1)}}).status(),
+              qb::http::status::URI_TOO_LONG);
+    // qb's own client will not SEND a field value past the constant (its serializer holds it), so the over-long
+    // one goes out raw.
+    const auto        port = server.server().transport().local_endpoint().port();
+    const std::string head =
+        "GET /limits HTTP/1.1\r\nHost: h\r\nx-v: " + std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v') + "\r\n\r\n";
+    const auto seen = raw_upload(port, head, 0, false);
+    EXPECT_EQ(seen.received.rfind("HTTP/1.1 431 ", 0), 0u) << "[" << seen.received.substr(0, 120) << "]";
+}
+
 std::mutex      g_probe_mutex;
 std::thread::id g_probe_constructed_on;
 std::thread::id g_probe_destroyed_on;
@@ -496,6 +572,12 @@ protected:
                     auto session = ctx->session();
                     ctx->text(session ? uuids::to_string(session->id()) : std::string{});
                 });
+                // The request limits the QB-94 case below reads (a 64-byte target, a 64-byte field value), then
+                // the body cap alone, which the QB-168 cases read.
+                qb::http::request_limits limits;
+                limits.max_url_length          = 64;
+                limits.max_header_value_length = 64;
+                srv.set_request_limits(limits);
                 srv.set_max_body_size(kBodyCap);
                 // A response larger than the default per-stream send window forces
                 // the factory-built server through its flow-control / pending-DATA
@@ -672,6 +754,43 @@ TEST_F(Http2MakeServerTest, TheHttp1FallbackAnswersOverTheCapWith413) {
     EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap), 5s, false)).response.status(), qb::http::status::OK);
     EXPECT_EQ(qb::http::run_sync(qb::http::POST(post_of(url, 4 * 1024 * 1024), 5s, false)).response.status(),
               qb::http::status::PAYLOAD_TOO_LARGE);
+}
+
+// The HTTP/2 server's request limits (`set_request_limits`, Huly QB-94): a `:path` and a field value exactly at
+// their limits are routed, one byte over each is answered on its stream -- 414, 431 -- and the SAME connection
+// serves the next request.
+TEST_F(Http2MakeServerTest, TheRequestLimitsAreAnsweredOnTheStreamAndTheConnectionGoesOn) {
+    auto client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(5s);
+    const auto send = [&](qb::http::Request request) {
+        return qb::http::run_sync(client->push_request(std::move(request)));
+    };
+    const auto connection = [&] {
+        return send(qb::http::Request{{base_url() + "/session_http2"}}).body().as<std::string>();
+    };
+    const auto padded = [&](std::size_t size) {
+        std::string target = "/ping_http2?q=";
+        target += std::string(size - target.size(), 'a');
+        return base_url() + target;
+    };
+    const auto before = connection();
+    ASSERT_FALSE(before.empty());
+
+    EXPECT_EQ(send(qb::http::Request{{padded(64)}}).status(), qb::http::status::OK);
+    EXPECT_EQ(send(qb::http::Request{{padded(65)}}).status(), qb::http::status::URI_TOO_LONG);
+
+    qb::http::Request at_limit{{base_url() + "/ping_http2"}};
+    at_limit.set_header("x-v", std::string(64, 'v'));
+    EXPECT_EQ(send(std::move(at_limit)).status(), qb::http::status::OK);
+    qb::http::Request over{{base_url() + "/ping_http2"}};
+    over.set_header("x-v", std::string(65, 'v'));
+    EXPECT_EQ(send(std::move(over)).status(), qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+
+    EXPECT_EQ(connection(), before) << "the refusals ended streams, never the connection";
+    EXPECT_EQ(2, g_http2_server_requests.load()) << "only the requests within the limits are routed";
+    client->disconnect();
 }
 
 #endif // QB_HAS_SSL
