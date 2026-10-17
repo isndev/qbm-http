@@ -190,7 +190,7 @@ A parameter (`:name`) matches exactly one path segment. A wildcard (`*name`) mat
 
 Read captured values off the context with `path_param`:
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:571-631 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:640-712 -->
 ```cpp
 [[nodiscard]] const std::string &path_param(std::string_view name) const;          // raw, static-empty on miss
 template <class T> [[nodiscard]] std::optional<T> path_param(std::string_view name) const;  // typed
@@ -228,7 +228,7 @@ For the whole parameter set at once — iteration, `has`, `size` — reach for `
 
 The `ctx` passed to a handler is a `std::shared_ptr<qb::http::Context<SessionType>>` — the single object that carries one request through its lifecycle. For route definition you mainly use four accessors:
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:489-631 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:555-712 -->
 ```cpp
 Request  &request();         // the incoming request: method, URI, headers, body, query()
 Response &response();        // the response you populate: status(), set_header(), body()

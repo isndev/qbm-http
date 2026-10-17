@@ -98,6 +98,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
   only when it is 1 to 128 characters of `[A-Za-z0-9._-]` (`is_valid_request_id`), and replaced
   otherwise -- never echoed, since the id goes into logs unchanged.
 
+- **`Context::route_pattern()` and router observers: `Router::add_observer(std::shared_ptr<IRequestObserver<S>>)`
+  (Huly QB-90).** `route_pattern()` names the route that matched in its canonical form (`/users/:id`,
+  `/files/*path`, `/`, whatever slashes the registration used; a 405 names the route whose path matched; empty
+  for a 404), a view of the compiled route names the context's chain retains -- what a metric or a log names a
+  request by, since the raw path's cardinality is the client's to choose. `<qbm/http/routing/observer.h>`: an
+  `IRequestObserver<S>` is told `on_request(ctx)` when the router creates the request's context and, exactly once,
+  `on_response(ctx, RequestEnd{outcome, duration})` when its response is decided -- after the `PRE_RESPONSE_SEND`
+  hooks and the hand-over to the session, before `REQUEST_COMPLETE`: every routed request, a 404, a 405, an error
+  chain, the early path-length 400, a client that left (`SESSION_GONE`) and a suppressed response (`SUPPRESSED`,
+  at the context's destruction). `duration` runs from the router receiving the request to the response handed to
+  the session (the protocol's serialization included, the transmission not). Unlike router lifecycle hooks, which
+  are copied into every context, an observer costs no allocation per request; a router with none pays a null-pointer
+  test when it creates a context and one when it finalizes it (two instructions in
+  `Context::finalize_processing_internal`, g++-14 -O3), and the context grows by 40 bytes inside its existing
+  allocation. A request a session refuses before routing (414, 431, 413) reaches no observer.
+
 ### Changed
 
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The

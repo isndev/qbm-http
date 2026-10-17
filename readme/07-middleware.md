@@ -113,7 +113,7 @@ Request
   -> route handler
 ```
 
-Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/src/qbm/http/routing/router.h:613-615, 238 -->
+Compilation happens in `router.compile()` (or lazily on the first `route()` call). Any change to routes or middleware resets the compiled flag, so re-registering after serving requires a recompile. <!-- src: qbm/http/src/qbm/http/routing/router.h:634-636, 238 -->
 
 ### Short-circuiting: `AsyncTaskResult`
 
@@ -135,7 +135,7 @@ enum class AsyncTaskResult {
 - **`ERROR`** — an unrecoverable failure. The router abandons the normal chain and runs the configured error task chain (see [Error handling](./13-error-handling.md)). You generally do not throw and call this yourself unless you want a specific status; an uncaught exception is converted to `ERROR` for you by `MiddlewareTask`.
 - **`CANCELLED`** — propagates a cancellation. Prefer `ctx->cancel(reason)`, which sets the cancellation flag and finalizes; do not call `complete(CANCELLED)` from a `cancel()` override.
 
-The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/src/qbm/http/routing/context.h:1184-1193 (complete(): is_finalised_internal / is_cancelled early-out) -->
+The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/src/qbm/http/routing/context.h:1265-1274 (complete(): is_finalised_internal / is_cancelled early-out) -->
 
 This is what "short-circuit" means in practice — a middleware that calls `complete(COMPLETE)` ends the chain:
 
@@ -185,7 +185,7 @@ router.use(
 
 #### Post-`next()` mutation: synchronous only
 
-For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, qbm/http/src/qbm/http/routing/context.h:403-451 -->
+For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, qbm/http/src/qbm/http/routing/context.h:469-517 -->
 
 ```cpp
 router.use(
@@ -254,8 +254,8 @@ Two rules make async middleware correct: capture `ctx` as a `std::shared_ptr` so
 
 Global (root-group) middleware is treated specially for the router's built-in chains:
 
-- It **is** prepended to the default and custom **404** and **405** handlers, so cross-cutting concerns (logging, security headers) still apply to not-found and method-not-allowed responses. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:124-168, 222-226, 236-238 -->
-- It is **not** automatically prepended to the **user-defined error chain** set via `Router::set_error_task_chain`. If you want global behaviors (error logging, CORS headers) on error responses, include them explicitly in the error chain. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:268-280 -->
+- It **is** prepended to the default and custom **404** and **405** handlers, so cross-cutting concerns (logging, security headers) still apply to not-found and method-not-allowed responses. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:128-172, 226-230, 240-242 -->
+- It is **not** automatically prepended to the **user-defined error chain** set via `Router::set_error_task_chain`. If you want global behaviors (error logging, CORS headers) on error responses, include them explicitly in the error chain. <!-- src: qbm/http/src/qbm/http/routing/router_core.h:272-284 -->
 
 There is one more asymmetry worth knowing: a router-level lifecycle hook is the only way to observe `HookPoint::PRE_ROUTING`, because router hooks are copied into each new `Context` before routing runs — a hook added *inside* a middleware is registered too late for that point.
 
@@ -264,7 +264,7 @@ There is one more asymmetry worth knowing: a router-level lifecycle hook is the 
 You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_middleware[, else_middleware])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:51, 153-160 -->
 
 If the selected child remains pending, `ctx->cancel()` notifies that child once, including a leaf selected through nested conditionals. The target belongs to this context, not to the shared conditional instance. A predicate that completes or cancels the context does not then start its old child; a child that completes synchronously and subsequently throws does not overwrite the newer task's outcome. The child still implements the existing no-argument `cancel()` notification, so shared user middleware must define its own operation-cancellation semantics.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1268-1300; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1349-1381; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
 
 ```cpp
 #include <qbm/http/http.h>

@@ -53,15 +53,23 @@ struct MatchedRouteInfo {
      *        no separate `std::optional` wrapper is needed (a `shared_ptr` is already nullable).
      */
     std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> route_tasks;
+    /**
+     * @brief The canonical pattern of the matched route (`/users/:id`), viewing the compiled route names that
+     *        `route_tasks` retains; empty only for a default-constructed value.
+     */
+    std::string_view route_pattern;
 
     /**
      * @brief Constructs `MatchedRouteInfo`.
      * @param params Extracted path parameters.
      * @param tasks Shared pointer to the task chain (may be null).
+     * @param pattern The matched route's canonical pattern.
      */
-    MatchedRouteInfo(PathParameters params, std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> tasks)
+    MatchedRouteInfo(PathParameters params, std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> tasks,
+                     std::string_view pattern = {})
         : path_parameters(std::move(params))
-        , route_tasks(std::move(tasks)) {}
+        , route_tasks(std::move(tasks))
+        , route_pattern(pattern) {}
 
     /** @brief Default constructor. */
     MatchedRouteInfo() = default;
@@ -82,15 +90,19 @@ struct PathAllowedMethodsInfo {
     PathParameters path_parameters;
     /** @brief HTTP methods that have a handler registered at the matched node. */
     std::vector<qb::http::method> methods;
+    /** @brief The canonical pattern of the matched node's route (`/users/:id`), viewing the compiled route names. */
+    std::string_view route_pattern;
 
     /**
      * @brief Constructs `PathAllowedMethodsInfo`.
      * @param params Captured path parameters.
      * @param allowed_methods Methods registered at the matched node.
+     * @param pattern The matched node's canonical route pattern.
      */
-    PathAllowedMethodsInfo(PathParameters params, std::vector<qb::http::method> allowed_methods)
+    PathAllowedMethodsInfo(PathParameters params, std::vector<qb::http::method> allowed_methods, std::string_view pattern = {})
         : path_parameters(std::move(params))
-        , methods(std::move(allowed_methods)) {}
+        , methods(std::move(allowed_methods))
+        , route_pattern(pattern) {}
 
     /** @brief Default constructor. */
     PathAllowedMethodsInfo() = default;
@@ -204,6 +216,12 @@ private:
         std::string_view param_name;
         /** @brief Child node for a wildcard segment, if one exists at this level. */
         std::unique_ptr<Node> wildcard_child;
+        /**
+         * @brief The canonical pattern of the route ending at this node -- `/`, `/users/:id`, `/files/ *path` (no space): its
+         *        segments joined by `/`, captures with their `:` or `*`. Set when a handler is first registered
+         *        here; it views the name arena. Empty for a node no route ends at.
+         */
+        std::string_view pattern;
 
         /**
          * @brief Constructs a Node.
@@ -424,6 +442,19 @@ public:
             throw std::invalid_argument("Cannot register a handler for an uninitialised / out-of-range HTTP method on path: "
                                         + path_pattern_str);
         }
+        if (current_node->pattern.empty()) {
+            // Every route ending here has the same canonical form: the same segments (a capture name conflict threw
+            // above), whatever slashes the registrations used.
+            std::string canonical;
+            for (const auto &segment : segments) {
+                canonical += '/';
+                canonical += segment;
+            }
+            if (canonical.empty())
+                canonical = "/";
+            _name_arena->segments.emplace_back(std::move(canonical));
+            current_node->pattern = _name_arena->segments.back();
+        }
         current_node->handlers[slot] =
             detail::make_owned_task_chain<SessionType>(std::shared_ptr<const detail::RouteNameArena>(_name_arena), std::move(task_chain_vec));
     }
@@ -488,7 +519,7 @@ private:
         if (segment_idx == segments.size()) {
             const auto &handler_here = current_node_ptr->handlers[slot];
             if (handler_here) {
-                return MatchedRouteInfo<SessionType>(current_params, handler_here);
+                return MatchedRouteInfo<SessionType>(current_params, handler_here, current_node_ptr->pattern);
             }
             // Special case for routes like /foo/* that can match /foo/ (wildcard captures empty)
             if (current_node_ptr->wildcard_child) {
@@ -496,7 +527,7 @@ private:
                 if (wc_handler) {
                     PathParameters final_params_for_wc = current_params;
                     final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, ""); // wildcard value is empty
-                    return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler);
+                    return MatchedRouteInfo<SessionType>(final_params_for_wc, wc_handler, current_node_ptr->wildcard_child->pattern);
                 }
             }
             return std::nullopt; // No handler for this method at this path, or no wildcard for empty remainder
@@ -538,7 +569,7 @@ private:
 
             const auto &wc_handler = current_node_ptr->wildcard_child->handlers[slot];
             if (wc_handler) {
-                return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, wc_handler);
+                return MatchedRouteInfo<SessionType>(params_for_wildcard_branch, wc_handler, current_node_ptr->wildcard_child->pattern);
             }
         }
 
@@ -588,13 +619,15 @@ public:
 
             if (segment_idx == segments.size()) {
                 if (has_any_handler(*current_node_ptr)) {
-                    merge_result(PathAllowedMethodsInfo<SessionType>(current_params, collect_allowed_methods(*current_node_ptr)));
+                    merge_result(PathAllowedMethodsInfo<SessionType>(current_params, collect_allowed_methods(*current_node_ptr),
+                                                                     current_node_ptr->pattern));
                 }
                 if (current_node_ptr->wildcard_child && has_any_handler(*current_node_ptr->wildcard_child)) {
                     PathParameters final_params_for_wc = current_params;
                     final_params_for_wc.set(current_node_ptr->wildcard_child->segment_match, "");
                     merge_result(PathAllowedMethodsInfo<SessionType>(std::move(final_params_for_wc),
-                                                                     collect_allowed_methods(*current_node_ptr->wildcard_child)));
+                                                                     collect_allowed_methods(*current_node_ptr->wildcard_child),
+                                                                     current_node_ptr->wildcard_child->pattern));
                 }
                 return result;
             }
@@ -622,7 +655,8 @@ public:
                 PathParameters params_for_wildcard_branch = current_params;
                 params_for_wildcard_branch.set(current_node_ptr->wildcard_child->segment_match, wildcard_captured_view);
                 merge_result(PathAllowedMethodsInfo<SessionType>(std::move(params_for_wildcard_branch),
-                                                                 collect_allowed_methods(*current_node_ptr->wildcard_child)));
+                                                                 collect_allowed_methods(*current_node_ptr->wildcard_child),
+                                                                 current_node_ptr->wildcard_child->pattern));
             }
 
             return result;

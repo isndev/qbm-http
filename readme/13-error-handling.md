@@ -20,7 +20,7 @@ This page covers status codes, the four ways to produce an error response, the `
 `qb::http::status` is an alias for the `qb::http::Status` wrapper class (`types.h`), which carries a nested `enum class Value` backed by llhttp's `HTTP_STATUS_*` constants and re-exposes each code as a `static constexpr Value` member — so `qb::http::status::NOT_FOUND` names a value directly. The response status is plain mutable state: `ctx->response().status()` is an lvalue you assign.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/types.h:509-907 (class Status), :909 (using status = Status), src/qbm/http/routing/context.h:521-529 (response()), :1067-1071 (status()) -->
+// <!-- src: qbm/http/src/qbm/http/types.h:509-907 (class Status), :909 (using status = Status), src/qbm/http/routing/context.h:590-598 (response()), :1148-1152 (status()) -->
 ctx->response().status() = qb::http::status::NOT_FOUND;    // 404
 ctx->status(qb::http::status::FORBIDDEN);                  // 403, chainable, non-terminal
 ```
@@ -49,7 +49,7 @@ The right tool depends on whether you want to send a final response immediately 
 The simplest path. The named helpers set the status, a plain-text body, and finalize in one call. The chain stops; the response goes out as written. The error chain is **not** involved.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/context.h:1079-1119 (named helpers), :1008-1046 (json/text/html) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:1160-1200 (named helpers), :1089-1127 (json/text/html) -->
 #include <qbm/http/http.h>
 
 router.get("/items/:id", [](auto ctx) {
@@ -69,7 +69,7 @@ Use this when the handler already knows the exact response it wants. It is termi
 Set a status that gives downstream context, then call `complete(AsyncTaskResult::ERROR)`. The normal chain halts and the `Context` attempts to switch to the router's error chain. Use this when you want one place to format all error responses consistently.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 (AsyncTaskResult), src/qbm/http/routing/context.h:1184-1260 (complete()) -->
+// <!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 (AsyncTaskResult), src/qbm/http/routing/context.h:1265-1341 (complete()) -->
 router.get("/items/:id", [](auto ctx) {
     auto item = find_item(ctx->path_param("id"));
     if (!item) {
@@ -97,7 +97,7 @@ router.get("/items/:id", [](auto ctx) {
 `Router::set_error_task_chain(...)` installs a `std::vector` of `IAsyncTask` shared pointers run when any task signals `AsyncTaskResult::ERROR`. The chain runs in full, in order; the last task is responsible for finalizing (`COMPLETE`).
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), qbm/http/src/qbm/http/routing/router_core.h:277 (set_error_task_chain), :302 (get_compiled_error_tasks), :315 (is_error_chain_set) -->
+// <!-- src: qbm/http/src/qbm/http/routing/router.h:272 (decl), qbm/http/src/qbm/http/routing/router_core.h:281 (set_error_task_chain), :322 (get_compiled_error_tasks), :335 (is_error_chain_set) -->
 std::vector<std::shared_ptr<qb::http::IAsyncTask<MySession>>> error_chain;
 error_chain.push_back(
     std::make_shared<qb::http::MiddlewareTask<MySession>>(my_error_formatter));
@@ -173,7 +173,7 @@ flowchart TD
 You do not have to wrap handler bodies in `try/catch` to keep the server alive. The chain driver in `Context` runs each task inside a `try/catch`; an exception that escapes a middleware or handler is caught, and — provided the context is not already finalized or cancelled — converted into `complete(AsyncTaskResult::ERROR)`. That routes through the error chain exactly as an explicit `ERROR` would, defaulting the status to 500.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/context.h:284-312 (task try/catch), :1183-1184 (complete()), :1224-1252 (the ERROR case: reseat the error chain, else 500) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:341-369 (task try/catch), :1264-1265 (complete()), :1305-1333 (the ERROR case: reseat the error chain, else 500) -->
 router.get("/risky", [](auto ctx) {
     auto data = parse_or_throw(ctx->request().body().template as<std::string_view>());
     // If parse_or_throw throws, the chain driver catches it,
