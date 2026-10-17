@@ -24,7 +24,9 @@
  * Per-iteration setup (building the Request, resetting the session) is hoisted out
  * of the timed region with PauseTiming/ResumeTiming so the reported number isolates
  * `route()`. Out-of-loop probes check the response, handler count, decoded path
- * parameters, hook phases and conditional branch before reporting a number.
+ * parameters, hook phases and conditional branch before reporting a number. A second
+ * router of the same session type records middleware entry order into a local trace
+ * through the SAME builder; the timed callable remains captureless and next()-only.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -51,8 +53,11 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
+#include <qb/utility/branch_hints.h>
 #include <qbm/http/http.h> // qb::http::Request, Response, method, status
 #include <qbm/http/middleware/conditional.h>
 #include <qbm/http/routing.h> // qb::http::Router, Context
@@ -140,23 +145,41 @@ public:
     cancel() override {}
 };
 
-// A pass-through global middleware: the cost the chain adds per hop is exactly one
-// CONTINUE through the task pump (mirrors AllInOneMiddleware::Behavior::CONTINUE).
+// The timed specialization is the original captureless next()-only lambda.
+// Registration below is shared: no second hand-built middleware list is an oracle.
+template <bool Observe>
+auto
+passthrough_callable([[maybe_unused]] std::size_t ordinal, [[maybe_unused]] std::vector<std::size_t> *trace) {
+    if constexpr (Observe) {
+        return [trace, ordinal](std::shared_ptr<qb::http::Context<BenchSession>> /*ctx*/, std::function<void()> next) {
+            trace->push_back(ordinal);
+            next();
+        };
+    } else {
+        return [](std::shared_ptr<qb::http::Context<BenchSession>> /*ctx*/, std::function<void()> next) {
+            next();
+        };
+    }
+}
+
+static_assert(std::is_empty_v<decltype(passthrough_callable<false>(0, nullptr))>);
+
+template <bool Observe>
 void
-add_passthrough_middleware(qb::http::Router<BenchSession> &router, int depth) {
+add_passthrough_middleware(qb::http::Router<BenchSession> &router, int depth, std::vector<std::size_t> *trace) {
     for (int i = 0; i < depth; ++i) {
-        router.use([](std::shared_ptr<qb::http::Context<BenchSession>> /*ctx*/, std::function<void()> next) { next(); },
-                   "PassThroughMw" + std::to_string(i));
+        router.use(passthrough_callable<Observe>(static_cast<std::size_t>(i), trace), "PassThroughMw" + std::to_string(i));
     }
 }
 
 // Build a router carrying `extra_static` filler static routes at /pad/N plus the
 // canonical static/param/wildcard/mixed routes the matcher spec pins, then compile.
+template <bool Observe = false>
 std::unique_ptr<qb::http::Router<BenchSession>>
-make_router(int extra_static, int mw_depth, int hook_count, bool conditional) {
+make_router(int extra_static, int mw_depth, int hook_count, bool conditional, std::vector<std::size_t> *trace = nullptr) {
     auto router = std::make_unique<qb::http::Router<BenchSession>>();
 
-    add_passthrough_middleware(*router, mw_depth);
+    add_passthrough_middleware<Observe>(*router, mw_depth, trace);
     for (int i = 0; i < hook_count; ++i) {
         // The mutable cookie is copied into each Context by the router. It
         // verifies phase order without registering a hook during dispatch.
@@ -207,13 +230,77 @@ make_router(int extra_static, int mw_depth, int hook_count, bool conditional) {
     return router;
 }
 
+// Keep the independent trace oracle outside the measured driver's inline budget.
+QB_NOINLINE bool
+middleware_probe(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path,
+                 qb::http::status expected, int hook_count, int conditional_branch) {
+    // Declared before the router so every capturing callable dies before its trace.
+    // This benchmark's middleware chain completes synchronously within this helper.
+    std::vector<std::size_t> middleware_order;
+    middleware_order.reserve(static_cast<std::size_t>(mw_depth));
+    auto              probe_router  = make_router<true>(extra_static, mw_depth, hook_count, conditional_branch >= 0, &middleware_order);
+    auto              probe_session = std::make_shared<BenchSession>();
+    qb::http::Request probe;
+    probe.method() = m;
+    probe.uri()    = qb::io::uri(path);
+    if (conditional_branch >= 0)
+        probe.set_header("X-Branch", conditional_branch == 1 ? "if" : "else");
+    probe.major_version = 1;
+    probe.minor_version = 1;
+    auto ctx            = probe_router->route(probe_session, probe);
+    if (!ctx || probe_session->_last_status != expected || probe_session->_response_writes != 1u
+        || probe_session->_handler_calls != (expected == qb::http::status::OK ? 1u : 0u)
+        || middleware_order.size() != static_cast<std::size_t>(mw_depth)) {
+        state.SkipWithError("route() did not execute the expected middleware count before completion");
+        return false;
+    }
+    for (std::size_t i = 0; i < middleware_order.size(); ++i) {
+        if (middleware_order[i] != i) {
+            state.SkipWithError("route() did not execute pass-through middleware in registration order");
+            return false;
+        }
+    }
+    return true;
+}
+
+// Call once after all preflights; keep the complete timed loop in its own function.
+QB_NOINLINE void
+run_timed_match(benchmark::State &state, qb::http::Router<BenchSession> *router, qb::http::method m, const std::string &path,
+                int conditional_branch) {
+    auto session = std::make_shared<BenchSession>();
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        session->reset();
+        qb::http::Request request;
+        request.method() = m;
+        request.uri()    = qb::io::uri(path);
+        if (conditional_branch >= 0)
+            request.set_header("X-Branch", conditional_branch == 1 ? "if" : "else");
+        request.major_version = 1;
+        request.minor_version = 1;
+        state.ResumeTiming();
+
+        auto ctx = router->route(session, request);
+        benchmark::DoNotOptimize(ctx);
+        benchmark::DoNotOptimize(session->_last_status);
+        benchmark::DoNotOptimize(session->_handler_calls);
+        benchmark::DoNotOptimize(session->_hook_calls);
+        benchmark::DoNotOptimize(session->_hook_order_errors);
+        benchmark::DoNotOptimize(session->_if_calls);
+        benchmark::DoNotOptimize(session->_else_calls);
+    }
+
+    state.SetItemsProcessed(state.iterations());
+}
+
 // Drive one request through the matcher with setup hoisted out of the timed region.
 using ExpectedParams = std::initializer_list<std::pair<std::string_view, std::string_view>>;
 
 void
 run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::method m, const std::string &path, qb::http::status expected,
           ExpectedParams expected_params = {}, int hook_count = 0, int conditional_branch = -1) {
-    auto router = make_router(extra_static, mw_depth, hook_count, conditional_branch >= 0);
+    auto router = make_router<false>(extra_static, mw_depth, hook_count, conditional_branch >= 0);
 
     // One out-of-loop oracle covers the full result, not just the response status.
     {
@@ -256,31 +343,12 @@ run_match(benchmark::State &state, int extra_static, int mw_depth, qb::http::met
         }
     }
 
-    auto session = std::make_shared<BenchSession>();
+    // The measured router passed its original preflight above. Keep the independent
+    // trace oracle, including its failure diagnostics, outside this function.
+    if (!middleware_probe(state, extra_static, mw_depth, m, path, expected, hook_count, conditional_branch))
+        return;
 
-    for (auto _ : state) {
-        state.PauseTiming();
-        session->reset();
-        qb::http::Request request;
-        request.method() = m;
-        request.uri()    = qb::io::uri(path);
-        if (conditional_branch >= 0)
-            request.set_header("X-Branch", conditional_branch == 1 ? "if" : "else");
-        request.major_version = 1;
-        request.minor_version = 1;
-        state.ResumeTiming();
-
-        auto ctx = router->route(session, request);
-        benchmark::DoNotOptimize(ctx);
-        benchmark::DoNotOptimize(session->_last_status);
-        benchmark::DoNotOptimize(session->_handler_calls);
-        benchmark::DoNotOptimize(session->_hook_calls);
-        benchmark::DoNotOptimize(session->_hook_order_errors);
-        benchmark::DoNotOptimize(session->_if_calls);
-        benchmark::DoNotOptimize(session->_else_calls);
-    }
-
-    state.SetItemsProcessed(state.iterations());
+    run_timed_match(state, router.get(), m, path, conditional_branch);
 }
 
 // --- Match-kind benchmarks (route-table size on the X axis) -----------------

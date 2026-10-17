@@ -15,7 +15,8 @@
  * Content-Length body is parsed in a second resume()+parse() pass keyed off
  * `error_pos` — exactly the two-pass dance http1-parse-limits.cpp documents. Each
  * iteration constructs a FRESH parser (parser state is single-use per message); that
- * construction is hoisted out of the timed region with PauseTiming/ResumeTiming.
+ * construction and destruction are INCLUDED in the timed driver call. Only the
+ * correctness probes run before the benchmark loop; no parser setup is moved out.
  *
  * Corpus is lifted from http1-parse-limits.cpp (happy-path branches): a header-only
  * GET, a multi-header GET with keep-alive/upgrade derivation, and a POST with a
@@ -38,9 +39,14 @@
  */
 
 #include <benchmark/benchmark.h>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <qbm/http/1.1/protocol/base.h> // qb::http::Parser, HPE_* codes
 #include <qbm/http/http.h>              // qb::http::Request
@@ -88,9 +94,8 @@ corpus_post_with_body() {
 // Whole-buffer parse: headers in one call, then (if a Content-Length body remains)
 // the two-pass resume()+parse() that http1-parse-limits.cpp pins.
 http_errno_t
-parse_whole(const std::string &raw) {
-    Parser<Request> parser;
-    auto            err = parser.parse(raw.data(), raw.size());
+parse_whole(Parser<Request> &parser, const std::string &raw) {
+    auto err = parser.parse(raw.data(), raw.size());
     if (err != HPE_PAUSED || !parser.headers_completed())
         return err;
     if (parser.content_length == 0u)
@@ -104,9 +109,8 @@ parse_whole(const std::string &raw) {
 // Byte-at-a-time: feed one byte per parse() call. on_headers_complete pauses the
 // parser mid-stream; resume() and keep feeding the remaining (body) bytes.
 http_errno_t
-parse_byte_at_a_time(const std::string &raw) {
-    Parser<Request> parser;
-    http_errno_t    err = HPE_OK;
+parse_byte_at_a_time(Parser<Request> &parser, const std::string &raw) {
+    http_errno_t err = HPE_OK;
     for (std::size_t i = 0; i < raw.size(); ++i) {
         err = parser.parse(raw.data() + i, 1);
         if (err == HPE_PAUSED) {
@@ -120,38 +124,211 @@ parse_byte_at_a_time(const std::string &raw) {
     return err;
 }
 
-// Fragmented: split at a few arbitrary mid-token offsets (URL + header + body), the
-// realistic partial-segment shape FragmentedHeaderFieldAndValue / FragmentedUrl pin.
+// The cut list names exclusive ends in the SAME raw buffer. A pause consumes only
+// up to error_pos: the rest of that fragment must be replayed after resume().
+// Check the fixed corpus and its cut/pause bounds in preflight, before using the
+// same driver without those checks in the timed loop. No runtime mode branch.
+template <bool Checked = false>
 http_errno_t
-parse_fragmented(const std::string &raw) {
-    Parser<Request>   parser;
-    const std::size_t n = raw.size();
-    // 4 cut points spread across the buffer (never zero-length slices for n>=4).
-    const std::size_t cuts[] = {n / 5, (2 * n) / 5, (3 * n) / 5, (4 * n) / 5};
-
+parse_fragments(Parser<Request> &parser, const std::string &raw, std::span<const std::size_t> ends) {
     std::size_t  pos     = 0;
     bool         resumed = false;
     http_errno_t err     = HPE_OK;
-    for (std::size_t c = 0; c <= 4; ++c) {
-        const std::size_t end = (c < 4) ? cuts[c] : n;
-        if (end <= pos)
-            continue;
-        err = parser.parse(raw.data() + pos, end - pos);
-        pos = end;
-        if (err == HPE_PAUSED && !resumed) {
-            parser.resume(); // headers complete mid-stream; continue into the body
-            resumed = true;
-            continue;
+    for (const auto end : ends) {
+        if constexpr (Checked) {
+            if (end < pos || end > raw.size())
+                return HPE_USER;
         }
-        if (err != HPE_OK && err != HPE_PAUSED && err != HPE_CB_MESSAGE_COMPLETE)
-            break;
+        while (pos < end) {
+            err = parser.parse(raw.data() + pos, end - pos);
+            if (err == HPE_PAUSED && !resumed && parser.headers_completed()) {
+                const auto *resume_at = parser.error_pos;
+                if constexpr (Checked) {
+                    if (!resume_at || resume_at < raw.data() + pos || resume_at > raw.data() + end)
+                        return HPE_USER;
+                }
+                pos                    = static_cast<std::size_t>(resume_at - raw.data());
+                const bool header_only = parser.content_length == 0u;
+                parser.resume(); // Preserve the original fragmented driver's resume, including heads.
+                resumed = true;
+                if (header_only)
+                    return err; // This corpus deliberately measures header-only/upgrade heads.
+                continue;       // Feed the unconsumed bytes of this fragment, if any.
+            }
+            if (err != HPE_OK)
+                return err;
+            pos = end;
+        }
     }
     return err;
 }
 
+template <bool Checked = false>
+http_errno_t
+parse_fragmented(Parser<Request> &parser, const std::string &raw) {
+    const std::size_t                n = raw.size();
+    const std::array<std::size_t, 5> ends{n / 5, (2 * n) / 5, (3 * n) / 5, (4 * n) / 5, n};
+    return parse_fragments<Checked>(parser, raw, ends);
+}
+
+// Preserve the timed workload: every public driver constructs and destroys its
+// ordinary production Parser inside the call, with the original callback table.
+http_errno_t
+parse_whole(const std::string &raw) {
+    Parser<Request> parser;
+    return parse_whole(parser, raw);
+}
+
+http_errno_t
+parse_byte_at_a_time(const std::string &raw) {
+    Parser<Request> parser;
+    return parse_byte_at_a_time(parser, raw);
+}
+
+http_errno_t
+parse_fragmented(const std::string &raw) {
+    Parser<Request> parser;
+    return parse_fragmented(parser, raw);
+}
+
+// Probe-only callback observation. The production callbacks still build the message.
+// Parser's callbacks recover their object from the http_t base, not its data member.
+// These corpora have no Transfer-Encoding, so the header callback does not swap tables.
+class CallbackProbe {
+    http_t         &_wire;
+    void           *_old_data;
+    void           *_old_settings;
+    http_settings_t _original;
+    http_settings_t _observed;
+
+public:
+    std::size_t headers    = 0;
+    std::size_t body_calls = 0;
+    std::size_t completed  = 0;
+    std::string body_bytes;
+
+    explicit CallbackProbe(Parser<Request> &parser)
+        : _wire(static_cast<http_t &>(parser))
+        , _old_data(_wire.data)
+        , _old_settings(_wire.settings)
+        , _original(*static_cast<const http_settings_t *>(_wire.settings))
+        , _observed(_original) {
+        _observed.on_headers_complete = [](http_t *wire) {
+            auto &probe = *static_cast<CallbackProbe *>(wire->data);
+            ++probe.headers;
+            return probe._original.on_headers_complete(wire);
+        };
+        _observed.on_body = [](http_t *wire, const char *data, std::size_t size) {
+            auto &probe = *static_cast<CallbackProbe *>(wire->data);
+            ++probe.body_calls;
+            probe.body_bytes.append(data, size);
+            return probe._original.on_body(wire, data, size);
+        };
+        _observed.on_message_complete = [](http_t *wire) {
+            auto &probe = *static_cast<CallbackProbe *>(wire->data);
+            ++probe.completed;
+            return probe._original.on_message_complete(wire);
+        };
+        _wire.data     = this;
+        _wire.settings = &_observed;
+    }
+
+    CallbackProbe(const CallbackProbe &)            = delete;
+    CallbackProbe &operator=(const CallbackProbe &) = delete;
+
+    ~CallbackProbe() {
+        _wire.data     = _old_data;
+        _wire.settings = _old_settings;
+    }
+};
+
+struct ExpectedHeader {
+    std::string_view              name;
+    std::vector<std::string_view> values;
+};
+
+struct ExpectedMessage {
+    http_method                 method;
+    std::string_view            target;
+    std::string_view            body;
+    bool                        upgrade;
+    std::vector<ExpectedHeader> headers;
+};
+
+const ExpectedMessage &
+expected_message(std::int64_t corpus) {
+    // Literal oracle, independently stated: no parser or serializer computes it.
+    static const std::array<ExpectedMessage, 3> expected{
+        {{HTTP_GET, "/health", "", false, {{"Host", {"example.test"}}}},
+         {HTTP_GET,
+          "/api/v1/users?name=alice",
+          "",
+          true,
+          {{"Host", {"example.test"}},
+           {"User-Agent", {"qb-bench/1.0"}},
+           {"Accept", {"application/json"}},
+           {"Accept-Encoding", {"gzip, deflate, br"}},
+           {"Connection", {"Upgrade"}},
+           {"Upgrade", {"h2c"}},
+           {"X-Multi", {"alpha", "beta"}}}},
+         {HTTP_POST, "/x", "hello", false, {{"Content-Length", {"5"}}}}}
+    };
+    return expected[static_cast<std::size_t>(corpus)];
+}
+
 bool
-ok_terminal(http_errno_t err) {
-    return err == HPE_PAUSED || err == HPE_CB_MESSAGE_COMPLETE;
+exact_message(Parser<Request> &parser, http_errno_t code, const std::string &raw, const ExpectedMessage &expected,
+              const CallbackProbe *probe = nullptr) {
+    auto      &message  = parser.get_parsed_message();
+    const auto terminal = expected.body.empty() ? HPE_PAUSED : HPE_CB_MESSAGE_COMPLETE;
+    if (code != terminal || !parser.headers_completed() || parser.error_pos != raw.data() + raw.size() || message.method() != expected.method
+        || message.uri().source() != expected.target || message.major_version != 1 || message.minor_version != 1 || !message.keep_alive
+        || message.upgrade != expected.upgrade || message.has_trailers() || message.body().as<std::string_view>() != expected.body
+        || message.header_count() != expected.headers.size())
+        return false;
+    for (const auto &header : expected.headers) {
+        const auto found = message.headers().find(std::string(header.name));
+        if (found == message.headers().end() || found->second.size() != header.values.size())
+            return false;
+        for (std::size_t i = 0; i < header.values.size(); ++i)
+            if (found->second[i] != header.values[i])
+                return false;
+    }
+    if (probe
+        && (probe->headers != 1 || probe->completed != static_cast<std::size_t>(!expected.body.empty()) || probe->body_bytes != expected.body
+            || (probe->body_calls == 0) != expected.body.empty()))
+        return false;
+    return true;
+}
+
+template <typename Driver>
+bool
+preflight(const std::string &raw, std::int64_t corpus, Driver driver) {
+    const auto &expected = expected_message(corpus);
+    // First observe the actual timed callback table, then delegate through counters.
+    // The observed parse is never used as the expected result of the ordinary one.
+    Parser<Request> plain;
+    if (!exact_message(plain, driver(plain), raw, expected))
+        return false;
+    Parser<Request> observed;
+    CallbackProbe   callbacks(observed);
+    return exact_message(observed, driver(observed), raw, expected, &callbacks);
+}
+
+bool
+fragmented_preflight(const std::string &raw, std::int64_t corpus) {
+    if (!preflight(raw, corpus, [&](auto &parser) { return parse_fragmented<true>(parser, raw); })
+        || !preflight(raw, corpus, [&](auto &parser) { return parse_fragmented(parser, raw); }))
+        return false;
+    // Every single boundary covers splits in the request target, header tokens,
+    // the CRLFCRLF pause, and each byte of "hello". The usual five-fragment shape
+    // above is separately exercised; neither expectation is generated by parsing.
+    for (std::size_t cut = 1; cut < raw.size(); ++cut) {
+        const std::array<std::size_t, 2> ends{cut, raw.size()};
+        if (!preflight(raw, corpus, [&](auto &parser) { return parse_fragments<true>(parser, raw, ends); }))
+            return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +354,8 @@ void
 BM_Http1Parse_WholeBuffer(benchmark::State &state) {
     const std::string &raw = select_corpus(state.range(0));
 
-    if (!ok_terminal(parse_whole(raw))) {
-        state.SkipWithError("whole-buffer parse did not reach a terminal state");
+    if (!preflight(raw, state.range(0), [&](auto &parser) { return parse_whole(parser, raw); })) {
+        state.SkipWithError("whole-buffer preflight failed: exact message, callbacks or consumption");
         return;
     }
 
@@ -187,6 +364,7 @@ BM_Http1Parse_WholeBuffer(benchmark::State &state) {
         benchmark::DoNotOptimize(err);
     }
 
+    state.SetLabel(state.range(0) == 2 ? "content-length-complete; driver-v2" : "headers-only; driver-v2");
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(raw.size()));
     state.SetItemsProcessed(state.iterations());
 }
@@ -195,8 +373,8 @@ void
 BM_Http1Parse_ByteAtATime(benchmark::State &state) {
     const std::string &raw = select_corpus(state.range(0));
 
-    if (!ok_terminal(parse_byte_at_a_time(raw))) {
-        state.SkipWithError("byte-at-a-time parse did not reach a terminal state");
+    if (!preflight(raw, state.range(0), [&](auto &parser) { return parse_byte_at_a_time(parser, raw); })) {
+        state.SkipWithError("byte-at-a-time preflight failed: exact message, callbacks or consumption");
         return;
     }
 
@@ -205,6 +383,7 @@ BM_Http1Parse_ByteAtATime(benchmark::State &state) {
         benchmark::DoNotOptimize(err);
     }
 
+    state.SetLabel(state.range(0) == 2 ? "content-length-complete; driver-v2" : "headers-only; driver-v2");
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(raw.size()));
     state.SetItemsProcessed(state.iterations());
 }
@@ -213,8 +392,8 @@ void
 BM_Http1Parse_Fragmented(benchmark::State &state) {
     const std::string &raw = select_corpus(state.range(0));
 
-    if (!ok_terminal(parse_fragmented(raw))) {
-        state.SkipWithError("fragmented parse did not reach a terminal state");
+    if (!fragmented_preflight(raw, state.range(0))) {
+        state.SkipWithError("fragmented preflight failed: exact message, callbacks or consumption");
         return;
     }
 
@@ -223,6 +402,7 @@ BM_Http1Parse_Fragmented(benchmark::State &state) {
         benchmark::DoNotOptimize(err);
     }
 
+    state.SetLabel(state.range(0) == 2 ? "content-length-complete; driver-v2" : "headers-only; driver-v2");
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(raw.size()));
     state.SetItemsProcessed(state.iterations());
 }

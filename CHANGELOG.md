@@ -259,6 +259,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Benchmark workload oracles (Huly QB-584, QB-585).** The fragmented HTTP/1.1
+  driver resumes at the parser's actual pause position, including the remaining
+  body bytes in the same fragment. Untimed probes check the complete message,
+  callbacks and every single split boundary; body-bearing cells require message
+  completion. Historical fragmented POST timings measured incomplete work and
+  are not comparable to the corrected cell. The routing benchmark also checks
+  pass-through middleware count and registration order with an untimed probe
+  session, while retaining the original empty callback in the measured session.
+  These changes affect benchmark fixtures, not the protocol or router runtime.
 - **The HTTP/2 client refuses a response trailer section that frames, routes or authenticates
   (Huly QB-1073).** It checked only the connection-specific fields there: a trailer `content-length`,
   `trailer`, `proxy-authenticate` or `proxy-authorization` was accepted and merged into the
