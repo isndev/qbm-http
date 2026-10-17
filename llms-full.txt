@@ -1087,20 +1087,21 @@ Stock session lifecycle: write progress and full-drain EOS collect logically com
 - `std::shared_ptr<Client> qb::http2::make_client(const std::string&);` / `make_client(const qb::io::uri&);`
 Usage: `auto c = qb::http2::make_client("https://h"); auto resp = co_await c->push_request(req);`
 
-### `qb::http::RetryPolicy` — `src/qbm/http/retry_policy.h:34`
-`struct`. The reconnection backoff shared by the qbm-http clients (the HTTP/2 client today); the same shape as `qb::redis::RetryPolicy` minus its `connect_timeout` (an HTTP client owns that setting). **All time fields are `qb::duration`.**
+### `qb::http::RetryPolicy` — `src/qbm/http/retry_policy.h:25`
+`using RetryPolicy = qb::io::reconnect_policy;` — qb-io's shared reconnection backoff (`<qb/io/reconnect.h>`, `qb/src/qb/io/reconnect.h:218`), the same type as `qb::redis::RetryPolicy`; the HTTP/2 client's run follows it. **All time fields are `qb::duration`.**
 
 ```cpp
-struct RetryPolicy {
-  int           max_attempts  = -1;        // per run, -1 = unlimited
-  qb::duration  initial_delay = 100ms;     // the wait before attempt 2
-  qb::duration  max_delay     = 30s;       // the wait never grows past this
-  double        multiplier    = 2.0;       // below 1 reads as 1
-  bool          jitter        = true;      // +-25 % on every wait
+struct qb::io::reconnect_policy {
+  int           max_attempts    = -1;      // per run, -1 = unlimited
+  qb::duration  initial_delay   = 100ms;   // the wait before attempt 2
+  qb::duration  max_delay       = 30s;     // the wait never grows past this
+  double        multiplier      = 2.0;     // below 1 reads as 1
+  bool          jitter          = true;    // +-25 % on every wait
+  qb::duration  connect_timeout = {};      // per attempt; zero = the client's own (the h2 client keeps set_connect_timeout())
   std::function<void(int attempt, qb::duration next_delay)> on_retry;  // before each wait: attempts failed so far
 };
 ```
-Fluent setters (each returns `RetryPolicy&`): `with_max_attempts(int)`, `with_initial_delay(qb::duration)`, `with_max_delay(qb::duration)`, `with_multiplier(double)`, `with_jitter(bool)`, `with_on_retry(std::function<void(int,qb::duration)>)`. Pure: `[[nodiscard]] qb::duration next_delay(int attempt, std::mt19937 *rng = nullptr) const` (`retry_policy.h:90`) — the wait after `attempt` failed attempts: 0 for `attempt < 1`, `initial_delay * multiplier^(attempt-1)` capped at `max_delay` (integer milliseconds, the redis arithmetic), jittered when `rng` is given and `jitter` is on, never below 1 ms once positive; a zero wait stays zero.
+Fluent setters (each returns `reconnect_policy&`): `with_max_attempts(int)`, `with_initial_delay(qb::duration)`, `with_max_delay(qb::duration)`, `with_multiplier(double)`, `with_jitter(bool)`, `with_connect_timeout(qb::duration)`, `with_on_retry(std::function<void(int,qb::duration)>)`. Pure: `[[nodiscard]] qb::duration next_delay(int attempt, std::mt19937 *rng = nullptr) const` — the wait after `attempt` failed attempts: 0 for `attempt < 1`, `initial_delay * multiplier^(attempt-1)` capped at `max_delay` (integer milliseconds), jittered when `rng` is given and `jitter` is on, never below 1 ms once positive; a zero wait stays zero. `[[nodiscard]] constexpr bool allows_attempt(int attempts) const noexcept` — whether a run that made `attempts` attempts may make another.
 
 ### HPACK (RFC 7541) — `src/qbm/http/2/protocol/hpack.h`
 - `class Encoder { bool encode(const std::vector<HeaderField>&, std::vector<uint8_t>&); void set_peer_max_dynamic_table_size(uint32_t); void set_max_capacity(uint32_t); void reset(); }` — value-owned. `encode` validates every field first: on `false` nothing is appended and the table is untouched. The table holds min(`set_max_capacity`, peer limit); a size change is announced by a Dynamic Table Size Update at the start of the next block (the smallest size reached first, RFC 7541 §4.2). A field marked `sensitive` stays a never-indexed literal even on an exact table match; default-sensitive names and pseudo headers are never indexed. Value octets 0x80–0xFF are valid.

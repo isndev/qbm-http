@@ -180,6 +180,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-unit-http1-protocol-framing`, `-unit-http2-server-protocol`,
   `-system-http3-connection-direct`, `-system-make-server-factory-http1`,
   `-system-make-server-factory-tls`, `-system-http3-loopback`.
+- **`qb::http::RetryPolicy` is qb-io's `qb::io::reconnect_policy` (Huly QB-126).** The struct moved to
+  `qb/io/reconnect.h` so qbm-redis, qbm-pgsql and the qbm-http clients share one reconnection policy;
+  `qbm/http/retry_policy.h` keeps the name as an alias. Every field, builder and `next_delay()` reads as before.
+  It gains `connect_timeout` / `with_connect_timeout()` (zero, the default, keeps each attempt's deadline at the
+  client's own `set_connect_timeout()`) and `allows_attempt()`. Its arithmetic is pinned in qb by
+  `qb-io-test-unit-reconnect-contract`; the module's `retry-policy` unit test, which pinned the same cases, is gone.
 
 - **One trailer list and one trailer section for HTTP/1.1, HTTP/2 and HTTP/3 (Huly QB-1073).** The
   three protocols kept three lists of the fields a trailer section must not carry, and each refused
