@@ -138,6 +138,11 @@ private:
     std::size_t                  _max_pipelined_requests{128};
     int  _refusal_status{0}; ///< The answer owed to a request refused for a size limit, once the ones before it are answered
     bool _closing{false};    ///< The connection's last response is published: the io closes once it is delivered
+    bool _draining{false};   ///< The server drains (http1_begin_drain()): the last request received is answered `close`
+    bool _drain_cut{false};  ///< Closed by the drain while idle: it reports DisconnectedReason::ServerDraining
+    /// The HTTP/1.1 protocol the session was built with: another one installed (a WebSocket upgrade, switch_protocol)
+    /// takes the session out of an HTTP drain (http1_speaks_http()).
+    qb::io::async::IProtocol const *_http_protocol{nullptr};
 
     /// The connection's last response is published: the io closes once it is delivered -- after the peer, at most the
     /// session's linger() later (qb-io close_after_deliver(), Huly QB-1089) -- so a peer still sending, a refused
@@ -166,10 +171,23 @@ private:
         return false;
     }
 
+    /// Whether the input buffer holds a byte of a request after the one being answered: the protocol tells which bytes
+    /// are that request's own while it hands it over (Protocol::dispatching_size()), none are afterwards.
+    [[nodiscard]] bool
+    another_request_buffered() noexcept {
+        return this->in().size() > static_cast<Protocol const *>(_http_protocol)->dispatching_size();
+    }
+
     void
     prepare_response_for_active_request(Response &response) {
         const bool response_closes = has_connection_token(response, "close");
         if (response_closes) {
+            _active_should_keep_alive = false;
+        }
+        // The server drains (Huly QB-167): the answer to the last request received -- none queued behind it, no byte
+        // of another one buffered -- closes the connection. A request still arriving keeps it open until it is
+        // answered in turn, or the drain's deadline.
+        if (_draining && _pending_requests.empty() && !another_request_buffered()) [[unlikely]] {
             _active_should_keep_alive = false;
         }
 
@@ -430,7 +448,7 @@ private:
         // The close that follows the last response (close_after_response()) ends without a reason of the io's own: it
         // is still the one it always reported.
         if (_closing && e.reason == 0)
-            e.reason = DisconnectedReason::ResponseTransmitted;
+            e.reason = _drain_cut ? DisconnectedReason::ServerDraining : DisconnectedReason::ResponseTransmitted;
         if constexpr (qb::has_on<Derived, event::disconnected>) {
             static_cast<Derived &>(*this).on(event::disconnected{e.reason});
         } else {
@@ -489,6 +507,45 @@ public:
         // cut a request the server accepts with no answer at all: a body at the default cap plus its
         // header section is over it (Huly QB-168). The input-buffer cap (QB_MAX_READ_BUFFER_SIZE) stays.
         this->set_max_message_size(std::numeric_limits<std::size_t>::max());
+        _http_protocol = this->protocol(); // the tcp::client base installed it
+    }
+
+    /**
+     * @brief Server hook (Huly QB-167): whether the session still speaks HTTP/1.1. A session switched to another
+     *        protocol -- a WebSocket upgrade in place -- is out of an HTTP drain: neither closed nor waited for.
+     */
+    [[nodiscard]] bool
+    http1_speaks_http() const noexcept {
+        return this->protocol() == _http_protocol;
+    }
+
+    /**
+     * @brief Server hook (Huly QB-167): the server drains. An idle session -- no request being answered, none
+     *        queued, no byte of one buffered -- closes now, gracefully: its sending side shut down, what the
+     *        client still sends read and dropped until it closes (qb-io's lingering close), reporting
+     *        DisconnectedReason::ServerDraining. Otherwise the answer to the last request received carries
+     *        `Connection: close` and the connection closes after it. A session already closing, or one that no
+     *        longer speaks HTTP/1.1, is left as it is.
+     */
+    void
+    http1_begin_drain() noexcept {
+        if (_draining)
+            return;
+        _draining = true;
+        if (_closing || this->lingering() || !http1_speaks_http())
+            return;
+        if (_context || !_pending_requests.empty() || _refusal_status != 0 || this->in().size() != 0)
+            return; // work in progress -- a request being handed over included: its last answer closes the connection
+        _drain_cut                = true;
+        _active_should_keep_alive = false;
+        close_after_response();
+        this->ready_to_write(); // nothing to deliver: the write path closes at once, after the client
+    }
+
+    /// Server hook (Huly QB-167): the drain's deadline came: the session is aborted.
+    void
+    http1_abort_drain() noexcept {
+        this->disconnect(DisconnectedReason::ServerDraining);
     }
 
     /**
@@ -716,6 +773,86 @@ class server
         LOG_HTTP_WARN("HTTP/1.1 server disconnected. Reason: " << event.reason);
     }
 
+    /// The bound of a drain (Huly QB-167). Its callback only reports the deadline: the server, which owns it, is never
+    /// destroyed from under it, and it is stopped -- never released -- once the drain ends.
+    class drain_deadline : public qb::io::async::with_timeout<drain_deadline> {
+        server &_owner;
+
+    public:
+        drain_deadline(server &owner, qb::duration bound)
+            : qb::io::async::with_timeout<drain_deadline>(bound)
+            , _owner(owner) {}
+
+        void
+        on(qb::io::async::event::timer const &) noexcept {
+            _owner.drain_deadline_reached();
+        }
+    };
+
+    bool                                         _draining   = false; ///< drain() was called: the listener is closed
+    bool                                         _drain_done = false; ///< on_drained ran (or there was none to run)
+    std::function<void(qb::http::drain_outcome)> _on_drained;
+    std::unique_ptr<drain_deadline>              _drain_deadline;
+
+    /// Whether the session type has the drain's hooks (this module's session does; a bare qb-io session served by this
+    /// server does not, and is waited for as it is, then aborted at the deadline).
+    static constexpr bool drainable_sessions = requires(Session &s) {
+        s.http1_begin_drain();
+        s.http1_abort_drain();
+        { s.http1_speaks_http() } -> std::convertible_to<bool>;
+    };
+
+    /// The sessions a drain waits for: those still speaking HTTP/1.1, lingering ones included (they are closing).
+    [[nodiscard]] std::size_t
+    http_sessions_left() noexcept {
+        std::size_t left = 0;
+        for (auto const &[id, session] : this->sessions()) {
+            if constexpr (drainable_sessions) {
+                if (session && session->http1_speaks_http())
+                    ++left;
+            } else if (session) {
+                ++left;
+            }
+        }
+        return left;
+    }
+
+    void
+    finish_drain(qb::http::drain_outcome outcome) noexcept {
+        if (_drain_done)
+            return;
+        _drain_done = true;
+        if (_drain_deadline)
+            _drain_deadline->setTimeout(qb::duration::zero()); // stopped, not released: this may be its own callback
+        auto on_drained = std::move(_on_drained);
+        _on_drained     = nullptr;
+        if (on_drained) {
+            try {
+                on_drained(outcome);
+            } catch (const std::exception &e) {
+                LOG_HTTP_ERROR("HTTP/1.1 drain callback threw: " << e.what());
+            } catch (...) {
+                LOG_HTTP_ERROR("HTTP/1.1 drain callback threw an unknown exception");
+            }
+        }
+    }
+
+    void
+    drain_deadline_reached() noexcept {
+        if (_drain_done)
+            return;
+        for (auto const &[id, session] : this->sessions()) {
+            if constexpr (drainable_sessions) {
+                if (session && session->http1_speaks_http())
+                    session->http1_abort_drain();
+            } else if (session) {
+                session->disconnect(qb::http::DisconnectedReason::ServerDraining);
+            }
+        }
+        LOG_HTTP_WARN("HTTP/1.1 drain deadline reached: the sessions still open are aborted.");
+        finish_drain(qb::http::drain_outcome::deadline);
+    }
+
 public:
     /**
      * @brief Default constructor
@@ -725,6 +862,91 @@ public:
      * and calling the listen method.
      */
     server() = default;
+
+    /**
+     * @brief Drain the server (Huly QB-167): stop taking connections, close the ones that wait, answer the
+     *        requests already received, and report when every HTTP session has closed or @p deadline came.
+     *
+     * - The listening socket is closed: a new connection is refused, and the port is free.
+     * - An idle session -- no request being answered, none queued, no byte of one buffered -- closes now,
+     *   gracefully: its sending side shut down, what its client still sends dropped until the client closes
+     *   (qb-io's lingering close); it reports `DisconnectedReason::ServerDraining`.
+     * - A session at work answers every request it has received; the answer to the last one carries
+     *   `Connection: close`, and the connection closes after it. A request still arriving is answered in turn.
+     * - @p on_drained runs once, on the server's loop: with `drain_outcome::drained` when the last HTTP session has
+     *   closed -- a lingering session counts until it is gone -- or with `drain_outcome::deadline` when @p deadline
+     *   came first, after aborting the sessions still open (`ServerDraining`). With no HTTP session open it runs
+     *   before drain() returns. A deadline of zero or less aborts what is still open at once.
+     * - **WebSocket is outside the drain.** A session upgraded in place (switch_protocol) is neither closed nor
+     *   waited for, and one extracted to another server is no longer this server's: @p on_drained can run while
+     *   they live. Closing them with `1001 Going Away` is Huly QB-1097.
+     *
+     * A server of bare qb-io sessions (no drain hooks) closes its listener and waits for them as they are, aborting
+     * them at the deadline. The server cannot listen again afterwards. drain_outcome is the HTTP/2 and HTTP/3
+     * servers' too.
+     * @param deadline   How long the sessions have, from now.
+     * @param on_drained Told how the drain ended; may be empty.
+     * @return False when a drain is already under way: the call changes nothing.
+     */
+    bool
+    drain(qb::duration deadline, std::function<void(qb::http::drain_outcome)> on_drained = {}) {
+        if (_draining)
+            return false;
+        _draining   = true;
+        _on_drained = std::move(on_drained);
+        this->stop();              // the accept watcher
+        this->transport().close(); // and the listening socket: a new connection is refused
+        if constexpr (drainable_sessions) {
+            for (auto const &[id, session] : this->sessions()) {
+                if (session)
+                    session->http1_begin_drain();
+            }
+        }
+        if (http_sessions_left() == 0) {
+            finish_drain(qb::http::drain_outcome::drained);
+            return true;
+        }
+        if (deadline <= qb::duration::zero()) {
+            drain_deadline_reached();
+            return true;
+        }
+        _drain_deadline = std::make_unique<drain_deadline>(*this, deadline);
+        return true;
+    }
+
+    /**
+     * @brief Whether drain() was called (the drain may be over: see its callback).
+     */
+    [[nodiscard]] bool
+    draining() const noexcept {
+        return _draining;
+    }
+
+    /**
+     * @brief Session hook: a session of this server is gone. The base forgets it; a drain that waited for it may end.
+     * @param ident The session's id.
+     */
+    void
+    disconnected(qb::uuid ident) {
+        qb::io::async::io_handler<Derived, Session>::disconnected(ident);
+        if (_draining && !_drain_done && http_sessions_left() == 0)
+            finish_drain(qb::http::drain_outcome::drained);
+    }
+
+    /**
+     * @brief Extract a session's transport, as io_handler::extractSession does -- a WebSocket upgrade handing its
+     *        connection to another actor. A drain that waited for that session may end: it is no longer this
+     *        server's (Huly QB-167).
+     * @param ident The session's id.
+     * @return The transport and whether the session was found.
+     */
+    [[nodiscard]] std::pair<typename Session::transport_io_type, bool>
+    extractSession(qb::uuid const &ident) {
+        auto extracted = qb::io::async::io_handler<Derived, Session>::extractSession(ident);
+        if (_draining && !_drain_done && http_sessions_left() == 0)
+            finish_drain(qb::http::drain_outcome::drained);
+        return extracted;
+    }
 
     /**
      * @brief Bind the listening socket **and start accepting**.

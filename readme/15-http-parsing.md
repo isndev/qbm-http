@@ -169,7 +169,7 @@ When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that man
 
 `server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. They then **move** the parsed message into the I/O handler and reset the parser:
 
-<!-- src: src/qbm/http/1.1/protocol/server.h:76-93 -->
+<!-- src: src/qbm/http/1.1/protocol/server.h:76-95 -->
 
 ```cpp
 void onMessage(std::size_t) noexcept final {
@@ -217,7 +217,7 @@ The parser is hardened against framing attacks. Its limits are a `qb::http::requ
 
 The body limit is checked twice: once against the declared `Content-Length` *before* any body buffer is reserved (so an oversized declaration is rejected before allocation), and again against the running total as body bytes arrive. Whatever the limit, the protocol hands the refused request to the session (`http1_refuse_request`), which answers it once every request received before it is answered, and drops what the client sends meanwhile. The limits are read from the server when a request begins (the session's `http_request_limits()` hook), so a new value applies to the next request. The HTTP/2 and HTTP/3 servers take the same `request_limits` and give the same answers (Huly QB-94).
 
-<!-- src: src/qbm/http/1.1/protocol/base.h:94-111,263-265,479-481,516-519,716-718,751-753; src/qbm/http/1.1/http.h:531-538,551-556,622-624 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:94-111,263-265,479-481,516-519,716-718,751-753; src/qbm/http/1.1/http.h:588-595,608-613,679-681 -->
 
 Two framing defenses go beyond size limits, both in `on_headers_complete`:
 
@@ -283,7 +283,7 @@ The HTTP/1.1 parser handles only the *opening* handshake of a WebSocket connecti
 - **`reset()` before reuse, always.** A `Parser` carries the previous message's state until reset. The framing layer resets after every `onMessage()`; a hand-rolled loop must too. `reset()` is also what makes the parser usable after an error.
 - **`content_length == 0` does not mean "no `Content-Length` header."** For requests with no framing headers, and for `1xx`/`204`/`304` responses, the parser normalizes the length to 0 even when a (misleading) `Content-Length` header was present. Read the body, not the raw header, to know what arrived.
 - **The parsed body owns its bytes before `onMessage`.** Inside `getMessageSize()`, the temporary `string_view` passed to `Body::operator=` is copied into the body's pipe. `onMessage()` moves that owning message to the handler. Do not keep a reference to `get_parsed_message()` across `parse()`, `reset()`, or message delivery.
-<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1038-1043; qbm/http/src/qbm/http/body.cpp:697-700; qbm/http/src/qbm/http/1.1/protocol/server.h:76-93 -->
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1038-1043; qbm/http/src/qbm/http/body.cpp:697-700; qbm/http/src/qbm/http/1.1/protocol/server.h:76-95 -->
 - **The limits are the server's.** `set_request_limits()` (and `set_max_body_size()` for the body alone) is read when each request begins; 0 means none, and the defaults are the `protocol_limits` constants. A Content-Length body is buffered whole, so `QB_MAX_READ_BUFFER_SIZE` (200 MB) still bounds it; the session leaves the transport's generic message cap (`QB_MAX_MESSAGE_SIZE`) to the protocol, which states its bounds and answers a breach -- a body at the default cap plus its header section was past it, and was cut with no answer (Huly QB-168). The HTTP/2 and HTTP/3 layers keep their own framing limits (`qb::http2::protocol_limits`, nghttp3's), and their servers take the same `request_limits` with the same answers (Huly QB-94); a client reads responses under the defaults.
 - **This is HTTP/1.1 only.** Neither `Parser` nor `qb::protocol::http::base` is involved in HTTP/2 (`2/protocol/`) or HTTP/3 (`3/protocol/`) framing; what the three share is `request_limits`, whose defaults are these `protocol_limits` constants. Do not reason about h2/h3 framing from this page.
 

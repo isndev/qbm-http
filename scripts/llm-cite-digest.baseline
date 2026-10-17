@@ -19,6 +19,7 @@ llm/qbm-http.llm.api.md	1.1/protocol/base.h:732-732	e431f45a4021	set_max_body_si
 llm/qbm-http.llm.api.md	1.1/protocol/base.h:740-740	c4437ea56b4b	max_body_size() const noexcept {
 llm/qbm-http.llm.api.md	1.1/protocol/base.h:751-751	50c9983a8354	refusal_status() const noexcept {
 llm/qbm-http.llm.api.md	1.1/protocol/base.h:94-94	1cea27b7e6a5	struct request_limits {
+llm/qbm-http.llm.api.md	1.1/protocol/server.h:103-103	59ebf4c707b5	dispatching_size() const noexcept {
 llm/qbm-http.llm.api.md	body.cpp:769-791	0a49f9fa4b9b	template <>
 llm/qbm-http.llm.api.md	body.h:253-253	cc499af9d486	static std::unique_ptr<qb::compression::compress_provider> get_compre...
 llm/qbm-http.llm.api.md	body.h:272-272	ee0ec258f912	std::size_t compress(std::string const &encoding);
@@ -92,12 +93,18 @@ llm/qbm-http.llm.api.md	headers.h:53-53	2e429ff5b2d6	using headers_map = qb::ica
 llm/qbm-http.llm.api.md	headers.h:598-598	4861deff47f0	[[nodiscard]] bool is_forbidden_trailer_field(std::string_view name) ...
 llm/qbm-http.llm.api.md	headers.h:68-68	4cc0ef18e2b1	[[nodiscard]] qb::icase_unordered_map<std::string> parse_header_attri...
 llm/qbm-http.llm.api.md	headers.h:98-98	f170c1837f39	[[nodiscard]] std::string accept_encoding();
-llm/qbm-http.llm.api.md	http.h:531-531	f5b19f1d3ad7	http_request_limits() noexcept {
-llm/qbm-http.llm.api.md	http.h:551-551	fead11dac70f	http1_refuse_request(qb::http::Status status) noexcept {
-llm/qbm-http.llm.api.md	http.h:622-622	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
-llm/qbm-http.llm.api.md	http.h:630-630	b4e777a3315d	request_limits() const noexcept {
-llm/qbm-http.llm.api.md	http.h:643-643	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
-llm/qbm-http.llm.api.md	http.h:651-651	c4437ea56b4b	max_body_size() const noexcept {
+llm/qbm-http.llm.api.md	http.h:518-518	7188d56115f4	http1_speaks_http() const noexcept {
+llm/qbm-http.llm.api.md	http.h:531-531	d98dc49e8e82	http1_begin_drain() noexcept {
+llm/qbm-http.llm.api.md	http.h:547-547	8fad8e356271	http1_abort_drain() noexcept {
+llm/qbm-http.llm.api.md	http.h:588-588	f5b19f1d3ad7	http_request_limits() noexcept {
+llm/qbm-http.llm.api.md	http.h:608-608	fead11dac70f	http1_refuse_request(qb::http::Status status) noexcept {
+llm/qbm-http.llm.api.md	http.h:679-679	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.api.md	http.h:687-687	b4e777a3315d	request_limits() const noexcept {
+llm/qbm-http.llm.api.md	http.h:700-700	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
+llm/qbm-http.llm.api.md	http.h:708-708	c4437ea56b4b	max_body_size() const noexcept {
+llm/qbm-http.llm.api.md	http.h:892-892	83353ce82899	drain(qb::duration deadline, std::function<void(qb::http::drain_outco...
+llm/qbm-http.llm.api.md	http.h:921-921	9f39ed46a1de	draining() const noexcept {
+llm/qbm-http.llm.api.md	http.h:944-944	ba60ba8e1894	extractSession(qb::uuid const &ident) {
 llm/qbm-http.llm.api.md	http2.h:311-311	f5b19f1d3ad7	http_request_limits() noexcept {
 llm/qbm-http.llm.api.md	http2.h:331-331	fead11dac70f	http1_refuse_request(qb::http::Status status) noexcept {
 llm/qbm-http.llm.api.md	http2.h:588-588	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
@@ -329,15 +336,18 @@ llm/qbm-http.llm.api.md	timing.h:158-158	304629e28bfb	timing_middleware(typename
 llm/qbm-http.llm.api.md	timing.h:41-41	a6ced6a34da4	class TimingMiddleware final : public IMiddleware<SessionType> {
 llm/qbm-http.llm.api.md	transform.h:128-128	6f3548185b74	transform_middleware(typename TransformMiddleware<SessionType>::Reque...
 llm/qbm-http.llm.api.md	transform.h:39-39	0a2fdfa9fa64	class TransformMiddleware final : public IMiddleware<SessionType> {
-llm/qbm-http.llm.api.md	types.h:274-274	607d1d321772	class Method {
-llm/qbm-http.llm.api.md	types.h:509-509	f4d7c130f7eb	class Status {
-llm/qbm-http.llm.api.md	types.h:916-916	8b48cea2d2f3	constexpr char endl[] = "\r\n";
-llm/qbm-http.llm.api.md	types.h:924-924	544be3d5f78c	constexpr char sep = ' ';
-llm/qbm-http.llm.api.md	types.h:934-934	028e26dbdc36	enum DisconnectedReason : int {
-llm/qbm-http.llm.api.md	types.h:951-951	6c7c92a87174	struct hash<qb::http::method> {
+llm/qbm-http.llm.api.md	types.h:275-275	607d1d321772	class Method {
+llm/qbm-http.llm.api.md	types.h:510-510	f4d7c130f7eb	class Status {
+llm/qbm-http.llm.api.md	types.h:917-917	8b48cea2d2f3	constexpr char endl[] = "\r\n";
+llm/qbm-http.llm.api.md	types.h:925-925	544be3d5f78c	constexpr char sep = ' ';
+llm/qbm-http.llm.api.md	types.h:935-935	028e26dbdc36	enum DisconnectedReason : int {
+llm/qbm-http.llm.api.md	types.h:942-944	e9ad04cab8a3	/// The server drains (`drain()`, Huly QB-167): an idle connection cl...
+llm/qbm-http.llm.api.md	types.h:950-950	eedbfe7f25a1	enum class drain_outcome : std::uint8_t {
+llm/qbm-http.llm.api.md	types.h:963-963	6c7c92a87174	struct hash<qb::http::method> {
 llm/qbm-http.llm.api.md	utility.h:258-260	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {
-llm/qbm-http.llm.md	1.1/http.h:622-624	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.md	1.1/http.h:679-681	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.md	1.1/http.h:892-892	83353ce82899	drain(qb::duration deadline, std::function<void(qb::http::drain_outco...
 llm/qbm-http.llm.md	2/http2.h:588-590	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
 llm/qbm-http.llm.md	3/http3.h:482-484	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
 llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1319-1378	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {

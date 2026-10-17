@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <cstdint>                             // For std::uint8_t (drain_outcome)
 #include <functional>                          // For std::hash
 #include <qbm/http/vendor/llhttp.h>            // For http_method, http_status, http_method_name, http_status_name
 #include <ostream>                             // For std::ostream
@@ -937,7 +938,18 @@ enum DisconnectedReason : int {
     ResponseTransmitted, ///< Disconnected after response was transmitted
     ServerError,         ///< Disconnected due to server error
     ByProtocolError,     ///< Disconnected due to protocol error
-    Undefined            ///< Undefined reason (should never happen)
+    Undefined,           ///< Undefined reason (should never happen)
+    /// The server drains (`drain()`, Huly QB-167): an idle connection closed, or one still open at the deadline
+    /// aborted. A connection whose last response was answered `Connection: close` reports ResponseTransmitted.
+    ServerDraining
+};
+
+/**
+ * @brief How a server's drain ended (`drain()`, Huly QB-167).
+ */
+enum class drain_outcome : std::uint8_t {
+    drained,  ///< Every HTTP session closed before the deadline.
+    deadline, ///< The deadline came first: the sessions still open were aborted.
 };
 } // namespace qb::http
 

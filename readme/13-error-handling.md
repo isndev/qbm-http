@@ -20,7 +20,7 @@ This page covers status codes, the four ways to produce an error response, the `
 `qb::http::status` is an alias for the `qb::http::Status` wrapper class (`types.h`), which carries a nested `enum class Value` backed by llhttp's `HTTP_STATUS_*` constants and re-exposes each code as a `static constexpr Value` member — so `qb::http::status::NOT_FOUND` names a value directly. The response status is plain mutable state: `ctx->response().status()` is an lvalue you assign.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/types.h:509-907 (class Status), :909 (using status = Status), src/qbm/http/routing/context.h:521-529 (response()), :1067-1071 (status()) -->
+// <!-- src: qbm/http/src/qbm/http/types.h:510-908 (class Status), :910 (using status = Status), src/qbm/http/routing/context.h:521-529 (response()), :1067-1071 (status()) -->
 ctx->response().status() = qb::http::status::NOT_FOUND;    // 404
 ctx->status(qb::http::status::FORBIDDEN);                  // 403, chainable, non-terminal
 ```

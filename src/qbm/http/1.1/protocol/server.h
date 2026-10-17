@@ -74,7 +74,7 @@ public:
      * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
      */
     void
-    onMessage(std::size_t) noexcept final {
+    onMessage(std::size_t size) noexcept final {
         auto &request_obj = this->_http_obj.get_parsed_message();
         // Parse cookies from the Cookie header
         // SECURITY: Wrap in try/catch - parse_cookie_header() can throw std::runtime_error
@@ -87,9 +87,24 @@ public:
         } catch (...) {
             LOG_HTTP_WARN("Failed to parse Cookie header: unknown exception");
         }
+        _dispatching = size;
         this->_io.on(std::move(request_obj));
+        _dispatching = 0;
         // Reset the parser without consuming (pipe API might have changed)
         this->_http_obj.reset();
     }
+
+    /**
+     * @brief The input bytes of the request being handed to the io, 0 outside that call: what of the io's input
+     *        buffer is that request's own. A session answering it there knows from it whether another request
+     *        follows in the buffer (a drain's last answer, Huly QB-167).
+     */
+    [[nodiscard]] std::size_t
+    dispatching_size() const noexcept {
+        return _dispatching;
+    }
+
+private:
+    std::size_t _dispatching = 0;
 };
 } // namespace qb::protocol::http

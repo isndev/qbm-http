@@ -75,7 +75,7 @@ Three lines carry more than they look like they do:
   method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
   accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
   afterwards is still harmless if you have code that does.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:754-760 (bind then start), :771-789 (the bind-only opt-out) -->
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:976-982 (bind then start), :993-1011 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -115,7 +115,7 @@ Read off it the four facts that matter:
 1. **A request occupies the session until it completes.** A second request arriving on the same connection while one is
    in flight is queued, not routed — up to 128 of them, after which the session is dropped with
    `DisconnectedReason::ByProtocolError`. HTTP/1.1 pipelining is *serialised*, not parallel.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:305-315 (queue behind the active response), :138 (_max_pipelined_requests default 128) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:323-333 (queue behind the active response), :138 (_max_pipelined_requests default 128) -->
 2. **The `Context` is a `shared_ptr` and it is the handle you keep.** The router builds it and hands it to your
    handler; the session holds one reference, your handler holds another. It outlives any suspension you make inside a
    handler, which is why the coroutine form below does not need the copy-everything-out discipline that the other two
@@ -124,11 +124,11 @@ Read off it the four facts that matter:
    synchronously from the protocol's `noexcept onMessage`, so an exception escaping your handler chain would cross a
    `noexcept` boundary and call `std::terminate`. It is contained: the session disconnects and the server keeps
    serving.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:232-252 (start_request contains the throw and disconnects) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:250-270 (start_request contains the throw and disconnects) -->
 4. **The response is written when the loop says so.** `complete()` serialises into the session's output pipe; the write
    watcher drains it over one or more turns, and `event::eos` fires when the last byte is gone. Only then does the
    `POST_RESPONSE_SEND` hook run, the context reset, and the keep-alive decision get taken.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:373-401 (eos: hook, then keep-alive -- or, after the last response, the close that follows its delivery) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:391-419 (eos: hook, then keep-alive -- or, after the last response, the close that follows its delivery) -->
 
 Which is the whole reason the next section exists: **while your handler is on the stack, none of that happens.** No
 other request on this connection is routed, no other session on this core is read, and no other actor on this core is
@@ -258,7 +258,7 @@ It is set in exactly the places the session knows the response can no longer be 
 | The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)` calls `_context->cancel()` unless `suppress_response()` was called |
 | Your own code | `ctx->cancel()` |
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:453-456 (disconnected: cancel only when ByUser and incomplete), :412-415 (extracted: cancel then reset) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:471-474 (disconnected: cancel only when ByUser and incomplete), :430-433 (extracted: cancel then reset) -->
 
 Note what is **not** in that table: an explicit local `disconnect()` and a session inactivity timeout. qb-io's default
 local reason, `disconnect_reason::user_initiated`, has integer value `1`; an explicit `disconnect(0)` is remapped to
@@ -267,7 +267,7 @@ assigns value `1` to `DisconnectedReason::ByTimeout`, so both a local default/ze
 miss the HTTP/1.1 session's reason-`0` cancellation branch. A long-running handler therefore cannot treat
 `is_cancelled()` as a general liveness signal: it is set for peer EOF and extraction, but not for either local teardown
 path.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:330-350 (timeout disconnects with ByTimeout) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:348-368 (timeout disconnects with ByTimeout) -->
 
 ### `http_awaiter` — the client's awaiter is not cancellation-aware
 
@@ -292,7 +292,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1240-1244 (REQUEST: qb::duration timeout = zero), :1247-1250 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1462-1466 (REQUEST: qb::duration timeout = zero), :1469-1472 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.
@@ -369,6 +369,11 @@ wait for anything:
   watcher.
 - **An in-flight upstream request is not cancelled.** The `http_awaiter` is not cancellation-aware; give it a timeout
   so it cannot outlive your shutdown by much.
+
+To let the requests already received finish first, `drain()` the HTTP/1.1 server before `kill()`: it closes the
+listener, closes idle connections, answers what busy ones received -- the last answer `Connection: close` -- and
+reports once, `drained` or `deadline`, on the server's loop (Huly QB-167; see the advanced topics). Kill in that
+report.
 
 If your actor owns other resources — a database connection, a Redis client, a subscription — disconnect them in the
 `KillEvent` handler *before* `kill()`, so anything parked on them resumes rather than waiting for its own operation to

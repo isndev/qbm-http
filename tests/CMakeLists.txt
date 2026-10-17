@@ -195,6 +195,7 @@ qhttp_test(system make-server-factory-huge-body system/server/make-server-factor
            EXTRA_LABELS http1 huge-body)
 qhttp_test(system listen-start-parity system/server/listen-start-parity.cpp REQUIRES live EXTRA_LABELS http1 http2)
 qhttp_test(system acceptor-disconnect system/server/acceptor-disconnect.cpp REQUIRES live EXTRA_LABELS http1 http2)
+qhttp_test(system server-drain system/server/server-drain.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system middleware-pipeline-system system/middleware/middleware-pipeline-system.cpp REQUIRES live EXTRA_LABELS middleware)
 qhttp_test(system middleware-auth-jwt-system system/middleware/middleware-auth-jwt-system.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 qhttp_test(system coro-client-http1    system/coro/coro-client-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)

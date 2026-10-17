@@ -13,7 +13,7 @@
 - **Append** through a compile-time-constrained `operator<<` (and the variadic constructor), accepting only byte-like ranges, `Chunk`, `Multipart`, `qb::json`, or arithmetic types. **Assign** through `operator=`, which additionally accepts `Form` (assignment-only — `Form` has no `pipe<char>::put<Form>` serializer, so it cannot be `<<`-appended). Anything else (a raw `nullptr`, a `std::map`) is rejected by the compiler rather than silently stringified.
 - **Typed reads** through `as<T>()` (throwing) and `try_as<T>()` (non-throwing, returns `std::optional<T>`), defined only for `std::string_view`, `std::string`, `qb::json`, `Multipart`, and `Form`. Any other `T` is a hard compile error.
 - **Optional compression** (`compress` / `uncompress`), gated on `QB_HAS_COMPRESSION`. Call these methods explicitly when you own encoding; HTTP/1.1 clients and the optional compression middleware invoke them in their own paths, not every protocol layer.
-<!-- src: qbm/http/src/qbm/http/body.h:240-312; qbm/http/src/qbm/http/1.1/http.h:939-979; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
+<!-- src: qbm/http/src/qbm/http/body.h:240-312; qbm/http/src/qbm/http/1.1/http.h:1161-1201; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
 
 The buffer is owning. The historical zero-copy `string_view` body mode was retired because the input pipe relocates bytes between socket reads and an async handler cannot guarantee a captured view outlives the read — so a `Body` always owns stable, movable bytes.
 
@@ -442,7 +442,7 @@ std::size_t back = body.uncompress("gzip");    // body holds the original bytes 
 ```
 
 The transformation belongs to the path you choose. With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an **uncompressed** request body when `Content-Encoding` is set and decompress an encoded response; do not precompress that request. Server response serialization writes existing body bytes unchanged, even if `Content-Encoding` is set: either call `body().compress(...)` yourself before setting the header, or attach compression middleware to negotiate, compress when worthwhile, and set the header. That middleware can also decompress encoded requests before the handler; it skips response compression when a `Content-Encoding` header already exists. HTTP/2 and HTTP/3 have no such HTTP/1.1 client compression step, so manage their encoding explicitly. Always guard direct `Body` codec calls with `#ifdef QB_HAS_COMPRESSION`, since the methods do not exist in a build without it.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:939-979; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1161-1201; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-163; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:288-303,318-348 -->
 
 ## Pitfalls
 

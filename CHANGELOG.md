@@ -9,6 +9,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **`drain(deadline, on_drained)` on the HTTP/1.1 server: stop it without dropping a request it has
+  received (Huly QB-167).** The listening socket closes, so a new connection is refused; an idle
+  session closes at once, gracefully (its sending side shut down, what its client still sends
+  dropped until the client closes); a busy session answers every request it has received, in order,
+  the last answer `Connection: close`, then closes. `on_drained` runs once, on the server's loop:
+  `qb::http::drain_outcome::drained` when the last HTTP session is gone, or `deadline` when the
+  deadline came first, after aborting what is still open. `draining()` tells a draining server.
+  WebSocket sessions are outside the drain -- one extracted for an upgrade is no longer the server's,
+  one switched in place is neither closed nor waited for -- so the report can come while they live
+  (closing them with `1001 Going Away` is Huly QB-1097). `qb::http::DisconnectedReason::ServerDraining`
+  is new, appended after `Undefined`: the existing values do not move; it reports a session the
+  drain closed while idle or aborted at the deadline. `drain_outcome` is meant for the HTTP/2 and
+  HTTP/3 servers' drains too. Witness: `qbm-http-test-system-server-drain`.
+
 - **`trailers()`: a message's trailer section, kept apart from its header fields, on HTTP/1.1,
   HTTP/2 and HTTP/3 (Huly QB-1073; RFC 9110 §6.5).** `Request` and `Response` gain
   `Headers &trailers()`, `const Headers &trailers() const noexcept` and `bool has_trailers() const
