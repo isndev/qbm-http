@@ -321,7 +321,7 @@ public:
                                                       return true;
                                                                   });
         if (thread->ready())
-            port = thread->server().transport().local_endpoint().port();
+            port = thread->port();
     }
 };
 

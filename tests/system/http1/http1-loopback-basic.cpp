@@ -209,7 +209,7 @@ protected:
             return true;
         });
         ASSERT_TRUE(server->ready());
-        port = server->server().transport().local_endpoint().port();
+        port = server->port();
         ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 

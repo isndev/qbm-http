@@ -206,7 +206,7 @@ protected:
         ASSERT_TRUE(_server->ready()) << "coro HTTP/1.1 server failed to start";
         // The ServerThread ctor already blocked on the readiness barrier, so the transport is
         // bound and its assigned port is visible to this thread.
-        _port = _server->server().transport().local_endpoint().port();
+        _port = _server->port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 

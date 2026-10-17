@@ -122,7 +122,7 @@ protected:
         ASSERT_TRUE(_server->ready()) << "plaintext HTTP/1.1 loopback server failed to start";
         // The ServerThread ctor already blocked on the readiness barrier, so the transport is
         // bound and its assigned port is visible to this thread.
-        _port = _server->server().transport().local_endpoint().port();
+        _port = _server->port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
@@ -280,7 +280,7 @@ TEST(HttpServerBodyCap, TheCapIsTheServersSetMaxBodySize) {
                                  return true;
                              });
     ASSERT_TRUE(server.ready());
-    const auto url = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port()) + "/echo";
+    const auto url = "http://localhost:" + std::to_string(server.port()) + "/echo";
 
     const auto at_cap = qb::http::run_sync(qb::http::POST(post_of(url, kBodyCap), 5s)).response;
     EXPECT_EQ(at_cap.status(), qb::http::status::OK);
@@ -317,7 +317,7 @@ TEST(HttpServerRequestLimits, TheLimitsAreTheServersAndEachBreachIsAnswered) {
                                  return true;
                              });
     ASSERT_TRUE(server.ready());
-    const auto origin = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port());
+    const auto origin = "http://localhost:" + std::to_string(server.port());
     const auto get    = [](qb::http::Request request) {
         return qb::http::run_sync(qb::http::GET(std::move(request), 5s)).response;
     };
@@ -348,7 +348,7 @@ TEST(HttpServerRequestLimits, TheDefaultLimitsAreAnswered) {
                                  return true;
                              });
     ASSERT_TRUE(server.ready());
-    const auto origin = "http://localhost:" + std::to_string(server.server().transport().local_endpoint().port());
+    const auto origin = "http://localhost:" + std::to_string(server.port());
     const auto get    = [](qb::http::Request request) {
         return qb::http::run_sync(qb::http::GET(std::move(request), 5s)).response;
     };
@@ -358,7 +358,7 @@ TEST(HttpServerRequestLimits, TheDefaultLimitsAreAnswered) {
               qb::http::status::URI_TOO_LONG);
     // qb's own client will not SEND a field value past the constant (its serializer holds it), so the over-long
     // one goes out raw.
-    const auto        port = server.server().transport().local_endpoint().port();
+    const auto        port = server.port();
     const std::string head =
         "GET /limits HTTP/1.1\r\nHost: h\r\nx-v: " + std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v') + "\r\n\r\n";
     const auto seen = raw_upload(port, head, 0, false);
@@ -473,7 +473,7 @@ protected:
                 return true;
             });
         ASSERT_TRUE(_server->ready()) << "HTTPS loopback server failed to start";
-        _port = _server->server().transport().local_endpoint().port();
+        _port = _server->port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
@@ -602,7 +602,7 @@ protected:
                 return true;
             });
         ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
-        _port = _server->server().transport().local_endpoint().port();
+        _port = _server->port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 

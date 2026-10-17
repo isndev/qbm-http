@@ -299,6 +299,19 @@ public:
         return true;
     }
 
+    /**
+     * @brief The port the server listens on, read on the server's own thread before it reported ready; 0 when
+     *        startup failed or the server has no TCP listener to ask.
+     *
+     * Use it rather than `server().transport().local_endpoint()`: the listening socket belongs to the server's
+     * thread, which may close it at any moment -- a drain does -- and a read from the test's thread would race
+     * with that close.
+     */
+    [[nodiscard]] std::uint16_t
+    port() const noexcept {
+        return _port;
+    }
+
 private:
     void
     worker_main() {
@@ -316,6 +329,9 @@ private:
             // Destruction belongs to the worker. Finish it before publishing
             // failure so the constructor cannot race a read of `_server`.
             _server.reset();
+        } else if constexpr (requires(ServerT &s) { s.transport().local_endpoint().port(); }) {
+            // Read here, published by `_ready` below: the test's thread never touches the listening socket.
+            _port = static_cast<std::uint16_t>(_server->transport().local_endpoint().port());
         }
 
         {
@@ -351,6 +367,7 @@ private:
     std::atomic<bool>        _running{true};
     std::atomic<bool>        _ready{false};
     std::atomic<bool>        _failed{false};
+    std::uint16_t            _port = 0; ///< Written before `_ready` is published, read after: see port()
     std::mutex               _mutex;
     std::condition_variable  _cv;
 };

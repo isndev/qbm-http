@@ -188,7 +188,7 @@ public:
                                                          return true;
                                                      });
         if (thread->ready())
-            port = thread->server().transport().local_endpoint().port();
+            port = thread->port();
     }
 };
 
@@ -340,7 +340,7 @@ TEST(HttpServerDrain, WithNoSessionTheDrainReportsAtOnce) {
                                  return true;
                              });
     ASSERT_TRUE(thread.ready());
-    const auto port = thread.server().transport().local_endpoint().port();
+    const auto port = thread.port();
 
     ASSERT_TRUE(wait_for_report());
     EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));

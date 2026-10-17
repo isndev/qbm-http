@@ -66,7 +66,7 @@ TEST(HttpServerHugeBody, ABodyAtTheDefaultCapIsServed) {
                                  return true;
                              });
     ASSERT_TRUE(server.ready()) << "plaintext HTTP/1.1 loopback server failed to start";
-    const auto port = server.server().transport().local_endpoint().port();
+    const auto port = server.port();
 
     qb::io::tcp::socket sock;
     ASSERT_EQ(sock.connect_v4("127.0.0.1", port), 0) << "the raw client could not connect";

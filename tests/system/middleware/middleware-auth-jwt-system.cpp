@@ -99,7 +99,7 @@ start_auth_server(std::uint16_t &port, BuildFn build_routes) {
     });
     // The ServerThread ctor already blocked on the readiness barrier, so on success the
     // transport is bound and its assigned port is visible to this thread.
-    port = server->ready() ? server->server().transport().local_endpoint().port() : 0;
+    port = server->ready() ? server->port() : 0;
     return server;
 }
 

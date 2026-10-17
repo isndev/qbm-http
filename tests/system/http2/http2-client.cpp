@@ -318,7 +318,7 @@ protected:
         });
         ASSERT_TRUE(_server->ready()) << "HTTP/2 loopback server failed to start";
         // The ServerThread ctor already blocked on the readiness barrier, so the transport is bound.
-        _port = _server->server().transport().local_endpoint().port();
+        _port = _server->port();
         ASSERT_NE(_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     }
 
@@ -767,7 +767,7 @@ TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
         return true;
     });
     ASSERT_TRUE(http1_only_server.ready());
-    const std::uint16_t port = http1_only_server.server().transport().local_endpoint().port();
+    const std::uint16_t port = http1_only_server.port();
     ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
@@ -1400,7 +1400,7 @@ make_h2_server_on(std::uint16_t port) {
 
 std::uint16_t
 port_of(ServerThread &srv) {
-    return srv.server().transport().local_endpoint().port();
+    return srv.port();
 }
 
 std::shared_ptr<qb::http2::Client>

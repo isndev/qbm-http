@@ -349,7 +349,7 @@ struct LoopbackHttp1Server {
         if (!thread.ready()) {
             throw std::runtime_error("HTTP/1.1 loopback server failed to start");
         }
-        port = thread.server().transport().local_endpoint().port();
+        port = thread.port();
     }
 
     [[nodiscard]] std::string

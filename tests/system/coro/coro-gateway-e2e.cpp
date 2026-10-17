@@ -247,7 +247,7 @@ protected:
         ASSERT_TRUE(_upstream->ready()) << "upstream loopback server failed to start";
         // The UpstreamThread ctor already blocked on the readiness barrier, so the transport is
         // bound and its assigned port is visible to this thread.
-        _upstream_port = _upstream->server().transport().local_endpoint().port();
+        _upstream_port = _upstream->port();
         ASSERT_NE(_upstream_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
         // _dead_port is the ONE port here that must never be bound — `UpstreamRefusedFallback`
