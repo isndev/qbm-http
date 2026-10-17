@@ -166,7 +166,6 @@ llm/qbm-http.llm.api.md	response.h:368-368	d4cfa8bc1ae1	pipe<char> &pipe<char>::
 llm/qbm-http.llm.api.md	response.h:56-58	e5d0228cfdc0	Response() noexcept
 llm/qbm-http.llm.api.md	response.h:76-76	2705db5fe133	status() const noexcept {
 llm/qbm-http.llm.api.md	response.h:80-80	82246683f1d1	status() noexcept {
-llm/qbm-http.llm.api.md	retry_policy.h:90-90	d7eb36cec31c	next_delay(int attempt, std::mt19937 *rng = nullptr) const {
 llm/qbm-http.llm.api.md	route.h:139-139	b610b99d7dbc	class CustomRouteAdapterTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route.h:51-51	ebbc59b09b09	class RouteLambdaTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route_group.h:148-148	6fc21ea46c61	use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
@@ -262,7 +261,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/middleware/jwt.h:345-351	bf3c28a6912a	/// C
 llm/qbm-http.llm.api.md	src/qbm/http/middleware/recaptcha.h:248-260	2df053804e74	struct RecaptchaResult {
 llm/qbm-http.llm.api.md	src/qbm/http/middleware/static_files.cpp:92-158	444043705aa3	sanitize_and_resolve_path(const std::filesystem::path &base_path, std...
 llm/qbm-http.llm.api.md	src/qbm/http/middleware/validation.h:141-141	df088fed4097	validation_middleware(std::shared_ptr<qb::http::validation::RequestVa...
-llm/qbm-http.llm.api.md	src/qbm/http/retry_policy.h:34-34	faac5b76e250	struct RetryPolicy {
+llm/qbm-http.llm.api.md	src/qbm/http/retry_policy.h:25-25	2a41a928458d	using RetryPolicy = qb::io::reconnect_policy;
 llm/qbm-http.llm.api.md	src/qbm/http/routing/async_task.h:47-47	dd58aabf8990	class IAsyncTask {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/async_task.h:92-115	4c8620673d9e	struct RouteNameArena {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/context.h:74-74	feae44a97d60	class Context : public std::enable_shared_from_this<Context<SessionTy...
