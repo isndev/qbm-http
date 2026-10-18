@@ -15,11 +15,14 @@
 #pragma once
 
 // Include all standard middleware components
+#include "./access_log.h"
 #include "./conditional.h"
 #include "./cors.h"
 #include "./error_handling.h"
 #include "./logging.h"
+#include "./metrics.h"
 #include "./rate_limit.h"
+#include "./request_id.h"
 #include "./timing.h"
 #include "./transform.h"
 #include "./validation.h"

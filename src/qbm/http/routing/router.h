@@ -282,6 +282,18 @@ public:
     Router<SessionType> &add_lifecycle_hook(typename Context<SessionType>::LifecycleHook hook_fn);
 
     /**
+     * @brief Registers an observer of every request this router routes (Huly QB-90): told when the request is
+     *        received and, exactly once, when its response is decided -- a 404, a 405, an error chain and a request
+     *        whose client left included. `RequestMetrics` and `AccessLog` are observers.
+     * @details Allocation-free per request: a context keeps the router's observer list by one reference count, and
+     *          a router with none pays one test of a null pointer at each end of a request. A context keeps the
+     *          list registered when it was created; `clear()` removes every observer. A null observer is ignored.
+     * @param observer The observer, shared by every request of this router.
+     * @return Reference to this `Router` for chaining.
+     */
+    Router<SessionType> &add_observer(std::shared_ptr<IRequestObserver<SessionType>> observer);
+
+    /**
      * @brief Finalizes all route definitions and compiles them into an efficient structure for matching.
      * This method **must** be called after all routes, groups, controllers, and middleware
      * have been defined and before the router is used to process any requests.
@@ -593,6 +605,15 @@ Router<SessionType> &
 Router<SessionType>::add_lifecycle_hook(typename Context<SessionType>::LifecycleHook hook_fn) {
     if (_router_core) {
         _router_core->add_lifecycle_hook(std::move(hook_fn));
+    }
+    return *this;
+}
+
+template <typename SessionType>
+Router<SessionType> &
+Router<SessionType>::add_observer(std::shared_ptr<IRequestObserver<SessionType>> observer) {
+    if (_router_core) {
+        _router_core->add_observer(std::move(observer));
     }
     return *this;
 }

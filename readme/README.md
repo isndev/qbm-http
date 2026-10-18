@@ -74,6 +74,7 @@ Read top to bottom for a first pass. Each row links the page and gives its one-l
 | 19 | [HTTP/3 protocol](./19-http3-protocol.md) | QUIC transport, the nghttp3 adapter, `http3::Client`/`Server`, and the dual-stack server. | HTTP/3 |
 | 20 | [WebSocket](./20-websocket.md) | HTTP/1.1 upgrade, RFC 6455 framing, the CRTP/callback `WebSocket` client, and WSS. | SSL |
 | 21 | [WebSocket coroutines](./21-websocket-coroutines.md) | `coro_client`, `coro_session`, the awaiters, and connection lifecycle. | SSL |
+| 22 | [Observability](./22-observability.md) | Request ids, the route pattern, router observers, the access log, request metrics and the Prometheus `/metrics` endpoint. | — |
 
 ## Suggested learning order
 

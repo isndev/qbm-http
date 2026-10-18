@@ -32,6 +32,7 @@
 #include "./context.h"      // For Context
 #include "./handler_node.h" // For IHandlerNode
 #include "./middleware.h"   // For MiddlewareTask (potentially if global middleware were adapted differently)
+#include "./observer.h"     // For IRequestObserver (Router::add_observer)
 #include "./radix_tree.h"   // For RadixTree
 #include "./route.h"        // For RouteLambdaTask (used in default 404 handler)
 #include "./route_group.h"  // For dynamic_pointer_cast to RouteGroup
@@ -79,6 +80,9 @@ private:
     /** @brief Callback invoked by the `Context` when request processing is fully finalized (after response is sent or context cancelled). */
     std::function<void(Context<SessionType> &)>               _on_request_finalized_callback;
     std::vector<typename Context<SessionType>::LifecycleHook> _router_lifecycle_hooks;
+    /// The router's observers, replaced whole (copy on write) by `add_observer`: every context keeps the list it
+    /// was created with. Null while none is registered.
+    std::shared_ptr<const detail::observer_list<SessionType>> _observers;
 
     [[nodiscard]] std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>>
     get_retained_error_tasks(std::shared_ptr<const std::vector<std::shared_ptr<IAsyncTask<SessionType>>>> previous_chain) const {
@@ -292,6 +296,22 @@ public:
     }
 
     /**
+     * @brief Registers an observer of every request this router creates a context for (Huly QB-90).
+     * @details The list is replaced, not changed in place: a context keeps the observers registered when it was
+     *          created. A null observer is ignored.
+     * @param observer The observer.
+     */
+    void
+    add_observer(std::shared_ptr<IRequestObserver<SessionType>> observer) {
+        if (!observer)
+            return;
+        auto next = _observers ? std::make_shared<detail::observer_list<SessionType>>(*_observers)
+                               : std::make_shared<detail::observer_list<SessionType>>();
+        next->push_back(std::move(observer));
+        _observers = std::move(next);
+    }
+
+    /**
      * @brief Retrieves the compiled, user-defined error handling task chain.
      * @return A `std::shared_ptr` to the immutable (const) user-defined error chain vector,
      *         or `nullptr` if no error chain was explicitly set (see `is_error_chain_set()`).
@@ -359,6 +379,9 @@ public:
         for (const auto &hook : _router_lifecycle_hooks) {
             ctx->add_lifecycle_hook(hook);
         }
+        if (_observers) [[unlikely]] {
+            ctx->observe_internal(_observers);
+        }
 
         ctx->execute_hook(qb::http::HookPoint::PRE_ROUTING);
 
@@ -405,6 +428,7 @@ public:
                 decode_path_parameters(decoded_params);
             }
             ctx->set_path_parameters(std::move(decoded_params));
+            ctx->set_route_pattern(matched_info_opt->route_pattern);
 
             tasks_to_execute = matched_info_opt->route_tasks; // share the compiled list (zero-copy)
 
@@ -418,6 +442,7 @@ public:
                 decode_path_parameters(decoded_params);
             }
             ctx->set_path_parameters(std::move(decoded_params));
+            ctx->set_route_pattern(allowed_info->route_pattern);
 
             const auto allow         = allowed_header_value(allowed_info->methods);
             ctx->response().status() = qb::http::status::METHOD_NOT_ALLOWED;
@@ -482,6 +507,7 @@ public:
         _user_defined_error_chain.clear();
         _user_error_chain_explicitly_set = false;
         _router_lifecycle_hooks.clear();
+        _observers.reset();
         compile_default_not_found_handler({}); // Re-compile 404 with no global tasks for now.
         compile_default_method_not_allowed_handler({});
     }

@@ -30,6 +30,8 @@
 #include <vector>      // For std::vector (task_chain, lifecycle_hooks)
 
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
+#include <qb/system/time.h>                    // For qb::mono_time, qb::mono_now (observed contexts)
+#include <qb/utility/branch_hints.h>           // For QB_NOINLINE
 #include "../request.h"                        // For qb::http::Request
 #include "../response.h"                       // For qb::http::Response
 #include "./async_task.h"                      // For IAsyncTask
@@ -37,6 +39,7 @@
 #include "./slot.h"                            // For qb::http::Slot<T> &mdash; typed compile-time keys
 #include "./types.h"                           // For HookPoint, AsyncTaskResult, http_method_to_string, HTTP_STATUS_*
 #include "./middleware.h"                      // For the selected child's cancellation interface
+#include "./observer.h"                        // For IRequestObserver, RequestEnd, RequestOutcome
 
 // Forward declaration for RouterCore to break circular dependency if Context needs methods from it.
 namespace qb::http {
@@ -140,6 +143,13 @@ private:
     std::function<void(Context<SessionType> &)> _on_finalized_callback;
     /** @brief Weak pointer to the `RouterCore` that created this context. Used to access global error handlers. */
     std::weak_ptr<RouterCore<SessionType>> _router_core_wptr;
+    /// The canonical pattern of the route that matched (`/users/:id`), viewing the compiled route names the task
+    /// chain retains; empty for a 404 and for a request answered before matching (Huly QB-90).
+    std::string_view _route_pattern;
+    /// The observers of the router that created this context (`Router::add_observer`); null when it had none.
+    std::shared_ptr<const detail::observer_list<SessionType>> _observers;
+    /// When the router received the request; read only for an observed context.
+    qb::mono_time _observed_since{};
 
     /**
      * @brief Consolidated lifecycle state (F24).
@@ -177,6 +187,7 @@ private:
         std::uint64_t   completion_count    = 0;
         bool            is_cancelled        = false;
         InFlightTask    task_in_flight      = InFlightTask::None;
+        bool            observers_told_end  = false; ///< `IRequestObserver::on_response` ran (exactly once)
         std::uint32_t   hook_dispatch_depth = 0;
     };
     Lifecycle _lc;
@@ -247,6 +258,48 @@ private:
     }
 
     /**
+     * @brief (Private) Attaches the router's observers to this context and tells them it started (Huly QB-90).
+     *        Called by `RouterCore` only when its router has observers: out of line, off the unobserved path.
+     */
+    QB_NOINLINE void
+    observe_internal(std::shared_ptr<const detail::observer_list<SessionType>> observers) noexcept {
+        _observers      = std::move(observers);
+        _observed_since = qb::mono_now();
+        for (const auto &observer : *_observers)
+            observer->on_request(*this);
+    }
+
+    /**
+     * @brief (Private) Tells the observers the request ended. Called once: by the finalization (which runs once)
+     *        or, for a context finalized without its callback, by the destructor, which checks the flag set here.
+     * @param outcome How it ended.
+     */
+    void
+    tell_observers_end_internal(RequestOutcome outcome) noexcept {
+        _lc.observers_told_end = true;
+        const RequestEnd end{outcome, qb::mono_now() - _observed_since};
+        for (const auto &observer : *_observers)
+            observer->on_response(*this, end);
+    }
+
+    /**
+     * @brief (Private) The finalization callback of an observed context, then its observers: the response they see
+     *        is the one the callback handed to the session, `PRE_RESPONSE_SEND` hooks applied.
+     */
+    QB_NOINLINE void
+    finalize_observed_internal() {
+        const RequestOutcome outcome = _session.expired() ? RequestOutcome::SESSION_GONE : RequestOutcome::RESPONDED;
+        if (_on_finalized_callback) {
+            try {
+                _on_finalized_callback(*this);
+            } catch (...) {
+                // Log: Context::finalize_processing_internal: Exception in _on_finalized_callback.
+            }
+        }
+        tell_observers_end_internal(outcome);
+    }
+
+    /**
      * @brief (Private) Finalizes the processing of the request context.
      * Ensures `POST_HANDLER_EXECUTION` hooks run and calls `_on_finalized_callback`.
      * Guards against multiple invocations.
@@ -266,6 +319,10 @@ private:
 
         execute_hook_internal(HookPoint::POST_HANDLER_EXECUTION);
 
+        if (_observers) [[unlikely]] {
+            finalize_observed_internal();
+            return;
+        }
         if (_on_finalized_callback) {
             try {
                 _on_finalized_callback(*this);
@@ -389,6 +446,15 @@ private:
         _path_parameters = std::move(params);
     }
 
+    /**
+     * @brief Sets the pattern of the route that matched; called by the `RouterCore` that matched it.
+     * @param pattern A view of the compiled route names this context's task chain retains.
+     */
+    void
+    set_route_pattern(std::string_view pattern) noexcept {
+        _route_pattern = pattern;
+    }
+
 public:
     /**
      * @brief Internal RAII guard used by functional middleware that supports
@@ -489,6 +555,9 @@ public:
             if (!is_finalised_internal()) {
                 finalize_processing_internal();
             }
+            if (_observers && !_lc.observers_told_end) [[unlikely]] {
+                tell_observers_end_internal(RequestOutcome::SUPPRESSED); // suppress_response(): no callback ran
+            }
             execute_hook_internal(qb::http::HookPoint::REQUEST_COMPLETE);
         } catch (...) {
             // Intentionally swallow: a failing hook must never take down the process
@@ -574,6 +643,18 @@ public:
     path_param(std::string_view name) const {
         const auto it = _path_parameters.find(name);
         return it != _path_parameters.end() ? it->second : detail::empty_string_value;
+    }
+
+    /**
+     * @brief The canonical pattern of the route that matched this request -- `/users/:id`, `/files/ *path` (no space), `/`:
+     *        its segments joined by `/`, captures with their `:` or `*`, whatever slashes the registration used.
+     * @return A view valid for the context's lifetime (the compiled route names its task chain retains); empty
+     *         when no route matched (a 404) or the router answered before matching (a path over its length limit).
+     *         A 405 names the route whose path matched.
+     */
+    [[nodiscard]] std::string_view
+    route_pattern() const noexcept {
+        return _route_pattern;
     }
 
     // --- Typed accessors (C++20) ----------------------------------------------

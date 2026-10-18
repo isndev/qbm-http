@@ -37,6 +37,7 @@
 #include "./error_handling.h"
 #include "./logging.h"
 #include "./rate_limit.h"
+#include "./request_id.h"
 #include "./security_headers.h"
 #include "./static_files.h"
 #include "./timing.h"
@@ -79,8 +80,9 @@ struct compression_fast {}; ///< Compression preset favouring throughput.
 struct compression_max {};  ///< Compression preset favouring size.
 
 // --- Observability ----------------------------------------------------
-struct logging {}; ///< Request/response logging.
-struct timing {};  ///< Request duration timing headers.
+struct logging {};    ///< Request/response logging.
+struct timing {};     ///< Request duration timing headers.
+struct request_id {}; ///< X-Request-ID generation or propagation (`RequestIdMiddleware`).
 
 // --- Rate limiting ----------------------------------------------------
 struct rate_limit {};        ///< Configurable rate limiter.
@@ -188,6 +190,12 @@ template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::timing, Args &&...args) {
     return qb::http::timing_middleware<SessionType>(std::forward<Args>(args)...);
+}
+
+template <typename SessionType, typename... Args>
+[[nodiscard]] auto
+make_dispatch(tags::request_id, Args &&...args) {
+    return qb::http::request_id_middleware<SessionType>(std::forward<Args>(args)...);
 }
 
 // --- Rate limit -------------------------------------------------------

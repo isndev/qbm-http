@@ -18,7 +18,7 @@ Everything here is in the `qb::http` namespace and reachable through the umbrell
 
 `Session` is your server's per-connection session type (for the bundled servers, `qb::http::DefaultSession` or `qb::http::ssl::DefaultSecureSession`). You almost never spell `Context<Session>` out in full; handlers and middleware receive a `std::shared_ptr<Context<Session>>` and you write the session type once at the server declaration.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:74-115, src/qbm/http/routing/types.h:38-59, src/qbm/http/routing/slot.h:78-98 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:77-118, src/qbm/http/routing/types.h:38-59, src/qbm/http/routing/slot.h:78-98 -->
 
 ## Concepts
 
@@ -33,7 +33,7 @@ router.get("/users/:id", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:74, 574 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:77, 643 -->
 
 ### The session is held weakly
 
@@ -47,7 +47,7 @@ if (auto s = ctx->session()) {
 
 In normal request handling you rarely call `session()` directly — completing the context sends the response for you. You reach for it only in advanced flows (streaming, server-sent events, protocol upgrades) where you drive the transport by hand.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:120-121, 538-550 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:123-124, 607-619 -->
 
 ### Tasks are shared; per-request state lives on the context
 
@@ -74,7 +74,7 @@ After `router.compile()`, the task objects in a chain (`IAsyncTask`, middleware,
 | `query_param_or<T>(name, fallback)` | `T` | typed query-string value, or `fallback` on absent/empty/parse-fail |
 | `bind<T>()` | `std::optional<T>` | no-throw body deserializer; `nullopt` on failure (see below) |
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:538-683 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:607-764 -->
 
 ### Path parameters
 
@@ -93,7 +93,7 @@ router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
 
 A standalone `PathParameters` copy still borrows its key names. Keep the original context alive, or copy the names into owned strings before retaining them beyond that context. Retaining a context does not retain the router's global error handlers or keep a destroyed session available for sending.
 
-<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:123-134,538-547,554-576; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:84-90,419-428 -->
+<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:126-137,607-616,623-645; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,443-453 -->
 
 ### Query parameters and body binding
 
@@ -118,7 +118,7 @@ if (!dto) { ctx->bad_request("invalid body"); return; }
 use(*dto);
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:637-683 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:718-764 -->
 
 ### Per-request custom data
 
@@ -167,9 +167,11 @@ bool present = ctx->has("request.id");                             // contains()
 ctx->remove("request.id");
 ```
 
+The shipped `RequestIdMiddleware` does exactly this for every request, under the same key through the typed slot `qb::http::request_id_slot` (`Slot<std::string>{"request.id"}`): see [request id](./08-standard-middleware.md#request-id).
+
 Why prefer slots: `ctx->set<int>("k", 1)` written one place and `ctx->get<std::size_t>("k")` read another **compiles and silently returns `std::nullopt`** at runtime. A slot makes that a compile error, documents at the declaration what gets stored under the key and by whom, and keeps the same `any_cast` read cost. Both APIs swallow `std::bad_any_cast` and return `nullopt` / `nullptr` on a type mismatch — a wrong-type read fails silently rather than throwing, which is exactly the footgun slots remove.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:733-974; qbm/http/src/qbm/http/routing/slot.h:56-104 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:814-1055; qbm/http/src/qbm/http/routing/slot.h:56-104 -->
 
 ## Completing a response
 
@@ -191,7 +193,7 @@ void complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE);
 
 `complete()` is **idempotent after finalization**: once the context is `Finalised` (or cancelled), further `complete()` calls are ignored — except `CANCELLED`, which is always honored. State only moves forward: `Ready → Running → Finalised`. This is what makes the late-arriving callback of an already-cancelled request harmless.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1184-1260 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1265-1341 -->
 
 ### Response helpers are terminal
 
@@ -226,13 +228,13 @@ router.post("/items", [](auto ctx) {
 
 Statuses are `qb::http::status` and JSON bodies are `qb::json` — see [Core HTTP concepts](./01-core-concepts.md).
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:978-1124 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1059-1205 -->
 
 ### Suppressing the response on ownership transfer
 
 If you hand the request or response off to another subsystem — most commonly a **WebSocket upgrade**, where the connection stops being an HTTP request/response exchange — call `ctx->suppress_response()`. It marks the context finalized *without* invoking the send callback, so the destructor won't push a stale or moved-from HTTP response back over a transport you no longer own. After this, `is_completed()` is `true` and neither the finalization callback nor `POST_HANDLER_EXECUTION` hooks run.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1339-1343 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1420-1424 -->
 
 ## Cancellation
 
@@ -248,7 +250,7 @@ It sets the sticky cancellation flag, records the reason, calls `cancel()` on th
 - `cancellation_reason()` — `std::optional<std::string>` with the reason, if one was given.
 
 For conditional middleware, the context notifies the child selected for this request, including a pending leaf inside nested conditionals. Selection belongs to the context, so two requests may select different children on the same conditional instance. The `IMiddleware::cancel()` interface has no context argument: it is a notification to that instance, not a guarantee that a shared user middleware can identify or preempt one particular native operation. Async callbacks still check `is_cancelled()` before proceeding.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1268-1300; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1349-1381; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
 
 The asymmetry to remember: a **handler or middleware** signals failure with `complete(AsyncTaskResult::ERROR)`; a task's own **`cancel()` override must not call `complete()`** — the context owns the cancellation-and-finalization sequence, and a second completion would double-finalize. For async work, check `is_cancelled()` in your completion callback before doing anything further; if it's set, clean up and return — the context is already finalizing.
 
@@ -262,7 +264,7 @@ qb::io::async::defer([ctx]() {
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1268-1321; qbm/http/src/qbm/http/routing/async_task.h:67-79 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1349-1402; qbm/http/src/qbm/http/routing/async_task.h:67-79 -->
 
 ## Lifecycle hooks
 
@@ -304,7 +306,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:219-245,267,492,694-718; qbm/http/src/qbm/http/routing/router_core.h:359-363,460; qbm/http/src/qbm/http/routing/router.h:352; src/qbm/http/2/http2.h:125-180,501-532 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:230-256,320,561,775-799; qbm/http/src/qbm/http/routing/router_core.h:379-386,485; qbm/http/src/qbm/http/routing/router.h:364; src/qbm/http/2/http2.h:125-180,501-532 -->
 
 ## Lifecycle in order
 
@@ -325,13 +327,13 @@ When a route is not matched, or a task returns `ERROR`, the same machinery runs 
 
 A `PRE_HANDLER_EXECUTION` hook that completes or cancels the context owns that outcome; the router does not restart the normal chain afterward. An asynchronous error chain selected by the hook remains in flight. Calling `complete(CONTINUE)` at this hook point is terminal for the normal route, as before; use the hook as an observer when you intend the route chain to run normally.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:83-102, 219-267, 472-492; qbm/http/src/qbm/http/routing/router_core.h:303-340, 460; qbm/http/src/qbm/http/routing/router.h:349-364 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:86-105, 230-320, 538-561; qbm/http/src/qbm/http/routing/router_core.h:323-360, 485; qbm/http/src/qbm/http/routing/router.h:361-376 -->
 
 ### Introspection (advanced)
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (the number of accepted `complete()` calls processed, including `CONTINUE`; ignored calls after finalization do not count). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1184-1197,1312-1385, 451 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1265-1278,1393-1466, 517 -->
 
 ## Pitfalls
 

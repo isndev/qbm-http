@@ -31,6 +31,7 @@
 #include "./routing/async_task.h"      // IAsyncTask interface for tasks in the processing chain.
 #include "./routing/context.h"         // Context object for request/response lifecycle management.
 #include "./routing/middleware.h"      // IMiddleware interface and MiddlewareTask adapter.
+#include "./routing/observer.h"        // IRequestObserver: router-level request observers (metrics, access log).
 #include "./routing/path_parameters.h" // PathParameters class for extracted route parameters.
 
 // Building blocks for route definitions

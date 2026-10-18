@@ -126,6 +126,62 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `tests/system/coro/coro-client-http1.cpp`; qb's `scripts/check-awaiter-tracking.py`, run over this module from the
   superproject, refuses an awaiter without it.
 
+- **`RequestIdMiddleware`: one id per request, generated or propagated, in the context and the
+  response (Huly QB-166).** `<qbm/http/middleware/request_id.h>`: `request_id_middleware<S>(options)`
+  (tag `middleware::tags::request_id`, listed in `all.h`) gives each request a random UUID version 4,
+  stores it under `qb::http::request_id_slot` (`Slot<std::string>`, the key `"request.id"`) and sets it
+  in the response header (`X-Request-ID`, `RequestIdOptions::header()` names another) before the
+  handler runs. The client's id is not trusted by default; with `trust_incoming_id()` it is adopted
+  only when it is 1 to 128 characters of `[A-Za-z0-9._-]` (`is_valid_request_id`), and replaced
+  otherwise -- never echoed, since the id goes into logs unchanged.
+
+- **`Context::route_pattern()` and router observers: `Router::add_observer(std::shared_ptr<IRequestObserver<S>>)`
+  (Huly QB-90).** `route_pattern()` names the route that matched in its canonical form (`/users/:id`,
+  `/files/*path`, `/`, whatever slashes the registration used; a 405 names the route whose path matched; empty
+  for a 404), a view of the compiled route names the context's chain retains -- what a metric or a log names a
+  request by, since the raw path's cardinality is the client's to choose. `<qbm/http/routing/observer.h>`: an
+  `IRequestObserver<S>` is told `on_request(ctx)` when the router creates the request's context and, exactly once,
+  `on_response(ctx, RequestEnd{outcome, duration})` when its response is decided -- after the `PRE_RESPONSE_SEND`
+  hooks and the hand-over to the session, before `REQUEST_COMPLETE`: every routed request, a 404, a 405, an error
+  chain, the early path-length 400, a client that left (`SESSION_GONE`) and a suppressed response (`SUPPRESSED`,
+  at the context's destruction). `duration` runs from the router receiving the request to the response handed to
+  the session (the protocol's serialization included, the transmission not). Unlike router lifecycle hooks, which
+  are copied into every context, an observer costs no allocation per request. A router with none pays a null-pointer
+  test when it creates a context and one when it finalizes it (two instructions in
+  `Context::finalize_processing_internal`, g++-14 -O3), the route pattern carried from the matched node, and the new
+  context members (40 bytes inside its existing allocation) initialised and destroyed: measured with callgrind on
+  g++-14 release against develop `d5f2d32`, a routed request costs 22 to 25 more instructions for a match (of 5 500
+  to 8 000, +0.3 to +0.4 %) and 6 more for a 404. A request a session refuses before routing (414, 431, 413)
+  reaches no observer.
+
+- **`AccessLog` and `RequestMetrics`: an access log and request metrics, as router observers (Huly QB-90).** The
+  ticket named them `AccessLogMiddleware` and `MetricsMiddleware`; they are observers (`Router::add_observer`), not
+  chain tasks, and are named for what they are: they see every request the router routes -- a 404, a 405, an error
+  chain, the early 400, a client that left -- once its response is decided, with no allocation per request.
+  `<qbm/http/middleware/access_log.h>`: `access_log<S>(sink, formatter)` writes one line per request to a sink, in
+  `access_log_format::common` or `combined` (Apache's lines, byte for byte, UTC, Apache's escaping) or `json` (one
+  object per line, with the request id `RequestIdMiddleware` gave the request, the route pattern, the duration and
+  the outcome); a formatter of your own receives an `AccessLogRecord`; the line buffer is reused; a throwing sink is
+  contained. `<qbm/http/middleware/metrics.h>`: `request_metrics<S>(options)` counts
+  `qb_http_requests_total{method,route,status}`, `qb_http_request_duration_seconds{method,route}` (a histogram,
+  `qb::metrics::default_duration_buckets` unless `with_buckets`) and `qb_http_requests_in_flight`, labelled by route
+  PATTERN (`unmatched` for none), never by raw path; plain integers of the router's thread, a series allocated on its
+  first sighting; `collect(snapshot&)` describes them for a `qb::metrics::Registry` source. `add_connections(snapshot,
+  protocol, open)` describes `qb_http_connections{protocol}`. Both listed in `middleware/all.h`. Measured with
+  callgrind (g++-14 release, a router of 19 routes, a request with a query, a 101-byte `User-Agent`, a `Referer` and a
+  request id: 16 150 instructions with no observer): `common` about +1 520 instructions a request, `combined` +2 040,
+  `json` +2 440, `RequestMetrics` +530. The line is built in a stack buffer, its quoted fields are scanned sixteen
+  bytes at a time and copied whole between escapes, and its time is formatted once a second per thread; the JSON
+  `duration_seconds` is rounded to the microsecond.
+
+- **The `/metrics` endpoint: `metrics_handler<S>(actor, options)` and `metrics_response<S>(ctx, snapshot)` (Huly
+  QB-154).** `<qbm/http/middleware/metrics.h>`: a coroutine route handler that scrapes every core's
+  `qb::metrics::Registry` (`qb::metrics::scrape`, through the registry of the actor's own core) and answers the
+  Prometheus text format 0.0.4 (`Content-Type: text/plain; version=0.0.4; charset=utf-8`): the core counters of each
+  core, `RequestMetrics`, the sources of the other modules. A core that does not answer within
+  `MetricsEndpointOptions::timeout` is `qb_scrape_core_up{core} 0`, never an error. Opt-in and mounted explicitly:
+  the endpoint exposes the process's internals.
+
 ### Changed
 
 - **The HTTP/3 server's `graceful_shutdown()` sends its two GOAWAYs a round trip apart (Huly QB-91;
@@ -352,6 +408,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `tests/unit/middleware/middleware-compression.cpp` -- the three lists in every build (both codecs, neither, no
   compression), a browser's `Accept-Encoding` answered with the first codec of the default order and decoded, an
   unregistered name passed over -- which catches five defects planted one at a time.
+
+- **`LoggingMiddleware` prefixes its two lines with `[<id>] ` when the request has an id (Huly
+  QB-166).** When `request_id_slot` is set -- a `RequestIdMiddleware` ran before it -- the request and
+  response messages read `[<id>] Request: GET /path` and `[<id>] Response: 200 OK`; without an id they
+  are unchanged.
 
 ### Fixed
 
