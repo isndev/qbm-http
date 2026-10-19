@@ -251,6 +251,7 @@ qhttp_bench(route-match      benchmark/routing/route-match.bench.cpp     EXTRA_L
 qhttp_bench(validation-rules benchmark/validation/validation-rules.bench.cpp EXTRA_LABELS validation)
 qhttp_bench(http1-parser     benchmark/http1/http1-parser.bench.cpp      EXTRA_LABELS http1)
 qhttp_bench(http1-serialize  benchmark/http1/http1-serialize.bench.cpp   EXTRA_LABELS http1)
+qhttp_bench(http1-access-log-loopback benchmark/http1/access-log-loopback.bench.cpp EXTRA_LABELS http1 middleware)
 qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_LABELS http2)
 qhttp_bench(frame-codec      benchmark/http2/frame-codec.bench.cpp       EXTRA_LABELS http2)
 qhttp_bench(http2-client-loopback benchmark/http2/client-loopback.bench.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)

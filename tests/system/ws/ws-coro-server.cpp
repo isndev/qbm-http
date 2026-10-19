@@ -679,4 +679,118 @@ TEST_F(WsCoroServer, AbandonedCloseAllowsAReplacementButRejectsAConcurrentClose)
     EXPECT_EQ(session.out().size(), queued_bytes);
 }
 
+// Install the real protocol without accept_upgrade() spawning EchoCoroSession::run():
+// these owner tests drive their own next_frame/close_async task on the same loop.
+EchoCoroSession::WS_Protocol *
+install_close_probe_protocol(EchoCoroSession &session) {
+    qb::http::WebSocketRequest request("dGhlIHNhbXBsZSBub25jZQ==");
+    request.upgrade = true;
+    request.uri()   = qb::io::uri("/ws");
+    qb::http::Response response;
+    return session.switch_protocol<EchoCoroSession::WS_Protocol>(session, request, response);
+}
+
+// The Close completion is queued by http_completion, not resumed inline. Its
+// actual scheduler continuation may request close_async() again to await teardown.
+TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
+    for (const bool server_drains : {false, true}) {
+        SCOPED_TRACE(server_drains);
+        EchoCoroServer  server;
+        EchoCoroSession session(server);
+        auto           *protocol = install_close_probe_protocol(session);
+        ASSERT_NE(protocol, nullptr);
+        ASSERT_EQ(session.out().size(), 0u);
+
+        qb::http::ws::IncomingFrame received;
+        qb::http::ws::IncomingFrame after_close;
+        int                         close_frames = 0;
+        int                         completions  = 0;
+        bool                        close_ok     = false;
+        auto                        consume      = [&]() -> qb::io::async::task<void> {
+            received = co_await session.next_frame();
+            ++close_frames;
+            close_ok = (co_await session.close_async(qb::http::ws::CloseStatus::Normal, "wait for teardown")).ok;
+            ++completions;
+            after_close = co_await session.next_frame();
+        };
+        auto task = consume();
+        task.handle().resume();
+        ASSERT_FALSE(task.handle().done());
+
+        if (server_drains) {
+            protocol->begin_server_drain();
+            ASSERT_TRUE(protocol->server_draining());
+        }
+        const std::string drain_wire(session.out().cbegin(), session.out().size());
+        if (server_drains)
+            ASSERT_EQ(qb::http::test::extract_close_code(drain_wire), 1001);
+
+        qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::GoingAway, "peer acknowledgement");
+        session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
+        const std::string close_wire(session.out().cbegin(), session.out().size());
+        if (server_drains) {
+            EXPECT_EQ(close_wire, drain_wire) << "the acknowledgement must not enqueue a second Close";
+        } else {
+            EXPECT_EQ(close_wire.size(), 2u + peer.size());
+            EXPECT_EQ(qb::http::test::extract_close_code(close_wire), 1001);
+        }
+        EXPECT_EQ(close_frames, 0) << "http_completion schedules the consumer; it does not resume it inline";
+        for (int turn = 0; turn != 16 && close_frames == 0; ++turn)
+            qb::io::async::coro_scheduler().run_ready();
+        ASSERT_EQ(close_frames, 1);
+        EXPECT_EQ(received.kind, qb::http::ws::IncomingFrame::Kind::Close);
+        EXPECT_EQ(received.close_code, 1001);
+        EXPECT_EQ(received.close_reason, "peer acknowledgement");
+        EXPECT_FALSE(task.handle().done());
+        EXPECT_EQ(completions, 0);
+        EXPECT_EQ(std::string(session.out().cbegin(), session.out().size()), close_wire)
+            << "close_async after the Close notification must only wait, never republish Close";
+
+        session.on(qb::io::async::event::disconnected{static_cast<int>(qb::http::DisconnectedReason::ServerDraining)});
+        for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
+            qb::io::async::coro_scheduler().run_ready();
+        ASSERT_TRUE(task.handle().done());
+        EXPECT_NO_THROW(task.await_resume());
+        EXPECT_TRUE(close_ok);
+        EXPECT_EQ(completions, 1);
+        EXPECT_EQ(close_frames, 1);
+        EXPECT_EQ(after_close.kind, qb::http::ws::IncomingFrame::Kind::Disconnected);
+        EXPECT_EQ(std::string(session.out().cbegin(), session.out().size()), close_wire);
+    }
+}
+
+TEST_F(WsCoroServer, CloseAwaiterDuringServerDrainWaitsForTheExistingHandshake) {
+    EchoCoroServer  server;
+    EchoCoroSession session(server);
+    auto           *protocol = install_close_probe_protocol(session);
+    ASSERT_NE(protocol, nullptr);
+    ASSERT_EQ(session.out().size(), 0u);
+    protocol->begin_server_drain();
+    ASSERT_TRUE(protocol->server_draining());
+    const std::string drain_wire(session.out().cbegin(), session.out().size());
+    ASSERT_EQ(qb::http::test::extract_close_code(drain_wire), 1001);
+
+    int  completions = 0;
+    bool close_ok    = false;
+    auto wait        = [&]() -> qb::io::async::task<void> {
+        close_ok = (co_await session.close_async(qb::http::ws::CloseStatus::Normal, "wait for drain")).ok;
+        ++completions;
+    };
+    auto task = wait();
+    task.handle().resume();
+    ASSERT_FALSE(task.handle().done());
+    EXPECT_EQ(std::string(session.out().cbegin(), session.out().size()), drain_wire)
+        << "the protocol already queued Close before the coroutine began waiting";
+
+    qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::GoingAway, "drain acknowledged");
+    session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
+    for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
+        qb::io::async::coro_scheduler().run_ready();
+    ASSERT_TRUE(task.handle().done());
+    EXPECT_NO_THROW(task.await_resume());
+    EXPECT_TRUE(close_ok);
+    EXPECT_EQ(completions, 1);
+    EXPECT_EQ(std::string(session.out().cbegin(), session.out().size()), drain_wire);
+}
+
 } // namespace ws_coro_server_test

@@ -9,16 +9,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **Persistent HTTP/1 access-log comparison (Huly QB-1106).** The existing benchmark suite gains
+  `qbm-http-bench-http1-access-log-loopback`: batches of 32 real loopback requests on a persistent
+  connection, logging off, common, or JSON. It checks response bodies and status, routed/logged
+  totals and the peer address in each emitted line. Request construction and verification are
+  outside the timed batch; client, server, event-loop and socket work remain inside. This is a
+  measurement fixture, not a claim of a native speedup or an isolated formatter cost.
+
 - **`drain(deadline, on_drained)` on the HTTP/1.1 server: stop it without dropping a request it has
   received (Huly QB-167).** The listening socket closes, so a new connection is refused; an idle
   session closes at once, gracefully (its sending side shut down, what its client still sends
   dropped until the client closes); a busy session answers every request it has received, in order,
   the last answer `Connection: close`, then closes. `on_drained` runs once, on the server's loop:
-  `qb::http::drain_outcome::drained` when the last HTTP session is gone, or `deadline` when the
+  `qb::http::drain_outcome::drained` when the last owned HTTP or in-place WebSocket session is gone, or `deadline` when the
   deadline came first, after aborting what is still open. `draining()` tells a draining server.
-  WebSocket sessions are outside the drain -- one extracted for an upgrade is no longer the server's,
-  one switched in place is neither closed nor waited for -- so the report can come while they live
-  (closing them with `1001 Going Away` is Huly QB-1097). `qb::http::DisconnectedReason::ServerDraining`
+  A WebSocket upgraded in place and still owned by this server receives `1001 Going Away` and keeps
+  the drain pending until it closes or the deadline aborts it (Huly QB-1097). Its Close callback is
+  preserved; coroutine close waiters do not enqueue a second Close when the drain already began.
+  A session extracted to another owner remains outside this server's drain. `qb::http::DisconnectedReason::ServerDraining`
   is new, appended after `Undefined`: the existing values do not move; it reports a session the
   drain closed while idle or aborted at the deadline. `drain_outcome` is meant for the HTTP/2 and
   HTTP/3 servers' drains too. Witness: `qbm-http-test-system-server-drain`.
@@ -35,13 +43,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   connection of the ALPN fallback that has received nothing closes. At the deadline a connection
   that never answered the PING is sent the final GOAWAY and closed once it is delivered, within
   qb-io's linger bound. HTTP/3 sends the notice, a GOAWAY naming the largest stream id, then the
-  final GOAWAY two smoothed round trips later (the endpoint's largest RTT, as qb-io keeps none per
-  connection; at least 1 ms, at most the deadline), and closes each connection once its last
-  request stream has and its GOAWAY is acknowledged; a connection that completes its handshake
-  during the drain is sent a GOAWAY naming stream 0 before any request stream is read, so every
-  request on it is rejected without reaching the router, and closed once that GOAWAY is
-  acknowledged. The UDP endpoint stays bound until `close()` (refusing in the QUIC handshake is Huly
-  QB-1098). The dual-stack server drains both stacks with one deadline and reports once,
+  final GOAWAY after two of that connection's smoothed round trips (at least 1 ms, at most the
+  deadline); one shared timer services the individual due times. Older custom backends without
+  a per-connection RTT retain the aggregate fallback. Each connection closes once its last request
+  stream has and its GOAWAY is acknowledged. During drain, the native backend refuses new Initial
+  packets without allocating a connection (Huly QB-1098). A handshake already in progress, or one
+  accepted by a legacy backend without admission control, still receives GOAWAY stream 0 before
+  any request is routed and closes after its acknowledgement. The UDP endpoint stays bound until
+  `close()`. The dual-stack server drains both stacks with one deadline and reports once,
   `deadline` when either met it. `ServerHttp2Protocol::begin_graceful_shutdown()` and
   `complete_graceful_shutdown()` are the two HTTP/2 phases. Witnesses:
   `qbm-http-test-system-server-drain-h2`, `-unit-http2-server-protocol`, `-system-http3-loopback`.

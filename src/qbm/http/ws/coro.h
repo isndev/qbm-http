@@ -612,6 +612,12 @@ private:
         return *static_cast<Self *>(this);
     }
 
+    [[nodiscard]] bool
+    server_drain_active() const noexcept {
+        const auto *protocol = dynamic_cast<const WS_Protocol *>(this->protocol());
+        return protocol && protocol->server_draining();
+    }
+
     void
     deliver_frame(IncomingFrame &&frame) {
         if (_frame_complete) {
@@ -840,11 +846,14 @@ public:
             frame.close_reason.assign(event.data + 2, event.size - 2);
         }
 
-        // Echo only when the peer initiated the close. If we already sent a
-        // close, this frame is the peer's echo and must not be echoed again.
-        if (!_close_sent) {
+        // The protocol may have initiated Close for the server's drain without
+        // passing through close_async(). Its acknowledgement still reaches the
+        // consumer, but neither that acknowledgement nor a later close_async()
+        // may enqueue another Close.
+        const bool echo = !_close_sent && !server_drain_active();
+        _close_sent     = true;
+        if (echo) {
             *this << event.ws;
-            _close_sent = true;
         }
 
         deliver_frame(std::move(frame));
@@ -908,6 +917,7 @@ public:
     /**
      * @brief Queue a Close frame and suspend until the peer echoes it
      *        (or the transport drops).
+     *        When closing already began, wait for that close without sending another frame.
      *
      * @throws std::invalid_argument when @p status is a reserved code.
      */
@@ -925,8 +935,11 @@ public:
             MessageClose msg(status, reason);
             const auto   identity   = complete.identity();
             const auto   close_sent = _close_sent;
+            const bool   closing    = close_sent || server_drain_active();
             _close_sent             = true;
             _close_complete         = std::move(complete);
+            if (closing)
+                return;
             try {
                 *this << msg;
             } catch (...) {

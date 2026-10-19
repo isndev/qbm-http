@@ -141,8 +141,8 @@ private:
     bool _closing{false};    ///< The connection's last response is published: the io closes once it is delivered
     bool _draining{false};   ///< The server drains (http1_begin_drain()): the last request received is answered `close`
     bool _drain_cut{false};  ///< Closed by the drain while idle: it reports DisconnectedReason::ServerDraining
-    /// The HTTP/1.1 protocol the session was built with: another one installed (a WebSocket upgrade, switch_protocol)
-    /// takes the session out of an HTTP drain (http1_speaks_http()).
+    /// The original HTTP/1.1 protocol. An in-place WebSocket upgrade participates through its cold drain hook;
+    /// a transport extracted to another owner is no longer this server's.
     qb::io::async::IProtocol const *_http_protocol{nullptr};
 
     /// The connection's last response is published: the io closes once it is delivered -- after the peer, at most the
@@ -513,7 +513,7 @@ public:
 
     /**
      * @brief Server hook (Huly QB-167): whether the session still speaks HTTP/1.1. A session switched to another
-     *        protocol -- a WebSocket upgrade in place -- is out of an HTTP drain: neither closed nor waited for.
+     *        protocol is handled by its own shutdown hook when it supports the server's drain.
      */
     [[nodiscard]] bool
     http1_speaks_http() const noexcept {
@@ -526,7 +526,7 @@ public:
      *        client still sends read and dropped until it closes (qb-io's lingering close), reporting
      *        DisconnectedReason::ServerDraining. Otherwise the answer to the last request received carries
      *        `Connection: close` and the connection closes after it. A session already closing, or one that no
-     *        longer speaks HTTP/1.1, is left as it is.
+     *        longer speaks HTTP/1.1, is left to its own protocol's drain hook.
      */
     void
     http1_begin_drain() noexcept {
@@ -784,15 +784,28 @@ class server
         { s.http1_speaks_http() } -> std::convertible_to<bool>;
     };
 
-    /// The sessions a drain waits for: those still speaking HTTP/1.1, lingering ones included (they are closing).
+    [[nodiscard]] static qb::http::detail::websocket_drain *
+    upgraded_drain(Session &session) noexcept {
+        if constexpr (requires { session.protocol(); })
+            return dynamic_cast<qb::http::detail::websocket_drain *>(session.protocol());
+        else
+            return nullptr;
+    }
+
+    [[nodiscard]] static bool
+    participates_in_drain(Session &session) noexcept {
+        if constexpr (drainable_sessions)
+            return session.http1_speaks_http() || upgraded_drain(session) != nullptr;
+        else
+            return true;
+    }
+
+    /// The drain waits for owned HTTP and upgraded WebSocket sessions, including a lingering close.
     [[nodiscard]] std::size_t
     http_sessions_left() noexcept {
         std::size_t left = 0;
         for (auto const &[id, session] : this->sessions()) {
-            if constexpr (drainable_sessions) {
-                if (session && session->http1_speaks_http())
-                    ++left;
-            } else if (session) {
+            if (session && participates_in_drain(*session)) {
                 ++left;
             }
         }
@@ -805,7 +818,7 @@ class server
             return;
         for (auto const &[id, session] : this->sessions()) {
             if constexpr (drainable_sessions) {
-                if (session && session->http1_speaks_http())
+                if (session && participates_in_drain(*session))
                     session->http1_abort_drain();
             } else if (session) {
                 session->disconnect(qb::http::DisconnectedReason::ServerDraining);
@@ -839,9 +852,9 @@ public:
      *   closed -- a lingering session counts until it is gone -- or with `drain_outcome::deadline` when @p deadline
      *   came first, after aborting the sessions still open (`ServerDraining`). With no HTTP session open it runs
      *   before drain() returns. A deadline of zero or less aborts what is still open at once.
-     * - **WebSocket is outside the drain.** A session upgraded in place (switch_protocol) is neither closed nor
-     *   waited for, and one extracted to another server is no longer this server's: @p on_drained can run while
-     *   they live. Closing them with `1001 Going Away` is Huly QB-1097.
+     * - An owned WebSocket upgraded in place receives Close `1001 Going Away` and is counted until it closes or
+     *   the deadline aborts it (Huly QB-1097). A connection extracted to another owner remains outside this drain;
+     *   its new owner is responsible for closing it.
      *
      * A server of bare qb-io sessions (no drain hooks) closes its listener and waits for them as they are, aborting
      * them at the deadline. The server cannot listen again afterwards. drain_outcome is the HTTP/2 and HTTP/3
@@ -856,9 +869,11 @@ public:
             return false;
         this->stop();              // the accept watcher
         this->transport().close(); // and the listening socket: a new connection is refused
-        if constexpr (drainable_sessions) {
-            for (auto const &[id, session] : this->sessions()) {
-                if (session)
+        for (auto const &[id, session] : this->sessions()) {
+            if (session) {
+                if (auto *upgraded = upgraded_drain(*session))
+                    upgraded->begin_server_drain();
+                else if constexpr (drainable_sessions)
                     session->http1_begin_drain();
             }
         }

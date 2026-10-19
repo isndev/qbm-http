@@ -40,6 +40,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -3475,9 +3476,8 @@ TEST_F(Http3LoopbackTest, DrainDeadlineClosesTheConnectionsStillOpen) {
     server->close();
 }
 
-// A connection made while the server drains serves nothing: its GOAWAY, sent before any request stream is read,
-// names stream 0, so the request it sent in its first flight is rejected -- never handed to the router -- and it
-// closes once the GOAWAY is acknowledged. The drain still waits for the connection that was there before it.
+// A new client is refused before its handshake completes while the server drains. Its request never reaches
+// the router, and the request on the connection established before the drain still receives its answer.
 TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesTheRouter) {
     const auto                                                    port   = next_port();
     auto                                                          server = qb::http3::make_server();
@@ -3493,8 +3493,12 @@ TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesThe
 
     auto first = qb::http3::make_client(https_origin(port));
     first->set_verify_peer(false);
-    bool first_done = false;
-    ASSERT_TRUE(first->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) { first_done = true; }));
+    bool               first_done = false;
+    qb::http::Response first_response;
+    ASSERT_TRUE(first->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response res) {
+        first_response = std::move(res);
+        first_done     = true;
+    }));
     ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
 
     int  reports = 0;
@@ -3504,15 +3508,22 @@ TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesThe
         ++reports;
     }));
 
-    auto late = qb::http3::make_client(https_origin(port));
-    late->set_verify_peer(false);
-    bool               late_done = false;
+    int                late_connect_reports = 0;
+    bool               late_connected       = false;
+    bool               late_done            = false;
     qb::http::Response late_response;
+    auto               late = qb::http3::make_client(https_origin(port));
+    late->set_verify_peer(false);
+    ASSERT_TRUE(late->connect([&](bool ok, std::string const &) {
+        late_connected = late_connected || ok;
+        ++late_connect_reports;
+    }));
     ASSERT_TRUE(late->push_request(qb::http::Request{qb::io::uri("/count")}, [&](qb::http::Response res) {
         late_response = std::move(res);
         late_done     = true;
     }));
-    ASSERT_TRUE(pump([&] { return late_done; }));
+    ASSERT_TRUE(pump([&] { return late_done && late_connect_reports == 1; }));
+    EXPECT_FALSE(late_connected) << "a client arriving during drain must not complete a handshake before being refused";
     EXPECT_NE(late_response.status(), qb::http::status::OK);
     EXPECT_EQ(counted, 0) << "the request of a connection made during the drain never reaches the router";
     EXPECT_TRUE(pump([&] { return !late->is_connected(); })) << "and the connection is closed";
@@ -3521,7 +3532,10 @@ TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesThe
     held_context->text("held-ok");
     held_context.reset();
     ASSERT_TRUE(pump([&] { return first_done && reports == 1; }));
+    EXPECT_EQ(first_response.status(), qb::http::status::OK);
+    EXPECT_EQ(first_response.body().as<std::string>(), "held-ok");
     EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+    EXPECT_EQ(late_connect_reports, 1);
     EXPECT_EQ(counted, 0);
 
     first->disconnect();
@@ -3529,7 +3543,7 @@ TEST_F(Http3LoopbackTest, ARequestOnAConnectionMadeDuringTheDrainNeverReachesThe
     server->close();
 }
 
-// A server with no connection reports `drained` before drain() returns.
+// A server with no connection reports `drained` before drain() returns and still refuses later handshakes.
 TEST_F(Http3LoopbackTest, DrainWithNoConnectionReportsAtOnce) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
@@ -3544,6 +3558,20 @@ TEST_F(Http3LoopbackTest, DrainWithNoConnectionReportsAtOnce) {
     }));
     EXPECT_EQ(reports, 1);
     EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+
+    int  connect_reports = 0;
+    bool connected       = false;
+    auto late            = qb::http3::make_client(https_origin(port));
+    late->set_verify_peer(false);
+    ASSERT_TRUE(late->connect([&](bool ok, std::string const &) {
+        connected = connected || ok;
+        ++connect_reports;
+    }));
+    ASSERT_TRUE(pump([&] { return connect_reports == 1; }));
+    EXPECT_FALSE(connected) << "an already drained listener must refuse a new Initial without completing its handshake";
+    EXPECT_EQ(reports, 1);
+    EXPECT_EQ(outcome, qb::http::drain_outcome::drained);
+    late->disconnect();
     server->close();
 }
 
@@ -3589,6 +3617,118 @@ TEST_F(Http3LoopbackTest, DualStackDrainReportsOnceAndDeadlineWhenOneStackMetIt)
 }
 
 namespace http3_shutdown_wire_test {
+
+// Real QUIC packets and TLS, with deterministic RTT estimates supplied only at the public cold query seam.
+class ControlledRttBackend final : public qb::io::quic::backend {
+    std::unique_ptr<qb::io::quic::backend> _native = qb::io::quic::make_native_backend();
+
+public:
+    std::vector<std::uint64_t>                          connections;
+    std::vector<std::pair<std::uint64_t, qb::duration>> estimates;
+    std::uint64_t                                       aggregate_rtt_us    = 10000000;
+    bool                                                legacy_capabilities = false;
+    mutable int                                         queries             = 0;
+
+    void
+    configure(qb::io::quic::settings const &config) override {
+        _native->configure(config);
+    }
+    void
+    start_server(qb::io::endpoint const &local, std::vector<std::string> const &alpn, qb::io::quic::tls_config const &tls) override {
+        _native->start_server(local, alpn, tls);
+    }
+    void
+    start_client(qb::io::endpoint const &local, qb::io::endpoint const &remote, std::vector<std::string> const &alpn,
+                 qb::io::quic::tls_config const &tls) override {
+        _native->start_client(local, remote, alpn, tls);
+    }
+    void
+    on_udp_datagram(qb::io::quic::packet_view packet) override {
+        _native->on_udp_datagram(packet);
+    }
+    void
+    on_timeout(std::chrono::steady_clock::time_point now) override {
+        _native->on_timeout(now);
+    }
+    std::chrono::steady_clock::time_point
+    next_timeout() const override {
+        return _native->next_timeout();
+    }
+    bool
+    wants_write() const noexcept override {
+        return _native->wants_write();
+    }
+    std::vector<qb::io::quic::packet>
+    drain_packets() override {
+        return _native->drain_packets();
+    }
+    std::vector<qb::io::quic::backend_event>
+    drain_events() override {
+        auto events = _native->drain_events();
+        for (auto const &event : events)
+            if (event.type == qb::io::quic::backend_event::kind::connected)
+                connections.push_back(event.connection_id);
+        return events;
+    }
+    std::uint64_t
+    open_stream(qb::io::quic::stream_direction direction) override {
+        return _native->open_stream(direction);
+    }
+    std::uint64_t
+    open_stream(std::uint64_t id, qb::io::quic::stream_direction direction) override {
+        return _native->open_stream(id, direction);
+    }
+    void
+    send_stream_data(std::uint64_t id, std::uint64_t stream, std::span<const std::byte> bytes, bool fin) override {
+        _native->send_stream_data(id, stream, bytes, fin);
+    }
+    void
+    extend_stream_credit(std::uint64_t id, std::uint64_t stream, std::uint64_t bytes) override {
+        _native->extend_stream_credit(id, stream, bytes);
+    }
+    void
+    reset_stream(std::uint64_t id, std::uint64_t stream, std::uint64_t code) override {
+        _native->reset_stream(id, stream, code);
+    }
+    void
+    stop_stream(std::uint64_t id, std::uint64_t stream, std::uint64_t code) override {
+        _native->stop_stream(id, stream, code);
+    }
+    void
+    send_datagram(std::uint64_t id, std::span<const std::byte> bytes) override {
+        _native->send_datagram(id, bytes);
+    }
+    void
+    close_connection(std::uint64_t id, std::uint64_t code, std::string_view reason) override {
+        _native->close_connection(id, code, reason);
+    }
+    void
+    close(std::uint64_t code, std::string_view reason) override {
+        _native->close(code, reason);
+    }
+    qb::io::quic::stats
+    current_stats() const noexcept override {
+        auto stats            = _native->current_stats();
+        stats.smoothed_rtt_us = aggregate_rtt_us;
+        return stats;
+    }
+    std::optional<qb::duration>
+    smoothed_rtt(std::uint64_t id) const noexcept override {
+        ++queries;
+        if (legacy_capabilities)
+            return qb::io::quic::backend::smoothed_rtt(id);
+        for (auto const &[connection_id, estimate] : estimates)
+            if (connection_id == id)
+                return estimate;
+        return std::nullopt;
+    }
+    bool
+    set_accepting_connections(bool accepting) noexcept override {
+        if (legacy_capabilities)
+            return qb::io::quic::backend::set_accepting_connections(accepting);
+        return _native->set_accepting_connections(accepting);
+    }
+};
 
 /// A bare QUIC peer offering h3: it reads what the server's control stream carries -- its GOAWAYs, and when each
 /// arrived -- and whether the connection closed. It opens no stream of its own. (qb-io reports no peer's
@@ -3703,4 +3843,104 @@ TEST_F(Http3LoopbackTest, GracefulShutdownSendsTheNoticeThenTheFinalGoawayARound
     EXPECT_GE(peer.goaway_arrivals[1] - peer.goaway_arrivals[0], 500us) << "a round trip separates the two GOAWAYs";
 
     server->close();
+}
+
+TEST_F(Http3LoopbackTest, ShutdownUsesEachPeersRttAndAdditionalNoticesKeepExistingDeadlines) {
+    const auto port       = next_port();
+    auto       server     = qb::http3::make_server();
+    auto       controlled = std::make_unique<http3_shutdown_wire_test::ControlledRttBackend>();
+    auto      *backend    = controlled.get();
+    server->set_backend(std::move(controlled));
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    http3_shutdown_wire_test::RawH3Peer fast;
+    http3_shutdown_wire_test::RawH3Peer slow;
+    ASSERT_TRUE(fast.open(https_origin(port)));
+    ASSERT_TRUE(pump([&] { return fast.connected && backend->connections.size() == 1; }));
+    ASSERT_TRUE(slow.open(https_origin(port)));
+    ASSERT_TRUE(pump([&] { return slow.connected && backend->connections.size() == 2; }));
+    backend->estimates = {{backend->connections[0], 5ms}, {backend->connections[1], 250ms}};
+    EXPECT_EQ(server->smoothed_rtt(backend->connections[0]), std::optional<qb::duration>{5ms});
+    EXPECT_EQ(server->smoothed_rtt(backend->connections[1]), std::optional<qb::duration>{250ms});
+    EXPECT_FALSE(server->smoothed_rtt().has_value()) << "zero is ambiguous with two server peers";
+    EXPECT_FALSE(server->smoothed_rtt(999999).has_value());
+    backend->queries = 0;
+
+    server->graceful_shutdown();
+    ASSERT_TRUE(pump([&] { return fast.goaway_ids.size() == 2; }));
+    EXPECT_LE(slow.goaway_ids.size(), 1u) << "the slower peer must retain its own notice delay";
+    EXPECT_EQ(backend->queries, 2);
+
+    // A later shutdown adds a new peer. Recomputing the old slow peer's due time would postpone it by twenty seconds.
+    backend->estimates[1].second = 10s;
+    http3_shutdown_wire_test::RawH3Peer later;
+    ASSERT_TRUE(later.open(https_origin(port)));
+    ASSERT_TRUE(pump([&] { return later.connected && backend->connections.size() == 3; }));
+    backend->estimates.emplace_back(backend->connections[2], 5ms);
+    server->graceful_shutdown();
+    EXPECT_EQ(backend->queries, 3) << "only the newly noticed peer needs a fresh RTT estimate";
+    ASSERT_TRUE(pump([&] { return fast.closed && slow.closed && later.closed; }));
+    ASSERT_EQ(slow.goaway_ids.size(), 2u);
+    ASSERT_EQ(later.goaway_ids.size(), 2u);
+    EXPECT_EQ(slow.goaway_ids.back(), 0u);
+    EXPECT_EQ(later.goaway_ids.back(), 0u);
+    EXPECT_EQ(backend->queries, 3);
+    server->close();
+}
+
+TEST_F(Http3LoopbackTest, LegacyBackendRttFallbackRemainsBoundedByTheDrainDeadline) {
+    for (const auto aggregate : {std::uint64_t{5000}, std::numeric_limits<std::uint64_t>::max()}) {
+        SCOPED_TRACE(aggregate);
+        int                                                           routed    = 0;
+        int                                                           responses = 0;
+        int                                                           reports   = 0;
+        auto                                                          outcome   = qb::http::drain_outcome::drained;
+        qb::http::Response                                            response;
+        const auto                                                    port   = next_port();
+        auto                                                          server = qb::http3::make_server();
+        std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+        auto  controlled             = std::make_unique<http3_shutdown_wire_test::ControlledRttBackend>();
+        auto *backend                = controlled.get();
+        backend->aggregate_rtt_us    = aggregate;
+        backend->legacy_capabilities = true;
+        server->set_backend(std::move(controlled));
+        server->router().get("/held", [&](auto ctx) {
+            ++routed;
+            held_context = ctx;
+        });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        EXPECT_FALSE(server->set_accepting_connections(false)) << "a legacy backend retains the unsupported default";
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/held")}, [&](qb::http::Response res) {
+            response = std::move(res);
+            ++responses;
+        }));
+        ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+        ASSERT_EQ(backend->connections.size(), 1u);
+        EXPECT_FALSE(server->smoothed_rtt(backend->connections.front()).has_value());
+        EXPECT_EQ(server->stats().smoothed_rtt_us, aggregate);
+        EXPECT_EQ(responses, 0);
+        backend->queries = 0;
+
+        ASSERT_TRUE(server->drain(50ms, [&](qb::http::drain_outcome result) {
+            outcome = result;
+            ++reports;
+        }));
+        EXPECT_EQ(backend->queries, 1) << "the live peer must use the unknown-RTT fallback";
+        ASSERT_TRUE(pump([&] { return reports == 1 && responses == 1 && !client->is_connected(); }));
+        EXPECT_EQ(outcome, qb::http::drain_outcome::deadline);
+        EXPECT_EQ(routed, 1);
+        EXPECT_NE(response.status(), qb::http::status::OK) << "the held request is abandoned, never fabricated as a successful response";
+        EXPECT_FALSE(server->drain(50ms));
+        held_context.reset();
+        client->disconnect();
+        server->close();
+        EXPECT_EQ(reports, 1);
+        EXPECT_EQ(responses, 1);
+        client.reset();
+        server.reset();
+        qb::io::async::listener::current.clear();
+    }
 }

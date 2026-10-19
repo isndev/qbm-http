@@ -24,6 +24,7 @@
 #error "HTTP/3 support is not enabled. Build qbm/http with QBM_HTTP_HAS_HTTP3."
 #endif
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <string_view>
@@ -265,10 +266,10 @@ private:
     qb::unordered_set<std::uint64_t>                                             _shutdown_connections;
     std::vector<std::uint64_t>                                                   _closed_connections;
     /// Connections sent the shutdown notice that wait for their final GOAWAY (Huly QB-91), and its timer.
-    qb::unordered_set<std::uint64_t>              _noticed_connections;
-    std::unique_ptr<qb::http::detail::loop_timer> _notice_timer;
-    qb::http::detail::drain_state                 _drain;                  ///< drain(), begun once, reported once
-    bool                                          _drain_aborting = false; ///< The deadline closes what is open
+    qb::unordered_map<std::uint64_t, qb::mono_time> _noticed_connections;
+    std::unique_ptr<qb::http::detail::loop_timer>   _notice_timer;
+    qb::http::detail::drain_state                   _drain;                  ///< drain(), begun once, reported once
+    bool                                            _drain_aborting = false; ///< The deadline closes what is open
     // >0 while an HTTP/3 read (nghttp3_conn_read_stream2) is on the stack. A request callback
     // reached from that read can synchronously fail a connection — a send larger than the QUIC
     // TX cap makes the backend queue a close and reentrantly deliver dispatch(connection_closed),
@@ -345,12 +346,39 @@ private:
         return std::find(_closed_connections.begin(), _closed_connections.end(), connection_id) != _closed_connections.end();
     }
 
-    /// How long the shutdown notice waits before the final GOAWAY (Huly QB-91): two smoothed round trips -- the
-    /// endpoint's largest, as qb-io keeps no smaller one per connection -- and at least 1 ms.
+    /// Two of this peer's smoothed round trips, at least 1 ms. Older custom backends keep the aggregate fallback.
     [[nodiscard]] qb::duration
-    shutdown_notice_wait() const noexcept {
-        const auto rtt = std::chrono::microseconds(static_cast<std::int64_t>(this->stats().smoothed_rtt_us));
-        return std::max<qb::duration>(2 * rtt, std::chrono::milliseconds(1));
+    shutdown_notice_wait(std::uint64_t connection_id) const noexcept {
+        auto estimate = this->smoothed_rtt(connection_id);
+        if (!estimate) {
+            const auto aggregate = this->stats().smoothed_rtt_us;
+            const auto limit     = std::chrono::duration_cast<std::chrono::microseconds>(qb::duration::max()).count();
+            estimate = aggregate > static_cast<std::uint64_t>(limit)
+                           ? qb::duration::max()
+                           : std::chrono::duration_cast<qb::duration>(std::chrono::microseconds{static_cast<std::int64_t>(aggregate)});
+        }
+        const auto rtt   = std::max(*estimate, qb::duration::zero());
+        const auto twice = rtt > qb::duration::max() / 2 ? qb::duration::max() : 2 * rtt;
+        return std::max<qb::duration>(twice, std::chrono::milliseconds(1));
+    }
+
+    void
+    arm_notice_timer(qb::mono_time now) {
+        if (_noticed_connections.empty()) {
+            if (_notice_timer)
+                _notice_timer->stop();
+            return;
+        }
+        auto due = qb::mono_time::max();
+        for (auto const &[_, deadline] : _noticed_connections)
+            due = std::min(due, deadline);
+        // A zero timeout stops loop_timer. An overdue deadline must run on the next loop turn.
+        const auto wait = due <= now ? qb::duration{1} : std::chrono::duration_cast<qb::duration>(due - now);
+        if (_notice_timer) {
+            _notice_timer->restart(wait);
+        } else {
+            _notice_timer = std::make_unique<qb::http::detail::loop_timer>(wait, [this]() noexcept { send_final_goaways(); });
+        }
     }
 
     /// Phase 1 of the shutdown (RFC 9114 section 5.2, Huly QB-91): a GOAWAY naming the largest stream id on every
@@ -358,6 +386,7 @@ private:
     /// the final GOAWAY comes shutdown_notice_wait() later, or at @p cap.
     void
     begin_shutdown_notices(qb::duration cap) {
+        const auto                 now = qb::mono_now();
         std::vector<std::uint64_t> connection_ids;
         connection_ids.reserve(_connections.size());
         for (auto const &[connection_id, _] : _connections) {
@@ -368,29 +397,34 @@ private:
         }
         for (auto connection_id : connection_ids) {
             if (auto *conn = connection(connection_id); conn && conn->submit_shutdown_notice()) {
-                _noticed_connections.insert(connection_id);
+                // Submitting may close this peer reentrantly. Do not publish a stale notice or move an existing deadline.
+                if (connection(connection_id) && !closing(connection_id)
+                    && _shutdown_connections.find(connection_id) == _shutdown_connections.end()) {
+                    const auto wait = std::min(
+                        {shutdown_notice_wait(connection_id), cap, std::chrono::duration_cast<qb::duration>(qb::mono_time::max() - now)});
+                    _noticed_connections.emplace(connection_id, now + wait);
+                }
             }
         }
-        if (_noticed_connections.empty()) {
-            return;
-        }
-        const auto wait = std::min(shutdown_notice_wait(), cap);
-        if (_notice_timer) {
-            _notice_timer->restart(wait); // never released: this may run from its own action
-        } else {
-            _notice_timer = std::make_unique<qb::http::detail::loop_timer>(wait, [this]() noexcept { send_final_goaways(); });
-        }
+        arm_notice_timer(now);
     }
 
-    /// Phase 2 (Huly QB-91): the final GOAWAY on every connection that had the notice -- the requests it read are
-    /// served, any above it rejected -- and each closes when its last request stream has.
+    /// Phase 2: finalize only peers whose own notice delay elapsed, then rearm the shared timer.
     void
     send_final_goaways() noexcept {
-        std::vector<std::uint64_t> connection_ids(_noticed_connections.begin(), _noticed_connections.end());
-        _noticed_connections.clear();
+        const auto                 now = qb::mono_now();
+        std::vector<std::uint64_t> connection_ids;
+        for (auto const &[connection_id, due] : _noticed_connections)
+            if (due <= now)
+                connection_ids.push_back(connection_id);
         for (auto connection_id : connection_ids) {
+            auto it = _noticed_connections.find(connection_id);
+            if (it == _noticed_connections.end() || it->second > now)
+                continue;
+            _noticed_connections.erase(it); // a previous send can close another peer or start another notice
             send_final_goaway(connection_id);
         }
+        arm_notice_timer(now);
     }
 
     void
@@ -418,6 +452,8 @@ private:
             }
         }
         _noticed_connections.clear();
+        if (_notice_timer)
+            _notice_timer->stop();
         for (auto connection_id : connection_ids) {
             if (auto *conn = connection(connection_id); conn && _shutdown_connections.find(connection_id) == _shutdown_connections.end()) {
                 _shutdown_connections.insert(connection_id);
@@ -657,7 +693,11 @@ public:
      */
     bool
     listen(qb::io::uri const &uri, std::filesystem::path const &cert_file, std::filesystem::path const &key_file) {
-        return qb::io::async::quic::endpoint::listen(uri, cert_file, key_file, {"h3"});
+        if (!qb::io::async::quic::endpoint::listen(uri, cert_file, key_file, {"h3"}))
+            return false;
+        if (_drain.started())
+            (void) this->set_accepting_connections(false);
+        return true;
     }
 
     /**
@@ -699,11 +739,11 @@ public:
      * - Each connection open now shuts down as graceful_shutdown() does: the notice, then -- two smoothed round
      *   trips later, at least 1 ms, at most @p deadline -- the final GOAWAY; it closes once its last request
      *   stream has and its GOAWAY is acknowledged.
-     * - A connection that completes its handshake during the drain, or after it, serves nothing: its GOAWAY,
+     * - The native QUIC listener refuses new Initial packets without allocating a connection or completing a handshake.
+     *   A handshake already in progress (or an older custom backend without admission control) serves nothing: its GOAWAY,
      *   sent before any request stream is read, names stream 0 -- no request was processed, the client may retry
      *   every one elsewhere -- every request on it is rejected (H3_REQUEST_REJECTED) without reaching the router,
-     *   and it closes, H3_NO_ERROR, once the GOAWAY is acknowledged. The UDP endpoint stays bound until close():
-     *   refusing a connection in the QUIC handshake itself is Huly QB-1098.
+     *   and it closes, H3_NO_ERROR, once the GOAWAY is acknowledged. The UDP endpoint stays bound until close().
      * - @p on_drained runs once, on the server's loop: with `drain_outcome::drained` when no connection is left,
      *   or with `drain_outcome::deadline` when @p deadline came first -- then each connection still open is sent
      *   its final GOAWAY, unless it was, and closed, H3_NO_ERROR, abandoning its requests. With no connection
@@ -720,6 +760,7 @@ public:
         if (!_drain.begin(std::move(on_drained))) {
             return false;
         }
+        (void) this->set_accepting_connections(false);
         if (_connections.empty()) {
             _drain.report(qb::http::drain_outcome::drained, "HTTP/3");
             return true;

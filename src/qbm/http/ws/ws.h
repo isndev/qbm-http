@@ -429,12 +429,15 @@ is_valid_received_close_code(std::uint16_t code) noexcept {
  * @tparam IO_ The I/O handler type
  */
 template <typename IO_>
-class base : public qb::io::async::AProtocol<IO_> {
-    std::size_t             _parsed         = 0; /**< Number of bytes parsed from the current frame */
-    std::size_t             _expected_size  = 0; /**< Expected payload size based on frame header */
-    unsigned char           _fin_rsv_opcode = 0; /**< Current frame's FIN, RSV, and opcode bits */
-    unsigned char           _data_opcode    = 0; /**< Opcode for the current fragmented data message */
-    ::qb::http::ws::Message _message;            /**< Current message being assembled */
+class base
+    : public qb::io::async::AProtocol<IO_>
+    , public ::qb::http::detail::websocket_drain {
+    std::size_t             _parsed          = 0; /**< Number of bytes parsed from the current frame */
+    std::size_t             _expected_size   = 0; /**< Expected payload size based on frame header */
+    unsigned char           _fin_rsv_opcode  = 0; /**< Current frame's FIN, RSV, and opcode bits */
+    unsigned char           _data_opcode     = 0; /**< Opcode for the current fragmented data message */
+    bool                    _server_draining = false;
+    ::qb::http::ws::Message _message; /**< Current message being assembled */
     // Secure default: bound the reassembled message size so a peer streaming
     // unbounded continuation fragments cannot exhaust server memory. Apps may
     // raise it or set 0 (unlimited) explicitly via set_max_payload_size().
@@ -535,6 +538,21 @@ class base : public qb::io::async::AProtocol<IO_> {
             // observed by the peer. We used to `_io.out().reset()` here which
             // silently dropped them (W20). The close frame is simply appended
             // after the in-flight data.
+            if (_server_draining) {
+                // The Close may still be queued (simultaneous close). Deliver it before ending the transport.
+                if constexpr (requires {
+                                  this->_io.close_after_deliver();
+                                  this->_io.ready_to_write();
+                              }) {
+                    this->_io.close_after_deliver();
+                    this->_io.ready_to_write();
+                } else {
+                    this->not_ok(); // Protocol-only consumers have no transport to finish.
+                }
+                if constexpr (qb::has_on<IO_, close>)
+                    this->_io.on(close{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
+                return;
+            }
             if constexpr (qb::has_on<IO_, close>) {
                 this->_io.on(close{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
             } else {
@@ -545,20 +563,26 @@ class base : public qb::io::async::AProtocol<IO_> {
             this->not_ok();
         } else if (frame_opcode == ::qb::http::ws::opcode::_Ping) {
             if constexpr (qb::has_on<IO_, ping>) {
-                this->_io.on(ping{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
+                if (!_server_draining) {
+                    this->_io.on(ping{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
+                }
             }
-            // Send pong automatically
+            // RFC 6455 5.5.2 still requires Pong until the peer's Close is received, even while draining.
             current_frame_message.fin_rsv_opcode = ::qb::http::ws::opcode::Pong;
             this->_io << current_frame_message;
         } else if (frame_opcode == ::qb::http::ws::opcode::_Pong) {
             if constexpr (qb::has_on<IO_, pong>) {
-                this->_io.on(pong{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
+                if (!_server_draining) {
+                    this->_io.on(pong{current_frame_message.size(), current_frame_message._data.cbegin(), current_frame_message});
+                }
             }
         }
     }
 
     void
     processDataFrame(unsigned char frame_opcode, bool is_final_frame, ::qb::http::ws::Message &current_frame_message) {
+        if (_server_draining)
+            return; // A peer may still have data in flight; after our Close it cannot cause application replies.
         // Handle data frames (Continuation, Text, Binary).
         if (frame_opcode != ::qb::http::ws::opcode::Continuation) {
             if (_data_opcode != 0) {
@@ -626,6 +650,28 @@ public:
      */
     explicit base(IO_ &io)
         : qb::io::async::AProtocol<IO_>(io) {}
+
+    [[nodiscard]] bool
+    server_draining() const noexcept {
+        return _server_draining;
+    }
+
+    void
+    begin_server_drain() noexcept final {
+        if (_server_draining || !this->ok())
+            return;
+        _server_draining = true;
+        try {
+            ::qb::http::ws::MessageClose close_msg(::qb::http::ws::CloseStatus::GoingAway, "server draining");
+            if constexpr (!IO_::has_server)
+                close_msg.masked = true;
+            this->_io << close_msg;
+        } catch (...) {
+            this->not_ok();
+            if constexpr (requires { this->_io.disconnect(::qb::http::DisconnectedReason::ServerDraining); })
+                this->_io.disconnect(::qb::http::DisconnectedReason::ServerDraining);
+        }
+    }
 
     /**
      * @brief Sets the maximum allowed payload size for a single message.
@@ -805,6 +851,7 @@ public:
         _message.reset();
         _expected_size = _parsed = _fin_rsv_opcode = 0;
         _data_opcode                               = 0;
+        _server_draining                           = false;
     }
 };
 
