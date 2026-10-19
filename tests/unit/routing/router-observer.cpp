@@ -41,12 +41,12 @@ using Ctx = qb::http::Context<MockSession>;
 
 struct Seen {
     std::string              event; ///< "request" or "response"
-    std::string              pattern;
+    std::string              pattern{};
     int                      status = 0;
     qb::http::RequestOutcome outcome{};
     qb::duration             duration{};
-    std::string              hook_header; ///< the X-Hook header the response carried when observed
-    unsigned                 writes = 0;  ///< the session's response writes when observed
+    std::string              hook_header{}; ///< the X-Hook header the response carried when observed
+    unsigned                 writes = 0;    ///< the session's response writes when observed
 };
 
 class Recorder final : public qb::http::IRequestObserver<MockSession> {
