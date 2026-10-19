@@ -425,6 +425,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Source and test comments follow the current handlers (Huly QB-1102).** Correct stale
+  authentication, Cookie, date, frame-parser, WebSocket and multipart references. Describe
+  malformed Base64 as an empty decode result, and distinguish nonempty CONTINUATION sequencing
+  from the separate empty-frame test. Request handling and test assertions are unchanged.
+
 - **An HTTP/3 graceful close could overtake its GOAWAY, and carried no HTTP/3 code (Huly QB-91).** A
   shutting-down connection with no request open was closed as soon as the final GOAWAY was handed
   to QUIC; `CONNECTION_CLOSE` overtakes the stream data QUIC still holds and is never retransmitted,

@@ -233,7 +233,7 @@ TEST_F(CookieTest, ParseCookiesValueAtLimitSucceeds) {
 }
 
 TEST_F(CookieTest, ParseCookiesExactlyLimitValueIsAccepted) {
-    // Ground truth (cookie.cpp:187): the guard is `length() >= COOKIE_VALUE_MAX`
+    // Ground truth (parse_cookies, unquoted value): the guard is `length() >= COOKIE_VALUE_MAX`
     // checked BEFORE pushing, so the longest accepted value is exactly
     // COOKIE_VALUE_MAX bytes (the check passes for lengths 0..MAX-1, then the
     // MAX-th char is pushed). A value of exactly COOKIE_VALUE_MAX is therefore
@@ -247,14 +247,14 @@ TEST_F(CookieTest, ParseCookiesExactlyLimitValueIsAccepted) {
 
 TEST_F(CookieTest, ParseCookiesOverLimitValueIsRejected) {
     // The FIRST rejected length is COOKIE_VALUE_MAX + 1: on the (MAX+1)-th value
-    // char the guard `length() >= COOKIE_VALUE_MAX` (cookie.cpp:187) trips and
+    // char the guard `length() >= COOKIE_VALUE_MAX` (parse_cookies, unquoted value) trips and
     // throws, keeping memory bounded against a malicious oversized Cookie header.
     std::string over_limit_value(COOKIE_VALUE_MAX + 1, 'v');
     EXPECT_THROW((void) parse_cookies(std::string("big=" + over_limit_value), false), std::runtime_error);
 }
 
 TEST_F(CookieTest, ParseCookiesExactlyLimitNameIsAccepted) {
-    // Same boundary semantics as the value guard (cookie.cpp:164): the check is
+    // Like the value guard, parse_cookies checks the name length before pushing:
     // `length() >= COOKIE_NAME_MAX` before pushing, so a name of exactly
     // COOKIE_NAME_MAX bytes is the longest accepted, not a rejection.
     std::string at_max_name(COOKIE_NAME_MAX, 'n');
@@ -265,7 +265,7 @@ TEST_F(CookieTest, ParseCookiesExactlyLimitNameIsAccepted) {
 
 TEST_F(CookieTest, ParseCookiesOverLimitNameIsRejected) {
     // The FIRST rejected name length is COOKIE_NAME_MAX + 1: the (MAX+1)-th name
-    // char trips the guard `length() >= COOKIE_NAME_MAX` (cookie.cpp:164).
+    // char trips the guard `length() >= COOKIE_NAME_MAX` (parse_cookies, name).
     std::string over_limit_name(COOKIE_NAME_MAX + 1, 'n');
     EXPECT_THROW((void) parse_cookies(std::string(over_limit_name + "=v"), false), std::runtime_error);
 }
@@ -700,8 +700,8 @@ TEST_F(CookieTest, MaxAgeParsingInvalidValues) {
     }
 
     // Test Max-Age with leading whitespace in value. parse_set_cookie applies
-    // utility::trim_http_whitespace to the attribute value before from_chars
-    // (cookie.cpp:323), so the leading space is stripped and "456" parses fully.
+    // utility::trim_http_whitespace to the attribute value before qb::to_number<int>
+    // in parse_set_cookie, so the leading space is stripped and "456" parses fully.
     // Pin the deterministic qb behavior rather than accept-either.
     {
         auto result = parse_set_cookie("test=value; Max-Age= 456");
@@ -969,7 +969,7 @@ TEST_F(CookieTest, MaxAgeRoundTrip) {
 //////////////////////////////////////////////////
 
 // parse_cookies with set_cookie_header=true exercises is_cookie_attribute's
-// Set-Cookie attribute filtering (cookie.cpp:81-90). Known attributes (Path,
+// Set-Cookie attribute filtering. Known attributes (Path,
 // Domain, Secure, ...) must be dropped, real name=value pairs kept.
 TEST_F(CookieTest, ParseCookiesSetCookieHeaderFiltersKnownAttributes) {
     auto cookies = parse_cookies(std::string("sid=xyz; Path=/; Domain=example.com; Secure; HttpOnly; SameSite=Lax"), true);
@@ -983,7 +983,7 @@ TEST_F(CookieTest, ParseCookiesSetCookieHeaderFiltersKnownAttributes) {
     EXPECT_TRUE(cookies.find("SameSite") == cookies.end());
 }
 
-// is_cookie_attribute's legacy/empty branch (cookie.cpp:77-80): a name that
+// is_cookie_attribute's legacy/empty branch: a name that
 // begins with '$' (RFC 2109 legacy) is treated as an attribute and dropped.
 TEST_F(CookieTest, ParseCookiesDropsDollarPrefixedLegacyAttributes) {
     // $Version / $Path are legacy attributes; "real" must survive in both modes.
@@ -994,14 +994,14 @@ TEST_F(CookieTest, ParseCookiesDropsDollarPrefixedLegacyAttributes) {
     EXPECT_EQ("ok", cookies["real"]);
 }
 
-// parse_cookies enforces the 16KB DoS guard (cookie.cpp:125-127).
+// parse_cookies enforces the 16KB DoS guard.
 TEST_F(CookieTest, ParseCookiesRejectsOver16KBHeader) {
     std::string huge = "a=" + std::string(16 * 1024 + 1, 'x');
     EXPECT_THROW((void) parse_cookies(huge, false), std::runtime_error);
 }
 
-// Separator (';'/',') encountered in NAME state with a buffered name but no '='
-// emits an empty-value cookie (cookie.cpp:151-160). e.g. "flag; k=v".
+// A separator (';', or ',' in Set-Cookie mode) in NAME state with a buffered name but no '='
+// emits an empty-value cookie in parse_cookies, e.g. "flag; k=v".
 TEST_F(CookieTest, ParseCookiesNameWithoutEqualsBeforeSeparatorYieldsEmptyValue) {
     auto cookies = parse_cookies(std::string("flag; k=v"), false);
     ASSERT_TRUE(cookies.find("flag") != cookies.end());
@@ -1011,7 +1011,7 @@ TEST_F(CookieTest, ParseCookiesNameWithoutEqualsBeforeSeparatorYieldsEmptyValue)
 }
 
 // In set_cookie_header mode, a bare attribute name before a separator is
-// recognised and dropped rather than emitted (cookie.cpp:155 false branch).
+// recognised and dropped rather than emitted by the is_cookie_attribute filter.
 TEST_F(CookieTest, ParseCookiesBareAttributeNameBeforeSeparatorIsDropped) {
     auto cookies = parse_cookies(std::string("Secure; real=v"), true);
     EXPECT_TRUE(cookies.find("Secure") == cookies.end());
@@ -1020,7 +1020,7 @@ TEST_F(CookieTest, ParseCookiesBareAttributeNameBeforeSeparatorIsDropped) {
 }
 
 // Quoted value exceeding COOKIE_VALUE_MAX via a plain quoted char throws
-// (cookie.cpp:215-218).
+// (parse_cookies, plain quoted-character branch).
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
     // Open quote, then COOKIE_VALUE_MAX+1 plain chars => length check trips.
     std::string header = "big=\"" + std::string(COOKIE_VALUE_MAX + 1, 'a') + "\"";
@@ -1028,7 +1028,7 @@ TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
 }
 
 // Quoted value exceeding COOKIE_VALUE_MAX via an escaped char throws
-// (cookie.cpp:194-197). Fill to the limit with plain chars, then an escape.
+// (parse_cookies, value_escape branch). Fill to the limit with plain chars, then an escape.
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
     // COOKIE_VALUE_MAX plain chars bring length to the limit, then "\\q" appends
     // an escaped char while at capacity => the escaped-branch length check trips.
@@ -1037,7 +1037,7 @@ TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
 }
 
 // parse_set_cookie with no ';' separator: the whole header is the cookie-pair
-// and the attribute string stays empty (cookie.cpp:280-283).
+// and the attribute string stays empty (parse_set_cookie, first_semi == npos).
 TEST_F(CookieTest, ParseSetCookieNoSemicolonWholeHeaderIsPair) {
     auto result = parse_set_cookie("only=pair");
     ASSERT_TRUE(result.has_value());
@@ -1048,13 +1048,13 @@ TEST_F(CookieTest, ParseSetCookieNoSemicolonWholeHeaderIsPair) {
 }
 
 // parse_set_cookie returns nullopt when the cookie-pair has no '=' or an empty
-// name (cookie.cpp:292-295).
+// name (parse_set_cookie, eq_pos validity check).
 TEST_F(CookieTest, ParseSetCookieInvalidPairReturnsNullopt) {
     EXPECT_FALSE(parse_set_cookie("novalue; Path=/").has_value());    // no '='
     EXPECT_FALSE(parse_set_cookie("=emptyname; Path=/").has_value()); // eq_pos == 0
 }
 
-// Quoted attribute value is unquoted (cookie.cpp:325-327): Path="/x" -> /x.
+// Quoted attribute value is unquoted (parse_set_cookie, attribute-value unquoting): Path="/x" -> /x.
 TEST_F(CookieTest, ParseSetCookieUnquotesAttributeValue) {
     auto result = parse_set_cookie("test=value; Path=\"/quoted/path\"; Domain=\"ex.com\"");
     ASSERT_TRUE(result.has_value());
@@ -1063,7 +1063,7 @@ TEST_F(CookieTest, ParseSetCookieUnquotesAttributeValue) {
 }
 
 // parse_set_cookie SameSite=Strict and SameSite=None branches
-// (cookie.cpp:360-366); the Lax branch is already covered elsewhere.
+// (parse_set_cookie, SameSite branches); the Lax branch is already covered elsewhere.
 TEST_F(CookieTest, ParseSetCookieSameSiteStrictAndNone) {
     {
         auto result = parse_set_cookie("test=value; SameSite=Strict");

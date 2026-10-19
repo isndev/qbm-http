@@ -355,8 +355,8 @@ TEST(WsHandshakeValidator, ServerRejectsWrongKeyLength) {
 TEST(WsHandshakeValidator, ServerRejectsNonBase64KeyOfCorrectLength) {
     HsServerFakeIO    io;
     qb::http::Request req = valid_upgrade_request();
-    // 24 chars containing base64-illegal bytes => decode throws (ws.h:993-996)
-    // or yields a wrong size / non-canonical re-encode (ws.h:998-1001).
+    // 24 chars with illegal Base64 bytes yield an empty decoded key; the size
+    // and canonical-form checks in ws_server::populate_handshake_response reject it.
     req.set_header("Sec-WebSocket-Key", "************************");
     qb::http::Response                      resp;
     qb::protocol::ws_server<HsServerFakeIO> proto(io, req, resp);
@@ -803,7 +803,7 @@ TEST(WsFramerErrors, ResetClearsPerFrameState) {
     WsFramer       proto(io, valid_upgrade_request());
     ASSERT_TRUE(proto.ok());
 
-    // Feed a complete masked text frame, then call reset() (ws.h:848-853) — the
+    // Feed a complete masked text frame, then call reset() (ws.h:850-855) — the
     // framer must accept a fresh frame afterwards and dispatch it.
     push_masked_frame(io.input, qb::http::ws::opcode::Text, "first");
     run_framer(proto, io);

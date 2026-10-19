@@ -245,8 +245,8 @@ TEST(WsHandshakeSecurity, NonBase64KeyOfCorrectLengthIsRejected) {
     auto sock = connect_raw(server.port);
 
     // Exactly 24 chars but contains characters illegal in base64 ('*','!','@'),
-    // so base64::decode either throws or yields the wrong byte count
-    // (ws.h:993-1001). Either way → 400.
+    // so base64::decode returns an empty result for malformed input; the key checks
+    // in ws_server::populate_handshake_response reject it, producing 400.
     write_all(sock, raw_handshake_request(server.port, "************************"));
 
     const auto response = read_http_response(sock);

@@ -3430,8 +3430,8 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 }
 
 // ---------------------------------------------------------------------------
-// DATA on an idle (never-opened, lower-numbered) stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (server.h:333-336).
+// DATA on an unknown lower-numbered stream -> RST_STREAM(
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:344-353).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -3454,7 +3454,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (server.h:329-331).
+// (qbm/http/src/qbm/http/2/protocol/server.h:344-348).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

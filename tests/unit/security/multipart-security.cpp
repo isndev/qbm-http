@@ -445,7 +445,7 @@ TEST_F(MultipartSecurityTest, SerializationRejectsBoundaryInjection) {
 // MultipartParser::setBoundary — direct error-path coverage.
 //
 // parse_boundary() guards the *header* form, but the low-level parser has its
-// own setBoundary() guards (multipart.cpp:245-256) reached when a parser is
+// own setBoundary() guards (MultipartParser::setBoundary) reached when a parser is
 // driven directly (e.g. by a streaming consumer). These pin the two rejection
 // reasons and the resulting ERROR state, plus the accept path.
 // ====================================================================
@@ -511,8 +511,8 @@ TEST_F(MultipartSecurityTest, FindBoundaryLocatesAndMisses) {
         const std::string hay = "no marker present here";
         EXPECT_EQ(find_boundary(hay, boundary), hay.end());
     }
-    // A near-miss prefix that does not complete still misses (drives the
-    // std::mismatch advance loop, multipart.cpp:44-49).
+    // A near-miss prefix that does not complete still misses; find_boundary
+    // now delegates this search to std::search.
     {
         const std::string hay = "--XY--XY"; // boundary "--XYZ" never completes
         EXPECT_EQ(find_boundary(hay, boundary), hay.end());
@@ -694,7 +694,7 @@ TEST_F(MultipartSecurityTest, ParserFeedMalformedHeadersEndingLf) {
 
 // Mid-stream flush: feeding a partial part body (no closing boundary) leaves
 // partDataMark open, so the post-loop dataCallback(..., clear=false) path
-// flushes it to the consumer (multipart.cpp:113-115, 400). A second feed of the
+// flushes it to the consumer (multipart.cpp:113-115, 399). A second feed of the
 // closing boundary then completes the parse and the reassembled body matches.
 TEST_F(MultipartSecurityTest, ParserFeedFlushesOpenPartDataOnChunkBoundary) {
     MultipartParser parser("bnd");
