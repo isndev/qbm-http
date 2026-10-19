@@ -722,8 +722,9 @@ TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
             ASSERT_TRUE(protocol->server_draining());
         }
         const std::string drain_wire(session.out().cbegin(), session.out().size());
-        if (server_drains)
+        if (server_drains) {
             ASSERT_EQ(qb::http::test::extract_close_code(drain_wire), 1001);
+        }
 
         qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::GoingAway, "peer acknowledgement");
         session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
