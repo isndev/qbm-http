@@ -231,7 +231,7 @@ TEST(WsHandshakeSecurity, WrongLengthKeyIsRejected) {
     ASSERT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     auto sock = connect_raw(server.port);
 
-    // 8-char key: non-empty (passes session gate) but != 24 chars (ws.h:990-991).
+    // 8-char key: non-empty (passes session gate) but != 24 chars (ws/ws.h:990-991).
     write_all(sock, raw_handshake_request(server.port, "shortkey"));
 
     const auto response = read_http_response(sock);
@@ -261,7 +261,7 @@ TEST(WsHandshakeSecurity, WellFormedButWrongDecodedSizeKeyIsRejected) {
 
     // 24 valid base64 chars decoding to 18 bytes (not 16). "AAAAAAAAAAAAAAAAAAAAAAAA"
     // is 24 'A's = 18 zero bytes when base64-decoded, so the size check at
-    // ws.h:998-999 (decoded_key.size() != 16) fires → 400.
+    // ws/ws.h:998-999 (decoded_key.size() != 16) fires → 400.
     write_all(sock, raw_handshake_request(server.port, "AAAAAAAAAAAAAAAAAAAAAAAA"));
 
     const auto response = read_http_response(sock);

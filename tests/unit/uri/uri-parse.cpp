@@ -20,12 +20,14 @@
  */
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include <qb/io/uri.h>
+#include <qbm/http/detail/redirect.h>
 
 // ====================================================================
 // Basic URI Component Tests
@@ -491,3 +493,242 @@ TEST(UriEdgeCases, WhiteSpaceHandlingIsRejected) {
     (void) host;
     (void) path;
 }
+
+namespace redirect_uri_test {
+
+using qb::http::detail::resolve_redirect_location;
+
+TEST(RedirectUri, ResolvesHttpReferencesAgainstTheRawBase) {
+    const qb::io::uri                                                base("http://a/b/c/d;p?q");
+    const std::vector<std::pair<std::string_view, std::string_view>> cases{
+        {"", "http://a/b/c/d;p?q"},
+        {"g", "http://a/b/c/g"},
+        {"./g", "http://a/b/c/g"},
+        {"g/", "http://a/b/c/g/"},
+        {"/g", "http://a/g"},
+        {"//g", "http://g"},
+        {"?y", "http://a/b/c/d;p?y"},
+        {"g?y", "http://a/b/c/g?y"},
+        {"#s", "http://a/b/c/d;p?q#s"},
+        {"g#s", "http://a/b/c/g#s"},
+        {"g?y#s", "http://a/b/c/g?y#s"},
+        {";x", "http://a/b/c/;x"},
+        {"g;x", "http://a/b/c/g;x"},
+        {"g;x?y#s", "http://a/b/c/g;x?y#s"},
+        {".", "http://a/b/c/"},
+        {"./", "http://a/b/c/"},
+        {"..", "http://a/b/"},
+        {"../", "http://a/b/"},
+        {"../g", "http://a/b/g"},
+        {"../..", "http://a/"},
+        {"../../", "http://a/"},
+        {"../../g", "http://a/g"},
+        {"../../../g", "http://a/g"},
+        {"/./g", "http://a/g"},
+        {"/../g", "http://a/g"},
+        {"g.", "http://a/b/c/g."},
+        {".g", "http://a/b/c/.g"},
+        {"g..", "http://a/b/c/g.."},
+        {"..g", "http://a/b/c/..g"},
+        {"./../g", "http://a/b/g"},
+        {"./g/.", "http://a/b/c/g/"},
+        {"g/./h", "http://a/b/c/g/h"},
+        {"g/../h", "http://a/b/c/h"},
+        {"g;x=1/./y", "http://a/b/c/g;x=1/y"},
+        {"g;x=1/../y", "http://a/b/c/y"},
+        {"g?y/./x", "http://a/b/c/g?y/./x"},
+        {"g?y/../x", "http://a/b/c/g?y/../x"},
+        {"g#s/./x", "http://a/b/c/g#s/./x"},
+        {"g#s/../x", "http://a/b/c/g#s/../x"},
+        {"https://other.test/a/../b?x#f", "https://other.test/b?x#f"},
+    };
+    for (const auto &[location, expected] : cases) {
+        SCOPED_TRACE(std::string(location));
+        const auto result = resolve_redirect_location(base, location);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->source(), expected);
+        EXPECT_TRUE(result->is_valid());
+    }
+    EXPECT_EQ(base.source(), "http://a/b/c/d;p?q");
+}
+
+TEST(RedirectUri, PreservesEmptyQueriesAndHttpFragmentInheritance) {
+    const qb::io::uri                                                base("http://a/p?old#prior");
+    const std::vector<std::pair<std::string_view, std::string_view>> cases{
+        {"", "http://a/p?old#prior"},
+        {"?", "http://a/p?#prior"},
+        {"?#", "http://a/p?#"},
+        {"?#new", "http://a/p?#new"},
+        {"#", "http://a/p?old#"},
+        {"#new?data", "http://a/p?old#new?data"},
+        {"next", "http://a/next#prior"},
+        {"//other?", "http://other?#prior"},
+        {"https://other.test", "https://other.test#prior"},
+    };
+    for (const auto &[location, expected] : cases) {
+        SCOPED_TRACE(std::string(location));
+        const auto result = resolve_redirect_location(base, location);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->source(), expected);
+    }
+    for (const std::string text : {"http://a?", "http://a/p?", "http://a/p?#"}) {
+        const auto result = resolve_redirect_location(qb::io::uri(text), "");
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->source(), text);
+    }
+    const auto no_path = resolve_redirect_location(qb::io::uri("http://a"), "child");
+    ASSERT_TRUE(no_path.has_value());
+    EXPECT_EQ(no_path->source(), "http://a/child");
+    const auto unchanged_path = resolve_redirect_location(qb::io::uri("http://a/x/./y?old"), "?");
+    ASSERT_TRUE(unchanged_path.has_value());
+    EXPECT_EQ(unchanged_path->source(), "http://a/x/./y?");
+}
+
+TEST(RedirectUri, PreservesSegmentsAndEncodedOctetsWithoutDecoding) {
+    qb::io::uri base("http://a/b/c/d?original");
+    base.queries()["original"] = {"edited map is not URI text"};
+    const std::vector<std::pair<std::string_view, std::string_view>> cases{
+        {"g//h/", "http://a/b/c/g//h/"},
+        {"/a//b/../c/", "http://a/a//c/"},
+        {"/a///b//", "http://a/a///b//"},
+        {"%2e%2e/g%2Fh", "http://a/b/c/%2e%2e/g%2Fh"},
+        {"%2E/next", "http://a/b/c/%2E/next"},
+        {"?q=a+b%20c%2f", "http://a/b/c/d?q=a+b%20c%2f"},
+        {"?q=%00%FF%25", "http://a/b/c/d?q=%00%FF%25"},
+        {"https://exa%6dple.test/%2F", "https://exa%6dple.test/%2F"},
+        {"https://a%40b.test/path", "https://a%40b.test/path"},
+        {"./g:h", "http://a/b/c/g:h"},
+        {"", "http://a/b/c/d?original"},
+    };
+    for (const auto &[location, expected] : cases) {
+        SCOPED_TRACE(std::string(location));
+        const auto result = resolve_redirect_location(base, location);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->source(), expected);
+    }
+}
+
+TEST(RedirectUri, AcceptsBracketedIpv6AndPreservesRawAuthority) {
+    const qb::io::uri                                                base("hTtP://[2001:db8::1]:8080/a/b?old");
+    const std::vector<std::pair<std::string_view, std::string_view>> cases{
+        {"../next", "hTtP://[2001:db8::1]:8080/next"},
+        {"//[::1]:443/p", "hTtP://[::1]:443/p"},
+        {"https://[::ffff:192.0.2.1]/p", "https://[::ffff:192.0.2.1]/p"},
+        {"HTTP://Example.test:00080/p", "HTTP://Example.test:00080/p"},
+        {"http://host:/p", "http://host:/p"},
+        {"http://host:0/p", "http://host:0/p"},
+        {"http://host:65535/p", "http://host:65535/p"},
+        {"https://[::1]:/p", "https://[::1]:/p"},
+    };
+    for (const auto &[location, expected] : cases) {
+        SCOPED_TRACE(std::string(location));
+        const auto result = resolve_redirect_location(base, location);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(result->source(), expected);
+    }
+}
+
+TEST(RedirectUri, RejectsMalformedReferencesAndUnsupportedDestinations) {
+    const qb::io::uri              base("https://example.test/a/b?q#f");
+    const std::vector<std::string> cases{
+        "%",
+        "%0",
+        "%GG",
+        "?q=%",
+        "?q=%1",
+        "#%zz",
+        "/back\\slash",
+        "/raw space",
+        "?raw space",
+        "#raw space",
+        "/raw\rline",
+        "?raw\nline",
+        "#raw\ttab",
+        std::string("/nul") + '\0' + "tail",
+        "/del\x7f",
+        "/utf8\xc3\xa9",
+        "?array[0]=x",
+        "#fragment#extra",
+        "http:g",
+        "g:h",
+        "1bad:ref",
+        ":ref",
+        "ftp://other.test/p",
+        "https:/missing",
+        "//",
+        "///path",
+        "http://",
+        "http:///path",
+        "//:80/p",
+        "//host:abc/p",
+        "//host:-1/p",
+        "//host:+80/p",
+        "//host:65536/p",
+        "//host:999999999999999999999/p",
+        "//host:80:90/p",
+        "//host%GG/p",
+        "//host[bad]/p",
+        "//[::1",
+        "//[not-ip]/p",
+        "//[::1]junk/p",
+        "//[::1]:abc/p",
+        "//[::1]:65536/p",
+        "//::1/p",
+        "//[fe80::1%25en0]/p",
+        "//[v1.future]/p",
+        std::string("//[::1") + '\0' + "ignored]/p",
+        "//user@host/p",
+        "//@host/p",
+        "https://user:pass@host/p",
+        "//a@b@host/p",
+    };
+    for (const auto &location : cases) {
+        SCOPED_TRACE(::testing::PrintToString(location));
+        EXPECT_FALSE(resolve_redirect_location(base, location).has_value());
+    }
+}
+
+TEST(RedirectUri, RequiresAValidAbsoluteHttpBaseEvenForAbsoluteLocations) {
+    const std::vector<std::string> cases{
+        "",
+        "/relative",
+        "http:",
+        "http://",
+        "http:///path",
+        "ftp://host/path",
+        "http://user@host/path",
+        "http://@host/path",
+        "http://host:65536/path",
+        "http://host:abc/path",
+        "http://[not-ip]/path",
+        "http://[fe80::1%25en0]/path",
+        "http://[v1.future]/path",
+        "http://host/%GG",
+        "http://host/?q=%",
+        "http://host/#bad space",
+    };
+    for (const auto &text : cases) {
+        SCOPED_TRACE(text);
+        EXPECT_FALSE(resolve_redirect_location(qb::io::uri(text), "https://valid.test/path").has_value());
+    }
+    EXPECT_FALSE(resolve_redirect_location(qb::io::uri{}, "https://valid.test/path").has_value());
+}
+
+TEST(RedirectUri, OwnsTheResultAfterBothInputsAreDestroyed) {
+    std::optional<qb::io::uri> result;
+    {
+        qb::io::uri base("https://example.test/a/b?old#kept");
+        std::string location("../c//?q=%2F");
+        result = resolve_redirect_location(base, location);
+        ASSERT_TRUE(result.has_value());
+        base     = std::string("http://replaced.test/");
+        location = "replaced";
+    }
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->source(), "https://example.test/c//?q=%2F#kept");
+    EXPECT_EQ(result->path(), "/c//");
+    EXPECT_EQ(result->encoded_queries(), "q=%2F");
+    EXPECT_EQ(result->fragment(), "kept");
+}
+
+} // namespace redirect_uri_test

@@ -251,6 +251,37 @@ TEST(Http1Serialization, RequestOmitsUriFragment) {
     EXPECT_EQ(wire.find("#client-only"), std::string::npos);
 }
 
+TEST(Http1Serialization, RequestPreservesExplicitEmptyQueryAcrossValueOperations) {
+    for (const std::string &path : {std::string{"/"}, std::string{"/target"}, std::string(160, 'x').insert(0, "/")}) {
+        for (const std::string &fragment : {std::string{}, std::string{"#client-only"}}) {
+            qb::io::uri retained;
+            {
+                qb::io::uri original{"http://example.test" + path + "?" + fragment};
+                qb::io::uri copied{original};
+                qb::io::uri moved{std::move(copied)};
+                retained = std::move(moved);
+            }
+            qb::http::Request         request{qb::http::method::GET, retained};
+            qb::allocator::pipe<char> out;
+            ASSERT_NO_THROW(out << request);
+            const std::string wire{out.begin(), out.size()};
+            EXPECT_TRUE(wire.starts_with("GET " + path + "? HTTP/1.1\r\n")) << wire;
+        }
+    }
+}
+
+TEST(Http1Serialization, RequestKeepsAbsentQueryAndEncodedDelimitersDistinct) {
+    for (const auto &[source, target] :
+         {std::pair{"http://example.test/a", "/a"}, std::pair{"http://example.test/a#ignored?x", "/a"},
+          std::pair{"http://example.test/a?q=%3F", "/a?q=%3F"}, std::pair{"http://example.test/a%3Fb", "/a%3Fb"}}) {
+        qb::http::Request         request{qb::http::method::GET, {source}};
+        qb::allocator::pipe<char> out;
+        ASSERT_NO_THROW(out << request);
+        const std::string wire{out.begin(), out.size()};
+        EXPECT_TRUE(wire.starts_with(std::string{"GET "} + target + " HTTP/1.1\r\n")) << wire;
+    }
+}
+
 TEST(Http1Serialization, ResponseChunksPresentBody) {
     qb::http::Response response;
     response.status() = qb::http::status::OK;

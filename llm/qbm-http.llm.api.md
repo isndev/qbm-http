@@ -517,6 +517,66 @@ Usage: `auto s = qb::http::make_server(); s->router().get("/", h); s->router().c
 - **`qb::duration::zero()` means "no timeout"**, not an immediate timeout.
 Usage (coro): `auto reply = co_await qb::http::GET(qb::http::Request{qb::http::method::GET, qb::io::uri{"https://h/x"}});`
 
+### Opt-in one-shot redirects — explicit `<qbm/http/redirect.h>`
+
+`struct qb::http::RedirectOptions { std::size_t max_hops = 5; bool allow_cross_origin = false; };`
+`struct qb::http::async::RedirectReply : Reply { std::vector<Reply> hops; };`
+The existing `Reply` is unchanged. These overloads have required timeout, verification and options arguments. Callback storage is decayed by value and invoked as an lvalue with `async::RedirectReply&&`:
+
+```cpp
+namespace qb::http {
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void REQUEST(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void GET(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void POST(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void PUT(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void DEL(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void HEAD(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void OPTIONS(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+template <typename Completion>
+requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+void PATCH(Request request, Completion&& complete, qb::duration timeout, bool verify_peer, RedirectOptions options);
+}
+```
+
+Coroutine declarations use a deduced awaiter type; `co_await` yields `async::RedirectReply`:
+
+```cpp
+namespace qb::http {
+[[nodiscard]] auto REQUEST(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto GET(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto POST(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto PUT(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto DEL(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto HEAD(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto OPTIONS(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+[[nodiscard]] auto PATCH(Request request, qb::duration timeout, bool verify_peer, RedirectOptions options);
+}
+```
+
+`REQUEST` keeps the supplied method; the seven verbs set it. The default cap is five followed hops (zero follows none), with the terminal reply kept apart from `hops`; reaching the cap returns the received 3xx, never a generated 508. Request snapshots have ordinary preparation/compression state; replay uses the logical body, not a prepared snapshot. Complete bodies remain in history, which grows on actual followed hops without reserving `max_hops` entries. The timeout is per attempt. Final completion is deferred beyond session dispatch; destroying the coroutine awaiter suppresses later attempts, without cancelling an already-started session. Listener teardown drops queued callbacks. Before any reply, setup exceptions can propagate; a later-hop setup exception returns the preceding completed reply. Enqueue allocation failure is not recovered at the noexcept callback boundary.
+
+Cross-origin following requires `allow_cross_origin=true`, then Authorization/Proxy-Authorization/Cookie/Origin/Referer and the cookie jar are cleared. HTTPS→HTTP is refused regardless. 301/302 change POST to GET and discard content; 303 discards content and uses GET unless HEAD; 307/308 preserve method/logical body. Missing/multiple Location values or next-attempt preparation refusal return the last completed reply. _(src/qbm/http/redirect.h:25-38; src/qbm/http/detail/redirect.cpp:282-319)_
+
+Followed targets require strict absolute HTTP(S) resolution. Userinfo, malformed escapes/bytes, scoped IPv6 and IPvFuture are refused. Relative references retain raw escaped octets, slash segments and explicit empty queries; HTTP fragment inheritance applies. _(src/qbm/http/detail/redirect.cpp:80-110,113-161,172-200,210-278)_
+
+The chain owns each flight during startup, then preserves the existing session disposal contract. The terminal reply and history move into final delivery after dispatch; abandonment prevents subsequent flights. These are the startup, processing and helper entry points. _(src/qbm/http/redirect.h:92-162,174-200,215-340)_
+
+Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:622-675,858-880,1181-1193)_
+
 ### Persistent client — `qb::http1::Client` (alias `client`) — `src/qbm/http/1.1/client.h`
 `class Client : public std::enable_shared_from_this<Client>` — same-origin keep-alive client; **non-copyable, must live in a `shared_ptr`**.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);` — throws `std::invalid_argument` on non-http(s) scheme / missing host (http-only when `QB_HAS_SSL` off).

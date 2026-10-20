@@ -139,7 +139,7 @@ void on(RefreshCatalog const &) {
 
 `ctx.cancellable(...)` is what makes the request interruptible: the module's `http_awaiter` registers no cancellation hook of its own, so an unwrapped `co_await` stays parked until the reply arrives even after `kill()`. The wrapper resumes it with `cancelled_error` instead — which `spawn` swallows unless you catch it. It does not stop the upstream; the request still completes on the far end, which is why the timeout argument matters.
 
-The one-shot free functions (`GET`, `POST`, `REQUEST`, …) also have a callback form that heap-allocates a self-deleting session and delivers a `qb::http::async::Reply` (the original request plus the response), taking a `qb::duration` timeout:
+The one-shot free functions (`GET`, `POST`, `REQUEST`, …) also have a callback form that heap-allocates a self-deleting session and delivers a `qb::http::async::Reply` (the request snapshot for that attempt plus the response), taking a `qb::duration` timeout:
 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:1298-1314 (REQUEST, GET), 690-693 (Reply), 829-837 (the self-deleting session) -->
 
@@ -153,13 +153,16 @@ qb::http::GET(std::move(req), [](qb::http::async::Reply &&reply) {
 });
 ```
 
-Capture nothing you cannot outlive: the callback runs from a later turn of the loop, and by then the actor that issued the request may be gone. Copy what it needs by value, exactly as the coroutine form does.
+Capture by value what the callback must retain: a network completion runs from a later turn, while a local scheme or TLS-capability rejection can complete inline. The actor that issued an outstanding request may be gone when it completes.
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1257-1271 -->
 
 Both spellings share the same names: `GET`/`POST`/`REQUEST` have callback overloads and coroutine overloads that return `qb::http::async::awaiter<qb::http::async::Reply>`. Drive the latter with `co_await` inside a coroutine, or with `qb::http::run_sync(...)` from a plain function.
 
+For opt-in HTTP/HTTPS redirects, include `<qbm/http/redirect.h>` and pass `RedirectOptions` as the required final argument: callback calls take five arguments, coroutine calls four. `RedirectOptions{}` follows at most five same-origin hops; the cap returns the last response, including a remaining 3xx. The result is `async::RedirectReply`: `.request` and `.response` describe the terminal attempt, while `.hops` holds the followed exchanges. See [redirect policy and replay](./readme/14-async-http-client.md#opt-in-redirects-http11).
+
 **Outside an actor** — a `main()`, a test, a CLI, a setup step before `qb::Main::start()` — the thread is yours to block, and `qb::http::run_sync` is the right answer:
 
-<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:204-209 -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:250-255 -->
 
 ```cpp
 #include <qbm/http/http.h>
@@ -264,7 +267,7 @@ These gates are real `#ifdef` boundaries in the headers, so feature availability
 
 ### Feature and build matrix
 
-<!-- src: qbm/http/CMakeLists.txt:55-61, :79-111, :183-185, qbm/http/src/qbm/http/http.h:43-53 -->
+<!-- src: qbm/http/CMakeLists.txt:55-61, :79-111, :184-186, qbm/http/src/qbm/http/http.h:43-53 -->
 
 | Capability | Header / namespace | Compile gate | Required dependency |
 |---|---|---|---|

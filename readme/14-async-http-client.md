@@ -8,7 +8,7 @@ Make non-blocking outbound HTTP/1.1, HTTP/2, and HTTP/3 requests over the qb-io 
 
 The qbm-http client surface is non-blocking from the ground up. Every request is driven by the same per-thread qb-io reactor that powers the server side, so a single I/O thread can have hundreds of outbound calls in flight without one thread per request. There are three layers, from simplest to most capable:
 
-- **One-shot callback client** — the free functions `qb::http::GET`, `POST`, `PUT`, `DEL`, `HEAD`, `OPTIONS`, `PATCH`, and the generic `REQUEST`. Each heap-allocates a self-deleting session, performs a single HTTP/1.1 request, and delivers an `async::Reply` to your callback.
+- **One-shot callback client** — the free functions `qb::http::GET`, `POST`, `PUT`, `DEL`, `HEAD`, `OPTIONS`, `PATCH`, and the generic `REQUEST`. Without redirect options, each heap-allocates a self-deleting session, performs a single HTTP/1.1 request, and delivers an `async::Reply` to your callback.
 - **One-shot coroutine client** — the same verb names, overloaded to return an awaiter you `co_await`. Driven from a coroutine, or run to completion with `qb::http::run_sync(...)`.
 - **Persistent client** — `qb::http1::Client`, `qb::http2::Client`, and `qb::http3::Client`. Long-lived, same-origin, connection-reusing clients with a request queue, batching, configurable connect/request timeouts, and automatic reconnection. HTTP/2 and HTTP/3 are only available through their persistent clients.
 
@@ -18,13 +18,13 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 ### `async::Reply` — the one-shot result
 
-The one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the original request with the server response so you can correlate the two — useful for tracing or request IDs.
+The legacy one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the request snapshot for that attempt with the server response. Normal preparation may add headers or compress the body; a failure may occur before transmission. The opt-in redirect overloads below return a separate `async::RedirectReply`.
 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:1037-1040 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
-        Request  request;   // the request that was sent (moved in)
+        Request  request;   // the attempt's request snapshot (moved in)
         Response response;  // the parsed response (or a synthesized error)
     };
 }
@@ -34,7 +34,7 @@ The persistent clients (`qb::http1::Client`, `qb::http2::Client`, `qb::http3::Cl
 
 ### Timeouts are `qb::duration`, and zero means "no timeout"
 
-Every connect and request timeout in the client surface is a `qb::duration`. The default is `qb::duration::zero()`, which means **no timeout** — not an immediate deadline. Pass a real duration to bound a call:
+Every connect and request timeout in the client surface is a `qb::duration`. The legacy one-shot helpers default to `qb::duration::zero()`, which means **no timeout** — not an immediate deadline. Pass a real duration to bound a call:
 
 ```cpp
 using namespace std::chrono_literals;
@@ -47,11 +47,11 @@ The persistent clients carry their own defaults: a 30-second connect timeout and
 
 ### `verify_peer` — TLS certificate verification
 
-For `https://` (and `wss://`, h2, h3) targets, `verify_peer` controls server-certificate chain and hostname verification. It defaults to `true` everywhere. Passing `false` (or calling `set_verify_peer(false)`) disables verification and must only be used for trusted or self-signed endpoints. On the persistent clients, set it **before** connecting.
+For `https://` (and `wss://`, h2, h3) targets, `verify_peer` controls server-certificate chain and hostname verification. The legacy helpers and persistent clients default to `true`; the opt-in redirect overloads require an explicit argument. Passing `false` (or calling `set_verify_peer(false)`) disables verification and must only be used for trusted or self-signed endpoints. On the persistent clients, set it **before** connecting.
 
 ### Single-shot awaiters and the mono-thread model
 
-The coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`coro.h`](../src/qbm/http/coro.h)). An awaiter is single-shot, non-copyable, and non-movable: you construct it as a prvalue from a factory and `co_await` it immediately. A `shared_ptr` alive sentinel guards against late callbacks if the awaiter is destroyed before the operation completes, and resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the I/O thread that started the call. This is the same mono-thread-per-listener contract as the rest of the framework — never share a client or drive its awaiters across threads.
+The legacy coroutine entry points return `qb::http::async::awaiter<T>` (defined in [`coro.h`](../src/qbm/http/coro.h)). An awaiter is single-shot, non-copyable, and non-movable: you construct it as a prvalue from a factory and `co_await` it immediately. A `shared_ptr` alive sentinel guards against late callbacks if the awaiter is destroyed before the operation completes, and resumption is routed through `qb::io::async::coro_scheduler()`, so the continuation always runs on the I/O thread that started the call. This is the same mono-thread-per-listener contract as the rest of the framework — never share a client or drive its awaiters across threads.
 
 `qb::http::run_sync(awaitable)` is a thin re-export of `qb::io::async::run_sync`. It pumps the *current* thread's event loop just enough to resolve one awaitable, without spawning threads or mutating the global scheduler. Use it from tests, `main`, or any synchronous bootstrap code.
 
@@ -162,7 +162,7 @@ namespace qb::http {
 
 From inside a coroutine, the call reads top to bottom — request out, response back, error handling is a plain `if`:
 
-<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:284-302 -->
+<!-- src: qbm/http/tests/system/coro/coro-client-http1.cpp:330-348 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async/coroutine.h>
@@ -175,7 +175,7 @@ qb::io::async::task<void> fetch() {
     auto reply = co_await qb::http::GET(std::move(req), 5s);
 
     if (reply.response.status() == qb::http::status::OK) {
-        // reply.request is the original request; reply.response the parsed reply.
+        // reply.request is this attempt's snapshot; reply.response is the processed reply.
         handle(reply.response.body().as<std::string_view>());
     }
     co_return;
@@ -208,6 +208,64 @@ To skip TLS verification for a self-signed endpoint, pass the third argument:
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
 ```
+
+## Opt-in redirects (HTTP/1.1)
+
+Include `<qbm/http/redirect.h>` explicitly. `RedirectOptions` is required as the final argument; `<qbm/http/http.h>` and the existing overloads continue to perform one attempt. The same opt-in forms exist for `REQUEST`, `GET`, `POST`, `PUT`, `DEL`, `HEAD`, `OPTIONS`, and `PATCH`:
+
+```cpp
+namespace qb::http {
+    struct RedirectOptions {
+        std::size_t max_hops = 5;
+        bool allow_cross_origin = false;
+    };
+
+    template <typename Completion>
+    requires std::is_invocable_v<std::decay_t<Completion>&, async::RedirectReply&&>
+    void GET(Request request, Completion&& complete, qb::duration timeout,
+             bool verify_peer, RedirectOptions options); // all five arguments required
+
+    [[nodiscard]] auto GET(Request request, qb::duration timeout,
+                           bool verify_peer, RedirectOptions options); // all four required
+}
+```
+<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,234-243 -->
+
+From inside a coroutine:
+
+```cpp
+#include <chrono>
+#include <qbm/http/redirect.h>
+
+auto reply = co_await qb::http::GET(
+    qb::http::Request{qb::io::uri{"https://example.test/start"}},
+    std::chrono::seconds{5}, true, qb::http::RedirectOptions{});
+```
+
+The callback takes `qb::http::async::RedirectReply&&`; it is stored by value, so a named callable is copied and a move-only callable must be moved. Final callback delivery is deferred until after the previous session's dispatch, including locally completed attempts. The coroutine form yields `async::RedirectReply`; destroying its awaiter prevents later attempts but does not cancel a session already started. Keep the originating listener running until completion: clearing or destroying it drops queued callbacks without invoking them and releases their captures. Exceptions from the final callback are contained by the listener's deferred drain.
+
+Before the first reply, setup exceptions propagate to the caller. A recoverable preparation or startup exception on a later hop returns the preceding completed reply. Startup ownership is guarded, including a session that deletes itself during an inline completion. This is not a general resource-exhaustion guarantee: failure to enqueue deferred work remains fatal at the existing noexcept callback boundary.
+<!-- src: qbm/http/src/qbm/http/redirect.h:92-162,174-200; qb/src/qb/io/async/listener.h:622-675,858-880,1181-1193 -->
+
+`RedirectReply` derives from the unchanged `async::Reply` and adds `std::vector<Reply> hops`. Its inherited `request` and `response` are the terminal exchange. `hops` contains each exchange actually followed, in order, without repeating the terminal one; after at least one followed hop, `hops.front().request` is the first attempt's snapshot. Every snapshot has the legacy preparation state: it may include automatic headers and a compressed request body. It is not a pristine pre-preparation input copy.
+
+| Policy | Behavior |
+|---|---|
+| Followable response | 301, 302, 303, 307 or 308 with exactly one usable Location value |
+| Hop cap | `max_hops=5` allows five followed hops after the initial attempt; zero follows none. At the cap, the last reply is returned, including its 3xx; no synthetic 508 |
+| Origin | Same-origin by default. `allow_cross_origin=true` permits a new origin and removes Authorization, Proxy-Authorization, Cookie, Origin and Referer, and clears the parsed cookie jar. Removed credentials are not restored on a later return hop |
+| Downgrade | HTTPS to HTTP stops the chain, even with cross-origin enabled |
+| Method and content | 301/302 turn POST into GET and drop content. 303 drops content and uses GET, except HEAD remains HEAD. 307/308 preserve method and logical body |
+| Timeout | The supplied connect/inactivity timeout applies separately to every attempt; zero disables it. It is not a whole-chain deadline |
+
+<!-- src: qbm/http/src/qbm/http/detail/redirect.cpp:282-319; qbm/http/src/qbm/http/redirect.h:128-150,174-200 -->
+
+Location resolution preserves encoded octets, repeated/trailing slashes and an explicitly empty query. A relative Location is resolved against the preceding attempt. An absent fragment inherits the prior fragment; an explicit empty `#` clears it, and fragments stay out of the wire target. Missing or multiple Location values, invalid syntax or percent escapes, userinfo, scoped IPv6 and IPvFuture are not followed. A single empty Location is an empty URI reference and is still bounded by the hop cap. A forbidden target or next-attempt preparation failure returns the last completed reply through the usual one-shot response processing.
+
+Each attempt receives a fresh copy of the logical request body, so replay does not compress an already-compressed snapshot. Body-dropping rewrites clear trailers and body/framing metadata; preserved-body rewrites recalculate Content-Length, and Host is rebuilt for the destination. Cross-origin permission can therefore also permit replaying a retained body to the new origin.
+
+History retains complete request and response bodies. The cap bounds followed hops, not retained bytes: storage grows with actual followed exchanges rather than being reserved up front from `max_hops`. A very large cap permits a correspondingly large history.
+<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,128-150,174-200; qbm/http/src/qbm/http/detail/redirect.cpp:80-110,113-161,172-200,210-278,282-319 -->
 
 ## Persistent client capability matrix
 
@@ -270,7 +328,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:505-516 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:607-618 -->
 ```cpp
 #include <qbm/http/http.h>
 

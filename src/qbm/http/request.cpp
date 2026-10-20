@@ -333,7 +333,7 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // origin-form whose URI has none) -- a default URI, or one naming only an authority (Huly QB-1066).
     const std::string_view path = r.uri().path();
     out << method << qb::http::sep << (path.empty() ? std::string_view{"/"} : path);
-    if (!r.uri().encoded_queries().empty())
+    if (r.uri().has_query())
         out << "?" << r.uri().encoded_queries();
     out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
 

@@ -187,6 +187,80 @@ BM_Http1_AccessLogFirstRequest(benchmark::State &state) {
     }
     state.SetItemsProcessed(state.iterations());
 }
+// Legacy API only: the common source can be built unchanged on both revisions.
+// Each interval starts at GET and includes connection setup, response delivery
+// and complete client/server connection teardown. Request/observation construction,
+// correctness checks and destruction of the returned Reply are outside timing.
+void
+BM_Http1_LegacyOneShotLifecycle(benchmark::State &state) {
+    Fixture fixture(0);
+    if (!fixture.ready) {
+        state.SkipWithError("HTTP/1 one-shot fixture connection failed");
+        return;
+    }
+    const std::string origin = "http://127.0.0.1:" + std::to_string(fixture.server->transport().local_endpoint().port());
+    // Fixture's historical persistent connection is setup only. Neither its
+    // socket nor its deferred self-hold may enter the one-shot measurements.
+    std::weak_ptr<qb::http1::Client> setup_client = fixture.client;
+    fixture.client->disconnect();
+    fixture.client.reset();
+    if (!http_client_bench::pump_until(
+            [&] { return setup_client.expired() && fixture.server->sessions().empty() && !qb::io::async::listener::current.has_deferred(); })
+        || fixture.routed != 0 || fixture.logged != 0) {
+        state.SkipWithError("HTTP/1 one-shot setup connection did not retire cleanly");
+        return;
+    }
+
+    struct Observed {
+        qb::http::async::Reply reply;
+        unsigned               delivered = 0;
+    };
+    std::uint64_t completed = 0;
+    for (auto _ : state) {
+        state.PauseTiming();
+        const std::string id   = completed % 2 == 0 ? "17" : "23";
+        const std::string path = "/bench/" + id;
+        qb::http::Request work{qb::http::method::GET, qb::io::uri(origin + path)};
+        work.set_header("User-Agent", "qb legacy one-shot comparison");
+        auto observed = std::make_shared<Observed>();
+        state.ResumeTiming();
+        qb::http::GET(
+            std::move(work),
+            [observed](qb::http::async::Reply &&reply) {
+                ++observed->delivered;
+                observed->reply = std::move(reply);
+            },
+            qb::duration::zero());
+        const bool settled = http_client_bench::pump_until([&] {
+            // The one-shot session owns a copy of this callback. A sole observer
+            // owner proves its destruction, not just receipt of the response.
+            return observed->delivered != 0 && observed.use_count() == 1 && fixture.server->sessions().empty()
+                   && !qb::io::async::listener::current.has_deferred();
+        });
+        state.PauseTiming();
+        ++completed;
+        if (!settled || observed->delivered != 1 || observed->reply.response.status() != qb::http::status::OK
+            || observed->reply.response.body().as<std::string>() != id || observed->reply.request.method() != qb::http::method::GET
+            || observed->reply.request.uri().path() != path || fixture.routed != completed || fixture.logged != 0
+            || !fixture.server->sessions().empty()) {
+            state.SkipWithError("HTTP/1 legacy one-shot work or connection teardown was incomplete");
+            return;
+        }
+        benchmark::DoNotOptimize(observed->reply.response.body().raw().size());
+        // A late callback still owns observed if the watchdog ever fails; no
+        // stack-reference capture escapes. Normal Reply destruction is untimed.
+        observed.reset();
+        state.ResumeTiming();
+    }
+    if (fixture.routed != completed || fixture.logged != 0 || !fixture.server->sessions().empty()) {
+        state.SkipWithError("HTTP/1 legacy one-shot final conservation failed");
+        return;
+    }
+    state.SetItemsProcessed(state.iterations());
+    state.counters["responses"]             = static_cast<double>(completed);
+    state.counters["connections_completed"] = static_cast<double>(completed);
+    state.counters["routed"]                = static_cast<double>(fixture.routed);
+}
 } // namespace access_log_loopback_bench
 
 BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogWarm)->Arg(0)->Arg(1)->Arg(2)->ArgNames({"format"})->Unit(benchmark::kMicrosecond);
@@ -198,5 +272,10 @@ BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogFirstRequest)
     // Automatic calibration creates thousands of fresh TCP pairs outside timing
     // and exhausts the host's ephemeral ports. Bound identical work on both sides.
     ->Iterations(8)
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(access_log_loopback_bench::BM_Http1_LegacyOneShotLifecycle)
+    // Bound fresh TCP pairs per process; calibration must not exhaust ephemeral ports.
+    ->Iterations(32)
+    ->UseRealTime()
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK_MAIN();

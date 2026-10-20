@@ -9,6 +9,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **Opt-in one-shot redirects (Huly QB-169).** Include `<qbm/http/redirect.h>` and pass the required
+  trailing `RedirectOptions` to any of the eight HTTP/HTTPS helpers. The default permits five
+  same-origin followed hops; the cap returns the last 3xx rather than creating 508. The separate
+  `async::RedirectReply` carries the terminal attempt and ordered followed replies, preserving
+  legacy prepared-request snapshots. Replayed bodies come from the logical request, avoiding
+  double compression. Timeout is per attempt; history retains whole bodies and grows with actual
+  followed hops. Cross-origin following is explicit and strips credentials; HTTPS-to-HTTP,
+  invalid Location values, userinfo, scoped IPv6 and IPvFuture are not followed. Final completion
+  is deferred until after dispatch. Existing overloads and the `async::Reply` layout are unchanged.
+
 - **Persistent HTTP/1 access-log comparison (Huly QB-1106).** The existing benchmark suite gains
   `qbm-http-bench-http1-access-log-loopback`: batches of 32 real loopback requests on a persistent
   connection, logging off, common, or JSON. It checks response bodies and status, routed/logged
@@ -429,6 +439,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   are unchanged.
 
 ### Fixed
+
+- **HTTP/1 serialization preserves an explicitly empty query (Huly QB-169).** A request for
+  `/path?` keeps its trailing `?`, including when written through `MessageHead`; it previously
+  became `/path`. URI fragments remain absent from the wire target.
 
 - **Source and test comments follow the current handlers (Huly QB-1102).** Correct stale
   authentication, Cookie, date, frame-parser, WebSocket and multipart references. Describe
