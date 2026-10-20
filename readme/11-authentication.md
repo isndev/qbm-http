@@ -142,7 +142,7 @@ void           set_options(const Options &) noexcept;
 | `roles` | `user.roles` (JSON array) | always |
 | `metadata` | `user.metadata` (JSON object) | when non-empty |
 
-<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:100-135 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:97-133 -->
 
 ### Verifying a token
 
@@ -151,16 +151,16 @@ void           set_options(const Options &) noexcept;
 Two security properties are worth stating explicitly:
 
 - **The algorithm and key come from `Options`, never from the token header.** `verify_token` selects HMAC-secret or asymmetric-public-key based on the configured algorithm family, pinning verification and defeating `alg`-confusion attacks driven by an attacker-controlled JWT header.
-- **The `User` is the one the token was issued for.** After the signature holds, the claims are read from the token's own JSON payload with their JSON types — exactly as the unverified branch reads them — so an `id` or `username` that looks like a number, a boolean or `null` (`"123"`, `"true"`) comes back as the same string. <!-- src: qbm/http/src/qbm/http/auth/manager.cpp:327-336 -->
+- **The `User` is the one the token was issued for.** After the signature holds, the claims are read from the token's own JSON payload with their JSON types — exactly as the unverified branch reads them — so an `id` or `username` that looks like a number, a boolean or `null` (`"123"`, `"true"`) comes back as the same string. <!-- src: qbm/http/src/qbm/http/auth/manager.cpp:288-297 -->
 - **A verified `User` must have a usable identity.** If a signature-valid token resolves to an empty `id` *and* empty `username`, verification still fails (logged and `nullopt`). Malformed `roles`/`metadata` JSON is tolerated — those fields are left empty and a warning is logged — because only a missing subject/username is fatal.
 
-<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:259-459 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:255-417 -->
 
 ### Extracting from a header
 
 `extract_token_from_header` strips the configured scheme and returns the bare token, or an empty string on a format mismatch. The scheme match is case-insensitive and requires whitespace after it: `"bearer <token>"` is accepted, but `"Bearertoken"` (no separator) is rejected.
 
-<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:235-255 -->
+<!-- src: qbm/http/src/qbm/http/auth/manager.cpp:230-250 -->
 
 ### End-to-end with the Manager
 
@@ -300,7 +300,7 @@ router.get("/data", [](auto ctx) {
 
 ## Pitfalls
 
-- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/src/qbm/http/auth/manager.cpp:262,338-400`)
+- **Never ship `require_signature_verification(false)`.** With it off, `verify_token` decodes the payload *without* a signature check and validates only `exp`/`nbf`/`iss`/`aud` against forgeable claims — any token with the right claims is accepted. The default is `true`; keep it `true` in production. (`qbm/http/src/qbm/http/auth/manager.cpp:257,299-361`)
 - **`verify_expiration(false)` mints non-expiring tokens.** `generate_token` only writes an `exp` claim when expiration verification is on, so disabling it produces tokens that never expire and are never rejected for age.
 - **The key must match the algorithm family.** An HMAC secret under an `RS*`/`ES*`/`EdDSA` algorithm (or vice versa) does not throw — `verify_token` simply returns `std::nullopt`. A verify-only service still needs the `public_key` set for asymmetric algorithms.
 - **`"Bearertoken"` is not a token.** `extract_token_from_header` always requires a scheme prefix followed by whitespace, so a missing separator yields an empty string. It cannot extract a bare/scheme-less token: `auth_scheme("")` does not enable that — it makes the whitespace check fall on the token's first character and reject every header.

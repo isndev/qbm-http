@@ -132,6 +132,35 @@ create_payload_json(const User &user, const Options &_options) {
     return payload;
 }
 
+// Creation and verification must use the same configured algorithm mapping.
+static qb::jwt::Algorithm
+jwt_algorithm(Options::Algorithm algorithm) noexcept {
+    switch (algorithm) {
+        case Options::Algorithm::HMAC_SHA256:
+            return qb::jwt::Algorithm::HS256;
+        case Options::Algorithm::HMAC_SHA384:
+            return qb::jwt::Algorithm::HS384;
+        case Options::Algorithm::HMAC_SHA512:
+            return qb::jwt::Algorithm::HS512;
+        case Options::Algorithm::RSA_SHA256:
+            return qb::jwt::Algorithm::RS256;
+        case Options::Algorithm::RSA_SHA384:
+            return qb::jwt::Algorithm::RS384;
+        case Options::Algorithm::RSA_SHA512:
+            return qb::jwt::Algorithm::RS512;
+        case Options::Algorithm::ECDSA_SHA256:
+            return qb::jwt::Algorithm::ES256;
+        case Options::Algorithm::ECDSA_SHA384:
+            return qb::jwt::Algorithm::ES384;
+        case Options::Algorithm::ECDSA_SHA512:
+            return qb::jwt::Algorithm::ES512;
+        case Options::Algorithm::ED25519:
+            return qb::jwt::Algorithm::EdDSA;
+        default:
+            return qb::jwt::Algorithm::HS256;
+    }
+}
+
 // Implementation of generate_token_payload
 std::string
 Manager::generate_token_payload(const User &user) const {
@@ -161,41 +190,7 @@ Manager::generate_token(const User &user) const {
     qb::jwt::CreateOptions options;
 
     // Map the algorithm
-    switch (_options.get_algorithm()) {
-        case Options::Algorithm::HMAC_SHA256:
-            options.algorithm = qb::jwt::Algorithm::HS256;
-            break;
-        case Options::Algorithm::HMAC_SHA384:
-            options.algorithm = qb::jwt::Algorithm::HS384;
-            break;
-        case Options::Algorithm::HMAC_SHA512:
-            options.algorithm = qb::jwt::Algorithm::HS512;
-            break;
-        case Options::Algorithm::RSA_SHA256:
-            options.algorithm = qb::jwt::Algorithm::RS256;
-            break;
-        case Options::Algorithm::RSA_SHA384:
-            options.algorithm = qb::jwt::Algorithm::RS384;
-            break;
-        case Options::Algorithm::RSA_SHA512:
-            options.algorithm = qb::jwt::Algorithm::RS512;
-            break;
-        case Options::Algorithm::ECDSA_SHA256:
-            options.algorithm = qb::jwt::Algorithm::ES256;
-            break;
-        case Options::Algorithm::ECDSA_SHA384:
-            options.algorithm = qb::jwt::Algorithm::ES384;
-            break;
-        case Options::Algorithm::ECDSA_SHA512:
-            options.algorithm = qb::jwt::Algorithm::ES512;
-            break;
-        case Options::Algorithm::ED25519:
-            options.algorithm = qb::jwt::Algorithm::EdDSA;
-            break;
-        default:
-            options.algorithm = qb::jwt::Algorithm::HS256;
-            break;
-    }
+    options.algorithm = jwt_algorithm(_options.get_algorithm());
 
     // Set the key based on algorithm
     if (options.algorithm == qb::jwt::Algorithm::HS256 || options.algorithm == qb::jwt::Algorithm::HS384
@@ -262,41 +257,7 @@ Manager::verify_token(const std::string &token) const {
     if (_options.get_require_signature_verification()) {
         qb::jwt::VerifyOptions options;
 
-        switch (_options.get_algorithm()) {
-            case Options::Algorithm::HMAC_SHA256:
-                options.algorithm = qb::jwt::Algorithm::HS256;
-                break;
-            case Options::Algorithm::HMAC_SHA384:
-                options.algorithm = qb::jwt::Algorithm::HS384;
-                break;
-            case Options::Algorithm::HMAC_SHA512:
-                options.algorithm = qb::jwt::Algorithm::HS512;
-                break;
-            case Options::Algorithm::RSA_SHA256:
-                options.algorithm = qb::jwt::Algorithm::RS256;
-                break;
-            case Options::Algorithm::RSA_SHA384:
-                options.algorithm = qb::jwt::Algorithm::RS384;
-                break;
-            case Options::Algorithm::RSA_SHA512:
-                options.algorithm = qb::jwt::Algorithm::RS512;
-                break;
-            case Options::Algorithm::ECDSA_SHA256:
-                options.algorithm = qb::jwt::Algorithm::ES256;
-                break;
-            case Options::Algorithm::ECDSA_SHA384:
-                options.algorithm = qb::jwt::Algorithm::ES384;
-                break;
-            case Options::Algorithm::ECDSA_SHA512:
-                options.algorithm = qb::jwt::Algorithm::ES512;
-                break;
-            case Options::Algorithm::ED25519:
-                options.algorithm = qb::jwt::Algorithm::EdDSA;
-                break;
-            default:
-                options.algorithm = qb::jwt::Algorithm::HS256;
-                break;
-        }
+        options.algorithm = jwt_algorithm(_options.get_algorithm());
 
         if (options.algorithm == qb::jwt::Algorithm::HS256 || options.algorithm == qb::jwt::Algorithm::HS384
             || options.algorithm == qb::jwt::Algorithm::HS512) {

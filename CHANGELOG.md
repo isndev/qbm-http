@@ -193,6 +193,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **JWT generation and verification share the configured-algorithm mapping.** The ten
+  supported algorithms and existing fallback retain their behavior; signing and
+  verification still select their private/public keys separately. Auth-manager tests
+  now assert the emitted algorithm name independently of the sign/verify round trip.
+
 - **The HTTP/3 server's `graceful_shutdown()` sends its two GOAWAYs a round trip apart (Huly QB-91;
   RFC 9114 §5.2).** It sent the shutdown notice and the final GOAWAY back to back, which left the
   requests already on their way no time to arrive before the final GOAWAY rejected them: the
