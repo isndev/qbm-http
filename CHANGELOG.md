@@ -440,6 +440,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Wall-clock timing for fragmented benchmark windows (Huly QB-1116).** Select `UseRealTime()`
+  for warm and first-request access logging, warm HTTP/3 response/data-credit handling, static-hit,
+  parameter-hit and miss routing, and WebSocket masked decoding and echo. Durations and rates use
+  the instrumented wall-clock windows, avoiding rate calculations from CPU fragments rounded to
+  zero. Work, pauses and validation stay unchanged; timing-boundary overhead remains, so this is
+  not a pure operation cost. The `/real_time` series stays separate from historical CPU results.
+
 - **HTTP/1 serialization preserves an explicitly empty query (Huly QB-169).** A request for
   `/path?` keeps its trailing `?`, including when written through `MessageHead`; it previously
   became `/path`. URI fragments remain absent from the wire target.

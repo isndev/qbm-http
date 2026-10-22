@@ -263,7 +263,13 @@ BM_Http1_LegacyOneShotLifecycle(benchmark::State &state) {
 }
 } // namespace access_log_loopback_bench
 
-BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogWarm)->Arg(0)->Arg(1)->Arg(2)->ArgNames({"format"})->Unit(benchmark::kMicrosecond);
+BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogWarm)
+    ->Arg(0)
+    ->Arg(1)
+    ->Arg(2)
+    ->ArgNames({"format"})
+    ->Unit(benchmark::kMicrosecond)
+    ->UseRealTime();
 BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogFirstRequest)
     ->Arg(0)
     ->Arg(1)
@@ -272,6 +278,7 @@ BENCHMARK(access_log_loopback_bench::BM_Http1_AccessLogFirstRequest)
     // Automatic calibration creates thousands of fresh TCP pairs outside timing
     // and exhausts the host's ephemeral ports. Bound identical work on both sides.
     ->Iterations(8)
+    ->UseRealTime()
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK(access_log_loopback_bench::BM_Http1_LegacyOneShotLifecycle)
     // Bound fresh TCP pairs per process; calibration must not exhaust ephemeral ports.

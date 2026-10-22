@@ -425,11 +425,11 @@ BM_Route_ConditionalSelectedElse(benchmark::State &state) {
 
 } // namespace
 
-BENCHMARK(BM_Route_StaticHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
-BENCHMARK(BM_Route_ParamHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_StaticHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond)->UseRealTime();
+BENCHMARK(BM_Route_ParamHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond)->UseRealTime();
 BENCHMARK(BM_Route_WildcardHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Route_MixedParamWildcardHit)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
-BENCHMARK(BM_Route_Miss404)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Route_Miss404)->Arg(0)->Arg(16)->Arg(256)->ArgNames({"routes"})->Unit(benchmark::kNanosecond)->UseRealTime();
 BENCHMARK(BM_Route_StaticHitMiddlewareDepth)->Arg(0)->Arg(2)->Arg(8)->Arg(32)->ArgNames({"chain_depth"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK(BM_Route_StaticHitLifecycleHooks)->Arg(0)->Arg(1)->Arg(8)->ArgNames({"hooks"})->Unit(benchmark::kNanosecond);
