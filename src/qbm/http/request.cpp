@@ -331,10 +331,23 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // URI fragments are client-side identifiers and are never sent in an HTTP request-target.
     // An empty path is sent as "/" (RFC 9112 §3.2.1: the client MUST send "/" as the path of an
     // origin-form whose URI has none) -- a default URI, or one naming only an authority (Huly QB-1066).
-    const std::string_view path = r.uri().path();
-    out << method << qb::http::sep << (path.empty() ? std::string_view{"/"} : path);
-    if (r.uri().has_query())
-        out << "?" << r.uri().encoded_queries();
+    const std::string_view path        = path_size ? r.uri().path() : std::string_view{"/"};
+    const bool             has_query   = r.uri().has_query();
+    const auto             method_size = std::strlen(method);
+    // The URI owns these bytes independently of the output pipe. Acquire the prefix once:
+    // separate appends repeat capacity/alias checks for each token and separator.
+    auto *cursor = out.allocate_back(method_size + 1 + path.size() + (has_query ? query_size + 1 : 0));
+    std::memcpy(cursor, method, method_size);
+    cursor += method_size;
+    *cursor++ = ' ';
+    std::memcpy(cursor, path.data(), path.size());
+    cursor += path.size();
+    if (has_query) {
+        *cursor++ = '?';
+        if (query_size) {
+            std::memcpy(cursor, r.uri().encoded_queries().data(), query_size);
+        }
+    }
     out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
 
     if (trailed) [[unlikely]] {

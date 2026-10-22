@@ -449,7 +449,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 - **HTTP/1 serialization preserves an explicitly empty query (Huly QB-169).** A request for
   `/path?` keeps its trailing `?`, including when written through `MessageHead`; it previously
-  became `/path`. URI fragments remain absent from the wire target.
+  became `/path`. URI fragments remain absent from the wire target. The serializer acquires
+  output space once for the method, separator, path and optional query, avoiding repeated
+  pipe capacity and alias checks while retaining every validation before the first write.
 
 - **Source and test comments follow the current handlers (Huly QB-1102).** Correct stale
   authentication, Cookie, date, frame-parser, WebSocket and multipart references. Describe

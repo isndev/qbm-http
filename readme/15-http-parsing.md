@@ -253,7 +253,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: qbm/http/src/qbm/http/request.h:386; qbm/http/src/qbm/http/response.h:358; qbm/http/src/qbm/http/request.cpp:397-399; qbm/http/src/qbm/http/response.cpp:368-370 -->
+<!-- src: qbm/http/src/qbm/http/request.h:386; qbm/http/src/qbm/http/response.h:358; qbm/http/src/qbm/http/request.cpp:410-412; qbm/http/src/qbm/http/response.cpp:368-370 -->
 
 ```cpp
 template <>
