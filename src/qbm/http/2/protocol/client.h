@@ -380,6 +380,13 @@ public:
         }
         _connection_receive_window -= payload_size;
         _connection_processed_bytes_for_window_update += payload_size;
+        if (!stream.headers_received_main) [[unlikely]] {
+            // Informational HEADERS do not begin the final response's content (RFC 9113 section 8.1).
+            // Even rejected DATA consumes connection-level flow-control credit.
+            conditionally_send_connection_window_update();
+            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "DATA before final response headers");
+            return;
+        }
         _control_reply_count = 0; // real response progress (accepted DATA) forgives the flood budget
 
         if (!data_payload.empty()) {
@@ -573,29 +580,8 @@ public:
             }
             clear_header_assembly_state(); // Also resets _active_header_block_stream_id
 
-            bool is_trailers_block = stream.headers_received_main;
-            if (!parse_and_validate_headers_into_response(stream, decoded_fields, is_trailers_block)) {
-                // Error handled by parse_and_validate_headers_into_response
+            if (!process_response_header_block(stream, decoded_fields, stream.end_stream_received)) {
                 return;
-            }
-
-            if (is_trailers_block) {
-                stream.trailers_received = true;
-                // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Trailers (via CONTINUATION) processed for stream " << stream.id);
-            } else {
-                stream.headers_received_main = true;
-                // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Main headers (via CONTINUATION) processed for stream " << stream.id);
-                // Check for "Trailer" header
-                if (!(stream.end_stream_received)) { // Only expect trailers if stream not already ended by this HEADERS/CONTINUATION block
-                    for (const auto &hf : decoded_fields) {
-                        if (hf.name == "trailer" || hf.name == "Trailer") {
-                            stream.trailers_expected = true;
-                            // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] 'Trailer' header found on stream " << stream.id << " (via
-                            // CONTINUATION). Expecting trailers.");
-                            break;
-                        }
-                    }
-                }
             }
             // State transitions for OPEN/HALF_CLOSED_REMOTE if applicable (e.g. if PUSH_PROMISE HEADERS was split)
             if (stream.state == Http2StreamConcreteState::IDLE && stream.id != 0) {
@@ -937,13 +923,8 @@ public:
             Http2ClientStream &stream_to_reject = it->second;
             // Only reject if still in RESERVED_REMOTE. If server already sent HEADERS, it's too late to reject this way.
             if (stream_to_reject.state == Http2StreamConcreteState::RESERVED_REMOTE) {
+                // send_rst_stream retires this node before notifying the application.
                 send_rst_stream(promised_stream_id, ErrorCode::REFUSED_STREAM, "Push rejected by application");
-                // Update stream state immediately after sending RST
-                stream_to_reject.rst_stream_sent = true;
-                stream_to_reject.error_code      = ErrorCode::REFUSED_STREAM;
-                stream_to_reject.state           = Http2StreamConcreteState::CLOSED;
-                try_close_stream_context_by_id(stream_to_reject.id, ErrorCode::REFUSED_STREAM,
-                                               "Push rejected by application"); // Attempt cleanup now
             } else {
                 // QB_LOG_WARN_PA(this->getName(), "Application tried to reject push for stream " << promised_stream_id
                 //              << " but it was not in RESERVED_REMOTE state. Current state: " << static_cast<int>(it->second.state));
@@ -1897,21 +1878,20 @@ private:
 
         this->_io << rst_frame;
 
-        // Mark stream as RST sent
+        // Retire before notifying: an error handler can re-enter RST/reset/send_request.
+        // Keeping this node through the callback both permits duplicate notification and
+        // leaves a dangling iterator if that callback erases it. Touch no stream afterwards.
         auto it = _client_streams.find(stream_id);
         if (it != _client_streams.end()) {
-            it->second.rst_stream_sent = true;
-            it->second.error_code      = error_code;
-            // Notify IO_Handler if response wasn't already dispatched
-            if (!it->second.response_dispatched) {
+            const bool notify_error = !it->second.response_dispatched;
+            _client_streams.erase(it);
+            if (notify_error) {
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by client: " + debug_message};
                 // Check if IO_Handler has the 'on' method for this event type
                 if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
                 }
             }
-            // Attempt to close stream context after marking RST and potentially notifying
-            try_close_stream_context(it->second, error_code);
         }
     }
 
@@ -2290,24 +2270,8 @@ private:
 
             clear_header_assembly_state();
 
-            bool is_trailers_block = stream.headers_received_main;
-            if (!parse_and_validate_headers_into_response(stream, decoded_fields, is_trailers_block)) {
+            if (!process_response_header_block(stream, decoded_fields, (headers_event.header.flags & FLAG_END_STREAM) != 0)) {
                 return;
-            }
-
-            if (is_trailers_block) {
-                stream.trailers_received = true;
-            } else {
-                stream.headers_received_main = true;
-                // Check for trailer header
-                if (!(headers_event.header.flags & FLAG_END_STREAM)) {
-                    for (const auto &hf : decoded_fields) {
-                        if (hf.name == "trailer" || hf.name == "Trailer") {
-                            stream.trailers_expected = true;
-                            break;
-                        }
-                    }
-                }
             }
 
             // Update stream state
@@ -2353,6 +2317,41 @@ private:
         }
 
         process_complete_response_if_ready(stream);
+    }
+
+    // Both HEADERS and its final CONTINUATION use the same classification. Only a final
+    // status establishes headers_received_main; informational fields never leak into it.
+    [[nodiscard]] bool
+    process_response_header_block(Http2ClientStream &stream, const std::vector<hpack::HeaderField> &decoded_fields, bool end_stream) {
+        const bool is_trailers_block = stream.headers_received_main;
+        if (!parse_and_validate_headers_into_response(stream, decoded_fields, is_trailers_block)) {
+            return false; // The stream may already have been erased by the error callback.
+        }
+        if (is_trailers_block) {
+            stream.trailers_received = true;
+            return true;
+        }
+        const auto status = stream.assembled_response.status().code();
+        if (status < 200) [[unlikely]] {
+            // RFC 9113 sections 8.1 and 8.6: 1xx cannot end the stream, and 101 is not an HTTP/2 status.
+            if (end_stream || status == 101) {
+                send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid informational response");
+                return false;
+            }
+            stream.assembled_response.reset();
+            stream.expected_content_length.reset();
+            return true;
+        }
+        stream.headers_received_main = true;
+        if (!end_stream) {
+            for (const auto &hf : decoded_fields) {
+                if (hf.name == "trailer" || hf.name == "Trailer") {
+                    stream.trailers_expected = true;
+                    break;
+                }
+            }
+        }
+        return true;
     }
 
     /**

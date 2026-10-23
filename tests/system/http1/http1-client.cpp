@@ -205,6 +205,35 @@ public:
             (void) ctx;
         });
 
+        router().post("/informational", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ASSERT_NE(session, nullptr);
+            session->publish("HTTP/1.1 100 Continue\r\n\r\n"
+                             "HTTP/1.1 103 Early Hints\r\nLink: </first>\r\n\r\n"
+                             "HTTP/1.1 103 Early Hints\r\nLink: </second>\r\n\r\n");
+            ctx->response().body() = ctx->request().body().template as<std::string>();
+            ctx->response().set_header("X-Final", "yes");
+            ctx->complete();
+        });
+
+        router().get("/informational-only", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ASSERT_NE(session, nullptr);
+            ctx->suppress_response();
+            session->publish("HTTP/1.1 103 Early Hints\r\nLink: </never>\r\n\r\n");
+        });
+
+        router().get("/informational-close", [this](auto ctx) {
+            ++request_count;
+            auto session = ctx->session();
+            ASSERT_NE(session, nullptr);
+            ctx->suppress_response();
+            session->publish("HTTP/1.1 100 Continue\r\n\r\n");
+            session->close_after_deliver();
+        });
+
         router().post("/echo", [this](auto ctx) {
             ++request_count;
             ctx->response().status() = qb::http::status::CREATED;
@@ -580,6 +609,73 @@ request_with_redirects(qb::http::Request req, qb::http::RedirectOptions options 
 }
 
 } // namespace
+
+TEST(Http1ClientTest, InformationalResponsesCompleteOnlyFinalAndPreserveQueuedRequests) {
+    LoopbackHttp1Server             server;
+    auto                            client = qb::http1::make_client(server.url("/"));
+    std::vector<qb::http::Response> responses;
+    auto                            req = request(qb::http::method::POST, "/informational");
+    req.body()                          = "request-body";
+    req.set_header("Expect", "100-continue");
+    ASSERT_TRUE(client->push_request(std::move(req), [&](auto response) {
+        responses.push_back(std::move(response));
+        // Submitting from the final callback must not steal the queued response.
+        client->push_request(request(qb::http::method::GET, "/item/reentrant"), [&](auto reply) { responses.push_back(std::move(reply)); });
+    }));
+    ASSERT_TRUE(
+        client->push_request(request(qb::http::method::GET, "/item/queued"), [&](auto response) { responses.push_back(std::move(response)); }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return responses.size() == 3; }));
+    ASSERT_EQ(responses.size(), 3u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::OK);
+    EXPECT_EQ(responses[0].body().as<std::string>(), "request-body");
+    EXPECT_EQ(responses[0].header("X-Final"), "yes");
+    EXPECT_FALSE(responses[0].has_header("Link"));
+    EXPECT_EQ(responses[1].body().as<std::string>(), "queued");
+    EXPECT_EQ(responses[2].body().as<std::string>(), "reentrant");
+    EXPECT_EQ(server.connection_count(), 1);
+    client->disconnect();
+    drain_client_callbacks();
+    EXPECT_EQ(responses.size(), 3u);
+}
+
+TEST(Http1ClientTest, InformationalResponsesOneShotCoroutineReturnsFinal) {
+    LoopbackHttp1Server server;
+    auto                req = request(qb::http::method::POST, server.url("/informational"));
+    req.body()              = "oneshot-body";
+    req.set_header("Expect", "100-continue");
+    auto reply = qb::http::run_sync(qb::http::POST(std::move(req), 2s));
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.body().as<std::string>(), "oneshot-body");
+    EXPECT_EQ(reply.response.header("X-Final"), "yes");
+    EXPECT_FALSE(reply.response.has_header("Link"));
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, InformationalResponseDoesNotCancelPersistentTimeout) {
+    LoopbackHttp1Server server;
+    auto                client = qb::http1::make_client(server.url("/"));
+    client->set_request_timeout(100ms);
+    int                calls = 0;
+    qb::http::Response result;
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/informational-only"), [&](auto response) {
+        ++calls;
+        result = std::move(response);
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return calls != 0; }));
+    EXPECT_EQ(result.status(), qb::http::status::GATEWAY_TIMEOUT);
+    client->disconnect();
+    drain_client_callbacks();
+    EXPECT_EQ(calls, 1);
+}
+
+TEST(Http1ClientTest, InformationalResponseOneShotTimeoutAndPeerCloseAreTerminalErrors) {
+    LoopbackHttp1Server server;
+    auto timeout_reply = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, server.url("/informational-only")), 100ms));
+    EXPECT_EQ(timeout_reply.response.status(), qb::http::status::GATEWAY_TIMEOUT);
+    auto close_reply = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, server.url("/informational-close")), 2s));
+    EXPECT_EQ(close_reply.response.status(), qb::http::status::BAD_GATEWAY);
+    drain_client_callbacks();
+}
 
 TEST(Http1ClientTest, ConnectCallbackAndSequentialRequestsReuseOneConnection) {
     LoopbackHttp1Server server;

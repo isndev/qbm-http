@@ -91,7 +91,7 @@ The line is written when the request's response is decided, with what that respo
 <!-- src: qb/src/qb/io/async/tcp/client.h:151-156; qb/src/qb/io/system/sys__socket.h:1218-1229; qbm/http/src/qbm/http/middleware/access_log.h:110-118 -->
 
 `qbm-http-bench-http1-access-log-loopback` compares logging off, common and JSON on batches of 32 real HTTP/1 loopback requests over one persistent connection. The fixture checks status/body of every response, routed/logged totals, connection liveness and presence of the peer address in each line. Input construction and validation are outside the timed batch; socket, client, server and event-loop work remain inside. Both warm and first-request cells select `UseRealTime()`: durations and rates use their instrumented wall-clock windows. Timing-boundary work remains part of the instrument, so these are not pure per-operation costs; historical CPU-clock results remain a separate series. The warm cell measures the whole batch, not an isolated formatter call or per-request latency percentile. A separate first-request cell opens a fresh connection outside its timed interval and measures exactly one request; setup and teardown remain outside. It fixes eight iterations per repetition: automatic calibration would create thousands of TCP pairs and can exhaust ephemeral ports before a valid sample completes. Both sides use the same bound, and the first-request dispersion must be reported separately. Raw durations and host conditions are required before making a performance claim.
-<!-- src: qbm/http/tests/benchmark/http1/access-log-loopback.bench.cpp:21-74,87-189,266-282; qbm/http/tests/CMakeLists.txt:254 -->
+<!-- src: qbm/http/tests/benchmark/http1/access-log-loopback.bench.cpp:21-74,87-189,266-282; qbm/http/tests/CMakeLists.txt:257 -->
 
 What a line costs, measured with callgrind on g++-14 (release) per request routed through a router of 19 routes, for a request with a query string, a 101-byte `User-Agent`, a `Referer` and a request id (16 150 instructions with no observer): `common` about +1 520 instructions, `combined` +2 040, `json` +2 440; for a request with none of those, +1 270, +1 370 and +1 740. That is the observer's two clock reads, the record -- three lookups: `Referer`, `User-Agent`, the request id -- and the line itself: it is built in a stack buffer and appended once to the reused one, the quoted fields are scanned sixteen bytes at a time (eight where SSE2 is not the baseline) and copied whole between the bytes they escape, and the formatted second is kept per thread and reformatted only when the second changes. Those earlier observer-fixture counts excluded the session's peer-address lookup and copy. The persistent loopback fixture above includes the stock transport's cache path and the surrounding request/response flow; its numbers are not interchangeable with these instruction counts.
 
@@ -153,3 +153,24 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:8080"]
 ```
+
+## A complete two-core monitoring example
+
+`07-applications/04-observability` in qb-examples combines an HTTP application on core 0
+with PostgreSQL `SELECT 1` and Redis `PING` on core 1. Each core has a `qb::metrics::Registry`.
+The database/client use the explicit `<qbm/pgsql/metrics.h>` and `<qbm/redis/metrics.h>`
+snapshot adapters; they do not install completion hooks. Redis latency remains explicitly
+opt-in. Source handles are removed on their owner core before client teardown.
+
+The application listens on loopback port 18080; its **separate** metrics server defaults to
+loopback port 19090. The example includes a pinned Compose stack, Prometheus scrape
+configuration, provisioned Grafana dashboard and an executable smoke check of both core
+series and real backend operations. The README describes the explicit bind override needed
+for a container to reach the native process; publishing a metrics listener beyond loopback
+requires a monitoring network or authentication boundary.
+
+For a standalone HTTP loop, no registry is required: construct a snapshot on its thread,
+call `qb::metrics::describe_dispatch(snapshot, loop.dispatch_timing(), loop.nb_invoked_event(),
+labels)`, then `qb::http::metrics_response(*ctx, snapshot)`. The last-run event count is a
+gauge, not a lifetime counter; watcher dispatch timing excludes deferred work and coroutine
+resumes outside that dispatch. The model links `qb::core` even without actor instances.

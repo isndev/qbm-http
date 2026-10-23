@@ -256,6 +256,13 @@ std::string get_mime_type_for_file(const std::filesystem::path &file_path, const
                                                                               long long        total_file_size) noexcept;
 
 /**
+ * @brief Evaluates If-Range with strong entity-tag comparison.
+ * Weak tags and dates cannot authorise a range: filesystem metadata does not
+ * establish that the representation changed at most once within a second.
+ */
+[[nodiscard]] bool if_range_matches(std::string_view validator, std::string_view current_etag) noexcept;
+
+/**
  * @brief Renders an HTML directory listing for @p directory_path.
  *
  * Entry names are HTML-escaped and URI-encoded for safe link construction;
@@ -534,13 +541,13 @@ public:
             }
 
             if (_options.enable_etags) {
-                // Simple ETag: combination of size and last modified time (as seconds since epoch)
+                // Metadata can collide for different bytes, so this validator is weak.
                 auto last_modified_sys_tp_for_etag = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                     last_modified_time - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
                 auto last_modified_epoch_sec =
                     std::chrono::duration_cast<std::chrono::seconds>(last_modified_sys_tp_for_etag.time_since_epoch()).count();
                 etag_value = "\"" + std::to_string(file_size_for_cond) + "-" + std::to_string(last_modified_epoch_sec) + "\"";
-                ctx->response().set_header("ETag", etag_value);
+                ctx->response().set_header("ETag", "W/" + etag_value);
 
                 if (has_if_none_match && !if_none_match_it->second.empty()) {
                     if (internal::if_none_match_contains(if_none_match_it->second.front(), etag_value)) {
@@ -635,6 +642,17 @@ public:
         bool      should_send_416  = false;
 
         std::string_view range_header_sv = ctx->request().header("Range");
+
+        if (_options.enable_range_requests && !is_head_request && !range_header_sv.empty()) {
+            const auto &headers  = ctx->request().headers();
+            const auto  if_range = headers.find("If-Range");
+            if (if_range != headers.end()
+                && (if_range->second.size() != 1 || !internal::if_range_matches(if_range->second.front(), ctx->response().header("ETag")))) {
+                // RFC 9110 13.1.5: a false condition ignores Range entirely,
+                // including an unsatisfiable range. Existing preconditions ran first.
+                range_header_sv = {};
+            }
+        }
 
         if (_options.enable_range_requests) {
             // Range requests ARE enabled

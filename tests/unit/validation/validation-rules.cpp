@@ -335,6 +335,14 @@ TEST_F(ValidationRulesTest, PatternRuleValidation) {
 
     EXPECT_EQ(rule.rule_name(), "pattern");
 
+    // A standalone rule deliberately matches the whole value; only the schema
+    // keyword uses substring search.
+    PatternRule whole_value("es");
+    result.clear();
+    EXPECT_FALSE(whole_value.validate(qb::json("expression"), "test", result));
+    result.clear();
+    EXPECT_TRUE(whole_value.validate(qb::json("es"), "test", result));
+
     // Invalid regex and over-long patterns are rejected at construction time.
     ASSERT_THROW(PatternRule("["), std::invalid_argument);
     ASSERT_THROW(PatternRule(std::string(1025, 'a')), std::invalid_argument);

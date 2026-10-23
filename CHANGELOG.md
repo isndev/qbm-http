@@ -9,6 +9,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **Matched performance fixtures for schema patterns and static files.** Pattern cells use
+  identical success and rejection inputs for anchored search, unanchored search and standalone
+  full matching. The static-file fixture verifies GET, HEAD, conditional and range responses
+  over a private local file; context lifecycle, metadata calls and reads are timed, without a socket. Both
+  revisions must use these same fixtures when comparing a correctness change.
+
+- **TLS configuration and certificate rotation on HTTPS and HTTP/2 servers (Huly QB-98).**
+  `set_tls_context`, `reload_certificates` and explicit-context `listen`/`listen_no_start`
+  overloads install policy without restarting the listener. Invalid renewal leaves the serving
+  context intact; established and already accepted connections retain their original context.
+  ALPN is pinned to HTTP/1.1 or h2 with HTTP/1.1 fallback. Supply a fresh unpublished context:
+  copies share SSL_CTX, and SNI-selected children need matching ALPN before publication.
+  Fresh raw TLS server/generic contexts are supported; client-only and DTLS contexts are refused.
+  Certificate-only reload replaces the entire configuration with defaults, including callbacks,
+  mTLS and session state. HTTP/3 and dual-stack rotation are outside this API's scope.
+
 - **Opt-in one-shot redirects (Huly QB-169).** Include `<qbm/http/redirect.h>` and pass the required
   trailing `RedirectOptions` to any of the eight HTTP/HTTPS helpers. The default permits five
   same-origin followed hops; the cap returns the last 3xx rather than creating 508. The separate
@@ -202,6 +218,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the endpoint exposes the process's internals.
 
 ### Changed
+
+- **Schema patterns search within strings (Huly QB-548).** JSON Schema `pattern` now uses
+  unanchored ECMAScript search, including nested schemas and `propertyNames`; use `^...$`
+  when the whole field must match. Standalone `PatternRule` keeps full-string matching.
+  Both paths retain the pattern/input limits and regex-engine error handling, and schema
+  rules remain compiled once per cached node.
+- **Static-file validators and conditional ranges (Huly QB-541).** Metadata-derived ETags
+  are now marked weak (`W/`): size and second-resolution modification time do not identify
+  exact file bytes. `If-None-Match` retains weak comparison, including previously issued
+  tags. `If-Range` can no longer authorise a partial response with these weak tags or with
+  filesystem dates whose strong-validator status cannot be established; the response is
+  the full representation with 200, even for a malformed or unsatisfiable Range. Ordinary
+  Range requests still produce 206/416, HEAD still sends no body, and cache preconditions
+  are evaluated first. No content hashing or additional file read is introduced.
 
 - **JWT generation and verification share the configured-algorithm mapping.** The ten
   supported algorithms and existing fallback retain their behavior; signing and
@@ -439,6 +469,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   are unchanged.
 
 ### Fixed
+
+- **Verify the WebSocket benchmark's actual echo (Huly QB-519).** The server serializes the decoded
+  message during its callback, while that message is valid. The preflight checks exact wire bytes
+  and an inverse client decode, and rejects same-size payload and opcode corruption. The cell is
+  renamed from `BM_WS_EchoRoundTrip` to `BM_WS_ServerEchoText`: its timed span covers server decode
+  and serialization, without a socket, handshake setup or client decoding. This corrects the
+  measurement fixture, not the production codec. Compare both revisions using this same fixture;
+  historical measurements from the former cell are not directly comparable.
+- **HTTP/1.1 and HTTP/2 clients wait for the final response after informational responses
+  (Huly QB-508).** `100 Continue`, repeated `103 Early Hints` and other non-upgrade 1xx
+  responses no longer complete a request, advance the HTTP/1.1 queue or cancel its timeout.
+  Their fields are discarded; callback and coroutine results contain the final response.
+  HTTP/2 accepts informational HEADERS split across CONTINUATION frames and preserves the
+  connection's HPACK state. A 1xx with END_STREAM, HTTP/2 status 101, or DATA before final
+  headers resets that stream with PROTOCOL_ERROR. HTTP/1.1 status 101 keeps its existing
+  upgrade handling. Request bodies are still sent immediately; this adds no Expect handshake
+  or informational callback API.
+
+- **HTTP/2 stream errors retire their protocol state before notifying user code.** A handler
+  that re-entered RST_STREAM for the same stream could trigger a second error notification
+  and leave the outer reset reading freed state. The dormant reserved-push rejection path
+  likewise no longer writes to the stream after resetting it. Public server push remains disabled.
 
 - **Wall-clock timing for fragmented benchmark windows (Huly QB-1116).** Select `UseRealTime()`
   for warm and first-request access logging, warm HTTP/3 response/data-credit handling, static-hit,

@@ -414,7 +414,7 @@ TEST_F(StaticFilesMiddlewareTest, ETagAndIfNoneMatch) {
     configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     const std::string etag = std::string(_session->_response.header("ETag"));
-    EXPECT_FALSE(etag.empty());
+    EXPECT_TRUE(etag.starts_with("W/\""));
 
     configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", etag}}));
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
@@ -432,7 +432,8 @@ TEST_F(StaticFilesMiddlewareTest, IfNoneMatchDoesNotUseSubstringMatching) {
     const std::string etag = std::string(_session->_response.header("ETag"));
     ASSERT_FALSE(etag.empty());
 
-    const std::string misleading = "\"prefix-" + etag.substr(1, etag.size() - 2) + "-suffix\"";
+    const auto        opaque     = std::string_view(etag).starts_with("W/") ? std::string_view(etag).substr(2) : std::string_view(etag);
+    const std::string misleading = "\"prefix-" + std::string(opaque.substr(1, opaque.size() - 2)) + "-suffix\"";
     configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", misleading}}));
 
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
@@ -450,7 +451,12 @@ TEST_F(StaticFilesMiddlewareTest, IfNoneMatchSupportsWeakComparisonAndWildcard) 
     const std::string etag = std::string(_session->_response.header("ETag"));
     ASSERT_FALSE(etag.empty());
 
-    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", "W/" + etag}}));
+    const std::string opaque = etag.starts_with("W/") ? etag.substr(2) : etag;
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", "W/" + opaque}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+    EXPECT_TRUE(_session->_response.body().empty());
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-None-Match", opaque}}));
     EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
     EXPECT_TRUE(_session->_response.body().empty());
 
@@ -534,6 +540,29 @@ TEST_F(StaticFilesMiddlewareTest, IfNoneMatchPrecedesIfModifiedSince) {
 }
 
 // --- Range requests --------------------------------------------------------
+
+TEST(StaticFilesIfRangeTest, ComparesOneStrongEntityTagExactly) {
+    using qb::http::internal::if_range_matches;
+    EXPECT_TRUE(if_range_matches("\"v1\"", "\"v1\""));
+    EXPECT_TRUE(if_range_matches(" \t\"v1\"\t ", "\"v1\""));
+    EXPECT_TRUE(if_range_matches("\"\"", "\"\""));
+    EXPECT_TRUE(if_range_matches("\"comma,inside\"", "\"comma,inside\""));
+    // etagc allows obs-text octets; they are compared opaquely, without decoding.
+    const std::string opaque_octets = "\"\x80\xff\"";
+    EXPECT_TRUE(if_range_matches(opaque_octets, opaque_octets));
+    EXPECT_FALSE(if_range_matches("\"v1\"", "\"v2\""));
+    EXPECT_FALSE(if_range_matches("W/\"v1\"", "\"v1\""));
+    EXPECT_FALSE(if_range_matches("\"v1\"", "W/\"v1\""));
+    EXPECT_FALSE(if_range_matches("W/\"v1\"", "W/\"v1\""));
+    EXPECT_FALSE(if_range_matches("\"v1\",\"v2\"", "\"v1\",\"v2\""));
+    EXPECT_FALSE(if_range_matches("\"has space\"", "\"has space\""));
+    EXPECT_FALSE(if_range_matches("\"has\ncontrol\"", "\"has\ncontrol\""));
+    EXPECT_FALSE(if_range_matches("\"\x7f\"", "\"\x7f\""));
+    EXPECT_FALSE(if_range_matches("\"unterminated", "\"unterminated"));
+    EXPECT_FALSE(if_range_matches("*", "*"));
+    EXPECT_FALSE(if_range_matches("", ""));
+    EXPECT_FALSE(if_range_matches("Sat, 01 Jan 2000 00:00:00 GMT", "Sat, 01 Jan 2000 00:00:00 GMT"));
+}
 
 TEST_F(StaticFilesMiddlewareTest, RangeRequestPartialContent) {
     qb::http::StaticFilesOptions options(_test_root_dir);
@@ -632,9 +661,7 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestDisabledServesFullContent) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
-TEST_F(StaticFilesMiddlewareTest, IfRangeHeaderIsIgnoredAndRangeStillServed) {
-    // The middleware does not implement If-Range; a Range request must still be
-    // honoured (206) regardless of any If-Range value. Pins the current contract.
+TEST_F(StaticFilesMiddlewareTest, IfRangeMismatchServesFullRepresentation) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_range_requests(true).with_etags(true);
     const std::string file_content = "Contents of file1.txt";
@@ -642,9 +669,100 @@ TEST_F(StaticFilesMiddlewareTest, IfRangeHeaderIsIgnoredAndRangeStillServed) {
     configure_router_and_run(
         make_mw(options), create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}, {"If-Range", "\"some-stale-etag\""}}));
 
-    EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
-    EXPECT_EQ(_session->_response.body().as<std::string>(), file_content.substr(0, 4));
-    EXPECT_EQ(std::string(_session->_response.header("Content-Length")), "4");
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), file_content);
+    EXPECT_EQ(std::string(_session->_response.header("Content-Length")), std::to_string(file_content.size()));
+    EXPECT_TRUE(_session->_response.header("Content-Range").empty());
+    EXPECT_EQ(_session->_response.header("Accept-Ranges"), "bytes");
+    EXPECT_FALSE(_session->_final_handler_called);
+}
+
+TEST_F(StaticFilesMiddlewareTest, IfRangeCannotTreatMetadataCollisionsAsStrongValidators) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto                         sf_mw = make_mw(options);
+    const auto                   path  = _test_root_dir / "file1.txt";
+    const auto original_time           = std::chrono::time_point_cast<std::chrono::seconds>(std::filesystem::file_time_type::clock::now())
+                                         - std::chrono::seconds(10) + std::chrono::milliseconds(500);
+    std::filesystem::last_write_time(path, original_time);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    const std::string etag     = std::string(_session->_response.header("ETag"));
+    const std::string modified = "CONTENTS OF FILE1.TXT";
+    ASSERT_EQ(modified.size(), _session->_response.body().size());
+    // Deterministically reproduce identical size/mtime metadata with new bytes.
+    create_test_file(path, modified);
+    std::filesystem::last_write_time(path, original_time);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}, {"If-Range", etag}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), modified);
+    EXPECT_TRUE(_session->_response.header("Content-Range").empty());
+}
+
+TEST_F(StaticFilesMiddlewareTest, IfRangeRejectsWeakDatesAndMalformedValidatorsBeforeParsingRange) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto                         sf_mw = make_mw(options);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    const std::string etag   = std::string(_session->_response.header("ETag"));
+    const std::string date   = std::string(_session->_response.header("Last-Modified"));
+    const std::string opaque = etag.starts_with("W/") ? etag.substr(2) : etag;
+    ASSERT_FALSE(date.empty());
+    for (const auto &validator :
+         {etag, opaque, date, std::string("Sat, 01 Jan 2000 00:00:00 GMT"), std::string("Sat, 01 Jan 2099 00:00:00 GMT"), std::string(""),
+          std::string("*"), std::string("not-a-validator"), opaque + ", " + opaque}) {
+        SCOPED_TRACE(validator);
+        for (const auto *range : {"bytes=0-3", "bytes=1000-2000", "bytes=invalid"}) {
+            SCOPED_TRACE(range);
+            configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"Range", range}, {"If-Range", validator}}));
+            EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+            EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+            EXPECT_EQ(_session->_response.header("Content-Length"), "21");
+            EXPECT_TRUE(_session->_response.header("Content-Range").empty());
+        }
+    }
+}
+
+TEST_F(StaticFilesMiddlewareTest, IfRangePreservesPreconditionsHeadAndDisabledRanges) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    auto                         sf_mw = make_mw(options);
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    const std::string etag = std::string(_session->_response.header("ETag"));
+    const std::string date = std::string(_session->_response.header("Last-Modified"));
+    for (const auto &precondition : {std::pair{"If-None-Match", etag}, std::pair{"If-Modified-Since", date}}) {
+        SCOPED_TRACE(precondition.first);
+        configure_router_and_run(
+            sf_mw, create_request(qb::http::method::GET, "/file1.txt",
+                                  {{precondition.first, precondition.second}, {"Range", "bytes=0-3"}, {"If-Range", "\"stale\""}}));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED);
+        EXPECT_TRUE(_session->_response.body().empty());
+    }
+    configure_router_and_run(sf_mw, create_request(qb::http::method::HEAD, "/file1.txt", {{"Range", "bytes=1000-2000"}, {"If-Range", etag}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.body().empty());
+    EXPECT_EQ(_session->_response.header("Content-Length"), "21");
+    EXPECT_TRUE(_session->_response.header("Content-Range").empty());
+
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt", {{"If-Range", "\"stale\""}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    options.with_range_requests(false);
+    configure_router_and_run(make_mw(options),
+                             create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}, {"If-Range", etag}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("Accept-Ranges").empty());
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+
+    options.with_range_requests(true).with_etags(false).with_last_modified(false);
+    configure_router_and_run(make_mw(options),
+                             create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}, {"If-Range", etag}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_TRUE(_session->_response.header("ETag").empty());
+    EXPECT_TRUE(_session->_response.header("Last-Modified").empty());
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+
+    auto repeated                  = create_request(qb::http::method::GET, "/file1.txt", {{"Range", "bytes=0-3"}});
+    repeated.headers()["If-Range"] = {etag, etag};
+    configure_router_and_run(sf_mw, std::move(repeated));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
 }
 
 // --- Cache-Control ---------------------------------------------------------

@@ -34,11 +34,15 @@
 #include <qb/io/compression.h>
 #endif
 #include <cctype>
+#include <concepts>
 #include <deque>
 #include <optional>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include "../coro.h"
 #include "../detail/drain.h"
+#include "../detail/server_tls.h"
 #include "../logger.h"
 #include "../origin.h"
 #include "../routing.h"
@@ -973,11 +977,8 @@ public:
         // translation unit that includes this header -- one declaration, 47 warnings.
         using tpt = std::decay_t<decltype(this->transport())>;
         if constexpr (tpt::is_secure()) {
-            this->transport().init(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)).alpn({"http/1.1"}));
-            if (!this->transport().context().ok()) {
-                LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context: " << this->transport().context().error());
+            if (!reload_certificates(std::move(cert_file), std::move(key_file)))
                 return false;
-            }
         }
 #else
         static_cast<void>(cert_file);
@@ -985,6 +986,62 @@ public:
 #endif
         return !this->transport().listen(std::move(uri));
     }
+
+#ifdef QB_HAS_SSL
+    /**
+     * @brief Install a fresh TLS configuration for future accepts, pinning ALPN to http/1.1.
+     *
+     * Call on the listener's owner thread. Invalid configurations return false and leave
+     * the listener unchanged. Established and already accepted connections retain their
+     * old context, including handshakes not yet begun; no socket is closed or rebound.
+     * Context copies share SSL_CTX: supply a fresh, fully configured, unpublished context,
+     * never a copy of one already serving connections. This call changes its ALPN list.
+     * SNI callbacks are preserved; prepare every context they return with http/1.1 ALPN
+     * before publication. Rotation replaces the full configuration and its session cache.
+     * TLS server and generic methods are supported, including fresh adopt/share contexts;
+     * client-only and DTLS contexts are refused. This checks usability and role, not every
+     * handshake prerequisite: the caller provides identity, SNI and/or custom authentication.
+     */
+    [[nodiscard]] bool
+    set_tls_context(qb::io::ssl::Context context)
+    requires(Transport::is_secure())
+    {
+        return qb::http::detail::set_server_tls_context(this->transport(), std::move(context), false);
+    }
+
+    /**
+     * @brief Load a new certificate/key with Context::server defaults, then install it.
+     *
+     * Synchronous cold operation; failure keeps the serving context. This replaces ALL
+     * configuration: mTLS policy, cipher settings, callbacks and session cache are not
+     * retained. For custom policy, build a fresh Context and use set_tls_context instead.
+     */
+    [[nodiscard]] bool
+    reload_certificates(std::filesystem::path cert_file, std::filesystem::path key_file)
+    requires(Transport::is_secure())
+    {
+        return set_tls_context(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)));
+    }
+
+    /** @brief Install a fresh Context, bind and start accepting. See set_tls_context for ownership and SNI. */
+    template <typename TLSContext>
+    requires(Transport::is_secure() && std::same_as<std::remove_cvref_t<TLSContext>, qb::io::ssl::Context>)
+    [[nodiscard]] bool
+    listen(qb::io::uri uri, TLSContext &&context) {
+        if (!listen_no_start(std::move(uri), std::forward<TLSContext>(context)))
+            return false;
+        this->start();
+        return true;
+    }
+
+    /** @brief Install a fresh Context and bind, deferring accepts until start(). */
+    template <typename TLSContext>
+    requires(Transport::is_secure() && std::same_as<std::remove_cvref_t<TLSContext>, qb::io::ssl::Context>)
+    [[nodiscard]] bool
+    listen_no_start(qb::io::uri uri, TLSContext &&context) {
+        return set_tls_context(std::forward<TLSContext>(context)) && !this->transport().listen(std::move(uri));
+    }
+#endif
 };
 
 template <typename IO_Handler, bool has_server = IO_Handler::has_server>
@@ -1161,6 +1218,11 @@ public:
      */
     void
     on(typename http_protocol::response response) {
+        const auto status = response.status().code();
+        if (status >= 100 && status < 200 && status != 101) [[unlikely]] {
+            // Keep this session and its deadline alive until the final response (RFC 9110 section 15.2).
+            return;
+        }
         LOG_HTTP_INFO("HTTP/1.1 client received response. Status: " << response.status().code());
 
 #ifdef QB_HAS_COMPRESSION

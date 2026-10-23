@@ -150,6 +150,7 @@ private:
 
     static std::shared_ptr<IRule> make_length_range_rule(std::size_t min_length, std::size_t max_length);
     static std::shared_ptr<IRule> make_numeric_bound_rule(const qb::json &bound, bool exclusive, bool minimum);
+    static std::shared_ptr<IRule> make_pattern_search_rule(std::string pattern);
 
     /// Cache of pre-compiled rule lists keyed by schema-node pointer.
     /// `_schema_definition` is stored by value and never mutated after

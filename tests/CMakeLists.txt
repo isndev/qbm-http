@@ -186,6 +186,9 @@ qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cp
            DEFINES QBM_TEST_FACTORY_PLAINTEXT_ONLY EXTRA_LABELS http1)
 qhttp_test(system make-server-factory-tls system/server/make-server-factory.cpp REQUIRES ssl live
            DEFINES QBM_TEST_FACTORY_TLS_ONLY EXTRA_LABELS http1 http2 ssl)
+if(TARGET qbm-http-test-system-make-server-factory-tls)
+    target_sources(qbm-http-test-system-make-server-factory-tls PRIVATE system/server/tls-operations.cpp)
+endif()
 # A request body exactly at the default cap (MAX_BODY_SIZE, 100 MiB) must be served: its message was past the
 # transport's generic message cap and was cut with no answer (Huly QB-168). ~200 MiB of server memory, so the case
 # is its own binary, labelled `huge-body` like the serialization one above (`ctest -LE huge-body` drops it) -- a
@@ -256,6 +259,7 @@ qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_L
 qhttp_bench(frame-codec      benchmark/http2/frame-codec.bench.cpp       EXTRA_LABELS http2)
 qhttp_bench(http2-client-loopback benchmark/http2/client-loopback.bench.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
 qhttp_bench(cors             benchmark/middleware/cors.bench.cpp         EXTRA_LABELS middleware)
+qhttp_bench(static-files     benchmark/middleware/static-files.bench.cpp EXTRA_LABELS middleware)
 qhttp_bench(body-codec       benchmark/message/body-codec.bench.cpp      EXTRA_LABELS message)
 qhttp_bench(uri-parse        benchmark/uri/uri-parse.bench.cpp           EXTRA_LABELS uri)
 qhttp_bench(ws-throughput    benchmark/ws/ws-throughput.bench.cpp        REQUIRES ssl         EXTRA_LABELS ws)

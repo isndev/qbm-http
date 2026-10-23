@@ -15,8 +15,9 @@
  *     run the framer's `getMessageSize()` + `onMessage()` loop — the exact path
  *     the protocol parser pins in tests/unit/ws + tests/system/ws. This exercises
  *     the unmasking XOR, the reassembly-buffer append, and the auto-Pong on a Ping.
- *   - ECHO: encode a masked client frame, decode it server-side, re-encode the
- *     server's reply — one full message round-trip per iteration.
+ *   - ECHO: decode a prepared masked client frame server-side and serialize the
+ *     decoded Message during its callback. Exact wire bytes and inverse client
+ *     decoding are checked outside the timed span, including corrupted inputs.
  *   - CLIENT FORWARD: deliver a prebuilt message event through the established
  *     CRTP client callback, without a socket or parser setup in the timed loop.
  *   - CORO RECEIVE: deliver one valid message event to a parked coro_client
@@ -217,8 +218,9 @@ ws_upgrade_request() {
 
 // Feed raw bytes into the input pipe and run the getMessageSize/onMessage loop
 // until the framer can extract no further complete message.
+template <typename Protocol, typename IO>
 void
-drive(WsServerProtocol &protocol, WsServerFakeIO &io) {
+drive(Protocol &protocol, IO &io) {
     std::size_t n;
     while ((n = protocol.getMessageSize()) > 0) {
         protocol.onMessage(n);
@@ -227,6 +229,62 @@ drive(WsServerProtocol &protocol, WsServerFakeIO &io) {
             break;
         }
     }
+}
+
+// Echo only during the callback: the parser resets its Message immediately
+// afterwards, so a retained event.data view would no longer be valid.
+struct WsEchoServerIO : WsServerFakeIO {
+    using base_io_t = WsEchoServerIO;
+
+    void
+    on(qb::protocol::ws_internal::event_message &&event) {
+        WsServerFakeIO::on(std::move(event));
+        output << event.ws;
+    }
+};
+
+struct WsClientProbeIO : WsServerFakeIO {
+    using base_io_t                  = WsClientProbeIO;
+    static constexpr bool has_server = false;
+    std::string           received;
+    unsigned char         opcode = 0;
+
+    void
+    on(qb::protocol::ws_internal::event_message &&event) {
+        WsServerFakeIO::on(std::move(event));
+        received.assign(event.data, event.size);
+        opcode = event.ws.fin_rsv_opcode;
+    }
+};
+
+// Both exact wire comparison and the inverse production decoder are outside
+// the timed span. The fixed handshake uses RFC 6455's example key/accept pair.
+bool
+echo_matches(const std::vector<std::uint8_t> &frame, std::string_view payload) {
+    WsEchoServerIO                          io;
+    qb::protocol::ws_server<WsEchoServerIO> server(io, ws_upgrade_request());
+    io.output.reset(); // discard the successful HTTP upgrade response
+    std::memcpy(io.input.allocate_back(frame.size()), frame.data(), frame.size());
+    drive(server, io);
+
+    std::string expected(expected_unmasked_binary_prefix(payload.size()));
+    expected[0] = '\x81'; // FIN + text, independent of the outgoing serializer
+    expected += payload;
+    if (!server.ok() || io.message_count != 1u || io.last_size != payload.size() || !io.input.empty() || io.output.view() != expected)
+        return false;
+
+    qb::http::Response handshake;
+    handshake.status() = qb::http::status::SWITCHING_PROTOCOLS;
+    handshake.upgrade  = true;
+    handshake.set_header("Upgrade", "websocket");
+    handshake.set_header("Connection", "Upgrade");
+    handshake.set_header("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    WsClientProbeIO                          client_io;
+    qb::protocol::ws_client<WsClientProbeIO> client(client_io, handshake, "dGhlIHNhbXBsZSBub25jZQ==");
+    client_io.input << io.output;
+    drive(client, client_io);
+    return client.ok() && client_io.message_count == 1u && client_io.input.empty() && client_io.opcode == 0x81u
+           && client_io.received == payload;
 }
 
 // ===========================================================================
@@ -386,47 +444,43 @@ BM_WS_DecodePingAutoPong(benchmark::State &state) {
 }
 
 // ===========================================================================
-// ECHO: full client->server->client round-trip of a single text message.
+// ECHO: server decode + reply, with inverse client decoding in the oracle.
 // ===========================================================================
 void
-BM_WS_EchoRoundTrip(benchmark::State &state) {
+BM_WS_ServerEchoText(benchmark::State &state) {
     const auto size    = static_cast<std::size_t>(state.range(0));
     const auto payload = make_payload(size);
     const auto frame   = make_masked_client_frame(0x81u, payload);
 
-    {
-        WsServerFakeIO   io;
-        WsServerProtocol protocol(io, ws_upgrade_request());
-        std::memcpy(io.input.allocate_back(frame.size()), frame.data(), frame.size());
-        drive(protocol, io);
-        qb::http::ws::MessageText reply;
-        reply.masked = false; // server->client frames are not masked
-        reply << payload;
-        qb::allocator::pipe<char> server_out;
-        server_out << reply;
-        if (io.message_count != 1u || server_out.size() <= size) {
-            state.SkipWithError("echo round-trip did not decode + re-encode correctly");
-            return;
-        }
+    if (!echo_matches(frame, payload)) {
+        state.SkipWithError("echo differs from exact text payload or inverse client decode");
+        return;
+    }
+    auto corrupted = frame;
+    corrupted.back() ^= 1u; // a different ASCII byte, with unchanged wire length
+    if (echo_matches(corrupted, payload)) {
+        state.SkipWithError("echo oracle accepted a same-size payload corruption");
+        return;
+    }
+    corrupted    = frame;
+    corrupted[0] = 0x82u; // binary instead of text, with unchanged payload and length
+    if (echo_matches(corrupted, payload)) {
+        state.SkipWithError("echo oracle accepted an opcode corruption");
+        return;
     }
 
-    qb::allocator::pipe<char> server_out;
     for (auto _ : state) {
         state.PauseTiming();
-        WsServerFakeIO   io;
-        WsServerProtocol protocol(io, ws_upgrade_request());
+        WsEchoServerIO                          io;
+        qb::protocol::ws_server<WsEchoServerIO> protocol(io, ws_upgrade_request());
         std::memcpy(io.input.allocate_back(frame.size()), frame.data(), frame.size());
-        server_out.reset();
+        io.output.reset();
         state.ResumeTiming();
 
         drive(protocol, io);
-        // Re-encode the server's reply (unmasked) as it would go back on the wire.
-        qb::http::ws::MessageText reply;
-        reply.masked = false;
-        reply << payload;
-        server_out << reply;
-        auto produced = server_out.size();
+        auto produced = io.output.size();
         benchmark::DoNotOptimize(produced);
+        benchmark::DoNotOptimize(io.output.begin());
     }
 
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(size));
@@ -584,7 +638,7 @@ BENCHMARK(BM_WS_DecodeMaskedText)
 
 BENCHMARK(BM_WS_DecodePingAutoPong)->Arg(0)->Arg(32)->Arg(125)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_EchoRoundTrip)
+BENCHMARK(BM_WS_ServerEchoText)
     ->Arg(16)
     ->Arg(256)
     ->Arg(4 * 1024)

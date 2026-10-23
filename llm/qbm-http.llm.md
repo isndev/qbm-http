@@ -267,6 +267,7 @@ router().use<HeaderGuard>();                  // in-place construction, forwards
   AccessLog obtains the peer through the session's `ip()`: stock socket transports cache a successful lookup; custom transports keep their own behavior. The line buffer is reused, but the returned address string is still a value, not an allocation-free guarantee. _(src/qbm/http/middleware/access_log.h:110-118; qb/src/qb/io/async/tcp/client.h:151-156; qb/src/qb/io/system/sys__socket.h:1218-1229)_
 - **The `/metrics` endpoint (QB-154) is mounted by you, never by default:** `router().get("/metrics", qb::http::metrics_handler<S>(*this))` from a server actor whose core has a `qb::metrics::Registry` (`engine.addActor<qb::metrics::Registry>(core)` on every core to scrape) answers the Prometheus text 0.0.4 of every core: a silent core is `qb_scrape_core_up{core} 0`, not an error. It exposes the process's internals: mount it behind auth or on its own listener. _(src/qbm/http/middleware/metrics.h:238)_
 - **Static files serve from any cwd.** `StaticFilesOptions`'s `root_directory` is a `std::filesystem::path` (string literals convert implicitly); a **relative** root is resolved by the middleware ctor via `qb::io::sys::resolve_resource` (cwd first, then the executable's own directory), so `static_files_middleware<S>(StaticFilesOptions{"public"})` finds assets bundled next to the binary regardless of where the process is launched. Absolute roots are used unchanged; the resolved root must exist or the ctor throws.
+- Static-file ETags are metadata-based and marked weak (`W/`). `If-None-Match` still compares weakly; `If-Range` requires a strong validator, so these tags and filesystem dates fall back to the full 200 representation. An ignored Range cannot produce 416. Cache preconditions run first, HEAD stays bodyless, and an ordinary Range without If-Range retains 206/416 behavior.
 
 ## Authentication & JWT (needs `QB_HAS_SSL`)
 
@@ -328,6 +329,7 @@ router().use(qb::http::validation_middleware<qb::http::DefaultSession>(rv));  //
 - A schema node with valid `minLength` and `maxLength` shares one Unicode count in its cached evaluation. It still reports both keyword errors in order; standalone and parameter rules retain their own evaluation.
 - Most primitive rules are type-gated and pass silently for the wrong kind — always assert `type` first.
 - `SchemaValidator` caches compiled rules lazily and mutates a recursion-depth counter on every validation. Warm-up does not make it safe to share across cores; use one per core or serialize every call.
+- JSON Schema `pattern` uses unanchored ECMAScript search (`"es"` matches `"expression"`); use `^...$` for a whole-field constraint. Standalone `PatternRule` still matches the entire string. Both retain the 1024-byte pattern limit, 2 KiB input limit and regex-engine error handling; the cached schema rule compiles only once per node.
 
 ## HTTP/2 (needs `QB_HAS_SSL`, TLS-only, ALPN `h2`)
 
@@ -365,7 +367,11 @@ server->listen(qb::io::uri("https://0.0.0.0:8443"), "cert.pem", "key.pem");  // 
 server->start();
 ```
 
-For mTLS/cipher policy, build the `SSL_CTX` yourself with `qb::io::ssl::create_server_context(TLS_server_method(), cert, key)`, configure via `qb::io::ssl::set_tls_protocol_versions/set_ciphersuites_tls13/configure_mtls_server_context`, then `server->transport().init(ctx)` (transport takes ownership — do not free it), `server->transport().set_supported_alpn_protocols({...})`, `server->transport().listen(uri)`. Client verification is secure by default (`verify_peer=true`); disable only for trusted/self-signed endpoints, and set it before connecting.
+For mTLS/cipher policy, configure a fresh `qb::io::ssl::Context::server(cert,key)` and pass it to `server->listen(uri, context)` (or `listen_no_start(uri, context)` then `start()`). HTTPS pins ALPN `http/1.1`; HTTP/2 pins `h2,http/1.1`. Rotate on the listener's owner thread with `set_tls_context(context)`: invalid input keeps the current context, and accepted connections keep their old context even if their handshake has not begun. **Context copies share `SSL_CTX`**; the setter mutates the supplied context's ALPN, so never pass a copy already in service or mutate it after publication. Preserve SNI by configuring each child with the protocol's ALPN before publishing a fresh root whose callback captures the child contexts by value. `reload_certificates(cert,key)` is synchronous sugar that replaces the **entire configuration with defaults**; mTLS, cipher policy, callbacks and session caches are not retained. Build a complete fresh context when those matter. Rotation does not guarantee TLS session resumption across contexts. These operations are SSL-only and cover h1/h2, not HTTP/3 or dual-stack. _(src/qbm/http/1.1/http.h:1006,1020,1030,1041; src/qbm/http/2/http2.h:918,929,937,948)_
+
+Client verification is secure by default (`verify_peer=true`); disable only for trusted/self-signed endpoints, and set it before connecting.
+
+The server setter accepts TLS server/generic contexts, including fresh raw `Context::adopt`/`share` wrappers, and rejects client-only or DTLS contexts before publication. Its checks establish usability and role, not complete handshake validity; the caller supplies certificates, SNI and/or custom authentication. _(src/qbm/http/detail/server_tls.cpp:11)_
 
 - **Cert/key (and CA/DH) paths are self-locating.** The HTTP/1.1 `listen(uri, cert, key)` here takes defaulted `std::filesystem::path cert={}, key={}`; the http2/http3/dual-stack `listen` overloads take `std::filesystem::path` cert/key too but WITHOUT defaults (both are required). `create_server_context` (and the CA/mTLS helpers) resolve a **relative** path via `qb::io::sys::resolve_resource` (`<qb/io/system/file.h>`): cwd first, then the executable's own directory — so certs shipped next to the binary load from any working directory; absolute paths are used unchanged. String literals convert implicitly, so `"cert.pem"` keeps working.
 
@@ -459,6 +465,16 @@ A destroyed suspended WebSocket receive/next-frame/close awaiter makes its slot 
 
 ## Clients (one-shot + persistent)
 
+HTTP/1.1 and HTTP/2 clients discard informational responses (`100`, `103`, other 1xx)
+while waiting for the final response. They do not complete the callback/awaiter, advance
+the HTTP/1.1 request queue, or cancel the request timeout. Informational fields are absent
+from the final result. HTTP/1.1 status `101` retains its upgrade handling; HTTP/2 rejects
+`101`, informational END_STREAM and DATA before final headers with a stream error.
+Bodies are sent immediately, including when the request carries `Expect: 100-continue`;
+there is no wait-for-100 upload handshake or informational callback API.
+HTTP/2 locally reset streams are retired before their error callback runs, so a callback
+can re-enter cancellation or submit another request without re-notifying the failed one.
+
 ```cpp
 // One-shot callback (HTTP/1.1). Self-deleting heap session; callback fires exactly once.
 qb::http::GET(std::move(req), [](qb::http::async::Reply&& reply) {     // also POST/PUT/DEL/HEAD/OPTIONS/PATCH/REQUEST
@@ -484,7 +500,7 @@ Opt-in redirects require `<qbm/http/redirect.h>` and a final `RedirectOptions` a
 
 Follow only 301/302/303/307/308 with one usable Location. At the cap or on a refused target, return the last completed reply, not 508. Default policy is same-origin; explicit crossing strips Authorization, Proxy-Authorization, Cookie, Origin and Referer plus the cookie jar. HTTPS→HTTP, malformed references, userinfo, scoped IPv6 and IPvFuture stop following. 301/302 rewrite POST to GET; 303 drops content and uses GET except HEAD; 307/308 replay method/body. Timeout is per attempt, zero disables it. Final callback delivery occurs after dispatch; awaiter destruction prevents further attempts but does not cancel a session already started. Listener teardown drops queued callbacks without invoking them. A later-hop setup exception returns the preceding completed reply; startup before any reply can still throw, and enqueue allocation failure remains fatal at the existing noexcept boundary. Relative resolution preserves raw escapes, slash segments and an empty query. _(src/qbm/http/redirect.h:25-38,92-162,174-200,215-340; src/qbm/http/detail/redirect.cpp:80-110,113-161,172-200,210-278,282-319; qb/src/qb/io/async/listener.h:622-675,858-880,1181-1193)_
 
-HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/timeout retires the old request and connect-callback cohort before user notification; new callback submissions belong to the next cycle. An explicit connect accepted during retirement starts after the old callback/protocol dispatch returns, and pending work may queue behind that intent with auto-reconnect disabled. Destruction abandons pending connect observers; explicit disconnect reports cancellation once. _(src/qbm/http/1.1/client.cpp:235-239,275-310,341-352,568-633,693-752)_
+HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/timeout retires the old request and connect-callback cohort before user notification; new callback submissions belong to the next cycle. An explicit connect accepted during retirement starts after the old callback/protocol dispatch returns, and pending work may queue behind that intent with auto-reconnect disabled. Destruction abandons pending connect observers; explicit disconnect reports cancellation once. _(src/qbm/http/1.1/client.cpp:240-244,280-315,346-357,573-638,698-757)_
 
 ---
 
@@ -515,14 +531,14 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   one is answered before the handler runs, the same everywhere: `414` target, `431` field name, value or a section's
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the
   stream then `RST_STREAM(NO_ERROR)`, h3 on the stream then STOP_SENDING(`H3_NO_ERROR`) (Huly QB-168, QB-94; until 3.3
-  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:680-682; 2/http2.h:661-663;
+  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:684-686; 2/http2.h:661-663;
   3/http3.h:633-635)_
 - To stop an HTTP/1.1 server, `drain(deadline, on_drained)`: the listener closes, idle sessions close, busy ones answer
   what they received -- the last answer `Connection: close` -- and `on_drained` reports `drained` or `deadline` once,
   on the server's loop (Huly QB-167). An in-place WebSocket upgrade still owned by that server receives Close
   `1001 Going Away` and counts until it closes or the deadline aborts it (QB-1097); an extracted session belongs
   to its new owner and remains outside this drain. Close observers still run; a custom observer checks the
-  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:787-828,867-888,919-923;
+  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:791-832,871-892,923-927;
   ws/ws.h:510-563,655-674)_
 - HTTP/2 and HTTP/3 drain connections in two GOAWAYs (Huly QB-91). The notice names the largest stream id.
   HTTP/2 sends its final GOAWAY on the notice PING's ACK and names the last stream opened; HTTP/3 names the first

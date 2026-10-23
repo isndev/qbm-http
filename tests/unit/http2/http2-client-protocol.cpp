@@ -228,11 +228,34 @@ struct qb::protocol::http2::ProtocolTestPeer<qb::protocol::http2::ClientHttp2Pro
     set_next_stream_id(qb::protocol::http2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, uint32_t id) {
         protocol._next_client_stream_id = id;
     }
+
+    static void
+    reserve_pushed_stream(qb::protocol::http2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, uint32_t id) {
+        auto [it, inserted] = protocol._client_streams.emplace(
+            id, h2::Http2ClientStream(id, h2::DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE, h2::DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE));
+        ASSERT_TRUE(inserted);
+        it->second.state = h2::Http2StreamConcreteState::RESERVED_REMOTE;
+    }
 };
 
 // ===========================================================================
 // Construction: client preface + initial SETTINGS frame.
 // ===========================================================================
+TEST(HTTP2ClientProtocol, ReservedPushRejectionRetiresStreamOnce) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    // Public settings disable push. Seed only the dormant reserved-state teardown
+    // branch; this test does not advertise or claim supported server push.
+    h2::ProtocolTestPeer<h2::ClientHttp2Protocol<Http2ClientFakeIO>>::reserve_pushed_stream(protocol, 2);
+    const auto before = io.output.size();
+    protocol.application_reject_push(2);
+    protocol.application_reject_push(2);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::REFUSED_STREAM);
+    EXPECT_EQ(count_frames_from(io.output, h2::FrameType::RST_STREAM, before), 1u);
+}
+
 TEST(HTTP2ClientProtocol, ConstructionEmitsPrefaceThenSettings) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
@@ -487,7 +510,60 @@ struct ReentrantEraseClientFakeIO : Http2ClientFakeIO {
         proto->on(std::move(rst));
     }
 };
+
+struct ReentrantStreamErrorClientFakeIO : Http2ClientFakeIO {
+    using Http2ClientFakeIO::on;
+    h2::ClientHttp2Protocol<ReentrantStreamErrorClientFakeIO> *proto         = nullptr;
+    bool                                                       reentered     = false;
+    bool                                                       next_accepted = false;
+
+    void
+    on(const h2::Http2StreamErrorEvent &event) {
+        Http2ClientFakeIO::on(event);
+        if (reentered) {
+            return;
+        }
+        reentered = true;
+        // A peer cancellation dispatched synchronously by a user's error handler must
+        // neither re-notify this request nor leave the outer RST holding an erased node.
+        h2::Http2FrameData<h2::RstStreamFrame> rst;
+        rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+        rst.header.set_stream_id(event.stream_id);
+        rst.payload.error_code = h2::ErrorCode::CANCEL;
+        proto->on(rst);
+        qb::http::Request next{qb::http::method::GET, qb::io::uri("https://example.test/next")};
+        next_accepted = proto->send_request(std::move(next), 97);
+    }
+};
 } // namespace
+
+TEST(HTTP2ClientProtocol, StreamErrorReentrantlyResettingSameStreamNotifiesOnce) {
+    for (int path = 0; path != 3; ++path) {
+        SCOPED_TRACE(path);
+        ReentrantStreamErrorClientFakeIO                          io;
+        h2::ClientHttp2Protocol<ReentrantStreamErrorClientFakeIO> protocol(io);
+        io.proto = &protocol;
+        qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/error")};
+        ASSERT_TRUE(protocol.send_request(std::move(req), 96));
+        if (path == 0) {
+            // Existing error path: proves the lifetime defect independently of 1xx handling.
+            protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "bad"}}));
+        } else if (path == 1) {
+            protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "103"}}));
+        } else {
+            protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}}));
+            protocol.on(make_data_frame(1, 0, std::string(40000, 'x')));
+        }
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_TRUE(io.reentered);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.response_count, 0);
+        ASSERT_TRUE(io.next_accepted);
+        protocol.on(make_headers_frame(3, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
+        EXPECT_EQ(io.response_count, 1);
+        EXPECT_EQ(io.last_app_id, 97u);
+    }
+}
 
 TEST(HTTP2ClientProtocol, ResponseHandlerReenteringSendRequestKeepsResponseAndConnectionIntact) {
     ReentrantSendClientFakeIO                          io;
@@ -499,6 +575,8 @@ TEST(HTTP2ClientProtocol, ResponseHandlerReenteringSendRequestKeepsResponseAndCo
     req.uri()    = qb::io::uri("https://example.test/r");
     ASSERT_TRUE(protocol.send_request(std::move(req), 5)); // stream 1, app id 5
 
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}}));
+    EXPECT_EQ(io.response_count, 0);
     protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
     // END_STREAM completes stream 1 → process_complete_response_if_ready dispatches; the handler
     // re-enters send_request 256× (relocating _client_streams) while the stream ref is live.
@@ -533,6 +611,8 @@ TEST(HTTP2ClientProtocol, ResponseHandlerReentrantlyErasingCurrentStreamKeepsCon
     first.uri()    = qb::io::uri("https://example.test/erase-current");
     ASSERT_TRUE(protocol.send_request(std::move(first), 5));
 
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "100"}}));
+    EXPECT_EQ(io.response_count, 0);
     protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
     protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "body-1"));
 
@@ -671,16 +751,10 @@ TEST(HTTP2ClientProtocol, ContinuationForWrongStreamIsConnectionError) {
 }
 
 // ===========================================================================
-// 1xx informational response handling. The client's on(HeadersFrame) ingest path
-// treats the first complete HEADERS block as THE response (it does not implement
-// separate RFC 9110 interim-response buffering): a 1xx HEADERS without END_STREAM
-// is accepted (connection stays ok, nothing dispatched yet), and a SECOND
-// status-bearing HEADERS block is therefore parsed as trailers and rejected as a
-// pseudo-header-in-trailers stream error. This pins the actual contract so a
-// regression that started double-dispatching or tearing the connection down on a
-// 1xx is caught.
+// RFC 9113 section 8.1: any number of informational header blocks precede the
+// final response. None completes a request or becomes part of its final fields.
 // ===========================================================================
-TEST(HTTP2ClientProtocol, InformationalHeadersAreAcceptedAndSecondStatusBlockIsRejected) {
+TEST(HTTP2ClientProtocol, InformationalHeadersWaitForFinalWithoutLeakingFields) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
@@ -692,34 +766,31 @@ TEST(HTTP2ClientProtocol, InformationalHeadersAreAcceptedAndSecondStatusBlockIsR
 
     // Interim 100 Continue: no END_STREAM. Accepted, nothing dispatched, no error.
     protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "100"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}, {"link", "</first>"}, {"trailer", "x-interim"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}, {"link", "</second>"}}));
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.response_count, 0);
     EXPECT_EQ(io.stream_error_count, 0);
     EXPECT_EQ(io.goaway_count, 0);
 
-    const std::size_t before = io.output.size();
-
-    // A SECOND status-bearing HEADERS block is treated as a trailers block; a
-    // :status pseudo-header there is illegal -> stream RST(PROTOCOL_ERROR), and the
-    // connection survives.
-    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "200"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "4"}, {"x-final", "yes"}}));
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "body"));
     EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.response_count, 0);
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
-
-    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
-    ASSERT_NE(rst_off, SIZE_MAX);
-    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 1u);
+    EXPECT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.stream_error_count, 0);
+    ASSERT_TRUE(io.last_response);
+    EXPECT_EQ(io.last_response->status(), 200);
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "body");
+    EXPECT_EQ(io.last_response->header("x-final"), "yes");
+    EXPECT_FALSE(io.last_response->has_header("link"));
+    EXPECT_FALSE(io.last_response->has_header("trailer"));
+    EXPECT_EQ(io.last_app_id, 88u);
 }
 
 // ===========================================================================
-// A 1xx HEADERS block carrying END_STREAM completes the stream and dispatches
-// the response with that status (the ingest path treats it as the main, final
-// response). This documents that the on() path applies no interim-vs-final 1xx
-// distinction and that an END_STREAM 1xx is dispatched rather than dropped.
+// An informational response cannot terminate the exchange before a final status.
 // ===========================================================================
-TEST(HTTP2ClientProtocol, InformationalHeadersWithEndStreamDispatch) {
+TEST(HTTP2ClientProtocol, InformationalHeadersWithEndStreamResetOnlyTheirStream) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
@@ -731,11 +802,124 @@ TEST(HTTP2ClientProtocol, InformationalHeadersWithEndStreamDispatch) {
     protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "100"}}));
 
     EXPECT_TRUE(protocol.ok());
-    ASSERT_EQ(io.response_count, 1);
-    ASSERT_TRUE(io.last_status.has_value());
-    EXPECT_EQ(*io.last_status, 100);
-    EXPECT_EQ(io.last_app_id, 5u);
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ClientProtocol, InformationalSplitHeadersThenFinalAndTrailersCompleteOnce) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req{qb::http::method::GET, qb::io::uri("https://example.test/hints")};
+    ASSERT_TRUE(protocol.send_request(std::move(req), 91));
+    const auto block = encode_hpack_headers({{":status", "103"}, {"link", "</hint>"}});
+    const auto cut   = block.size() / 2;
+    push_raw_header_carrier(io, h2::FrameType::HEADERS, 0, 1, {block.begin(), block.begin() + cut});
+    push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, {block.begin() + cut, block.end()});
+    drive(protocol, io);
+    EXPECT_EQ(io.response_count, 0);
     EXPECT_EQ(io.stream_error_count, 0);
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-sum"}}));
+    protocol.on(make_data_frame(1, 0, "result"));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{"x-sum", "6"}}));
+    EXPECT_TRUE(protocol.ok());
+    ASSERT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_response);
+    EXPECT_EQ(io.last_response->status(), 200);
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "result");
+    EXPECT_EQ(io.last_response->trailers().header("x-sum"), "6");
+    EXPECT_FALSE(io.last_response->has_header("link"));
+}
+
+TEST(HTTP2ClientProtocol, InformationalSplitHeadersWithEndStreamResetOnlyTheirStream) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req{qb::http::method::GET, qb::io::uri("https://example.test/hints")};
+    ASSERT_TRUE(protocol.send_request(std::move(req), 92));
+    const auto block = encode_hpack_headers({{":status", "103"}, {"link", "</hint>"}});
+    const auto cut   = block.size() / 2;
+    push_raw_header_carrier(io, h2::FrameType::HEADERS, h2::FLAG_END_STREAM, 1, {block.begin(), block.begin() + cut});
+    push_raw_header_carrier(io, h2::FrameType::CONTINUATION, h2::FLAG_END_HEADERS, 1, {block.begin() + cut, block.end()});
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ClientProtocol, InformationalSwitchingProtocolsIsRejectedInHttp2) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req{qb::http::method::GET, qb::io::uri("https://example.test/switch")};
+    ASSERT_TRUE(protocol.send_request(std::move(req), 93));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "101"}}));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ClientProtocol, InformationalResponsesDoNotAllowDataBeforeFinalHeaders) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req{qb::http::method::GET, qb::io::uri("https://example.test/hints")};
+    ASSERT_TRUE(protocol.send_request(std::move(req), 94));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}}));
+    protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "not-final"));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST(HTTP2ClientProtocol, InformationalResponsesKeepHpackStateAndIndependentStreams) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::protocol::hpack::Encoder               encoder;
+    qb::http::Request                          first{qb::http::method::GET, qb::io::uri("https://example.test/first")};
+    qb::http::Request                          second{qb::http::method::GET, qb::io::uri("https://example.test/second")};
+    ASSERT_TRUE(protocol.send_request(std::move(first), 10));
+    ASSERT_TRUE(protocol.send_request(std::move(second), 20));
+    auto headers = [&](uint32_t stream, uint8_t flags, std::vector<qb::protocol::hpack::HeaderField> fields) {
+        std::vector<uint8_t> encoded;
+        ASSERT_TRUE(encoder.encode(fields, encoded));
+        push_raw_header_carrier(io, h2::FrameType::HEADERS, flags | h2::FLAG_END_HEADERS, stream, encoded);
+        drive(protocol, io);
+    };
+    headers(1, 0, {{":status", "103"}, {"link", "</shared>"}});
+    EXPECT_EQ(io.response_count, 0);
+    // The second response refers to a dynamic-table entry learned from the first stream's 103.
+    headers(3, h2::FLAG_END_STREAM, {{":status", "204"}, {"link", "</shared>"}});
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.last_app_id, 20u);
+    ASSERT_TRUE(io.last_response);
+    EXPECT_EQ(io.last_response->header("link"), "</shared>");
+    headers(1, 0, {{":status", "103"}, {"link", "</shared>"}});
+    EXPECT_EQ(io.response_count, 1);
+    headers(1, h2::FLAG_END_STREAM, {{":status", "204"}});
+    EXPECT_TRUE(protocol.ok());
+    ASSERT_EQ(io.response_count, 2);
+    EXPECT_EQ(io.last_app_id, 10u);
+    EXPECT_EQ(io.stream_error_count, 0);
+    ASSERT_TRUE(io.last_response);
+    EXPECT_FALSE(io.last_response->has_header("link"));
+}
+
+TEST(HTTP2ClientProtocol, InformationalResponseThenPeerResetCompletesOnlyAsStreamError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req{qb::http::method::GET, qb::io::uri("https://example.test/cancel")};
+    ASSERT_TRUE(protocol.send_request(std::move(req), 95));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "103"}}));
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(1);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(rst);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(io.stream_error_count, 1);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::CANCEL);
 }
 
 // ===========================================================================

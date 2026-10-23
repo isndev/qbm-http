@@ -894,12 +894,59 @@ public:
      */
     [[nodiscard]] bool
     listen_no_start(qb::io::uri uri, std::filesystem::path cert_file, std::filesystem::path key_file) {
-        this->transport().init(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)).alpn({"h2", "http/1.1"}));
-        if (!this->transport().context().ok()) {
-            LOG_HTTP_ERROR("Failed to initialize SSL/TLS server context: " << this->transport().context().error());
+        if (!reload_certificates(std::move(cert_file), std::move(key_file)))
             return false;
-        }
         return !this->transport().listen(std::move(uri));
+    }
+
+    /**
+     * @brief Install a fresh TLS configuration for future accepts, with h2 then http/1.1 ALPN.
+     *
+     * Owner-thread operation; an invalid context leaves the listener unchanged. Existing
+     * connections, including accepted sockets awaiting their handshake, retain their old
+     * context. No session is closed and the listening socket is not rebound.
+     * Context copies share SSL_CTX: supply a fresh, configured, unpublished context. This
+     * call changes its ALPN list. SNI callbacks are retained; their selected contexts must
+     * already advertise h2/http/1.1 before publication. Rebuild the entire SNI table for a
+     * rotation and capture its contexts by value. Session resumption across rotation is
+     * not guaranteed: the new context has its own cache and ticket configuration.
+     * TLS server and generic methods are supported, including fresh adopt/share contexts;
+     * client-only and DTLS contexts are refused. Usability and role are checked, not every
+     * handshake prerequisite: the caller provides identity, SNI and/or custom authentication.
+     */
+    [[nodiscard]] bool
+    set_tls_context(qb::io::ssl::Context context) {
+        return qb::http::detail::set_server_tls_context(this->transport(), std::move(context), true);
+    }
+
+    /**
+     * @brief Load certificate/key with Context::server defaults and replace the entire TLS configuration.
+     *
+     * Synchronous cold operation; failure preserves the listener. Does not retain mTLS,
+     * ciphers, callbacks or session cache. Use set_tls_context for a complete custom policy.
+     */
+    [[nodiscard]] bool
+    reload_certificates(std::filesystem::path cert_file, std::filesystem::path key_file) {
+        return set_tls_context(qb::io::ssl::Context::server(std::move(cert_file), std::move(key_file)));
+    }
+
+    /** @brief Install a fresh Context, bind and start accepting. See set_tls_context for ownership and SNI. */
+    template <typename TLSContext>
+    requires std::same_as<std::remove_cvref_t<TLSContext>, qb::io::ssl::Context>
+    [[nodiscard]] bool
+    listen(qb::io::uri uri, TLSContext &&context) {
+        if (!listen_no_start(std::move(uri), std::forward<TLSContext>(context)))
+            return false;
+        this->start();
+        return true;
+    }
+
+    /** @brief Install a fresh Context and bind, deferring accepts until start(). */
+    template <typename TLSContext>
+    requires std::same_as<std::remove_cvref_t<TLSContext>, qb::io::ssl::Context>
+    [[nodiscard]] bool
+    listen_no_start(qb::io::uri uri, TLSContext &&context) {
+        return set_tls_context(std::forward<TLSContext>(context)) && !this->transport().listen(std::move(uri));
     }
 };
 

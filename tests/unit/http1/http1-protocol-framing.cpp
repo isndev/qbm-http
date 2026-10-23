@@ -169,6 +169,30 @@ TEST(Http1ProtocolFraming, ContentLengthRequestFramesAndDispatchesExactlyOnce) {
     EXPECT_EQ(req.body().as<std::string>(), "hello world");
 }
 
+TEST(Http1ProtocolFraming, InformationalResponsesAreSeparateBodylessMessagesAtEveryByteBoundary) {
+    ClientFakeIO                                   io;
+    qb::protocol::http::client<ClientFakeIO>       proto(io);
+    const std::vector<std::pair<std::string, int>> messages = {
+        {"HTTP/1.1 100 Continue\r\n\r\n", 100},
+        {"HTTP/1.1 103 Early Hints\r\nLink: </a>\r\n\r\n", 103},
+        {"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone", 200}
+    };
+    int received = 0;
+    for (auto const &[wire, status] : messages) {
+        for (std::size_t n = 0; n < wire.size(); ++n) {
+            feed(io, std::string_view(wire).substr(n, 1));
+            step(proto, io);
+            ASSERT_TRUE(proto.ok());
+            EXPECT_EQ(io.response_count, received + (n + 1 == wire.size() ? 1 : 0));
+        }
+        ++received;
+        ASSERT_TRUE(io.last_response);
+        EXPECT_EQ(io.last_response->status(), status);
+        EXPECT_EQ(io.last_response->body().as<std::string>(), status == 200 ? "done" : "");
+    }
+    EXPECT_EQ(io.input.size(), 0u);
+}
+
 TEST(Http1ProtocolFraming, HeaderOnlyGetFramesWithEmptyBody) {
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);

@@ -620,22 +620,26 @@ constexpr std::size_t MAX_REGEX_INPUT_LENGTH = 2 * 1024; // 2 KiB
 // legitimate JSON Schema and are expensive to compile in libstdc++.
 constexpr std::size_t MAX_REGEX_PATTERN_LENGTH = 1024;
 
-PatternRule::PatternRule(std::string pattern_str)
-    : _pattern_str(std::move(pattern_str)) {
-    if (_pattern_str.length() > MAX_REGEX_PATTERN_LENGTH) {
+namespace {
+
+std::regex
+compile_pattern(const std::string &pattern) {
+    if (pattern.length() > MAX_REGEX_PATTERN_LENGTH) {
         throw std::invalid_argument("JSON Schema pattern exceeds maximum length (" + std::to_string(MAX_REGEX_PATTERN_LENGTH)
                                     + " chars); shorten the pattern or split validation.");
     }
     try {
-        _regex = std::regex(_pattern_str, std::regex_constants::ECMAScript | std::regex_constants::optimize);
+        return std::regex(pattern, std::regex_constants::ECMAScript | std::regex_constants::optimize);
     } catch (const std::regex_error &e) {
         // It's crucial that schema authors provide valid regex. This throw prevents using an invalid rule.
-        throw std::invalid_argument("Invalid regex pattern in schema: '" + _pattern_str + "'. Error: " + e.what());
+        throw std::invalid_argument("Invalid regex pattern in schema: '" + pattern + "'. Error: " + e.what());
     }
 }
 
+template <bool Search>
 bool
-PatternRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
+validate_pattern(const IRule &rule, const std::string &pattern, const std::regex &regex, const qb::json &value, const std::string &field_path,
+                 Result &result) {
     if (!value.is_string()) {
         return true; // Pattern rule only applies to strings.
     }
@@ -644,7 +648,7 @@ PatternRule::validate(const qb::json &value, const std::string &field_path, Resu
     // Security: ReDoS protection - limit input size for regex matching
     // Pathological regex patterns can cause exponential time complexity
     if (str_val.length() > MAX_REGEX_INPUT_LENGTH) {
-        result.add_error(field_path, rule_name(),
+        result.add_error(field_path, rule.rule_name(),
                          "String exceeds maximum length for pattern validation (" + std::to_string(MAX_REGEX_INPUT_LENGTH)
                              + " chars). "
                                "This limit protects against ReDoS attacks.",
@@ -652,23 +656,67 @@ PatternRule::validate(const qb::json &value, const std::string &field_path, Resu
         return false;
     }
 
-    // std::regex_match can THROW std::regex_error at match time — on libc++ its
+    // Both regex operations can THROW std::regex_error at match time — on libc++ its
     // catastrophic-backtracking guard throws "complexity exceeded" (libstdc++ has no such
     // guard, but the MAX_REGEX_INPUT_LENGTH cap above bounds its backtracking). This is
     // reached from the body-schema path (SchemaValidator::apply_primitive_rules), which has
     // NO try/catch up to ValidationMiddleware and the noexcept I/O boundary — an uncaught
     // regex_error would cross it. Treat an engine failure as a validation failure.
     try {
-        if (!std::regex_match(str_val, _regex)) {
-            result.add_error(field_path, rule_name(), "String does not match pattern: " + _pattern_str, std::make_optional(value));
+        const bool matches = [&] {
+            if constexpr (Search)
+                return std::regex_search(str_val, regex);
+            else
+                return std::regex_match(str_val, regex);
+        }();
+        if (!matches) {
+            result.add_error(field_path, rule.rule_name(), "String does not match pattern: " + pattern, std::make_optional(value));
             return false;
         }
     } catch (const std::regex_error &) {
-        result.add_error(field_path, rule_name(), "Pattern could not be evaluated (regex complexity limit exceeded).",
+        result.add_error(field_path, rule.rule_name(), "Pattern could not be evaluated (regex complexity limit exceeded).",
                          std::make_optional(value));
         return false;
     }
     return true;
+}
+
+// JSON Schema does not implicitly anchor its pattern keyword. Keep this rule
+// private to the cached schema rules so PatternRule retains its full-match API.
+class PatternSearchRule final : public IRule {
+    std::string _pattern;
+    std::regex  _regex;
+
+public:
+    explicit PatternSearchRule(std::string pattern)
+        : _pattern(std::move(pattern))
+        , _regex(compile_pattern(_pattern)) {}
+
+    bool
+    validate(const qb::json &value, const std::string &field_path, Result &result) const override {
+        return validate_pattern<true>(*this, _pattern, _regex, value, field_path, result);
+    }
+
+    std::string
+    rule_name() const override {
+        return "pattern";
+    }
+};
+
+} // namespace
+
+PatternRule::PatternRule(std::string pattern_str)
+    : _pattern_str(std::move(pattern_str))
+    , _regex(compile_pattern(_pattern_str)) {}
+
+bool
+PatternRule::validate(const qb::json &value, const std::string &field_path, Result &result) const {
+    return validate_pattern<false>(*this, _pattern_str, _regex, value, field_path, result);
+}
+
+std::shared_ptr<IRule>
+SchemaValidator::make_pattern_search_rule(std::string pattern) {
+    return std::make_shared<PatternSearchRule>(std::move(pattern));
 }
 
 MinimumRule::MinimumRule(double min_val, bool exclusive)

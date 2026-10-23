@@ -52,6 +52,21 @@ StaticFilesOptions::StaticFilesOptions(std::filesystem::path root_dir)
 namespace internal {
 
 bool
+if_range_matches(std::string_view validator, std::string_view current_etag) noexcept {
+    validator    = trim_optional_whitespace(validator);
+    current_etag = trim_optional_whitespace(current_etag);
+    // Equality alone would accept two weak validators (or two dates). A strong
+    // entity-tag is one quoted opaque value; quoted lists are not a single tag.
+    if (validator.size() < 2 || validator.front() != '"' || validator.back() != '"' || validator != current_etag)
+        return false;
+    for (const unsigned char c : validator.substr(1, validator.size() - 2)) {
+        if (c == '"' || c < 0x21 || c == 0x7f)
+            return false;
+    }
+    return true;
+}
+
+bool
 if_none_match_contains(std::string_view if_none_match, std::string_view current_etag) noexcept {
     if_none_match = trim_optional_whitespace(if_none_match);
     if (if_none_match == "*") {

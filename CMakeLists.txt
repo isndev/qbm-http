@@ -83,6 +83,7 @@ if(QB_HAS_SSL)
         src/qbm/http/2/http2.cpp
         src/qbm/http/2/client.cpp
     )
+    list(APPEND QBM_HTTP_EXTRA_SOURCES src/qbm/http/detail/server_tls.cpp)
     list(APPEND QBM_HTTP_EXTRA_DEFINES QBM_HTTP_HAS_SSL=1)
 endif()
 

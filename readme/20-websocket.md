@@ -157,7 +157,7 @@ void on(TransferToWebSocketEvent &event) {
 `qb::http::Server::drain(deadline, on_drained)` includes a WebSocket upgraded in place while the session remains in that server's ownership (Huly QB-1097). It queues Close `1001 Going Away`, stops dispatching new Data/Ping/Pong to the application, and waits for the closing session or the shared drain deadline. The protocol still answers Ping with Pong until the peer Close arrives ([RFC 6455 §5.5.2](https://www.rfc-editor.org/rfc/rfc6455#section-5.5.2)); application Ping/Pong callbacks stay suppressed. A valid peer Close is still delivered to its Close observer; output already queued is finished before transport closure. A custom Close handler can inspect the active `ws_protocol`'s `server_draining()` and must not echo an acknowledgement of the Close the drain already sent.
 
 This does **not** extend the old HTTP server's ownership: after `extractSession`, the receiving actor/server must manage the transferred connection's shutdown. A raw `qb::io::tcp::server` is not automatically an HTTP server with this drain API. Coroutine sessions preserve `IncomingFrame::Close` and its code/reason; waiting with `close_async()` after a close has begun sends no duplicate frame.
-<!-- src: src/qbm/http/1.1/http.h:787-828,867-888,919-923; src/qbm/http/ws/ws.h:510-580,583-585,655-674; src/qbm/http/ws/coro.h:837-864,925-952 -->
+<!-- src: src/qbm/http/1.1/http.h:791-832,871-892,923-927; src/qbm/http/ws/ws.h:510-580,583-585,655-674; src/qbm/http/ws/coro.h:837-864,925-952 -->
 
 ## Sending frames
 

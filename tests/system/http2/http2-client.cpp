@@ -165,6 +165,27 @@ public:
             ctx->complete();
         });
 
+        router().post("/api/informational", [](auto ctx) {
+            auto session = ctx->session();
+            ASSERT_NE(session, nullptr);
+            namespace h2 = qb::protocol::http2;
+            h2::Http2FrameData<h2::HeadersFrame> info;
+            info.header.type  = static_cast<uint8_t>(h2::FrameType::HEADERS);
+            info.header.flags = h2::FLAG_END_HEADERS;
+            info.header.set_stream_id(static_cast<uint32_t>(ctx->request().stream_id));
+            // Literal without indexing, indexed name :status (8). This independent wire
+            // fixture leaves the server encoder's dynamic table untouched.
+            info.payload.header_block_fragment = {0x08, 0x03, '1', '0', '0'};
+            info.header.set_payload_length(5);
+            *session << info;
+            info.payload.header_block_fragment.back() = '3';
+            *session << info;
+            *session << info;
+            ctx->response().body() = ctx->request().body().template as<std::string>();
+            ctx->response().set_header("X-Final", "yes");
+            ctx->complete();
+        });
+
         // 5. Error route.
         router().get("/api/error", [](auto ctx) {
             ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -367,6 +388,27 @@ TEST_F(Http2ClientTest, SimpleGetRequest) {
     EXPECT_EQ(response.body().template as<std::string>(), "HTTP/2 GET Success");
     EXPECT_EQ(response.header("X-Protocol"), "HTTP/2");
     client->disconnect();
+}
+
+TEST_F(Http2ClientTest, InformationalResponsesCompleteCallbackAndCoroutineOnlyOnFinal) {
+    auto              client = make_test_client();
+    int               calls  = 0;
+    qb::http::Request request{qb::http::method::POST, qb::io::uri("/api/informational")};
+    request.body() = "callback-body";
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response response) {
+        ++calls;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        EXPECT_EQ(response.body().as<std::string>(), "callback-body");
+        EXPECT_EQ(response.header("X-Final"), "yes");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return calls != 0; }));
+    request.body() = "coroutine-body";
+    auto response  = qb::http::run_sync(client->push_request(request));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().as<std::string>(), "coroutine-body");
+    EXPECT_EQ(response.header("X-Final"), "yes");
+    client->disconnect();
+    EXPECT_EQ(calls, 1);
 }
 
 TEST_F(Http2ClientTest, PostRequestEchoesBody) {

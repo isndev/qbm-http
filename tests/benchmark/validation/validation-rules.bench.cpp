@@ -1,6 +1,6 @@
 /**
  * @file qbm/http/tests/benchmark/validation/validation-rules.bench.cpp
- * @brief Cost of JSON Schema length, numeric bound, and uniqueness validation.
+ * @brief Cost of JSON Schema length, pattern, numeric bound, and uniqueness validation.
  *
  * Fixtures and schema caches are prepared before timing. Each case verifies its
  * verdict before reporting a number; the timed loop measures repeated validation
@@ -30,18 +30,30 @@ using qb::http::validation::Result;
 using qb::http::validation::SchemaValidator;
 
 void
-run_schema(benchmark::State &state, const qb::json &schema, const qb::json &value, bool expected) {
+run_schema(benchmark::State &state, const qb::json &schema, const qb::json &value, bool expected, const qb::json *counterexample = nullptr) {
     SchemaValidator validator(schema);
     Result          probe;
     if (validator.validate(value, probe) != expected || probe.success() != expected) {
         state.SkipWithError("schema validation returned an unexpected verdict");
         return;
     }
+    if (counterexample) {
+        Result opposite;
+        if (validator.validate(*counterexample, opposite) == expected || opposite.success() == expected) {
+            state.SkipWithError("schema validation returned the wrong counterexample verdict");
+            return;
+        }
+    }
     for (auto _ : state) {
         Result result;
         bool   valid = validator.validate(value, result);
         benchmark::DoNotOptimize(valid);
         benchmark::DoNotOptimize(result);
+    }
+    Result final;
+    if (validator.validate(value, final) != expected || final.success() != expected) {
+        state.SkipWithError("schema validation verdict changed during measurement");
+        return;
     }
     state.SetItemsProcessed(state.iterations());
 }
@@ -86,6 +98,75 @@ BM_Validation_UniqueObjects(benchmark::State &state) {
     run_schema(state, {{"type", "array"}, {"uniqueItems", true}}, values, true);
 }
 
+// Identical verdict and input on the full-match baseline and search-based schema
+// implementation. Construction/compilation stays outside the measured span.
+void
+BM_Validation_AnchoredPattern(benchmark::State &state) {
+    const auto     size     = static_cast<std::size_t>(state.range(0));
+    const qb::json rejected = std::string(size, 'A');
+    run_schema(state, {{"type", "string"}, {"pattern", "^[a-z]+$"}}, std::string(size, 'a'), true, &rejected);
+}
+
+void
+BM_Validation_UnanchoredPatternFullInput(benchmark::State &state) {
+    const auto     size     = static_cast<std::size_t>(state.range(0));
+    const qb::json rejected = std::string(size, 'A');
+    run_schema(state, {{"type", "string"}, {"pattern", "[a-z]+"}}, std::string(size, 'a'), true, &rejected);
+}
+
+void
+BM_Validation_AnchoredPatternNoMatch(benchmark::State &state) {
+    const auto     size     = static_cast<std::size_t>(state.range(0));
+    const qb::json accepted = std::string(size, 'a');
+    run_schema(state, {{"type", "string"}, {"pattern", "^[a-z]+$"}}, std::string(size, 'A'), false, &accepted);
+}
+
+void
+BM_Validation_UnanchoredPatternNoMatch(benchmark::State &state) {
+    const auto     size     = static_cast<std::size_t>(state.range(0));
+    const qb::json accepted = std::string(size, 'a');
+    run_schema(state, {{"type", "string"}, {"pattern", "[a-z]+"}}, std::string(size, 'A'), false, &accepted);
+}
+
+void
+run_pattern_rule(benchmark::State &state, bool expected) {
+    qb::http::validation::PatternRule rule("[a-z]+");
+    const auto                        size  = static_cast<std::size_t>(state.range(0));
+    const qb::json                    value = std::string(size, expected ? 'a' : 'A');
+    Result                            probe;
+    if (rule.validate(value, "value", probe) != expected || probe.success() != expected) {
+        state.SkipWithError("full-match pattern rule returned an unexpected verdict");
+        return;
+    }
+    Result opposite;
+    if (rule.validate(std::string(size, expected ? 'A' : 'a'), "value", opposite) == expected || opposite.success() == expected) {
+        state.SkipWithError("full-match pattern rule returned the wrong counterexample verdict");
+        return;
+    }
+    for (auto _ : state) {
+        Result     result;
+        const bool valid = rule.validate(value, "value", result);
+        benchmark::DoNotOptimize(valid);
+        benchmark::DoNotOptimize(result);
+    }
+    Result final;
+    if (rule.validate(value, "value", final) != expected || final.success() != expected) {
+        state.SkipWithError("full-match pattern rule verdict changed during measurement");
+        return;
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
+void
+BM_Validation_PatternRuleFullMatch(benchmark::State &state) {
+    run_pattern_rule(state, true);
+}
+
+void
+BM_Validation_PatternRuleNoMatch(benchmark::State &state) {
+    run_pattern_rule(state, false);
+}
+
 } // namespace
 
 BENCHMARK(BM_Validation_AsciiLength)->Arg(32)->Arg(1024)->Arg(65536);
@@ -93,5 +174,11 @@ BENCHMARK(BM_Validation_Utf8Length)->Arg(32)->Arg(1024)->Arg(32768);
 BENCHMARK(BM_Validation_ExactIntegerBound);
 BENCHMARK(BM_Validation_UniqueScalars)->Arg(16)->Arg(128)->Arg(1024);
 BENCHMARK(BM_Validation_UniqueObjects)->Arg(16)->Arg(128)->Arg(1024);
+BENCHMARK(BM_Validation_AnchoredPattern)->Arg(16)->Arg(256)->Arg(2048);
+BENCHMARK(BM_Validation_UnanchoredPatternFullInput)->Arg(16)->Arg(256)->Arg(2048);
+BENCHMARK(BM_Validation_PatternRuleFullMatch)->Arg(16)->Arg(256)->Arg(2048);
+BENCHMARK(BM_Validation_AnchoredPatternNoMatch)->Arg(16)->Arg(256)->Arg(2048);
+BENCHMARK(BM_Validation_UnanchoredPatternNoMatch)->Arg(16)->Arg(256)->Arg(2048);
+BENCHMARK(BM_Validation_PatternRuleNoMatch)->Arg(16)->Arg(256)->Arg(2048);
 
 BENCHMARK_MAIN();

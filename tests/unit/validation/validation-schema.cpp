@@ -54,6 +54,64 @@ validation_errors_to_json(const std::vector<qb::http::validation::Error> &errors
     return errors_array;
 }
 
+// --- JSON Schema pattern (unanchored unless the author supplies anchors) -----
+
+TEST_F(ValidationSchemaTest, PatternSearchesWithinTheString) {
+    SchemaValidator validator({{"pattern", "es"}});
+    for (const auto &value : {"expression", "es", "before es after", "\nes\n"}) {
+        SCOPED_TRACE(value);
+        result.clear();
+        EXPECT_TRUE(validator.validate(qb::json(value), result));
+        EXPECT_TRUE(result.success());
+    }
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json("absent"), result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "pattern");
+    EXPECT_EQ(result.errors()[0].field_path, "");
+}
+
+TEST_F(ValidationSchemaTest, PatternHonoursExplicitAnchorsAndEmptyMatches) {
+    SchemaValidator anchored({{"pattern", "^es$"}});
+    EXPECT_TRUE(anchored.validate(qb::json("es"), result));
+    result.clear();
+    EXPECT_FALSE(anchored.validate(qb::json("expression"), result));
+    result.clear();
+    EXPECT_TRUE(SchemaValidator({{"pattern", ""}}).validate(qb::json("anything"), result));
+    result.clear();
+    EXPECT_TRUE(SchemaValidator({{"pattern", "a*"}}).validate(qb::json("bbb"), result));
+    result.clear();
+    EXPECT_TRUE(anchored.validate(qb::json(42), result));
+    EXPECT_TRUE(result.success());
+}
+
+TEST_F(ValidationSchemaTest, PatternSearchAppliesToNestedValuesAndPropertyNames) {
+    SchemaValidator validator(
+        {{"type", "object"},
+         {"propertyNames", {{"pattern", "key"}}},
+         {"additionalProperties", {{"type", "array"}, {"items", {{"pattern", "value"}}}}}});
+    EXPECT_TRUE(validator.validate(qb::json{{"a_key_b", {"a_value_b"}}}, result));
+    EXPECT_TRUE(result.success());
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json{{"a_key_b", {"absent"}}}, result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].field_path, "a_key_b[0]");
+    EXPECT_EQ(result.errors()[0].rule_violated, "pattern");
+}
+
+TEST_F(ValidationSchemaTest, PatternSearchRetainsLimitsAndCompilationErrors) {
+    SchemaValidator validator({{"pattern", "x"}});
+    EXPECT_TRUE(validator.validate(qb::json(std::string(2047, 'a') + "x"), result));
+    result.clear();
+    EXPECT_FALSE(validator.validate(qb::json(std::string(2048, 'a') + "x"), result));
+    ASSERT_EQ(result.errors().size(), 1u);
+    EXPECT_EQ(result.errors()[0].rule_violated, "pattern");
+    EXPECT_NE(result.errors()[0].message.find("maximum length"), std::string::npos);
+    result.clear();
+    EXPECT_THROW(SchemaValidator({{"pattern", "["}}).validate(qb::json("x"), result), std::invalid_argument);
+    EXPECT_THROW(SchemaValidator({{"pattern", std::string(1025, 'a')}}).validate(qb::json("x"), result), std::invalid_argument);
+}
+
 // --- Object schemas ----------------------------------------------------------
 
 TEST_F(ValidationSchemaTest, BasicObject) {

@@ -110,7 +110,7 @@ SchemaValidator::build_rules_for_schema_node(const qb::json &schema_node) {
         rules.push_back(std::make_shared<MaxLengthRule>(*max_length));
     }
     if (schema_node.contains("pattern") && schema_node["pattern"].is_string()) {
-        rules.push_back(std::make_shared<PatternRule>(schema_node["pattern"].get<std::string>()));
+        rules.push_back(make_pattern_search_rule(schema_node["pattern"].get<std::string>()));
     }
     if (schema_node.contains("minimum") && schema_node["minimum"].is_number()) {
         const bool legacy_exclusive = schema_node.contains("exclusiveMinimum") && schema_node["exclusiveMinimum"].is_boolean()

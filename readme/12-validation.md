@@ -156,6 +156,15 @@ If a parameter rule returns `false` without adding an error, `ParameterValidator
 - **Objects:** `properties`, `required`, `additionalProperties` (bool or schema), `minProperties`, `maxProperties`, `propertyNames`.
 - **Combinators:** `allOf`, `anyOf`, `oneOf`, `not`.
 
+The schema `pattern` keyword searches for a match anywhere in a string, as required by
+[JSON Schema](https://json-schema.org/draft/2020-12/json-schema-validation#name-pattern):
+`"es"` accepts `"expression"`. Supply `^...$` for a whole-field constraint. This differs
+from standalone `PatternRule`, which keeps full-string matching. Both use ECMAScript
+regular expressions, reject patterns above 1024 bytes and inputs above 2 KiB, and report
+a matching-engine `std::regex_error` as a validation failure. Patterns are compiled lazily
+with the cached rules; invalid or oversized definitions still throw `std::invalid_argument`
+when that node is first evaluated. The limits do not make arbitrary patterns linear-time.
+
 ```cpp
 // <!-- src: qbm/http/tests/unit/validation/validation-schema.cpp (schema shape) -->
 #include <qbm/http/validation.h>
@@ -195,7 +204,7 @@ if (validator.validate(data, result)) {
 
 > **Use one `SchemaValidator` per core.** Internally it caches the compiled `IRule` list lazily in an unsynchronised `std::unordered_map`, and every recursive validation also increments and decrements the validator's ordinary mutable `_recursion_depth` counter. Warming the cache removes neither that write nor its data race. Do not share one validator across cores without external serialization.
 
-> **One nesting budget per validation.** A validation stops descending past 64 nested sub-schemas and reports `schemaTooDeep` where it stopped. Every keyword that holds a sub-schema — `properties`, `items`, `additionalItems`, `additionalProperties`, `propertyNames` and the four combinators — is validated in place and draws on that one budget, so the same nesting gets the same verdict whatever keyword carries it. (A standalone `PropertyNamesRule` validates through a `SchemaValidator` of its own, with a budget of its own.) <!-- src: qbm/http/src/qbm/http/validation/schema_validator.h:162-168, qbm/http/src/qbm/http/validation/schema_validator.cpp:494-500, qbm/http/src/qbm/http/validation/schema_validator.cpp:511-530 -->
+> **One nesting budget per validation.** A validation stops descending past 64 nested sub-schemas and reports `schemaTooDeep` where it stopped. Every keyword that holds a sub-schema — `properties`, `items`, `additionalItems`, `additionalProperties`, `propertyNames` and the four combinators — is validated in place and draws on that one budget, so the same nesting gets the same verdict whatever keyword carries it. (A standalone `PropertyNamesRule` validates through a `SchemaValidator` of its own, with a budget of its own.) <!-- src: qbm/http/src/qbm/http/validation/schema_validator.h:163-169, qbm/http/src/qbm/http/validation/schema_validator.cpp:494-500, qbm/http/src/qbm/http/validation/schema_validator.cpp:511-530 -->
 
 > **Combinators short-circuit and aggregate.** `anyOf`/`oneOf`/`not` are evaluated only if earlier combinators passed. They validate sub-schemas against throwaway `Result`s, so a failure surfaces a single aggregate error (`"anyOf"`, `"oneOf"`, `"not"`) rather than the per-branch detail. Expect one error per failed combinator, not a tree.
 

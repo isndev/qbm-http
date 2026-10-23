@@ -306,7 +306,7 @@ The freshness lifetime is **not** a duration type: `with_cache_control` takes a 
 
 For GET and HEAD, a present `If-None-Match` takes precedence over `If-Modified-Since`; a differing ETag serves the representation even when the supplied date is newer. A directory's configured index file is checked against the canonical root and the `reject_symlinks` option before serving it. Its `Content-Type` follows the configured index filename, including when that filename is a symlink to a file with another extension.
 
-A filesystem root (`/`, `C:\`) is a valid root: its canonical form already ends with the separator, and the containment check accepts what lies below it, while a sibling that merely shares an ordinary root's string prefix (`www` and `www_old`) stays refused. The directory listing writes the request path into each link escaped for the HTML attribute (`&` becomes `&amp;`, percent-encodings are left as they are), and each entry name percent-encoded. <!-- src: qbm/http/src/qbm/http/middleware/static_files.cpp:138-155, qbm/http/src/qbm/http/middleware/static_files.cpp:306-314 -->
+A filesystem root (`/`, `C:\`) is a valid root: its canonical form already ends with the separator, and the containment check accepts what lies below it, while a sibling that merely shares an ordinary root's string prefix (`www` and `www_old`) stays refused. The directory listing writes the request path into each link escaped for the HTML attribute (`&` becomes `&amp;`, percent-encodings are left as they are), and each entry name percent-encoded. <!-- src: qbm/http/src/qbm/http/middleware/static_files.cpp:153-170, qbm/http/src/qbm/http/middleware/static_files.cpp:321-329 -->
 
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
@@ -324,9 +324,21 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:809 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:827 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
+
+ETags derived from file size and modification time are **weak**, prefixed with `W/`.
+They remain usable for `If-None-Match`, which compares weakly even if a client retained
+an earlier tag without the prefix. They cannot prove byte-for-byte identity for resuming
+a download. `If-Range` therefore makes the middleware ignore `Range` and serve the full
+representation with 200 for its metadata validators; filesystem dates are also treated
+as weak because the middleware cannot establish whether a file changed twice in one
+second. This follows the strong-validator requirement of
+[RFC 9110 §13.1.5](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.5).
+No file hash or additional read is needed. Without `If-Range`, existing single-range
+206/416 behavior is unchanged. Cache preconditions run before range handling, and HEAD
+always ignores Range and sends the full representation's headers without a body.
 
 ## Authentication
 

@@ -148,6 +148,11 @@ public:
 
     void
     on(typename http_protocol::response response) {
+        const auto status = response.status().code();
+        if (status >= 100 && status < 200 && status != 101) [[unlikely]] {
+            // RFC 9110 section 15.2: the active request, its deadline and queue await the final response.
+            return;
+        }
         auto owner_guard = _owner.weak_from_this().lock();
         this->setTimeout(qb::duration::zero());
 #ifdef QB_HAS_COMPRESSION

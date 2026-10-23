@@ -16,11 +16,29 @@ The qbm-http client surface is non-blocking from the ground up. Every request is
 
 ## Concepts
 
+### Informational responses
+
+HTTP/1.1 and HTTP/2 clients wait through `100 Continue`, `103 Early Hints` and other
+informational responses. Only the final response completes your callback or coroutine;
+the request's timeout and cancellation still apply while it waits. Interim fields such
+as an Early Hints `Link` are not merged into that final response, and an HTTP/1.1 queued
+request does not start because a 1xx arrived.
+
+HTTP/2 also accepts repeated and CONTINUATION-split informational header blocks. A 1xx
+that sets END_STREAM, status 101, or DATA before final headers is a stream protocol
+error. HTTP/1.1 status 101 keeps its existing upgrade handling. This follows
+[RFC 9110 section 15.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.2) and
+[RFC 9113 section 8.1](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1).
+
+The clients still send a request's body immediately, even if you set
+`Expect: 100-continue`. There is no wait-for-100 upload handshake or separate callback
+for informational responses.
+
 ### `async::Reply` — the one-shot result
 
 The legacy one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the request snapshot for that attempt with the server response. Normal preparation may add headers or compress the body; a failure may occur before transmission. The opt-in redirect overloads below return a separate `async::RedirectReply`.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1037-1040 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1094-1097 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -94,19 +112,19 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1088-1094,1166-1176; qbm/http/src/qbm/http/1.1/client.cpp:149-163,372-390; qbm/http/src/qbm/http/headers.cpp:320-325 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1145-1151,1228-1238; qbm/http/src/qbm/http/1.1/client.cpp:149-168,377-395; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:248-261,604-619; qbm/http/src/qbm/http/3/client.cpp:191-203,760-769; qbm/http/src/qbm/http/body.h:291-312 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1136-1143; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1193-1200; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
 
 ## One-shot callback client (HTTP/1.1)
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1162-1177,1257-1272,1307-1312 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1219-1239,1319-1334,1369-1374 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -150,7 +168,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1443-1448 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1505-1510 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -203,7 +221,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1443-1448 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1505-1510 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -328,7 +346,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:607-618 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:703-714 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -356,11 +374,15 @@ Notes specific to the persistent HTTP/1.1 client:
 A closing response marks the client disconnected **before** its callback runs. The active response is delivered once, while queued remainder follows the normal reconnect policy. On disconnect, connect failure, or timeout, the old request and connect-callback cohort is detached before its notifications. A request submitted by one of those callbacks belongs to the next cycle and cannot be consumed by the old failure loop. Batch order, callback counts, and existing pending-request deadlines are preserved.
 
 If a callback requests `connect()`, the new attempt is accepted but starts only after the old callbacks and protocol/I/O dispatch have unwound. `is_connecting()` can therefore be true while `is_connected()` remains false. Work queued behind this explicit intent is admitted even with `set_auto_reconnect(false)`; without such an intent, a disconnected client with automatic reconnect disabled still rejects work with 503. A direct `disconnect()` outside callback dispatch releases the retired connection before returning. Callback exceptions remain contained, so one throwing old callback does not prevent the remaining old notifications.
-<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:235-239,275-310,341-352,497-513,568-596,600-633,693-752 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:240-244,280-315,346-357,502-518,573-601,605-638,698-757 -->
 
 ## Persistent HTTP/2 client (`qb::http2::Client`)
 
 HTTP/2 is TLS-only with ALPN. The client advertises only `h2` and fails the connection if ALPN does not negotiate it — plaintext `h2c` is not supported, so `qb::http2::Client` requires `QB_HAS_SSL` and an `https://` base URI. It multiplexes concurrent requests over a single connection and preserves batch order.
+
+A stream reset locally by the protocol is retired before its error callback runs. The
+callback can cancel that same stream again or enqueue another request without a duplicate
+notification or a reference to the retired stream.
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
@@ -417,7 +439,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:354-358 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:375-379 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```

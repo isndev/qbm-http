@@ -40,6 +40,7 @@
  */
 
 #include <chrono>
+#include <filesystem>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -51,6 +52,16 @@
 using namespace std::chrono_literals;
 
 namespace listen_start_parity_test {
+
+// Compiled in both SSL and SSL-off builds: TLS configuration is not a plaintext
+// server capability, and the legacy path overload still accepts empty braces.
+template <typename Server>
+concept has_certificate_reload = requires(Server &server, std::filesystem::path file) { server.reload_certificates(file, file); };
+static_assert(!has_certificate_reload<qb::http::Server<>>);
+static_assert(requires(qb::http::Server<> &server, qb::io::uri uri) {
+    server.listen(uri, {});
+    server.listen_no_start(uri, {}, {});
+});
 
 // A minimal plain-TCP server built DIRECTLY on qb::io::async::tcp::acceptor, used below to
 // pin the base class's own listen() contract against the qbm override that hides it.
