@@ -573,11 +573,25 @@ BENCHMARK(BM_WS_EncodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 10
 
 BENCHMARK(BM_WS_EncodeUnmaskedBinary)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_DecodeMaskedText)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_DecodeMaskedText)
+    ->Arg(16)
+    ->Arg(256)
+    ->Arg(4 * 1024)
+    ->Arg(64 * 1024)
+    ->ArgNames({"bytes"})
+    ->Unit(benchmark::kNanosecond)
+    ->UseRealTime();
 
 BENCHMARK(BM_WS_DecodePingAutoPong)->Arg(0)->Arg(32)->Arg(125)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
 
-BENCHMARK(BM_WS_EchoRoundTrip)->Arg(16)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_WS_EchoRoundTrip)
+    ->Arg(16)
+    ->Arg(256)
+    ->Arg(4 * 1024)
+    ->Arg(64 * 1024)
+    ->ArgNames({"bytes"})
+    ->Unit(benchmark::kNanosecond)
+    ->UseRealTime();
 
 BENCHMARK(BM_WS_ClientMessageForward)->Unit(benchmark::kNanosecond);
 

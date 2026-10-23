@@ -21,6 +21,7 @@
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -37,8 +38,10 @@
 #include <qb/io/system/sys__socket.h>
 
 #include "../../shared/loopback_server.h"
+#include "../../shared/ssl_test_resource.h"
 
 #include <qbm/http/http.h>
+#include <qbm/http/redirect.h>
 
 #ifdef QB_HAS_COMPRESSION
 #include <zlib.h>
@@ -124,8 +127,9 @@ public:
 // test reads them only AFTER it has joined on the observable client outcome.
 class Http1ClientTestServer : public qb::http::use<Http1ClientTestServer>::server<Http1ClientTestSession> {
 public:
-    std::atomic<int> connection_count{0};
-    std::atomic<int> request_count{0};
+    std::atomic<int>           connection_count{0};
+    std::atomic<int>           request_count{0};
+    std::atomic<std::uint16_t> redirect_peer_port{0};
 
     Http1ClientTestServer() {
         router().get("/ping", [this](auto ctx) {
@@ -293,6 +297,84 @@ public:
             auto session = ctx->session();
             ctx->suppress_response();
             session->publish("NOT HTTP AT ALL\r\n\r\n");
+        });
+
+        // Redirect routes share this suite's existing real socket and request counter.
+        router().get("/redirect/chain/:hop", [this](auto ctx) {
+            ++request_count;
+            const auto hop           = std::stoul(ctx->path_param("hop"));
+            ctx->response().status() = hop < 3 ? qb::http::status::FOUND : qb::http::status::OK;
+            ctx->response().body()   = "chain:" + std::to_string(hop);
+            if (hop < 3)
+                ctx->response().set_header("Location", "/redirect/chain/" + std::to_string(hop + 1));
+            ctx->complete();
+        });
+        router().get("/redirect/loop", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "/redirect/loop");
+            ctx->complete();
+        });
+        const auto inspect_redirect = [](auto ctx) {
+            ctx->response().set_header("X-Seen-Method", std::string(ctx->request().method()));
+            for (char const *name :
+                 {"Host", "Authorization", "Proxy-Authorization", "Cookie", "Origin", "Referer", "Content-Type", "Content-Encoding",
+                  "Content-Length", "Transfer-Encoding"}) {
+                ctx->response().set_header(std::string("X-Seen-") + name, ctx->request().header(name));
+            }
+        };
+        const auto redirect_echo = [this, inspect_redirect](auto ctx) {
+            ++request_count;
+            inspect_redirect(ctx);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        };
+        router().get("/redirect/inspect", redirect_echo);
+        router().post("/redirect/inspect", redirect_echo);
+        router().head("/redirect/inspect", redirect_echo);
+        const auto redirect_method = [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = std::stoi(ctx->path_param("status"));
+            ctx->response().set_header("Location", "/redirect/inspect");
+            ctx->complete();
+        };
+        router().post("/redirect/method/:status", redirect_method);
+        router().head("/redirect/method/:status", redirect_method);
+        router().get("/redirect/cross", [this, inspect_redirect](auto ctx) {
+            ++request_count;
+            inspect_redirect(ctx);
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "http://127.0.0.1:" + std::to_string(redirect_peer_port.load()) + "/redirect/return");
+            ctx->complete();
+        });
+        router().get("/redirect/return", [this, inspect_redirect](auto ctx) {
+            ++request_count;
+            inspect_redirect(ctx);
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "http://127.0.0.1:" + std::to_string(redirect_peer_port.load()) + "/redirect/inspect");
+            ctx->complete();
+        });
+        router().get("/redirect/ows", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", " \t/redirect/inspect \t");
+            ctx->complete();
+        });
+        router().get("/redirect/refuse/:kind", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::FOUND;
+            const auto kind          = ctx->path_param("kind");
+            if (kind == "multiple") {
+                ctx->response().add_header("Location", "/redirect/inspect");
+                ctx->response().add_header("Location", "/ping");
+            } else if (kind == "userinfo") {
+                ctx->response().set_header("Location", "http://user:secret@127.0.0.1:" + std::to_string(transport().local_endpoint().port())
+                                                           + "/redirect/inspect");
+            } else {
+                ctx->response().set_header("Location", "http://[invalid");
+            }
+            ctx->complete();
         });
 
         router().compile();
@@ -476,6 +558,26 @@ public:
         return false;
     }
 };
+
+qb::http::async::RedirectReply
+request_with_redirects(qb::http::Request req, qb::http::RedirectOptions options = {}, bool verify_peer = true) {
+    struct Observation {
+        qb::http::async::RedirectReply result;
+        unsigned                       delivered = 0;
+    };
+    auto observed = std::make_shared<Observation>();
+    qb::http::REQUEST(
+        std::move(req),
+        [observed](qb::http::async::RedirectReply &&reply) {
+            ++observed->delivered;
+            observed->result = std::move(reply);
+        },
+        2s, verify_peer, options);
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->delivered != 0; }));
+    drain_client_callbacks();
+    EXPECT_EQ(observed->delivered, 1u);
+    return std::move(observed->result);
+}
 
 } // namespace
 
@@ -1742,3 +1844,409 @@ TEST(Http1ClientTest, HeadOfAChunkedRouteEndsAtItsHeaderSection) {
     EXPECT_EQ(server.connection_count(), 1) << "the HEAD response left bytes behind, or the connection was dropped";
     drain_client_callbacks();
 }
+
+// QB-169: following is opt-in; old one-shot requests still return the first 3xx.
+TEST(Http1ClientTest, RedirectLegacyPathAndZeroCapNeverFollow) {
+    LoopbackHttp1Server server;
+    auto                legacy = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, server.url("/redirect/chain/0")), 2s));
+    EXPECT_EQ(legacy.response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(server.request_count(), 1);
+    auto zero = request_with_redirects(request(qb::http::method::GET, server.url("/redirect/chain/0")), {0, false});
+    EXPECT_EQ(zero.response.status(), qb::http::status::FOUND);
+    EXPECT_TRUE(zero.hops.empty());
+    EXPECT_EQ(zero.request.uri().path(), "/redirect/chain/0");
+    EXPECT_EQ(server.request_count(), 2);
+}
+
+TEST(Http1ClientTest, RedirectCapHistoryAndTerminalRequestAreExact) {
+    LoopbackHttp1Server server;
+    for (const std::size_t cap : {std::size_t{1}, std::size_t{5}, (std::numeric_limits<std::size_t>::max)()}) {
+        SCOPED_TRACE(cap);
+        const auto before   = server.request_count();
+        const auto followed = std::min(cap, std::size_t{3});
+        auto       req      = request(qb::http::method::GET, server.url("/redirect/chain/0"));
+        req.set_header("X-Trace", "redirect-history");
+        req.set_header("Authorization", "same-origin-secret");
+        auto reply = request_with_redirects(std::move(req), {cap, false});
+        EXPECT_EQ(reply.response.status(), cap < 3 ? qb::http::status::FOUND : qb::http::status::OK);
+        EXPECT_EQ(reply.response.body().as<std::string>(), "chain:" + std::to_string(followed));
+        EXPECT_EQ(reply.request.uri().path(), "/redirect/chain/" + std::to_string(followed));
+        EXPECT_EQ(reply.request.header("Authorization"), "same-origin-secret");
+        ASSERT_EQ(reply.hops.size(), followed);
+        EXPECT_EQ(server.request_count() - before, static_cast<int>(followed + 1));
+        for (std::size_t i = 0; i < followed; ++i) {
+            EXPECT_EQ(reply.hops[i].response.status(), qb::http::status::FOUND);
+            EXPECT_EQ(reply.hops[i].request.uri().path(), "/redirect/chain/" + std::to_string(i));
+            EXPECT_EQ(reply.hops[i].request.header("X-Trace"), "redirect-history");
+            EXPECT_EQ(reply.hops[i].request.header("Authorization"), "same-origin-secret");
+            EXPECT_EQ(reply.hops[i].request.header("Host"), "127.0.0.1:" + std::to_string(server.port));
+            EXPECT_FALSE(reply.hops[i].request.header("User-Agent").empty());
+        }
+    }
+    const auto before = server.request_count();
+    auto       loop   = request_with_redirects(request(qb::http::method::GET, server.url("/redirect/loop")), {1, false});
+    EXPECT_EQ(loop.response.status(), qb::http::status::FOUND);
+    ASSERT_EQ(loop.hops.size(), 1u);
+    EXPECT_EQ(loop.request.uri().path(), "/redirect/loop");
+    EXPECT_EQ(server.request_count() - before, 2);
+}
+
+TEST(Http1ClientTest, RedirectPost301302303DropsBodyAndEntityHeaders) {
+    LoopbackHttp1Server server;
+    for (int code : {301, 302, 303}) {
+        SCOPED_TRACE(code);
+        auto req   = request(qb::http::method::POST, server.url("/redirect/method/" + std::to_string(code)));
+        req.body() = "discard-this-body";
+        req.set_header("Content-Type", "application/octet-stream");
+        req.set_header("Content-Length", "17");
+        auto reply = request_with_redirects(std::move(req));
+        ASSERT_EQ(reply.hops.size(), 1u);
+        EXPECT_EQ(reply.hops.front().request.method(), qb::http::method::POST);
+        EXPECT_EQ(reply.hops.front().response.status(), code);
+        EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+        EXPECT_EQ(reply.response.header("X-Seen-Method"), "GET");
+        EXPECT_TRUE(reply.response.body().empty());
+        EXPECT_TRUE(reply.response.header("X-Seen-Content-Type").empty());
+        EXPECT_TRUE(reply.response.header("X-Seen-Content-Length").empty());
+        EXPECT_TRUE(reply.response.header("X-Seen-Content-Encoding").empty());
+        EXPECT_TRUE(reply.response.header("X-Seen-Transfer-Encoding").empty());
+        EXPECT_EQ(reply.request.method(), qb::http::method::GET);
+        EXPECT_TRUE(reply.request.body().empty());
+    }
+}
+
+TEST(Http1ClientTest, Redirect303KeepsHeadAndHasNoBody) {
+    LoopbackHttp1Server server;
+    auto                reply = request_with_redirects(request(qb::http::method::HEAD, server.url("/redirect/method/303")));
+    ASSERT_EQ(reply.hops.size(), 1u);
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.header("X-Seen-Method"), "HEAD");
+    EXPECT_EQ(reply.request.method(), qb::http::method::HEAD);
+    EXPECT_TRUE(reply.response.body().empty());
+}
+
+#ifdef QB_HAS_COMPRESSION
+TEST(Http1ClientTest, Redirect303DropsCompressionBeforePreparingNextRequest) {
+    LoopbackHttp1Server server;
+    auto                req = request(qb::http::method::POST, server.url("/redirect/method/303"));
+    req.body()              = "discard-this-compressed-body";
+    req.set_header("Content-Encoding", "gzip");
+    req.set_header("Content-Type", "application/octet-stream");
+    auto reply = request_with_redirects(std::move(req));
+    ASSERT_EQ(reply.hops.size(), 1u);
+    EXPECT_EQ(reply.hops.front().request.header("Content-Encoding"), "gzip");
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.response.header("X-Seen-Method"), "GET");
+    EXPECT_TRUE(reply.response.header("X-Seen-Content-Encoding").empty());
+    EXPECT_TRUE(reply.request.header("Content-Encoding").empty());
+    EXPECT_TRUE(reply.request.body().empty());
+    EXPECT_TRUE(reply.response.body().empty());
+}
+
+TEST(Http1ClientTest, Redirect307308ReplayLogicalBodyWithExactlyOneGzipLayer) {
+    LoopbackHttp1Server server;
+    const std::string   plain = std::string(2048, 'R') + "redirect-body";
+    for (int code : {307, 308}) {
+        SCOPED_TRACE(code);
+        auto req   = request(qb::http::method::POST, server.url("/redirect/method/" + std::to_string(code)));
+        req.body() = plain;
+        req.set_header("Content-Encoding", "gzip");
+        req.set_header("Content-Type", "application/octet-stream");
+        auto reply = request_with_redirects(std::move(req));
+        ASSERT_EQ(reply.hops.size(), 1u);
+        EXPECT_EQ(reply.hops.front().response.status(), code);
+        EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+        EXPECT_EQ(reply.response.header("X-Seen-Method"), "POST");
+        EXPECT_EQ(reply.response.header("X-Seen-Content-Encoding"), "gzip");
+        EXPECT_EQ(reply.response.header("X-Seen-Content-Type"), "application/octet-stream");
+        const auto wire = gunzip_reference(reply.response.body().as<std::string>());
+        ASSERT_TRUE(wire.has_value());
+        EXPECT_EQ(*wire, plain);
+        const auto initial  = gunzip_reference(reply.hops.front().request.body().as<std::string>());
+        const auto terminal = gunzip_reference(reply.request.body().as<std::string>());
+        ASSERT_TRUE(initial.has_value());
+        ASSERT_TRUE(terminal.has_value());
+        EXPECT_EQ(*initial, plain);
+        EXPECT_EQ(*terminal, plain);
+    }
+}
+#endif
+
+TEST(Http1ClientTest, RedirectCrossOriginIsOptInAndNeverRestoresSecretsOnReturn) {
+    LoopbackHttp1Server first;
+    LoopbackHttp1Server second;
+    first.srv->redirect_peer_port.store(second.port);
+    second.srv->redirect_peer_port.store(first.port);
+    auto make_request = [&] {
+        auto req = request(qb::http::method::GET, first.url("/redirect/cross"));
+        for (char const *name : {"Authorization", "Proxy-Authorization", "Cookie", "Origin", "Referer"})
+            req.set_header(std::string_view{name}, "secret-value");
+        req.set_header("Cookie", "header-secret=value");
+        req.cookies().add("jar-secret", "value");
+        req.set_header("Host", "stale.example:9");
+        req.set_header("X-Trace", "retained");
+        return req;
+    };
+    auto stopped = request_with_redirects(make_request());
+    EXPECT_EQ(stopped.response.status(), qb::http::status::FOUND);
+    EXPECT_TRUE(stopped.hops.empty());
+    EXPECT_EQ(second.request_count(), 0);
+    auto followed = request_with_redirects(make_request(), {5, true});
+    ASSERT_EQ(followed.hops.size(), 2u);
+    EXPECT_EQ(followed.response.status(), qb::http::status::OK);
+    EXPECT_EQ(first.request_count(), 3);
+    EXPECT_EQ(second.request_count(), 1);
+    EXPECT_EQ(followed.hops[0].request.header("Authorization"), "secret-value");
+    EXPECT_FALSE(followed.hops[0].request.cookies().empty());
+    for (char const *name : {"Authorization", "Proxy-Authorization", "Cookie", "Origin", "Referer"}) {
+        SCOPED_TRACE(name);
+        EXPECT_TRUE(followed.hops[1].request.header(name).empty());
+        EXPECT_TRUE(followed.request.header(name).empty());
+        EXPECT_TRUE(followed.hops[1].response.header(std::string("X-Seen-") + name).empty());
+        EXPECT_TRUE(followed.response.header(std::string("X-Seen-") + name).empty());
+    }
+    EXPECT_TRUE(followed.hops[1].request.cookies().empty());
+    EXPECT_TRUE(followed.request.cookies().empty());
+    EXPECT_EQ(followed.hops[1].response.header("X-Seen-Host"), "127.0.0.1:" + std::to_string(second.port));
+    EXPECT_EQ(followed.response.header("X-Seen-Host"), "127.0.0.1:" + std::to_string(first.port));
+    EXPECT_EQ(followed.request.header("X-Trace"), "retained");
+}
+
+TEST(Http1ClientTest, RedirectRefusesInvalidMultipleAndUserinfoLocations) {
+    LoopbackHttp1Server server;
+    for (char const *kind : {"invalid", "multiple", "userinfo"}) {
+        SCOPED_TRACE(kind);
+        const auto before = server.request_count();
+        auto       reply  = request_with_redirects(request(qb::http::method::GET, server.url(std::string("/redirect/refuse/") + kind)));
+        EXPECT_EQ(reply.response.status(), qb::http::status::FOUND);
+        EXPECT_TRUE(reply.hops.empty());
+        EXPECT_EQ(server.request_count() - before, 1);
+    }
+}
+
+TEST(Http1ClientTest, RedirectMoveOnlyCallbackIsDeferredAndDeliveredOnce) {
+    auto observed = std::make_shared<std::pair<bool, unsigned>>(false, 0u);
+    qb::http::GET(
+        request(qb::http::method::GET, "ftp://127.0.0.1/resource"),
+        [owned = std::make_unique<int>(73), observed](qb::http::async::RedirectReply &&reply) {
+            EXPECT_TRUE(observed->first);
+            EXPECT_EQ(*owned, 73);
+            ++observed->second;
+            EXPECT_EQ(reply.response.status(), qb::http::status::BAD_REQUEST);
+            EXPECT_TRUE(reply.hops.empty());
+        },
+        2s, true, qb::http::RedirectOptions{});
+    EXPECT_EQ(observed->second, 0u);
+    observed->first = true;
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->second != 0; }));
+    drain_client_callbacks();
+    EXPECT_EQ(observed->second, 1u);
+}
+
+TEST(Http1ClientTest, RedirectThrowingFinalCallbackIsContainedOnceAndReleasesCapture) {
+    qb::io::async::init();
+    auto &listener = qb::io::async::listener::current;
+    RecordProperty("inherited_active_watchers", listener.loop().active_count());
+    RecordProperty("inherited_pending_events", static_cast<int>(listener.loop().pending_count()));
+    RecordProperty("inherited_has_deferred", static_cast<int>(listener.has_deferred()));
+    RecordProperty("inherited_has_work", static_cast<int>(listener.has_work()));
+    // This TEST owner has no per-case TearDown: earlier clients can leave weak
+    // deadline timers after their own objects have gone. Isolate before creating
+    // this case's server, request or captured state, never to satisfy its oracle.
+    listener.clear();
+    ASSERT_FALSE(listener.has_work());
+    LoopbackHttp1Server server;
+    struct Observation {
+        unsigned                                      delivered = 0;
+        bool                                          threw     = false;
+        bool                                          barrier   = false;
+        std::optional<qb::http::async::RedirectReply> reply;
+    };
+    auto                     observed = std::make_shared<Observation>();
+    auto                     capture  = std::make_shared<int>(91);
+    const std::weak_ptr<int> released = capture;
+    qb::http::GET(
+        request(qb::http::method::GET, server.url("/redirect/chain/0")),
+        [observed, capture = std::move(capture)](qb::http::async::RedirectReply &&reply) {
+            ++observed->delivered;
+            EXPECT_EQ(*capture, 91);
+            EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+            EXPECT_EQ(reply.response.body().as<std::string>(), "chain:3");
+            EXPECT_EQ(reply.request.uri().path(), "/redirect/chain/3");
+            EXPECT_EQ(reply.hops.size(), 3u);
+            if (reply.hops.size() == 3) {
+                for (std::size_t i = 0; i < reply.hops.size(); ++i) {
+                    EXPECT_EQ(reply.hops[i].response.status(), qb::http::status::FOUND);
+                    EXPECT_EQ(reply.hops[i].request.uri().path(), "/redirect/chain/" + std::to_string(i));
+                }
+            }
+            observed->reply.emplace(std::move(reply));
+            observed->threw = true;
+            throw std::runtime_error("owned redirect completion failure");
+        },
+        qb::duration::zero(), true, qb::http::RedirectOptions{});
+    EXPECT_EQ(observed->delivered, 0u);
+    EXPECT_FALSE(released.expired());
+    // The exception leaves only the user callback; the existing defer drain
+    // contains it. Waiting for all client work also completes socket disposal.
+    const bool settled =
+        ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->delivered != 0 && released.expired() && !listener.has_work(); });
+    RecordProperty("final_delivered", static_cast<int>(observed->delivered));
+    RecordProperty("final_capture_expired", static_cast<int>(released.expired()));
+    RecordProperty("final_has_work", static_cast<int>(listener.has_work()));
+    RecordProperty("final_has_deferred", static_cast<int>(listener.has_deferred()));
+    RecordProperty("final_active_watchers", listener.loop().active_count());
+    RecordProperty("final_pending_events", static_cast<int>(listener.loop().pending_count()));
+    EXPECT_EQ(observed->delivered, 1u);
+    EXPECT_TRUE(released.expired()) << "the final completion capture is still owned";
+    EXPECT_FALSE(listener.has_work()) << "client work remains after completion";
+    ASSERT_TRUE(settled) << "delivered=" << observed->delivered << ", capture_expired=" << released.expired()
+                         << ", deferred=" << listener.has_deferred() << ", active=" << listener.loop().active_count()
+                         << ", pending=" << listener.loop().pending_count();
+    ASSERT_TRUE(observed->reply.has_value());
+    EXPECT_TRUE(observed->threw);
+    EXPECT_EQ(observed->delivered, 1u);
+    EXPECT_EQ(observed->reply->response.status(), qb::http::status::OK);
+    EXPECT_EQ(observed->reply->hops.size(), 3u);
+    EXPECT_EQ(server.request_count(), 4);
+
+    // An additional real deferred turn must neither retry completion nor send
+    // another request. No elapsed-time sleep stands in for this ordering fence.
+    qb::io::async::defer([observed] { observed->barrier = true; });
+    ASSERT_TRUE(
+        ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->barrier && !qb::io::async::listener::current.has_work(); }));
+    EXPECT_EQ(observed->delivered, 1u);
+    EXPECT_TRUE(released.expired());
+    EXPECT_EQ(server.request_count(), 4);
+}
+
+TEST(Http1ClientTest, RedirectLocationWithOptionalWhitespaceFollows) {
+    LoopbackHttp1Server server;
+    auto                reply = request_with_redirects(request(qb::http::method::GET, server.url("/redirect/ows")));
+    ASSERT_EQ(reply.hops.size(), 1u);
+    EXPECT_EQ(reply.hops.front().response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.request.uri().path(), "/redirect/inspect");
+    EXPECT_EQ(server.request_count(), 2);
+}
+
+#if QB_HAS_SSL
+TEST(Http1ClientTest, RedirectHttpsSameOriginHonorsPeerVerification) {
+    ASSERT_TRUE(qb::http::test::certs_available())
+        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
+    using SecureServer                  = qb::http::ssl::Server<>;
+    auto                       requests = std::make_shared<std::atomic<unsigned>>(0);
+    const std::string          cert     = qb::http::test::ssl_cert_path().string();
+    const std::string          key      = qb::http::test::ssl_key_path().string();
+    ServerThread<SecureServer> server([requests, cert, key](SecureServer &srv) {
+        auto tls = qb::io::ssl::Context::server(cert, key);
+        if (!tls.ok())
+            return false;
+        srv.transport().init(std::move(tls));
+        srv.router().get("/secure-start", [requests](auto ctx) {
+            ++*requests;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "/secure-terminal");
+            ctx->complete();
+        });
+        srv.router().get("/secure-terminal", [requests](auto ctx) {
+            ++*requests;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "https-redirect-complete";
+            ctx->complete();
+        });
+        srv.router().compile();
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server.ready());
+    ASSERT_NE(server.port(), 0);
+    const std::string target = "https://127.0.0.1:" + std::to_string(server.port()) + "/secure-start";
+
+    // The shipped self-signed certificate is not an authenticated loopback peer.
+    // Verification must fail before any HTTP route is invoked.
+    auto rejected = request_with_redirects(request(qb::http::method::GET, target), {}, true);
+    EXPECT_EQ(rejected.response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_TRUE(rejected.hops.empty());
+    EXPECT_EQ(requests->load(), 0u);
+
+    // Opt out only for this owned TLS fixture. The relative Location must retain HTTPS.
+    auto followed = request_with_redirects(request(qb::http::method::GET, target), {}, false);
+    ASSERT_EQ(followed.hops.size(), 1u);
+    EXPECT_EQ(followed.hops.front().response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(followed.hops.front().request.uri().scheme(), "https");
+    EXPECT_EQ(followed.hops.front().request.uri().path(), "/secure-start");
+    EXPECT_EQ(followed.response.status(), qb::http::status::OK);
+    EXPECT_EQ(followed.response.body().as<std::string>(), "https-redirect-complete");
+    EXPECT_EQ(followed.request.uri().scheme(), "https");
+    EXPECT_EQ(followed.request.uri().path(), "/secure-terminal");
+    EXPECT_EQ(requests->load(), 2u);
+}
+
+TEST(Http1ClientTest, RedirectHttpsNeverDowngradesEvenWithCrossOriginOptIn) {
+    ASSERT_TRUE(qb::http::test::certs_available())
+        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
+    LoopbackHttp1Server plaintext;
+    using SecureServer                     = qb::http::ssl::Server<>;
+    auto                       requests    = std::make_shared<std::atomic<unsigned>>(0);
+    const std::string          cert        = qb::http::test::ssl_cert_path().string();
+    const std::string          key         = qb::http::test::ssl_key_path().string();
+    const std::string          destination = plaintext.url("/ping");
+    ServerThread<SecureServer> server([requests, cert, key, destination](SecureServer &srv) {
+        auto tls = qb::io::ssl::Context::server(cert, key);
+        if (!tls.ok())
+            return false;
+        srv.transport().init(std::move(tls));
+        srv.router().get("/downgrade", [requests, destination](auto ctx) {
+            ++*requests;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", destination);
+            ctx->response().body() = "retain-this-redirect";
+            ctx->complete();
+        });
+        srv.router().compile();
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server.ready());
+    ASSERT_NE(server.port(), 0);
+    const std::string target = "https://127.0.0.1:" + std::to_string(server.port()) + "/downgrade";
+    auto              reply  = request_with_redirects(request(qb::http::method::GET, target), {5, true}, false);
+    EXPECT_EQ(reply.response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(reply.response.body().as<std::string>(), "retain-this-redirect");
+    EXPECT_EQ(reply.response.header("Location"), destination);
+    EXPECT_EQ(reply.request.uri().scheme(), "https");
+    EXPECT_EQ(reply.request.uri().path(), "/downgrade");
+    EXPECT_TRUE(reply.hops.empty());
+    EXPECT_EQ(requests->load(), 1u);
+    EXPECT_EQ(plaintext.request_count(), 0);
+    EXPECT_EQ(plaintext.connection_count(), 0);
+}
+#else
+TEST(Http1ClientTest, RedirectHttpsWithoutSslCompletesOnceDeferredWithoutNetwork) {
+    // A real owned plaintext endpoint is deliberately named with https: a wrong
+    // fallback to plaintext would reach /ping, rather than failing at a closed port.
+    LoopbackHttp1Server plaintext;
+    auto                observed = std::make_shared<std::pair<bool, unsigned>>(false, 0u);
+    qb::http::GET(
+        request(qb::http::method::GET, "https://127.0.0.1:" + std::to_string(plaintext.port) + "/ping"),
+        [observed](qb::http::async::RedirectReply &&reply) {
+            EXPECT_TRUE(observed->first);
+            ++observed->second;
+            EXPECT_EQ(reply.response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+            EXPECT_TRUE(reply.hops.empty());
+        },
+        2s, false, qb::http::RedirectOptions{});
+    EXPECT_EQ(observed->second, 0u);
+    observed->first = true;
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->second != 0; }));
+    drain_client_callbacks();
+    EXPECT_EQ(observed->second, 1u);
+    EXPECT_EQ(plaintext.request_count(), 0);
+    EXPECT_EQ(plaintext.connection_count(), 0);
+}
+#endif

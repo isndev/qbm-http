@@ -27,6 +27,15 @@
 
 namespace qb::http::detail {
 
+/// Cold shutdown capability of a protocol upgraded in place. No hook runs during ordinary HTTP traffic.
+class websocket_drain {
+public:
+    virtual void begin_server_drain() noexcept = 0;
+
+protected:
+    ~websocket_drain() = default;
+};
+
 /**
  * @brief A one-shot timer of the loop the creating thread runs: its action runs once, when the time given has
  *        passed.

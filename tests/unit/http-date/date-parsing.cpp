@@ -78,7 +78,7 @@ TEST_F(DateParsingTest, ParseHttpDateVariousDays) {
     // Each weekday string parses AND reproduces its exact canonical date — the
     // has_value()-only version could not catch a wrong day/date computation.
     //
-    // Ground truth (date.cpp:148): format_http_date emits the day-name computed
+    // Ground truth (date.cpp:152): format_http_date emits the day-name computed
     // from the parsed instant (tm_wday); parse_rfc1123_date does NOT validate the
     // input weekday token. So the canonical output uses the REAL weekday for the
     // date. The seven dates below are the true Mon..Sun of the first week of 2024
@@ -281,10 +281,10 @@ TEST_F(DateParsingTest, ExceptionSafety) {
 
 // Each mutation keeps the canonical RFC-1123 fixture's length (29) but corrupts
 // exactly one field, routing through parse_rfc1123_date (has ',' / no '-') to a
-// distinct interior failure branch (date.cpp:181..209).
+// distinct interior failure branch of parse_rfc1123_date.
 TEST_F(DateParsingTest, Rfc1123InteriorFieldRejections) {
     const char *bad[] = {
-        "Sun,X06 Nov 1994 08:49:37 GMT", // no space after comma          (date.cpp:181)
+        "Sun,X06 Nov 1994 08:49:37 GMT", // no space after comma          (date.cpp:184-185)
         "Sun, xx Nov 1994 08:49:37 GMT", // non-numeric day               (170)
         "Sun, 06xNov 1994 08:49:37 GMT", // no space after day            (172)
         "Sun, 06 NovX1994 08:49:37 GMT", // no space after month          (183)
@@ -304,14 +304,14 @@ TEST_F(DateParsingTest, Rfc1123InteriorFieldRejections) {
 
 // Length-correct (30-char) single-char mutations of the canonical RFC-850
 // fixture "Sunday, 06-Nov-94 08:49:37 GMT". Each contains a '-' so it routes to
-// parse_rfc850_date and reaches one interior branch (date.cpp:263..288).
+// parse_rfc850_date and reaches one of its interior field-rejection branches.
 TEST_F(DateParsingTest, Rfc850InteriorFieldRejections) {
     // Sanity: the canonical RFC-850 fixture parses (so the mutations below are
     // genuinely isolating one corrupted field, not failing the front door).
     ASSERT_TRUE(parse_http_date(std::string_view("Sunday, 06-Nov-94 08:49:37 GMT")).has_value());
 
     const char *bad[] = {
-        "Sunday, xx-Nov-94 08:49:37 GMT", // non-numeric day             (date.cpp:263)
+        "Sunday, xx-Nov-94 08:49:37 GMT", // non-numeric day             (date.cpp:266-267)
         "Sunday, 06xNov-94 08:49:37 GMT", // missing '-' after day       (242)
         "Sunday, 06-xxx-94 08:49:37 GMT", // invalid month               (251)
         "Sunday, 06-NovX94 08:49:37 GMT", // missing '-' after month     (253)
@@ -336,7 +336,7 @@ TEST_F(DateParsingTest, AsctimeInteriorFieldRejections) {
     ASSERT_TRUE(parse_http_date(std::string_view("Sun Nov  6 08:49:37 1994")).has_value());
 
     const char *bad[] = {
-        "Sun xxx  6 08:49:37 1994", // invalid month                     (date.cpp:336)
+        "Sun xxx  6 08:49:37 1994", // invalid month                     (date.cpp:339-340)
         "Sun Nov  6 xx:49:37 1994", // non-numeric hour                  (341)
         "Sun Nov  6 08x49:37 1994", // missing ':' after hour            (343)
         "Sun Nov  6 08:xx:37 1994", // non-numeric minute                (345)
@@ -352,8 +352,8 @@ TEST_F(DateParsingTest, AsctimeInteriorFieldRejections) {
 
 // asctime allows a single-digit day with a preceding double-space ("Sun Nov  6
 // ..."). A two-digit day with three or more digits ("...  100 ...") trips the
-// `day_len > 2` guard (date.cpp:348) — pin it explicitly. A two-digit day with
-// a wrong delimiter after it trips date.cpp:356.
+// `day_len > 2` guard (date.cpp:352-353) — pin it explicitly. A two-digit day with
+// a wrong delimiter after it trips date.cpp:359-360.
 TEST_F(DateParsingTest, AsctimeDayLengthAndDelimiterRejections) {
     // Three-digit day field is impossible in asctime → rejected (325).
     EXPECT_FALSE(parse_http_date(std::string_view("Sun Nov 100 08:49:37 994")).has_value());
@@ -366,7 +366,7 @@ TEST_F(DateParsingTest, AsctimeDayLengthAndDelimiterRejections) {
 // ====================================================================
 
 // date::now() must emit a well-formed, parseable RFC-1123 string for the
-// current instant (date.cpp:461). It is non-deterministic in value, so we pin
+// current instant (date::now). It is non-deterministic in value, so we pin
 // only its STRUCTURE: it parses back, and re-formatting the parsed instant is a
 // byte-for-byte fixed point.
 TEST_F(DateParsingTest, NowEmitsParseableRfc1123) {
@@ -380,7 +380,7 @@ TEST_F(DateParsingTest, NowEmitsParseableRfc1123) {
 }
 
 // date::format_timestamp() formats "YYYY-MM-DD HH:MM:SS" in LOCAL time
-// (date.cpp:465). The local offset is environment-dependent, so we pin the
+// (date::format_timestamp). The local offset is environment-dependent, so we pin the
 // FORMAT shape deterministically rather than the exact value.
 TEST_F(DateParsingTest, FormatTimestampShape) {
     const auto        epoch = system_clock::time_point(std::chrono::seconds(kCanonicalEpoch));

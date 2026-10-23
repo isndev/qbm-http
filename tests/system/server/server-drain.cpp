@@ -5,7 +5,7 @@
  * drain() closes the listener, closes the sessions that wait, answers the requests already received --
  * the last one `Connection: close` -- and reports, once, on the server's loop: `drained` when the last
  * HTTP session has closed, `deadline` when the deadline came first, after aborting what is still open.
- * WebSocket sessions are outside it: an upgraded session is neither closed nor waited for.
+ * Owned WebSocket sessions receive Close 1001 and keep the drain pending until closed or the deadline.
  *
  * The drain is started from a route, so it runs on the server's loop; the clients are raw sockets, so what
  * goes over the wire -- each answer, its `Connection` field, the close -- is what is asserted.
@@ -32,6 +32,9 @@
 #include <qbm/http/http.h>
 
 #include "../../shared/loopback_server.h"
+#ifdef QB_HAS_SSL
+#include "../../shared/ws_loopback.h"
+#endif
 
 using namespace std::chrono_literals;
 
@@ -125,6 +128,11 @@ public:
     close() {
         _sock.close();
     }
+
+    qb::io::tcp::socket &
+    socket() {
+        return _sock;
+    }
 };
 
 std::string
@@ -195,6 +203,185 @@ public:
 } // namespace server_drain_test
 
 using namespace server_drain_test;
+
+#ifdef QB_HAS_SSL
+namespace server_drain_test {
+class UpgradeSession;
+std::atomic<bool> g_message_preserved{false};
+std::atomic<int>  g_draining_control_callbacks{0};
+std::atomic<int>  g_close_callbacks{0};
+using UpgradeServer = qb::http::Server<UpgradeSession>;
+class UpgradeSession : public qb::http::use<UpgradeSession>::session<UpgradeServer> {
+public:
+    using Base       = qb::http::use<UpgradeSession>::session<UpgradeServer>;
+    using WsProtocol = qb::http::ws::protocol<UpgradeSession>;
+    explicit UpgradeSession(UpgradeServer &server)
+        : Base(server) {}
+    void
+    on(WsProtocol::message &&event) {
+        if (event.ws.data().view() == "drain-in-handler") {
+            this->server().drain(5s, [](qb::http::drain_outcome outcome) {
+                g_outcome = static_cast<int>(outcome);
+                ++g_reports;
+            });
+            g_message_preserved = event.ws.data().view() == "drain-in-handler";
+        } else {
+            *this << event.ws;
+        }
+    }
+    void
+    on(WsProtocol::ping &&) {
+        ++g_draining_control_callbacks;
+    }
+    void
+    on(WsProtocol::pong &&) {
+        ++g_draining_control_callbacks;
+    }
+    void
+    on(WsProtocol::close &&event) {
+        ++g_close_callbacks;
+        if (!this->server().draining())
+            *this << event.ws;
+    }
+};
+
+class UpgradeDrainServer {
+public:
+    qb::http::test::ServerThread<UpgradeServer> thread;
+    UpgradeDrainServer()
+        : thread([] { return qb::http::make_server<UpgradeSession>(); },
+                 [](UpgradeServer &server) {
+                     using Ctx = std::shared_ptr<qb::http::Context<UpgradeSession>>;
+                     server.router().get("/ws", [](Ctx ctx) {
+                         auto session = ctx->session();
+                         if (!session || !session->template switch_protocol<UpgradeSession::WsProtocol>(*session, ctx->request())) {
+                             ctx->text("upgrade failed", qb::http::Status::BAD_REQUEST);
+                             return;
+                         }
+                         ctx->suppress_response();
+                     });
+                     server.router().get("/drain", [&server](Ctx ctx) {
+                         const auto ms = std::stoi(ctx->request().query_or("ms", "5000"));
+                         server.drain(std::chrono::milliseconds(ms), [](qb::http::drain_outcome outcome) {
+                             g_outcome = static_cast<int>(outcome);
+                             ++g_reports;
+                         });
+                         ctx->text("draining");
+                     });
+                     server.router().compile();
+                     if (server.transport().listen_v4(0, "127.0.0.1") != 0)
+                         return false;
+                     server.start();
+                     return true;
+                 }) {}
+};
+} // namespace server_drain_test
+
+TEST(HttpServerDrain, WebSocketCloseIsSentAndDrainWaitsForItsReply) {
+    reset_globals();
+    g_close_callbacks = 0;
+    UpgradeDrainServer server;
+    ASSERT_TRUE(server.thread.ready());
+    RawClient upgraded(server.thread.port());
+    ASSERT_TRUE(upgraded.connected);
+    qb::http::test::perform_upgrade(upgraded.socket(), server.thread.port(), "/ws");
+
+    RawClient caller(server.thread.port());
+    ASSERT_TRUE(caller.connected);
+    caller.send(get("/drain?ms=5000"));
+    caller.read_to_close();
+    caller.close();
+    upgraded.read_until([&] { return qb::http::test::extract_close_code(upgraded.received).has_value(); }, 500ms);
+    ASSERT_EQ(qb::http::test::extract_close_code(upgraded.received), 1001);
+    EXPECT_EQ(g_reports.load(), 0) << "a live WebSocket keeps the drain pending";
+    EXPECT_FALSE(upgraded.closed);
+
+    RawClient refused(server.thread.port());
+    EXPECT_FALSE(refused.connected) << "the listener stays closed while a WebSocket finishes";
+    auto close = qb::http::test::make_client_frame(0x88, std::string("\x03\xe9", 2));
+    upgraded.send(std::string(close.begin(), close.end()));
+    upgraded.read_to_close();
+    EXPECT_TRUE(upgraded.closed);
+    upgraded.close();
+    ASSERT_TRUE(wait_for_report());
+    EXPECT_EQ(g_reports.load(), 1);
+    EXPECT_EQ(g_close_callbacks.load(), 1);
+    EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));
+}
+
+TEST(HttpServerDrain, SilentWebSocketIsAbortedAtTheDrainDeadline) {
+    reset_globals();
+    UpgradeDrainServer server;
+    ASSERT_TRUE(server.thread.ready());
+    RawClient upgraded(server.thread.port());
+    ASSERT_TRUE(upgraded.connected);
+    qb::http::test::perform_upgrade(upgraded.socket(), server.thread.port(), "/ws");
+    RawClient caller(server.thread.port());
+    ASSERT_TRUE(caller.connected);
+    caller.send(get("/drain?ms=200"));
+    caller.read_to_close();
+    caller.close();
+    upgraded.read_to_close(2000ms);
+    EXPECT_EQ(qb::http::test::extract_close_code(upgraded.received), 1001);
+    EXPECT_TRUE(upgraded.closed);
+    ASSERT_TRUE(wait_for_report());
+    EXPECT_EQ(g_reports.load(), 1);
+    EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::deadline));
+}
+
+TEST(HttpServerDrain, WebSocketDrainPreservesTheMessageThatStartedItAndFlushesItsClose) {
+    reset_globals();
+    g_message_preserved = false;
+    UpgradeDrainServer server;
+    ASSERT_TRUE(server.thread.ready());
+    RawClient upgraded(server.thread.port());
+    ASSERT_TRUE(upgraded.connected);
+    qb::http::test::perform_upgrade(upgraded.socket(), server.thread.port(), "/ws");
+    auto message            = qb::http::test::make_client_frame(0x81, "drain-in-handler");
+    auto simultaneous_close = qb::http::test::make_client_frame(0x88, std::string("\x03\xe9", 2));
+    message.insert(message.end(), simultaneous_close.begin(), simultaneous_close.end());
+    upgraded.send(std::string(message.begin(), message.end()));
+    upgraded.read_to_close();
+    upgraded.close();
+    EXPECT_TRUE(g_message_preserved.load()) << "drain() must not reset a borrowed message under its handler";
+    EXPECT_EQ(qb::http::test::extract_close_code(upgraded.received), 1001) << "a simultaneous peer Close must not discard our queued Close";
+    ASSERT_TRUE(wait_for_report());
+    EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));
+}
+
+TEST(HttpServerDrain, WebSocketDrainDoesNotDispatchDataOrControlCallbacksAfterClose) {
+    reset_globals();
+    g_draining_control_callbacks = 0;
+    g_close_callbacks            = 0;
+    UpgradeDrainServer server;
+    ASSERT_TRUE(server.thread.ready());
+    RawClient upgraded(server.thread.port());
+    ASSERT_TRUE(upgraded.connected);
+    qb::http::test::perform_upgrade(upgraded.socket(), server.thread.port(), "/ws");
+    const std::string ping_payload("p\0ng\xff", 5);
+    auto              wire = qb::http::test::make_client_frame(0x81, "drain-in-handler");
+    // Before the peer's Close: automatic Pong remains mandatory, application callbacks stay suppressed.
+    // After it: even coalesced trailing frames must not reach the protocol or publish another Pong.
+    for (const auto opcode : {0x89, 0x8a, 0x82, 0x88, 0x89, 0x8a, 0x82}) {
+        const auto payload = opcode == 0x88 ? std::string("\x03\xe9", 2) : ping_payload;
+        auto       frame   = qb::http::test::make_client_frame(static_cast<std::uint8_t>(opcode), payload);
+        wire.insert(wire.end(), frame.begin(), frame.end());
+    }
+    upgraded.send(std::string(wire.begin(), wire.end()));
+    upgraded.read_to_close();
+    upgraded.close();
+    EXPECT_TRUE(upgraded.closed);
+    EXPECT_EQ(g_draining_control_callbacks.load(), 0);
+    EXPECT_EQ(g_close_callbacks.load(), 1);
+    // Exact wire oracle: one unmasked Close 1001, then one unmasked Pong with the identical binary payload.
+    // Equality also rejects echoed Data, a second Close, or a Pong for the Ping after the acknowledgement.
+    const std::string expected = std::string("\x88\x11\x03\xe9", 4) + "server draining" + std::string("\x8a\x05", 2) + ping_payload;
+    EXPECT_EQ(upgraded.received, expected);
+    ASSERT_TRUE(wait_for_report());
+    EXPECT_EQ(g_reports.load(), 1);
+    EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));
+}
+#endif
 
 // An idle keep-alive connection is closed by the drain, without an answer; the request that started the drain
 // is answered `Connection: close`; the listener refuses a new connection; the drain reports `drained` once both
@@ -292,7 +479,7 @@ TEST(HttpServerDrain, TheDeadlineAbortsWhatIsStillOpen) {
 
 // A session extracted from the server -- a WebSocket upgrade handing its connection to another actor -- is no longer
 // the server's: the drain neither closes it nor waits for it, and reports `drained` while it lives (closing a
-// WebSocket with 1001 Going Away is Huly QB-1097).
+// owned WebSocket with 1001 Going Away is covered by the cases above, Huly QB-1097).
 TEST(HttpServerDrain, AnExtractedSessionIsOutsideTheDrain) {
     DrainServer server;
     ASSERT_NE(server.port, 0);

@@ -489,8 +489,8 @@ using http3_client_loopback_bench::BM_H3_ExplicitReconnect;
 using http3_client_loopback_bench::BM_H3_WarmResponseCallbacks;
 using http3_data_credit_bench::BM_H3_WarmDataCredit;
 
-BENCHMARK(BM_H3_WarmResponseCallbacks)->Unit(benchmark::kMicrosecond);
-BENCHMARK(BM_H3_WarmDataCredit)->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_H3_WarmResponseCallbacks)->Unit(benchmark::kMicrosecond)->UseRealTime();
+BENCHMARK(BM_H3_WarmDataCredit)->Unit(benchmark::kMicrosecond)->UseRealTime();
 BENCHMARK(BM_H3_ContinuousStreamsCorrectness)->Iterations(1);
 BENCHMARK(BM_H3_ExplicitReconnect)->Unit(benchmark::kMicrosecond);
 BENCHMARK_MAIN();

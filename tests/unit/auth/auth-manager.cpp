@@ -137,6 +137,7 @@ TEST(AuthManagerRoundTrip, ValidHmacTokenRoundTrips) {
     const User  user  = make_user();
     std::string token = mgr.generate_token(user);
     ASSERT_FALSE(token.empty());
+    EXPECT_EQ(qb::json::parse(qb::jwt::decode(token).header).at("alg"), "HS256");
 
     auto out = mgr.verify_token(token);
     ASSERT_TRUE(out.has_value());
@@ -184,6 +185,7 @@ TEST(AuthManagerRoundTrip, HmacSha384AndSha512RoundTrip) {
         const User  user  = make_user();
         std::string token = mgr.generate_token(user);
         ASSERT_FALSE(token.empty());
+        EXPECT_EQ(qb::json::parse(qb::jwt::decode(token).header).at("alg"), algo == Options::Algorithm::HMAC_SHA384 ? "HS384" : "HS512");
 
         auto out = mgr.verify_token(token);
         ASSERT_TRUE(out.has_value()) << "algorithm index " << static_cast<int>(algo);
@@ -193,19 +195,19 @@ TEST(AuthManagerRoundTrip, HmacSha384AndSha512RoundTrip) {
 }
 
 // ---------------------------------------------------------------------------
-// Asymmetric round-trips (RSA RS384/RS512, ECDSA ES384/ES512, EdDSA)
+// Asymmetric round-trips (RSA RS256/RS384/RS512, ECDSA ES256/ES384/ES512, EdDSA)
 //
 // The HMAC tests above cover the symmetric algorithm branches; these drive the asymmetric
-// algorithm-mapping switches (both the sign and the verify path in auth::Manager) and the
+// shared algorithm mapper (both the sign and the verify path in auth::Manager) and the
 // public/private-key handling, using freshly generated keypairs (no checked-in PEM material).
-// RS256 / ES256 are already exercised by the middleware-auth suite; here we close the 384/512 +
-// EdDSA branches. Each test mints a token with the private key and verifies it with the public key,
+// The emitted header is checked independently against each expected algorithm name.
+// Each test mints a token with the private key and verifies it with the public key,
 // proving a real end-to-end sign+verify per algorithm — not just an enum mapping.
 // ---------------------------------------------------------------------------
 
 namespace {
 void
-expect_asymmetric_roundtrip(Options::Algorithm algo, const std::string &priv, const std::string &pub) {
+expect_asymmetric_roundtrip(Options::Algorithm algo, const char *expected_algorithm, const std::string &priv, const std::string &pub) {
     Options sign_opts;
     sign_opts.algorithm(algo).private_key(priv).secret_key("");
     Options verify_opts;
@@ -214,6 +216,7 @@ expect_asymmetric_roundtrip(Options::Algorithm algo, const std::string &priv, co
     const User  user  = make_user();
     std::string token = Manager(sign_opts).generate_token(user);
     ASSERT_FALSE(token.empty()) << "sign failed for algorithm index " << static_cast<int>(algo);
+    EXPECT_EQ(qb::json::parse(qb::jwt::decode(token).header).at("alg"), expected_algorithm);
 
     auto out = Manager(verify_opts).verify_token(token);
     ASSERT_TRUE(out.has_value()) << "verify failed for algorithm index " << static_cast<int>(algo);
@@ -222,30 +225,37 @@ expect_asymmetric_roundtrip(Options::Algorithm algo, const std::string &priv, co
 }
 } // namespace
 
-TEST(AuthManagerRoundTrip, RsaSha384AndSha512RoundTrip) {
+TEST(AuthManagerRoundTrip, RsaAlgorithmsRoundTrip) {
     auto [priv, pub] = qb::crypto::generate_rsa_keypair(2048); // {private, public}
     ASSERT_FALSE(priv.empty());
     ASSERT_FALSE(pub.empty());
-    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA384, priv, pub);
-    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA512, priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA256, "RS256", priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA384, "RS384", priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::RSA_SHA512, "RS512", priv, pub);
+}
+
+TEST(AuthManagerRoundTrip, EcdsaSha256RoundTrip) {
+    auto [priv, pub] = qb::crypto::generate_ec_keypair("prime256v1");
+    ASSERT_FALSE(priv.empty());
+    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA256, "ES256", priv, pub);
 }
 
 TEST(AuthManagerRoundTrip, EcdsaSha384RoundTrip) {
     auto [priv, pub] = qb::crypto::generate_ec_keypair("secp384r1"); // P-384 for ES384
     ASSERT_FALSE(priv.empty());
-    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA384, priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA384, "ES384", priv, pub);
 }
 
 TEST(AuthManagerRoundTrip, EcdsaSha512RoundTrip) {
     auto [priv, pub] = qb::crypto::generate_ec_keypair("secp521r1"); // P-521 for ES512
     ASSERT_FALSE(priv.empty());
-    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA512, priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::ECDSA_SHA512, "ES512", priv, pub);
 }
 
 TEST(AuthManagerRoundTrip, Ed25519RoundTrip) {
     auto [priv, pub] = qb::crypto::generate_ed25519_keypair();
     ASSERT_FALSE(priv.empty());
-    expect_asymmetric_roundtrip(Options::Algorithm::ED25519, priv, pub);
+    expect_asymmetric_roundtrip(Options::Algorithm::ED25519, "EdDSA", priv, pub);
 }
 
 // ---------------------------------------------------------------------------

@@ -37,8 +37,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <coroutine>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -47,10 +49,11 @@
 
 #include <qbm/http/coro.h>
 #include <qbm/http/http.h>
+#include <qbm/http/redirect.h>
 
 using namespace std::chrono_literals;
 
-namespace {
+namespace coro_client_http1_test {
 
 class CoroTestServer;
 
@@ -63,6 +66,9 @@ public:
 /// Fixed-route HTTP/1.1 server used by every test in this file.
 class CoroTestServer : public qb::http::use<CoroTestServer>::server<CoroTestSession> {
 public:
+    std::atomic<unsigned> redirect_requests{0};
+    std::atomic<unsigned> redirect_terminals{0};
+
     CoroTestServer() {
         router().get("/ping", [](auto ctx) {
             ctx->response().status() = qb::http::status::OK;
@@ -150,6 +156,46 @@ public:
             auto held = ctx;
             (void) held;
         });
+
+        router().get("/redirect/start", [this](auto ctx) {
+            ++redirect_requests;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "/redirect/finish");
+            ctx->complete();
+        });
+        router().get("/redirect/timeout", [this](auto ctx) {
+            ++redirect_requests;
+            ctx->response().status() = qb::http::status::FOUND;
+            ctx->response().set_header("Location", "/blackhole");
+            ctx->complete();
+        });
+        const auto redirect_verb = [this](auto ctx) {
+            ++redirect_requests;
+            ctx->response().status() = qb::http::status::TEMPORARY_REDIRECT;
+            ctx->response().set_header("Location", "/redirect/finish");
+            ctx->complete();
+        };
+        const auto redirect_finish = [this](auto ctx) {
+            ++redirect_terminals;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("X-Seen-Method", std::string(ctx->request().method()));
+            ctx->response().body() = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        };
+        router().get("/redirect/verb", redirect_verb);
+        router().post("/redirect/verb", redirect_verb);
+        router().put("/redirect/verb", redirect_verb);
+        router().del("/redirect/verb", redirect_verb);
+        router().head("/redirect/verb", redirect_verb);
+        router().options("/redirect/verb", redirect_verb);
+        router().patch("/redirect/verb", redirect_verb);
+        router().get("/redirect/finish", redirect_finish);
+        router().post("/redirect/finish", redirect_finish);
+        router().put("/redirect/finish", redirect_finish);
+        router().del("/redirect/finish", redirect_finish);
+        router().head("/redirect/finish", redirect_finish);
+        router().options("/redirect/finish", redirect_finish);
+        router().patch("/redirect/finish", redirect_finish);
 
         router().compile();
     }
@@ -378,7 +424,95 @@ TEST_F(CoroClientTest, CallbackApiStillWorks) {
     EXPECT_EQ(received.body().template as<std::string>(), "pong");
 }
 
-} // namespace
+// QB-169: the coroutine API shares the explicit opt-in history contract.
+TEST_F(CoroClientTest, RedirectAwaiterCarriesHistoryAndTerminalRequest) {
+    qb::http::Request req{{url("/redirect/start")}};
+    req.set_header("X-Trace", "coro-redirect");
+    auto reply = qb::http::run_sync(qb::http::GET(std::move(req), 2s, true, qb::http::RedirectOptions{}));
+    ASSERT_EQ(reply.hops.size(), 1u);
+    EXPECT_EQ(reply.hops[0].response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(reply.hops[0].request.uri().path(), "/redirect/start");
+    EXPECT_FALSE(reply.hops[0].request.header("User-Agent").empty());
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply.request.uri().path(), "/redirect/finish");
+    EXPECT_EQ(reply.request.header("X-Trace"), "coro-redirect");
+    EXPECT_EQ(_server->server().redirect_requests.load(), 1u);
+    EXPECT_EQ(_server->server().redirect_terminals.load(), 1u);
+}
+
+TEST_F(CoroClientTest, RedirectEveryCoroutineVerbPreserves307MethodAndBody) {
+    auto make_request = [&] {
+        qb::http::Request req{{url("/redirect/verb")}};
+        req.body() = "replay-body";
+        return req;
+    };
+    const auto check = [&](auto &&awaitable, qb::http::Method method) {
+        auto reply = qb::http::run_sync(std::forward<decltype(awaitable)>(awaitable));
+        ASSERT_EQ(reply.hops.size(), 1u);
+        EXPECT_EQ(reply.hops[0].response.status(), qb::http::status::TEMPORARY_REDIRECT);
+        EXPECT_EQ(reply.hops[0].request.method(), method);
+        EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+        EXPECT_EQ(reply.request.method(), method);
+        EXPECT_EQ(reply.response.header("X-Seen-Method"), std::string(method));
+        EXPECT_EQ(reply.request.body().template as<std::string>(), "replay-body");
+        if (method == qb::http::method::HEAD)
+            EXPECT_TRUE(reply.response.body().empty());
+        else
+            EXPECT_EQ(reply.response.body().template as<std::string>(), "replay-body");
+    };
+    const qb::http::RedirectOptions options{};
+    check(qb::http::REQUEST(make_request(), 2s, true, options), qb::http::method::GET);
+    check(qb::http::GET(make_request(), 2s, true, options), qb::http::method::GET);
+    check(qb::http::POST(make_request(), 2s, true, options), qb::http::method::POST);
+    check(qb::http::PUT(make_request(), 2s, true, options), qb::http::method::PUT);
+    check(qb::http::DEL(make_request(), 2s, true, options), qb::http::method::DEL);
+    check(qb::http::HEAD(make_request(), 2s, true, options), qb::http::method::HEAD);
+    check(qb::http::OPTIONS(make_request(), 2s, true, options), qb::http::method::OPTIONS);
+    check(qb::http::PATCH(make_request(), 2s, true, options), qb::http::method::PATCH);
+    EXPECT_EQ(_server->server().redirect_requests.load(), 8u);
+    EXPECT_EQ(_server->server().redirect_terminals.load(), 8u);
+}
+
+TEST_F(CoroClientTest, RedirectTimeoutOnNextAttemptRetainsOnlyFollowedHistory) {
+    auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{url("/redirect/timeout")}}, 250ms, true, qb::http::RedirectOptions{}));
+    ASSERT_EQ(reply.hops.size(), 1u);
+    EXPECT_EQ(reply.hops[0].response.status(), qb::http::status::FOUND);
+    EXPECT_EQ(reply.hops[0].request.uri().path(), "/redirect/timeout");
+    EXPECT_EQ(reply.response.status(), qb::http::status::GATEWAY_TIMEOUT);
+    EXPECT_EQ(reply.request.uri().path(), "/blackhole");
+}
+
+TEST_F(CoroClientTest, RedirectAbandonAfterResponseBeforeDeferPreventsNextAttempt) {
+    auto &listener = qb::io::async::listener::current;
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !listener.has_work(); }));
+    bool response_deferred = false;
+    {
+        auto pending = qb::http::GET(qb::http::Request{{"http://127.0.0.1:" + std::to_string(_port) + "/redirect/start"}}, 2s, true,
+                                     qb::http::RedirectOptions{});
+        // No continuation is resumed: destruction here is exactly abandonment of
+        // the outstanding awaiter, not cancellation of an already queued frame.
+        pending.await_suspend(std::coroutine_handle<>{});
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (!listener.has_deferred() && std::chrono::steady_clock::now() < deadline)
+            listener.loop().run(EVRUN_NOWAIT);
+        // Drive only native watcher dispatch above. On this successful one-shot
+        // connection the first defer is receive()'s queued redirect processing;
+        // the listener tail has not run it. No socket-failure defer is accepted.
+        response_deferred = listener.has_deferred();
+        EXPECT_TRUE(response_deferred);
+        EXPECT_EQ(_server->server().redirect_requests.load(), 1u);
+        EXPECT_EQ(_server->server().redirect_terminals.load(), 0u);
+    }
+    // Drain both the queued continuation and all owned client sockets. If an
+    // abandoned redirect erroneously starts a second flight, that flight must
+    // settle before this predicate passes and its server counter exposes it.
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !listener.has_work(); }));
+    ASSERT_TRUE(response_deferred);
+    EXPECT_EQ(_server->server().redirect_requests.load(), 1u);
+    EXPECT_EQ(_server->server().redirect_terminals.load(), 0u);
+}
+
+} // namespace coro_client_http1_test
 
 // The awaiter's completion callback is one-shot: a second complete() is ignored.
 TEST(HttpCoroAwaiterTest, CompletionCallbackIsOneShot) {

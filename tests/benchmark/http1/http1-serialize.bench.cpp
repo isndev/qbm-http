@@ -159,6 +159,23 @@ BM_Http1Serialize_HeaderBlock(benchmark::State &state) {
     serialize_loop(state, response);
 }
 
+void
+BM_Http1Serialize_RequestQuery(benchmark::State &state) {
+    std::string target = "/search";
+    if (state.range(0) != 0)
+        target += "?q=" + std::string(static_cast<std::size_t>(state.range(0)), 'x');
+    const std::string expected = "GET " + target + " HTTP/1.1\r\nhost: example.test\r\n\r\n";
+    qb::http::Request request{qb::http::method::GET, {"http://example.test" + target}};
+    request.set_header("host", "example.test");
+    qb::allocator::pipe<char> proof;
+    proof << request;
+    if (std::string_view(proof.begin(), proof.size()) != expected) {
+        state.SkipWithError("request target/header oracle failed");
+        return;
+    }
+    serialize_loop(state, request);
+}
+
 } // namespace
 
 BENCHMARK(BM_Http1Serialize_FixedLengthResponse)
@@ -171,5 +188,6 @@ BENCHMARK(BM_Http1Serialize_FixedLengthResponse)
 BENCHMARK(BM_Http1Serialize_ChunkedResponse)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"body_bytes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Http1Serialize_ChunkedRequest)->Arg(256)->Arg(4 * 1024)->Arg(64 * 1024)->ArgNames({"body_bytes"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Http1Serialize_HeaderBlock)->Arg(1)->Arg(8)->Arg(32)->ArgNames({"headers"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Http1Serialize_RequestQuery)->Arg(0)->Arg(1)->Arg(128)->ArgNames({"query_bytes"})->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

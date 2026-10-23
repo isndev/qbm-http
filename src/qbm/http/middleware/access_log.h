@@ -82,8 +82,8 @@ void json(AccessLogRecord const &record, std::string &line);
  *
  * Register it on the router: `router().add_observer(qb::http::access_log<S>(sink))`. The sink receives each line
  * without its line feed, on the router's thread, when the request's response is decided; an exception from the
- * formatter or the sink is contained and logged. The client's address is read from its session's socket
- * (`ip()`, a system call per line) and is empty once the session is gone.
+ * formatter or the sink is contained and logged. The address comes from session ip(): stock sockets cache
+ * successful peer lookups; custom transports keep their own behavior. Empty once the session is gone.
  *
  * @tparam SessionType The session type of the router.
  */
