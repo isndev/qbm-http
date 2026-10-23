@@ -231,7 +231,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   filesystem dates whose strong-validator status cannot be established; the response is
   the full representation with 200, even for a malformed or unsatisfiable Range. Ordinary
   Range requests still produce 206/416, HEAD still sends no body, and cache preconditions
-  are evaluated first. No content hashing or additional file read is introduced.
+  are evaluated first. Weak tags use a compact opaque encoding built in bounded stack buffers;
+  legacy decimal validators remain accepted on conditional requests. The response owns its
+  header value. No content hashing, narrowed metadata or additional file read is introduced.
 
 - **JWT generation and verification share the configured-algorithm mapping.** The ten
   supported algorithms and existing fallback retain their behavior; signing and

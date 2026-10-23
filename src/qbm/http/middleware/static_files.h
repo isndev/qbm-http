@@ -12,7 +12,10 @@
  */
 #pragma once
 
+#include <array>
+#include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <filesystem> // Requires C++17
 #include <fstream>
 #include <limits>
@@ -156,6 +159,32 @@ public:
 };
 
 namespace internal {
+// Decimal bounds include the full unsigned size and signed seconds count.
+// They also bound base 16; five bytes cover W/, both quotes and the separator.
+using StaticFileETagBuffer =
+    std::array<char, 5 + std::numeric_limits<std::uintmax_t>::digits10 + 1 + std::numeric_limits<std::chrono::seconds::rep>::digits10 + 1
+                         + std::numeric_limits<std::chrono::seconds::rep>::is_signed>;
+
+template <int Base>
+[[nodiscard]] std::string_view
+format_static_file_etag(StaticFileETagBuffer &buffer, std::uintmax_t size, std::chrono::seconds::rep modified) noexcept {
+    static_assert(Base == 10 || Base == 16);
+    auto *next = buffer.data();
+    auto *end  = buffer.data() + buffer.size() - 1; // reserve the closing quote
+    if constexpr (Base == 16) {
+        *next++ = 'W';
+        *next++ = '/';
+    }
+    *next++ = '"';
+    // The type-derived bound makes both conversions fit, including signed min.
+    // Reserve a separator byte for the first conversion; no negation or narrowing.
+    next    = std::to_chars(next, end - 1, size, Base).ptr;
+    *next++ = Base == 16 ? ':' : '-';
+    next    = std::to_chars(next, end, modified, Base).ptr;
+    *next++ = '"';
+    return {buffer.data(), static_cast<std::size_t>(next - buffer.data())};
+}
+
 [[nodiscard]] inline bool
 path_prefix_matches(std::string_view path, std::string_view prefix) noexcept {
     if (prefix.empty()) {
@@ -519,7 +548,6 @@ public:
         }
 
         // ETag and Last-Modified handling
-        std::string                     etag_value;
         std::filesystem::file_time_type last_modified_time;
 
         if (_options.enable_etags || _options.enable_last_modified) {
@@ -546,11 +574,21 @@ public:
                     last_modified_time - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
                 auto last_modified_epoch_sec =
                     std::chrono::duration_cast<std::chrono::seconds>(last_modified_sys_tp_for_etag.time_since_epoch()).count();
-                etag_value = "\"" + std::to_string(file_size_for_cond) + "-" + std::to_string(last_modified_epoch_sec) + "\"";
-                ctx->response().set_header("ETag", "W/" + etag_value);
+                internal::StaticFileETagBuffer etag_storage;
+                const auto etag_value = internal::format_static_file_etag<16>(etag_storage, file_size_for_cond, last_modified_epoch_sec);
+                ctx->response().set_header("ETag", etag_value); // owns a copy; the view stays within etag_storage's lifetime
 
                 if (has_if_none_match && !if_none_match_it->second.empty()) {
-                    if (internal::if_none_match_contains(if_none_match_it->second.front(), etag_value)) {
+                    const auto &condition = if_none_match_it->second.front();
+                    bool        matches   = internal::if_none_match_contains(condition, etag_value);
+                    if (!matches) {
+                        // ':' keeps the new encoding disjoint from previously issued decimal tags.
+                        // Only a miss needs the legacy opaque value; neither buffer allocates.
+                        internal::StaticFileETagBuffer legacy_storage;
+                        const auto legacy = internal::format_static_file_etag<10>(legacy_storage, file_size_for_cond, last_modified_epoch_sec);
+                        matches           = internal::if_none_match_contains(condition, legacy);
+                    }
+                    if (matches) {
                         send_not_modified_response(ctx);
                         return;
                     }

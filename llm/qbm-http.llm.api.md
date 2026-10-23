@@ -321,15 +321,15 @@ Factory (`timing.h:158`): `timing_middleware<S>(callback, name="TimingMiddleware
 Usage: `router.use(qb::http::timing_middleware<S>([](auto ms){ LOG(ms.count()); }));`
 
 ## Static files — `src/qbm/http/middleware/static_files.h`
-### `qb::http::StaticFilesOptions` — `static_files.h:39`
+### `qb::http::StaticFilesOptions` — `static_files.h:42`
 `explicit StaticFilesOptions(std::filesystem::path root);` Public member `std::filesystem::path root_directory;` + fluent setters (return `StaticFilesOptions&`): `with_root_directory(std::filesystem::path); with_serve_index_file(bool) /*index.html*/; with_index_file_name(string); with_default_mime_type(string); with_path_prefix_to_strip(string); add_mime_type(ext, mime); with_cache_control(bool, value="public, max-age=3600"); with_etags(bool); with_last_modified(bool); with_range_requests(bool); with_directory_listing(bool) /*default false*/; with_max_file_size(std::size_t) noexcept /*default 64 MiB; 0=unlimited*/; with_reject_symlinks(bool) noexcept;`
 **`root_directory` is a `std::filesystem::path`** (string-literal/`std::string` arguments convert implicitly). A **relative** root is resolved by the middleware ctor via `qb::io::sys::resolve_resource` (`<qb/io/system/file.h>`): looked up against the current working directory first, then against the executable's own directory — so a binary shipped next to its assets serves them from **any** cwd. An absolute root is used unchanged.
 
-### `qb::http::StaticFilesMiddleware<S>` — `static_files.h:288`
+### `qb::http::StaticFilesMiddleware<S>` — `static_files.h:317`
 `explicit StaticFilesMiddleware(StaticFilesOptions options, std::string name="StaticFilesMiddleware");`
-Metadata-derived ETags are weak (`W/`); `If-None-Match` uses weak comparison. `If-Range` requires a strong validator: the generated weak tags and filesystem dates cannot authorise a range, so a request with If-Range receives the full 200 representation. Cache preconditions precede range handling; HEAD has no body; ordinary Range requests retain 206/416 behavior.
+Metadata-derived ETags are weak (`W/`) and opaque; `If-None-Match` uses weak comparison and accepts previously issued decimal tags with or without `W/`. The compact representation retains the full size and signed modification-seconds fields. `If-Range` requires a strong validator: the generated weak tags and filesystem dates cannot authorise a range, so a request with If-Range receives the full 200 representation. Cache preconditions precede range handling; HEAD has no body; ordinary Range requests retain 206/416 behavior.
 Serves GET/HEAD; path-traversal hardened (canonicalised, symlink-escape rejected), including configured directory index files; supports ETag/If-None-Match, Last-Modified/If-Modified-Since (`If-None-Match` takes precedence when present), `Range`/`206`/`416`, optional directory listing (links escape the request path for the HTML attribute). A filesystem root (`/`, `C:\`) is a valid root: `internal::sanitize_and_resolve_path` accepts its descendants and still refuses a prefix-sharing sibling (`src/qbm/http/middleware/static_files.cpp:107-173`). **Ctor anchors a relative `root_directory` via `qb::io::sys::resolve_resource` (cwd then exe dir), then requires it to exist and canonicalise.** Throws `std::invalid_argument` if root empty, `std::runtime_error` if root (after resolution) missing/not a directory or not canonicalisable.
-Factory (`static_files.h:827`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
+Factory (`static_files.h:865`): `static_files_middleware<S>(options, name="StaticFilesMiddleware")`.
 Usage: `router.use(qb::http::static_files_middleware<S>(qb::http::StaticFilesOptions{"public"}.with_path_prefix_to_strip("/static")));  // "public" found relative to cwd or the executable's dir`
 
 ## Security headers — `src/qbm/http/middleware/security_headers.h`

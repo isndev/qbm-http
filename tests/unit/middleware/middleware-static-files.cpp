@@ -34,13 +34,17 @@
 #include <gtest/gtest.h>
 #include <qb/uuid.h>
 
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "../../shared/middleware_test_fixture.h"
 
@@ -405,6 +409,112 @@ TEST_F(StaticFilesMiddlewareTest, NonGetHeadMethodsPassThrough) {
 }
 
 // --- Conditional GET -------------------------------------------------------
+
+TEST(StaticFilesMetadataETagTest, FullWidthSignedValuesStayDistinctAndLegacyEncodingIsPreserved) {
+    using Rep = std::chrono::seconds::rep;
+    struct Metadata {
+        std::uintmax_t size;
+        Rep            modified;
+    };
+    const std::array cases{
+        Metadata{0, 0},
+        Metadata{1, 0},
+        Metadata{0, -1},
+        Metadata{std::numeric_limits<std::uintmax_t>::max(), std::numeric_limits<Rep>::min()},
+        Metadata{std::numeric_limits<std::uintmax_t>::max() - 1, std::numeric_limits<Rep>::min()},
+        Metadata{std::numeric_limits<std::uintmax_t>::max(), std::numeric_limits<Rep>::min() + 1},
+        Metadata{std::numeric_limits<std::uintmax_t>::max(), std::numeric_limits<Rep>::max()},
+        Metadata{std::numeric_limits<std::uintmax_t>::max(), 0},
+        Metadata{std::numeric_limits<std::uint32_t>::max(), 0},
+        Metadata{0, std::numeric_limits<Rep>::max()}
+    };
+    std::vector<std::string> tags;
+    for (const auto &metadata : cases) {
+        struct GuardedBuffer {
+            char                                     before = '[';
+            qb::http::internal::StaticFileETagBuffer value;
+            char                                     after = ']';
+        } storage;
+        const auto compact = qb::http::internal::format_static_file_etag<16>(storage.value, metadata.size, metadata.modified);
+        ASSERT_TRUE(compact.starts_with("W/\""));
+        ASSERT_TRUE(compact.ends_with('"'));
+        EXPECT_EQ(storage.before, '[');
+        EXPECT_EQ(storage.after, ']');
+        for (const auto &previous : tags) {
+            EXPECT_FALSE(qb::http::internal::if_none_match_contains(previous, compact));
+        }
+        tags.emplace_back(compact);
+
+        const auto legacy = qb::http::internal::format_static_file_etag<10>(storage.value, metadata.size, metadata.modified);
+        // Independent oracle: this is the expression used by the shipped decimal formatter.
+        EXPECT_EQ(legacy, "\"" + std::to_string(metadata.size) + "-" + std::to_string(metadata.modified) + "\"");
+        EXPECT_EQ(storage.before, '[');
+        EXPECT_EQ(storage.after, ']');
+        EXPECT_FALSE(qb::http::internal::if_none_match_contains(legacy, tags.back()));
+    }
+}
+
+TEST(StaticFilesMetadataETagTest, HeaderOwnsTheFormattedBytesAfterTheStackBufferIsReused) {
+    qb::http::Headers headers;
+    std::string       expected;
+    {
+        qb::http::internal::StaticFileETagBuffer storage;
+        const auto tag = qb::http::internal::format_static_file_etag<16>(storage, std::numeric_limits<std::uintmax_t>::max(),
+                                                                         std::numeric_limits<std::chrono::seconds::rep>::min());
+        expected.assign(tag);
+        headers.set_header("ETag", tag);
+        storage.fill('x');
+    }
+    EXPECT_EQ(headers.header("ETag"), expected);
+}
+
+TEST_F(StaticFilesMiddlewareTest, LegacyDecimalValidatorsRemainUsableAfterTheEncodingChanges) {
+    const auto path = _test_root_dir / "file1.txt";
+    // Well inside a second: the two existing clock-offset approximations must
+    // not straddle a boundary when ETag and Last-Modified are produced.
+    const auto modified = std::chrono::time_point_cast<std::chrono::seconds>(std::filesystem::file_time_type::clock::now())
+                          - std::chrono::seconds(10) + std::chrono::milliseconds(500);
+    std::filesystem::last_write_time(path, modified);
+    auto sf_mw = make_mw(qb::http::StaticFilesOptions(_test_root_dir));
+    configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/file1.txt"));
+    ASSERT_EQ(_session->_response.status(), qb::http::status::OK);
+    const std::string compact(_session->_response.header("ETag"));
+    const auto        parsed_date = qb::http::date::parse_http_date(_session->_response.header("Last-Modified"));
+    ASSERT_TRUE(parsed_date.has_value());
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(parsed_date->time_since_epoch()).count();
+    const auto legacy  = "\"" + std::to_string(std::filesystem::file_size(path)) + "-" + std::to_string(seconds) + "\"";
+    ASSERT_NE(compact, "W/" + legacy);
+    for (const auto method : {qb::http::method::GET, qb::http::method::HEAD}) {
+        for (const auto &condition : {legacy, "W/" + legacy, "\"unrelated\", W/" + legacy, compact, std::string("*")}) {
+            configure_router_and_run(
+                sf_mw,
+                create_request(method, "/file1.txt", {{"If-None-Match", condition}, {"If-Modified-Since", "Sat, 01 Jan 2000 00:00:00 GMT"}}));
+            EXPECT_EQ(_session->_response.status(), qb::http::status::NOT_MODIFIED) << condition;
+            EXPECT_TRUE(_session->_response.body().empty());
+            EXPECT_EQ(_session->_response.header("ETag"), compact);
+        }
+    }
+}
+
+TEST_F(StaticFilesMiddlewareTest, NewEncodingCannotAliasAnOlderDecimalValidatorForDifferentMetadata) {
+    const auto path = _test_root_dir / "file1.txt";
+    create_test_file(path, std::string(22, 'x'));
+    const auto desired  = std::chrono::system_clock::time_point{} + std::chrono::seconds(291) + std::chrono::milliseconds(500);
+    const auto modified = std::filesystem::file_time_type::clock::now()
+                          + std::chrono::duration_cast<std::filesystem::file_time_type::duration>(desired - std::chrono::system_clock::now());
+    std::filesystem::last_write_time(path, modified);
+    auto sf_mw = make_mw(qb::http::StaticFilesOptions(_test_root_dir));
+    // Hex 22/291 would be "16-123" with the old delimiter: exactly an old
+    // decimal tag for DIFFERENT metadata. It must not authorize a 304.
+    configure_router_and_run(sf_mw,
+                             create_request(qb::http::method::GET, "/file1.txt",
+                                            {{"If-None-Match", "W/\"16-123\""}, {"If-Modified-Since", "Sat, 01 Jan 2099 00:00:00 GMT"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), std::string(22, 'x'));
+    const auto parsed_date = qb::http::date::parse_http_date(_session->_response.header("Last-Modified"));
+    ASSERT_TRUE(parsed_date.has_value());
+    EXPECT_EQ(std::chrono::duration_cast<std::chrono::seconds>(parsed_date->time_since_epoch()).count(), 291);
+}
 
 TEST_F(StaticFilesMiddlewareTest, ETagAndIfNoneMatch) {
     qb::http::StaticFilesOptions options(_test_root_dir);

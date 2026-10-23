@@ -10,8 +10,12 @@
  * Both revisions use this fixture; strong and weak ETags are accepted by the probe.
  */
 #include <benchmark/benchmark.h>
+#include <charconv>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -87,8 +91,46 @@ matches(const std::shared_ptr<Context> &ctx, const std::string &payload, bool he
            && (!range || response.header("Content-Range") == "bytes 0-7/" + std::to_string(payload.size()));
 }
 
+// Outside the measured loop. Decode only the canonical producer forms, then
+// replay the historic decimal validator; do not approximate filesystem clocks.
+std::string
+legacy_etag_from_current(std::string_view tag) {
+    if (tag.starts_with("W/"))
+        tag.remove_prefix(2);
+    if (tag.size() < 3 || tag.front() != '"' || tag.back() != '"')
+        throw std::runtime_error("Static-file ETag is not a quoted canonical value");
+    const auto opaque    = tag.substr(1, tag.size() - 2);
+    const bool compact   = opaque.find(':') != std::string_view::npos;
+    const char separator = compact ? ':' : '-';
+    const auto split     = opaque.find(separator);
+    if (split == std::string_view::npos || split == 0 || split + 1 == opaque.size())
+        throw std::runtime_error("Static-file ETag is missing a metadata field");
+    const auto                size_text   = opaque.substr(0, split);
+    const auto                time_text   = opaque.substr(split + 1);
+    std::uintmax_t            size        = 0;
+    std::chrono::seconds::rep modified    = 0;
+    const int                 base        = compact ? 16 : 10;
+    const auto                size_result = std::from_chars(size_text.data(), size_text.data() + size_text.size(), size, base);
+    const auto                time_result = std::from_chars(time_text.data(), time_text.data() + time_text.size(), modified, base);
+    if (size_result.ec != std::errc{} || size_result.ptr != size_text.data() + size_text.size() || time_result.ec != std::errc{}
+        || time_result.ptr != time_text.data() + time_text.size())
+        throw std::runtime_error("Static-file ETag metadata is invalid or out of range");
+    // Round-trip each parsed field to reject padding, uppercase, -0 and prefixes.
+    // Binary value bits plus sign room also bound the selected bases.
+    const auto canonical = [base](auto value) {
+        char       storage[std::numeric_limits<decltype(value)>::digits + 2];
+        const auto result = std::to_chars(storage, storage + sizeof(storage), value, base);
+        if (result.ec != std::errc{})
+            throw std::runtime_error("Static-file ETag canonicalization overflow");
+        return std::string(storage, result.ptr);
+    };
+    if (canonical(size) != size_text || canonical(modified) != time_text)
+        throw std::runtime_error("Static-file ETag metadata is not canonical");
+    return "\"" + std::to_string(size) + "-" + std::to_string(modified) + "\"";
+}
+
 void
-run(benchmark::State &state, bool head, bool conditional, bool range = false) {
+run(benchmark::State &state, bool head, bool conditional, bool range = false, bool legacy = false) {
     try {
         File file(static_cast<std::size_t>(state.range(0)));
         auto middleware = qb::http::static_files_middleware<Session>(qb::http::StaticFilesOptions(file.root));
@@ -99,7 +141,9 @@ run(benchmark::State &state, bool head, bool conditional, bool range = false) {
             state.SkipWithError("static file response or same-size corruption oracle failed");
             return;
         }
-        const std::string etag  = conditional ? std::string(initial->response().header("ETag")) : std::string{};
+        const std::string etag  = conditional ? (legacy ? legacy_etag_from_current(initial->response().header("ETag"))
+                                                        : std::string(initial->response().header("ETag")))
+                                              : std::string{};
         auto              probe = context(session, head, etag, range);
         middleware->process(probe);
         if (!matches(probe, file.payload, head, conditional, range)) {
@@ -137,6 +181,11 @@ BM_StaticFiles_NotModified(benchmark::State &state) {
 }
 
 void
+BM_StaticFiles_NotModifiedLegacy(benchmark::State &state) {
+    run(state, false, true, false, true);
+}
+
+void
 BM_StaticFiles_Range(benchmark::State &state) {
     run(state, false, false, true);
 }
@@ -146,5 +195,6 @@ BM_StaticFiles_Range(benchmark::State &state) {
 BENCHMARK(static_files_bench::BM_StaticFiles_Get)->Arg(16)->Arg(4096)->UseRealTime();
 BENCHMARK(static_files_bench::BM_StaticFiles_Head)->Arg(16)->UseRealTime();
 BENCHMARK(static_files_bench::BM_StaticFiles_NotModified)->Arg(16)->UseRealTime();
+BENCHMARK(static_files_bench::BM_StaticFiles_NotModifiedLegacy)->Arg(16)->Arg(4096)->UseRealTime();
 BENCHMARK(static_files_bench::BM_StaticFiles_Range)->Arg(16)->Arg(4096)->UseRealTime();
 BENCHMARK_MAIN();

@@ -324,13 +324,17 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:827 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:865 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
 
 ETags derived from file size and modification time are **weak**, prefixed with `W/`.
-They remain usable for `If-None-Match`, which compares weakly even if a client retained
-an earlier tag without the prefix. They cannot prove byte-for-byte identity for resuming
+The opaque value uses a compact, distinct encoding of the same full-width size and
+signed modification-seconds fields. Clients should echo the tag, not parse it.
+`If-None-Match` compares weakly and still accepts previously issued decimal tags,
+with or without the weak prefix; the legacy value is formatted only after a miss
+on the current tag. Formatting uses bounded local buffers, and the response owns
+its header value. They cannot prove byte-for-byte identity for resuming
 a download. `If-Range` therefore makes the middleware ignore `Range` and serve the full
 representation with 200 for its metadata validators; filesystem dates are also treated
 as weak because the middleware cannot establish whether a file changed twice in one
