@@ -2140,80 +2140,80 @@ TEST(Http1ClientTest, RedirectMoveOnlyCallbackIsDeferredAndDeliveredOnce) {
 }
 
 TEST(Http1ClientTest, RedirectThrowingFinalCallbackIsContainedOnceAndReleasesCapture) {
-    qb::io::async::init();
-    auto &listener = qb::io::async::listener::current;
-    RecordProperty("inherited_active_watchers", listener.loop().active_count());
-    RecordProperty("inherited_pending_events", static_cast<int>(listener.loop().pending_count()));
-    RecordProperty("inherited_has_deferred", static_cast<int>(listener.has_deferred()));
-    RecordProperty("inherited_has_work", static_cast<int>(listener.has_work()));
-    // This TEST owner has no per-case TearDown: earlier clients can leave weak
-    // deadline timers after their own objects have gone. Isolate before creating
-    // this case's server, request or captured state, never to satisfy its oracle.
-    listener.clear();
-    ASSERT_FALSE(listener.has_work());
-    LoopbackHttp1Server server;
-    struct Observation {
-        unsigned                                      delivered = 0;
-        bool                                          threw     = false;
-        bool                                          barrier   = false;
-        std::optional<qb::http::async::RedirectReply> reply;
-    };
-    auto                     observed = std::make_shared<Observation>();
-    auto                     capture  = std::make_shared<int>(91);
-    const std::weak_ptr<int> released = capture;
-    qb::http::GET(
-        request(qb::http::method::GET, server.url("/redirect/chain/0")),
-        [observed, capture = std::move(capture)](qb::http::async::RedirectReply &&reply) {
-            ++observed->delivered;
-            EXPECT_EQ(*capture, 91);
-            EXPECT_EQ(reply.response.status(), qb::http::status::OK);
-            EXPECT_EQ(reply.response.body().as<std::string>(), "chain:3");
-            EXPECT_EQ(reply.request.uri().path(), "/redirect/chain/3");
-            EXPECT_EQ(reply.hops.size(), 3u);
-            if (reply.hops.size() == 3) {
-                for (std::size_t i = 0; i < reply.hops.size(); ++i) {
-                    EXPECT_EQ(reply.hops[i].response.status(), qb::http::status::FOUND);
-                    EXPECT_EQ(reply.hops[i].request.uri().path(), "/redirect/chain/" + std::to_string(i));
+    // A dedicated thread gives this lifetime oracle a fresh thread-local listener.
+    // No cleanup runs before its final no-work and capture-release assertions.
+    std::thread([] {
+        qb::io::async::init();
+        auto &listener = qb::io::async::listener::current;
+        RecordProperty("inherited_active_watchers", listener.loop().active_count());
+        RecordProperty("inherited_pending_events", static_cast<int>(listener.loop().pending_count()));
+        RecordProperty("inherited_has_deferred", static_cast<int>(listener.has_deferred()));
+        RecordProperty("inherited_has_work", static_cast<int>(listener.has_work()));
+        ASSERT_FALSE(listener.has_work());
+        LoopbackHttp1Server server;
+        struct Observation {
+            unsigned                                      delivered = 0;
+            bool                                          threw     = false;
+            bool                                          barrier   = false;
+            std::optional<qb::http::async::RedirectReply> reply;
+        };
+        auto                     observed = std::make_shared<Observation>();
+        auto                     capture  = std::make_shared<int>(91);
+        const std::weak_ptr<int> released = capture;
+        qb::http::GET(
+            request(qb::http::method::GET, server.url("/redirect/chain/0")),
+            [observed, capture = std::move(capture)](qb::http::async::RedirectReply &&reply) {
+                ++observed->delivered;
+                EXPECT_EQ(*capture, 91);
+                EXPECT_EQ(reply.response.status(), qb::http::status::OK);
+                EXPECT_EQ(reply.response.body().as<std::string>(), "chain:3");
+                EXPECT_EQ(reply.request.uri().path(), "/redirect/chain/3");
+                EXPECT_EQ(reply.hops.size(), 3u);
+                if (reply.hops.size() == 3) {
+                    for (std::size_t i = 0; i < reply.hops.size(); ++i) {
+                        EXPECT_EQ(reply.hops[i].response.status(), qb::http::status::FOUND);
+                        EXPECT_EQ(reply.hops[i].request.uri().path(), "/redirect/chain/" + std::to_string(i));
+                    }
                 }
-            }
-            observed->reply.emplace(std::move(reply));
-            observed->threw = true;
-            throw std::runtime_error("owned redirect completion failure");
-        },
-        qb::duration::zero(), true, qb::http::RedirectOptions{});
-    EXPECT_EQ(observed->delivered, 0u);
-    EXPECT_FALSE(released.expired());
-    // The exception leaves only the user callback; the existing defer drain
-    // contains it. Waiting for all client work also completes socket disposal.
-    const bool settled =
-        ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->delivered != 0 && released.expired() && !listener.has_work(); });
-    RecordProperty("final_delivered", static_cast<int>(observed->delivered));
-    RecordProperty("final_capture_expired", static_cast<int>(released.expired()));
-    RecordProperty("final_has_work", static_cast<int>(listener.has_work()));
-    RecordProperty("final_has_deferred", static_cast<int>(listener.has_deferred()));
-    RecordProperty("final_active_watchers", listener.loop().active_count());
-    RecordProperty("final_pending_events", static_cast<int>(listener.loop().pending_count()));
-    EXPECT_EQ(observed->delivered, 1u);
-    EXPECT_TRUE(released.expired()) << "the final completion capture is still owned";
-    EXPECT_FALSE(listener.has_work()) << "client work remains after completion";
-    ASSERT_TRUE(settled) << "delivered=" << observed->delivered << ", capture_expired=" << released.expired()
-                         << ", deferred=" << listener.has_deferred() << ", active=" << listener.loop().active_count()
-                         << ", pending=" << listener.loop().pending_count();
-    ASSERT_TRUE(observed->reply.has_value());
-    EXPECT_TRUE(observed->threw);
-    EXPECT_EQ(observed->delivered, 1u);
-    EXPECT_EQ(observed->reply->response.status(), qb::http::status::OK);
-    EXPECT_EQ(observed->reply->hops.size(), 3u);
-    EXPECT_EQ(server.request_count(), 4);
+                observed->reply.emplace(std::move(reply));
+                observed->threw = true;
+                throw std::runtime_error("owned redirect completion failure");
+            },
+            qb::duration::zero(), true, qb::http::RedirectOptions{});
+        EXPECT_EQ(observed->delivered, 0u);
+        EXPECT_FALSE(released.expired());
+        // The exception leaves only the user callback; the existing defer drain
+        // contains it. Waiting for all client work also completes socket disposal.
+        const bool settled = ServerThread<Http1ClientTestServer>::pump_until(
+            [&] { return observed->delivered != 0 && released.expired() && !listener.has_work(); });
+        RecordProperty("final_delivered", static_cast<int>(observed->delivered));
+        RecordProperty("final_capture_expired", static_cast<int>(released.expired()));
+        RecordProperty("final_has_work", static_cast<int>(listener.has_work()));
+        RecordProperty("final_has_deferred", static_cast<int>(listener.has_deferred()));
+        RecordProperty("final_active_watchers", listener.loop().active_count());
+        RecordProperty("final_pending_events", static_cast<int>(listener.loop().pending_count()));
+        EXPECT_EQ(observed->delivered, 1u);
+        EXPECT_TRUE(released.expired()) << "the final completion capture is still owned";
+        EXPECT_FALSE(listener.has_work()) << "client work remains after completion";
+        ASSERT_TRUE(settled) << "delivered=" << observed->delivered << ", capture_expired=" << released.expired()
+                             << ", deferred=" << listener.has_deferred() << ", active=" << listener.loop().active_count()
+                             << ", pending=" << listener.loop().pending_count();
+        ASSERT_TRUE(observed->reply.has_value());
+        EXPECT_TRUE(observed->threw);
+        EXPECT_EQ(observed->delivered, 1u);
+        EXPECT_EQ(observed->reply->response.status(), qb::http::status::OK);
+        EXPECT_EQ(observed->reply->hops.size(), 3u);
+        EXPECT_EQ(server.request_count(), 4);
 
-    // An additional real deferred turn must neither retry completion nor send
-    // another request. No elapsed-time sleep stands in for this ordering fence.
-    qb::io::async::defer([observed] { observed->barrier = true; });
-    ASSERT_TRUE(
-        ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->barrier && !qb::io::async::listener::current.has_work(); }));
-    EXPECT_EQ(observed->delivered, 1u);
-    EXPECT_TRUE(released.expired());
-    EXPECT_EQ(server.request_count(), 4);
+        // An additional real deferred turn must neither retry completion nor send
+        // another request. No elapsed-time sleep stands in for this ordering fence.
+        qb::io::async::defer([observed] { observed->barrier = true; });
+        ASSERT_TRUE(
+            ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->barrier && !qb::io::async::listener::current.has_work(); }));
+        EXPECT_EQ(observed->delivered, 1u);
+        EXPECT_TRUE(released.expired());
+        EXPECT_EQ(server.request_count(), 4);
+    }).join();
 }
 
 TEST(Http1ClientTest, RedirectLocationWithOptionalWhitespaceFollows) {

@@ -581,7 +581,7 @@ Followed targets require strict absolute HTTP(S) resolution. Userinfo, malformed
 
 The chain owns each flight during startup, then preserves the existing session disposal contract. The terminal reply and history move into final delivery after dispatch; abandonment prevents subsequent flights. These are the startup, processing and helper entry points. _(src/qbm/http/redirect.h:92-162,174-200,215-340)_
 
-Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:622-675,858-880,1181-1193)_
+Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:622-675,866-888,1189-1201)_
 
 ### Persistent client — `qb::http1::Client` (alias `client`) — `src/qbm/http/1.1/client.h`
 - Non-upgrade 1xx responses do not complete or advance the active request, enter statistics, or disable its timeout. Only final fields reach the callback/awaiter; status 101 retains the existing handling. No wait-for-100 upload handshake.

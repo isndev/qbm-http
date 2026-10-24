@@ -26,7 +26,7 @@
  * Topology: TWO servers, each on its own worker thread via the shared
  * `ServerThread<>` RAII harness (condition-variable readiness barriers — NO
  * sleep_for warmup, NO magic ports; both ports are ephemeral). A dead ephemeral
- * port (reserved then released) provides the "refused upstream" target.
+ * port held by a bound, non-listening socket provides the "refused upstream" target.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -45,6 +45,7 @@
 #include <gtest/gtest.h>
 
 #include <qb/io/async/coroutine/combinators.h> // when_all
+#include <qb/io/tcp/socket.h>
 
 #include "../../shared/loopback_server.h"
 
@@ -226,6 +227,7 @@ protected:
     std::uint16_t                   _upstream_port{0};
     std::uint16_t                   _gateway_port{0};
     std::uint16_t                   _dead_port{0};
+    qb::io::tcp::socket             _dead_reservation;
     std::unique_ptr<UpstreamThread> _upstream;
 
     void
@@ -250,15 +252,19 @@ protected:
         _upstream_port = _upstream->port();
         ASSERT_NE(_upstream_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
-        // _dead_port is the ONE port here that must never be bound — `UpstreamRefusedFallback`
-        // needs a connect to it to be REFUSED — so it cannot use the bind-and-read-back pattern:
-        // there is no serving socket to read a port off. It keeps the probe-and-release draw, and
-        // is drawn AFTER the upstream is listening so the kernel cannot hand out that port.
-        _dead_port = qb::http::test::ephemeral_port(); // reserved + released = refused target
+        // A bound socket without listen() refuses connections while retaining its port.
+        // Keep it alive through gateway teardown so no later bind can reuse the target.
+        ASSERT_EQ(_dead_reservation.init(), 0);
+#if defined(_WIN32)
+        ASSERT_EQ(_dead_reservation.set_optval(SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1), 0);
+#endif
+        ASSERT_EQ(_dead_reservation.bind(qb::io::uri{"tcp://127.0.0.1:0"}), 0);
+        _dead_port = _dead_reservation.local_endpoint().port();
+        ASSERT_NE(_dead_port, 0);
         ASSERT_NE(_dead_port, _upstream_port);
 
         const std::string upstream_base = "http://localhost:" + std::to_string(_upstream_port);
-        const std::string dead_base     = "http://localhost:" + std::to_string(_dead_port);
+        const std::string dead_base     = "http://127.0.0.1:" + std::to_string(_dead_port);
 
         // GatewayServer needs ctor args (upstream + dead bases), which the
         // generic ServerThread<> default-construct path does not support, so the
@@ -266,10 +272,7 @@ protected:
         // an observable condition-variable readiness barrier (no sleep_for warmup).
         start_gateway(upstream_base, dead_base);
         ASSERT_NE(_gateway_port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
-        // The gateway's :0 bind happened after _dead_port's probe was released, so the kernel
-        // could in principle re-hand that number. UpstreamRefusedFallback only proves anything if
-        // the dead target really is distinct from both live servers — pin it rather than let the
-        // test pass for the wrong reason.
+        // The refused target must remain distinct from both live servers.
         ASSERT_NE(_gateway_port, _dead_port);
         ASSERT_NE(_gateway_port, _upstream_port);
     }
@@ -319,6 +322,7 @@ protected:
             _gateway_thread.join();
         }
         _upstream.reset();
+        _dead_reservation.close();
     }
 
     [[nodiscard]] qb::http::Response
@@ -374,6 +378,8 @@ TEST_F(CoroGatewayTest, UpstreamErrorFallback) {
 }
 
 TEST_F(CoroGatewayTest, UpstreamRefusedFallback) {
+    qb::io::tcp::listener intruder;
+    ASSERT_NE(intruder.listen_v4(_dead_port, "127.0.0.1"), 0) << "the refused target must remain reserved";
     // The dead upstream port has no listener: the gateway's outbound awaiter
     // resolves with a non-OK status (connection refused -> BAD_GATEWAY, or the
     // bounded timeout -> GATEWAY_TIMEOUT). Either way the handler degrades to

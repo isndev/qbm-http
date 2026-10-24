@@ -480,6 +480,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Gateway test refusal-port ownership.** Keep the refused upstream's loopback
+  port bound without listening until the gateway has stopped. A later ephemeral
+  bind can no longer reuse the target; the refusal case also checks that another
+  listener cannot take the reserved port. Runtime behavior is unchanged.
+
+- **Redirect callback test isolation.** Run the throwing-completion lifetime
+  oracle on a fresh thread-local listener. Pending slots inherited from an earlier
+  test no longer fail its setup; the callback-count, capture-release and final
+  no-work checks remain intact.
+
 - **Verify the WebSocket benchmark's actual echo (Huly QB-519).** The server serializes the decoded
   message during its callback, while that message is valid. The preflight checks exact wire bytes
   and an inverse client decode, and rejects same-size payload and opcode corruption. The cell is
