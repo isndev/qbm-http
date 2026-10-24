@@ -144,8 +144,8 @@ run_pattern_rule(benchmark::State &state, bool expected) {
         return;
     }
     for (auto _ : state) {
-        Result     result;
-        const bool valid = rule.validate(value, "value", result);
+        Result result;
+        bool   valid = rule.validate(value, "value", result);
         benchmark::DoNotOptimize(valid);
         benchmark::DoNotOptimize(result);
     }
