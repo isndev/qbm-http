@@ -224,6 +224,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   when the whole field must match. Standalone `PatternRule` keeps full-string matching.
   Both paths retain the pattern/input limits and regex-engine error handling, and schema
   rules remain compiled once per cached node.
+  A leading `^` without alternation now restricts the search to the original starting position,
+  avoiding pointless retries on long rejected inputs; it still accepts partial matches such as `^es`
+  on `estonia`. A complete positive ASCII character class, optionally followed by `+`, searches
+  its byte set directly; contiguous sets use bounded SIMD loads on SSE2 targets. Other expressions
+  retain general regex search, including negation, escapes, nested classes and additional syntax.
+  Regex compilation still validates every pattern. Both pattern paths read the JSON string by
+  reference instead of copying it. Rejection cost can still grow with input length, because a
+  valid match may occur at the final byte.
 - **Static-file validators and conditional ranges (Huly QB-541).** Metadata-derived ETags
   are now marked weak (`W/`): size and second-resolution modification time do not identify
   exact file bytes. `If-None-Match` retains weak comparison, including previously issued

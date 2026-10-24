@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -83,6 +84,102 @@ TEST_F(ValidationSchemaTest, PatternHonoursExplicitAnchorsAndEmptyMatches) {
     result.clear();
     EXPECT_TRUE(anchored.validate(qb::json(42), result));
     EXPECT_TRUE(result.success());
+
+    // A start-constrained search is not a whole-value match. Alternation can
+    // escape a leading anchor; escaped and bracketed carets are not anchors.
+    struct Case {
+        const char *pattern;
+        const char *value;
+        bool        expected;
+    };
+    for (const auto &test : std::vector<Case>{
+             {"^es", "estonia", true},
+             {"^es", "before es", false},
+             {"^es", "\nes", false},
+             {"^es|x", "before x", true},
+             {"^es|x", "absent", false},
+             {"^es(?:x|y)", "esy suffix", true},
+             {"^es\\|x", "es|x suffix", true},
+             {"^es[|x]", "es| suffix", true},
+             {"\\^es", "before ^es", true},
+             {"[^a]+", "aaB", true},
+             {"(^es)?x", "before x", true},
+             {"^", "anything", true},
+             {"^$", "", true},
+             {"^$", "\n", false},
+             {"$", "anything", true},
+             {"^[a-z]+$", "AAAa", false},
+             {"[a-z]+", "AAAa", true}
+         }) {
+        SCOPED_TRACE(test.pattern);
+        SCOPED_TRACE(test.value);
+        result.clear();
+        EXPECT_EQ(SchemaValidator({{"pattern", test.pattern}}).validate(qb::json(test.value), result), test.expected);
+        EXPECT_EQ(result.success(), test.expected);
+    }
+}
+
+TEST_F(ValidationSchemaTest, PatternByteClassesAgreeWithRegexSearch) {
+    for (const std::string &pattern : std::vector<std::string>{"[a-z]",       "[a-z]+",     "[A-z]+",
+                                                               "[0-9A-Fa-f]", "[ab]+",      "[_.]",
+                                                               "[|+*?()]",    "[a-cb-d]+",  "[0-9]+",
+                                                               "[^a]+",       "[a\\-z]",    "[[:alpha:]]",
+                                                               "[a-z]+$",     "[a-z]{2}",   "[a-z]+?",
+                                                               "[a-z]|x",     "([a-z])\\1", "[a-z][0-9]",
+                                                               "[a-z]*",      "[a-z]?",     "^[a-z]+$",
+                                                               "[a-]",        "[-a]",       std::string("[\0-a]+", 6),
+                                                               "[a-\x7f]+",   "[+]+",       std::string("[") + static_cast<char>(0x80) + "]"}) {
+        SCOPED_TRACE(pattern);
+        const std::regex oracle(pattern, std::regex_constants::ECMAScript | std::regex_constants::optimize);
+        SchemaValidator  validator({{"pattern", pattern}});
+        const auto       check = [&](const std::string &value) {
+            result.clear();
+            const bool expected = std::regex_search(value, oracle);
+            EXPECT_EQ(validator.validate(qb::json(value), result), expected);
+            EXPECT_EQ(result.success(), expected);
+            if (!expected) {
+                ASSERT_EQ(result.errors().size(), 1u);
+                EXPECT_EQ(result.errors()[0].rule_violated, "pattern");
+            }
+        };
+        check("");
+        for (unsigned c = 0; c < 256; ++c) {
+            SCOPED_TRACE(c);
+            check(std::string(1, static_cast<char>(c)));
+            check(std::string("X") + static_cast<char>(c) + "X");
+            check(std::string(16, static_cast<char>(c)));
+        }
+        for (const auto &value : {"Aa", "aA", "A0z", "aa", "xx", "ab1", "A\na", "a\n", "AAA_", "12AF"})
+            check(value);
+    }
+}
+
+TEST_F(ValidationSchemaTest, PatternByteClassSearchCoversEveryBlockAndTail) {
+    for (const std::string pattern : {"[a-z]+", "[a-z]", "[A-z]", "[0-9A-Fa-f_]+"}) {
+        SCOPED_TRACE(pattern);
+        const std::regex oracle(pattern, std::regex_constants::ECMAScript | std::regex_constants::optimize);
+        SchemaValidator  validator({{"pattern", pattern}});
+        for (std::size_t size : {1u, 7u, 15u, 16u, 17u, 31u, 32u, 33u, 63u, 64u, 65u, 255u, 256u, 2048u}) {
+            SCOPED_TRACE(size);
+            std::string value(size, static_cast<char>(0xff));
+            result.clear();
+            EXPECT_FALSE(validator.validate(qb::json(value), result));
+            for (std::size_t pos = 0; pos < size; ++pos) {
+                SCOPED_TRACE(pos);
+                value[pos] = 'a';
+                result.clear();
+                EXPECT_EQ(validator.validate(qb::json(value), result), std::regex_search(value, oracle));
+                EXPECT_TRUE(result.success());
+                value[pos] = static_cast<char>(0xff);
+            }
+        }
+        result.clear();
+        EXPECT_TRUE(validator.validate(qb::json(42), result));
+        result.clear();
+        EXPECT_FALSE(validator.validate(qb::json(std::string(2049, 'a')), result));
+        ASSERT_EQ(result.errors().size(), 1u);
+        EXPECT_NE(result.errors()[0].message.find("maximum length"), std::string::npos);
+    }
 }
 
 TEST_F(ValidationSchemaTest, PatternSearchAppliesToNestedValuesAndPropertyNames) {

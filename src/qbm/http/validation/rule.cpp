@@ -26,6 +26,13 @@
 #include <qb/utility/branch_hints.h>
 #include "./schema_validator.h"
 
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+#define QB_HTTP_PATTERN_SEARCH_SSE2 1
+#else
+#define QB_HTTP_PATTERN_SEARCH_SSE2 0
+#endif
+
 namespace qb::http::validation {
 namespace {
 
@@ -636,14 +643,101 @@ compile_pattern(const std::string &pattern) {
     }
 }
 
+// A whole positive ASCII class, optionally repeated with +, has a boolean
+// search match iff one input byte belongs to it. The regex is still compiled
+// first; anything outside this small grammar keeps the regex engine. In
+// particular, no escapes, negation, nested/collating classes or suffixes are
+// interpreted here. compile_pattern enables neither icase nor collate.
+class ByteClassSearch {
+    std::uint64_t _members[2]{};
+    unsigned char _first      = 127;
+    unsigned char _last       = 0;
+    bool          _enabled    = false;
+    bool          _contiguous = false;
+
+    static bool
+    plain(unsigned char c) noexcept {
+        return c < 128 && c != '[' && c != ']' && c != '\\' && c != '^' && c != '-';
+    }
+
+public:
+    explicit ByteClassSearch(std::string_view pattern) noexcept {
+        if (!pattern.empty() && pattern.back() == '+')
+            pattern.remove_suffix(1);
+        if (pattern.size() < 3 || pattern.front() != '[' || pattern.back() != ']')
+            return;
+        const auto end = pattern.size() - 1;
+        for (std::size_t i = 1; i < end;) {
+            const auto first = static_cast<unsigned char>(pattern[i++]);
+            if (!plain(first))
+                return;
+            auto last = first;
+            if (i < end && pattern[i] == '-') {
+                if (++i == end)
+                    return;
+                last = static_cast<unsigned char>(pattern[i++]);
+                if (!plain(last) || last < first)
+                    return;
+            }
+            for (unsigned c = first; c <= last; ++c)
+                _members[c / 64] |= std::uint64_t{1} << (c % 64);
+            _first = std::min(_first, first);
+            _last  = std::max(_last, last);
+        }
+        _contiguous = std::popcount(_members[0]) + std::popcount(_members[1]) == _last - _first + 1;
+        _enabled    = true;
+    }
+
+    bool
+    enabled() const noexcept {
+        return _enabled;
+    }
+
+    bool
+    matches(std::string_view value) const noexcept {
+        if (_contiguous) {
+            const char *p = value.data();
+            std::size_t n = value.size();
+#if QB_HTTP_PATTERN_SEARCH_SSE2
+            if (n >= 16) {
+                const __m128i first    = _mm_set1_epi8(static_cast<char>(_first));
+                const __m128i last     = _mm_set1_epi8(static_cast<char>(_last));
+                const auto    contains = [&](const char *at) noexcept {
+                    const __m128i bytes = _mm_loadu_si128(reinterpret_cast<const __m128i *>(at));
+                    const __m128i above = _mm_cmpeq_epi8(_mm_max_epu8(bytes, first), bytes);
+                    const __m128i below = _mm_cmpeq_epi8(_mm_min_epu8(bytes, last), bytes);
+                    return _mm_movemask_epi8(_mm_and_si128(above, below)) != 0;
+                };
+                for (; n > 16; p += 16, n -= 16)
+                    if (contains(p))
+                        return true;
+                // Overlap the last block, wholly inside the input; no padding read.
+                return contains(p + n - 16);
+            }
+#endif
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto c = static_cast<unsigned char>(p[i]);
+                if (c >= _first && c <= _last)
+                    return true;
+            }
+            return false;
+        }
+        for (unsigned char c : value)
+            if (c < 128 && (_members[c / 64] & (std::uint64_t{1} << (c % 64))))
+                return true;
+        return false;
+    }
+};
+
 template <bool Search>
 bool
 validate_pattern(const IRule &rule, const std::string &pattern, const std::regex &regex, const qb::json &value, const std::string &field_path,
-                 Result &result) {
+                 Result &result, std::regex_constants::match_flag_type flags = std::regex_constants::match_default,
+                 const ByteClassSearch *byte_search = nullptr) {
     if (!value.is_string()) {
         return true; // Pattern rule only applies to strings.
     }
-    const auto &str_val = value.get<std::string>();
+    const auto &str_val = value.get_ref<const std::string &>();
 
     // Security: ReDoS protection - limit input size for regex matching
     // Pathological regex patterns can cause exponential time complexity
@@ -664,9 +758,11 @@ validate_pattern(const IRule &rule, const std::string &pattern, const std::regex
     // regex_error would cross it. Treat an engine failure as a validation failure.
     try {
         const bool matches = [&] {
-            if constexpr (Search)
-                return std::regex_search(str_val, regex);
-            else
+            if constexpr (Search) {
+                if (byte_search && byte_search->enabled())
+                    return byte_search->matches(str_val);
+                return std::regex_search(str_val, regex, flags);
+            } else
                 return std::regex_match(str_val, regex);
         }();
         if (!matches) {
@@ -684,17 +780,26 @@ validate_pattern(const IRule &rule, const std::string &pattern, const std::regex
 // JSON Schema does not implicitly anchor its pattern keyword. Keep this rule
 // private to the cached schema rules so PatternRule retains its full-match API.
 class PatternSearchRule final : public IRule {
-    std::string _pattern;
-    std::regex  _regex;
+    std::string                           _pattern;
+    std::regex                            _regex;
+    std::regex_constants::match_flag_type _flags;
+    ByteClassSearch                       _byte_search;
 
 public:
     explicit PatternSearchRule(std::string pattern)
         : _pattern(std::move(pattern))
-        , _regex(compile_pattern(_pattern)) {}
+        , _regex(compile_pattern(_pattern))
+        // ECMAScript without multiline: a leading ^ requires the original start.
+        // Any alternation conservatively keeps the general search: ^a|b can
+        // match b elsewhere. Even escaped/class-contained bars take that fallback.
+        , _flags(!_pattern.empty() && _pattern.front() == '^' && _pattern.find('|') == std::string::npos
+                     ? std::regex_constants::match_continuous
+                     : std::regex_constants::match_default)
+        , _byte_search(_pattern) {}
 
     bool
     validate(const qb::json &value, const std::string &field_path, Result &result) const override {
-        return validate_pattern<true>(*this, _pattern, _regex, value, field_path, result);
+        return validate_pattern<true>(*this, _pattern, _regex, value, field_path, result, _flags, &_byte_search);
     }
 
     std::string
