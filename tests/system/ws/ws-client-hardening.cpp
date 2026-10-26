@@ -153,14 +153,14 @@ static_assert(requires(qb::http::ws::client_secure &client) {
  * listening port shareable). Binding :0 on the socket that actually serves and reading
  * the assigned port back leaves no window at all.
  *
- * @return The kernel-assigned port; a 0 here fails the test loudly rather than sending
- *         the client at port 0.
+ * @return The kernel-assigned port, or 0 when the fixture is not listening — its ctor has already
+ *         reported why (Huly QB-1125). Every caller ASSERTs on it, so the scenario stops there
+ *         instead of driving its client at port 0 until its pump budget runs out.
  */
 template <typename ServerT>
 [[nodiscard]] int
 bound_port(const qb::http::test::WsServerThread<ServerT> &server) {
-    EXPECT_NE(server.port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
-    return server.port;
+    return server.listening() ? server.port : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,6 +268,7 @@ TEST(WebSocketClientHardening, ClientControlFramesAreMaskedAndAcceptedByServer) 
     ServerProbeResult                                  result;
     qb::http::test::WsServerThread<ControlProbeServer> server(0, [&](ControlProbeServer &s) { s.results = &result; });
     const int                                          port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     bool connected = false;
 
@@ -358,6 +359,7 @@ TEST(WebSocketClientHardening, ServerRejectsMalformedSecWebSocketKey) {
 
     qb::http::test::WsServerThread<HandshakeValidationServer> server(0);
     const int                                                 port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     // 24 'a' chars: valid base64 length but not a 16-byte nonce decode.
     const std::string response = drive_bad_key_handshake(port, "aaaaaaaaaaaaaaaaaaaaaaaa");
@@ -371,6 +373,7 @@ TEST(WebSocketClientHardening, ServerRejectsNonBase64SecWebSocketKey) {
 
     qb::http::test::WsServerThread<HandshakeValidationServer> server(0);
     const int                                                 port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     const std::string response = drive_bad_key_handshake(port, "!!!!!!!!!!!!!!!!!!!!!!!!");
 
@@ -425,6 +428,7 @@ TEST(WebSocketClientHardening, ClientRejectsServerSubprotocolNotOffered) {
 
     qb::http::test::WsServerThread<BadSubprotocolServer> server(0);
     const int                                            port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     bool connected = false;
     bool errored   = false;
@@ -532,6 +536,7 @@ run_extension_response_case(bool select_unoffered_extension) {
         s.client_offered_extension   = &client_offered_extension;
     });
     const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     int                  connected = 0;
     int                  errors    = 0;
@@ -568,7 +573,9 @@ TEST(WebSocketClientHardening, ConnectedCallbackMayDestroyClient) {
         client.reset();
     });
     client->on_message([&](auto &) { ++messages; });
-    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    const int port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), 1s);
     ASSERT_TRUE(pump_until([&] { return callbacks == 1; }));
     EXPECT_FALSE(client);
     EXPECT_EQ(messages, 0);
@@ -583,7 +590,9 @@ TEST(WebSocketClientHardening, HandshakeErrorCallbackMayDestroyClient) {
         ++callbacks;
         client.reset();
     });
-    client->connect(qb::io::uri("ws://localhost:" + std::to_string(bound_port(server)) + "/path"), 1s);
+    const int port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+    client->connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), 1s);
     ASSERT_TRUE(pump_until([&] { return callbacks == 1; }));
     EXPECT_FALSE(client);
 }
@@ -896,7 +905,8 @@ TEST(WebSocketClientHardening, DestroyedClientsIgnorePendingConnectorCallbacks) 
         s.closed   = &closed;
     });
     const int                                             port = bound_port(server);
-    const qb::io::uri                                     remote("ws://localhost:" + std::to_string(port) + "/path");
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+    const qb::io::uri remote("ws://localhost:" + std::to_string(port) + "/path");
 
     {
         qb::http::ws::client client;
@@ -1210,6 +1220,7 @@ TEST(WebSocketClientHardening, ClientRejectsMalformedConnectionTokenInResponse) 
 
     qb::http::test::WsServerThread<BadConnectionTokenServer> server(0);
     const int                                                port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     bool connected = false;
     bool errored   = false;
@@ -1345,6 +1356,7 @@ run_bad_frame_scenario(std::uint16_t expected_close_code) {
     ServerProbeResult                       result;
     qb::http::test::WsServerThread<ServerT> server(0, [&](ServerT &s) { s.results = &result; });
     const int                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     bool        errored  = false;
     std::size_t messages = 0;
@@ -1447,6 +1459,7 @@ TEST(WebSocketClientHardening, ClientEchoesPeerCloseFrameExactlyOnce) {
     ServerProbeResult                                    result;
     qb::http::test::WsServerThread<CloseEchoProbeServer> server(0, [&](CloseEchoProbeServer &s) { s.results = &result; });
     const int                                            port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
 
     std::size_t closes_seen = 0;
     std::string order;

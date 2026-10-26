@@ -7,7 +7,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
-Nothing yet. Entries land here as they are merged, and move under a version heading when that version is tagged.
+### Fixed
+
+- **The WebSocket loopback fixture binds 127.0.0.1 and keeps the OS error of a refused bind: the report
+  names address, port and code instead of "failed" on an address it had not bound, and the hardening
+  scenarios stop instead of driving their client at port 0 (Huly QB-1125).** `WsServerThread` listened
+  on every interface while its message said 127.0.0.1 and dropped the code; it now binds the loopback
+  like the module's other fixtures, reads `get_last_errno()` before anything else touches a socket --
+  a refused bind reads `listen_v4 failed on 127.0.0.1:<port> (native error 98: Address already in use)` --
+  and exposes `listening()`.
+  A lifecycle test holds a port with an intruder listener and asserts the reported address, port and
+  code (EADDRINUSE, WSAEADDRINUSE on Windows). Test fixtures only; no shipped code changes.
 
 ## [3.3.0] - 2026-10-26
 

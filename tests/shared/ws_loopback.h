@@ -62,6 +62,7 @@
 
 #include <gtest/gtest.h>
 
+#include <qb/io/system/sys__socket.h>
 #include <qbm/http/ws/coro.h>
 
 namespace qb::http::test {
@@ -77,7 +78,8 @@ using namespace std::chrono_literals;
  *
  * The ctor initializes the async loop, constructs the server, applies an
  * optional @p config callback (e.g. to set per-server limits before it accepts
- * connections), binds @p port_ on IPv4, and starts it. Readiness is signalled
+ * connections), binds @p port_ on the IPv4 loopback (127.0.0.1, like every other fixture
+ * of the module — never every interface), and starts it. Readiness is signalled
  * through a condition variable the instant the listener is bound + listening +
  * started (mirrors @c shared/loopback_server.h ServerThread) — the ctor blocks on
  * that cv, NOT a busy-poll + fixed settle sleep, so there is no sleep-based race
@@ -88,6 +90,11 @@ using namespace std::chrono_literals;
  * that throws never reaches the notify, so an unbounded wait would block the test thread forever
  * (and an escaping exception would std::terminate the process) — a defect that would surface as a
  * tier timeout instead of a named failure.
+ *
+ * A refused bind is reported with what a reader needs to act on: the address, the port and the OS
+ * error by number and text, read with `get_last_errno()` before anything else touches a socket
+ * (Huly QB-1125: a Windows gate once read "failed" on an address the fixture had not bound). The
+ * scenario checks `listening()` and stops, rather than driving its client at port 0.
  *
  * @tparam ServerT a @c qb::io::use<...>::tcp::server<...> session host.
  */
@@ -101,6 +108,10 @@ struct WsServerThread {
     std::string             failure_message;
     std::mutex              mutex;
     std::condition_variable cv;
+
+    /// The address the fixture binds. A loopback test server has no business listening on every
+    /// interface — and on Windows that is what raises the firewall prompt on a fresh machine.
+    static constexpr const char *kHost = "127.0.0.1";
 
     explicit WsServerThread(int port_, std::function<void(ServerT &)> config = {},
                             std::chrono::milliseconds ready_budget = std::chrono::seconds(5))
@@ -118,8 +129,13 @@ struct WsServerThread {
                 if (config) {
                     config(server);
                 }
-                if (server.transport().listen_v4(static_cast<std::uint16_t>(port)) != 0) {
-                    throw std::runtime_error("listen_v4 failed for 127.0.0.1:" + std::to_string(port));
+                if (server.transport().listen_v4(static_cast<std::uint16_t>(port), kHost) != 0) {
+                    // Read the OS error before anything else touches a socket: listener::listen returns
+                    // pserve's -1 and leaves the code where get_last_errno() reads it (WSAGetLastError on
+                    // Windows). Without it a refused bind on a CI runner reads as "failed", nothing more.
+                    const int native = qb::io::socket::get_last_errno();
+                    throw std::runtime_error(std::string("listen_v4 failed on ") + kHost + ':' + std::to_string(port) + " (native error "
+                                             + std::to_string(native) + ": " + qb::io::socket::strerror(native) + ')');
                 }
                 // When the caller asked for an ephemeral port (port == 0), read the
                 // kernel-assigned port back from the now-bound listener and publish it
@@ -163,8 +179,15 @@ struct WsServerThread {
         if (!signalled) {
             ADD_FAILURE() << "WsServerThread: the server did not become ready within " << ready_budget.count() << " ms";
         } else if (failed.load(std::memory_order_acquire)) {
-            ADD_FAILURE() << "WsServerThread: startup failed — nothing is listening on port " << port << ": " << failure_message;
+            ADD_FAILURE() << "WsServerThread: startup failed — nothing is listening on " << kHost << ':' << port << ": " << failure_message;
         }
+    }
+
+    /// Whether the worker bound, started and signalled. False after a reported startup failure, so a
+    /// scenario can stop there instead of driving its client at a port nobody listens on.
+    [[nodiscard]] bool
+    listening() const noexcept {
+        return ready.load(std::memory_order_acquire);
     }
 
     ~WsServerThread() {

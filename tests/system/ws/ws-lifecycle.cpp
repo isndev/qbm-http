@@ -25,6 +25,10 @@
  *                                  connections in sequence leaves the server able
  *                                  to accept and upgrade every one (exact upgrade
  *                                  count), proving no listener/session leak.
+ *   - `StartupFailureNamesHostPortAndNativeError`
+ *                                — a fixture that cannot bind reports the address it
+ *                                  bound, the port and the OS error by number and text,
+ *                                  and says it is not listening (Huly QB-1125).
  *
  * All servers run on their own qb-io event-loop thread (`WsServerThread`) bound to
  * `:0`, taking the kernel-assigned port read back from the serving listener, so
@@ -51,14 +55,18 @@
  */
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <qb/io/async.h>
+#include <qb/io/system/sys__socket.h>
+#include <qb/io/tcp/listener.h>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ws_loopback.h"
@@ -421,6 +429,56 @@ TEST(WsLifecycle, RapidConnectDisconnect) {
     // listener/session leak. (Server-side counts are not reachable from the
     // worker-thread WsServerThread, so the proof is the per-connection
     // upgrade+echo+teardown asserted in the loop above.)
+}
+
+// ===========================================================================
+// Fixture diagnostics (Huly QB-1125)
+// ===========================================================================
+
+#if defined(_WIN32)
+constexpr int kAddressInUse = WSAEADDRINUSE;
+#else
+constexpr int kAddressInUse = EADDRINUSE;
+#endif
+
+/**
+ * A fixture that cannot bind must say what a reader needs to act on — the address it bound, the
+ * port, the OS error by number and text — and must leave the scenario a way to stop. An intruder
+ * listener holds a loopback port; the fixture asked for that port fails on its own bind
+ * (EADDRINUSE / WSAEADDRINUSE: `pserve` makes every qb listener exclusive, SO_EXCLUSIVEADDRUSE on
+ * Windows). Red on the former fixture, whose message named 127.0.0.1 while it had bound 0.0.0.0 and
+ * carried no code: on the 2026-10-23 Windows gate a refused `listen_v4(0)` read as "failed" and
+ * nothing more, then the scenario drove its client at port 0 until its budget ran out.
+ */
+TEST(WsLifecycle, StartupFailureNamesHostPortAndNativeError) {
+    qb::io::tcp::listener intruder;
+    ASSERT_EQ(intruder.listen_v4(0, "127.0.0.1"), 0) << "the intruder could not take a loopback port";
+    const int taken = static_cast<int>(intruder.local_endpoint().port());
+    ASSERT_NE(taken, 0) << "listen_v4(0) did not yield a kernel-assigned port";
+
+    // The fixture reports through ADD_FAILURE: intercept that report instead of failing here.
+    ::testing::TestPartResultArray reports;
+    bool                           listening = true;
+    bool                           failed    = false;
+    std::string                    message;
+    {
+        ::testing::ScopedFakeTestPartResultReporter intercept(::testing::ScopedFakeTestPartResultReporter::INTERCEPT_ONLY_CURRENT_THREAD,
+                                                              &reports);
+        WsServerThread<EchoServer>                  server{taken};
+        listening = server.ready.load(std::memory_order_acquire);
+        failed    = server.failed.load(std::memory_order_acquire);
+        message   = server.failure_message;
+    }
+    EXPECT_FALSE(listening);
+    EXPECT_TRUE(failed);
+    ASSERT_EQ(reports.size(), 1) << "the fixture reports its startup failure exactly once";
+    const std::string reported = reports.GetTestPartResult(0).message();
+
+    const std::string where = "127.0.0.1:" + std::to_string(taken);
+    EXPECT_NE(message.find(where), std::string::npos) << message;
+    EXPECT_NE(message.find("native error " + std::to_string(kAddressInUse) + ":"), std::string::npos) << message;
+    EXPECT_NE(reported.find(where), std::string::npos) << reported;
+    EXPECT_NE(reported.find(message), std::string::npos) << reported;
 }
 
 } // namespace ws_lifecycle_test

@@ -60,7 +60,7 @@ A WebSocket server session is an ordinary `qb-io` TCP session that starts by par
 
 For a bare WebSocket endpoint, subclass `qb::io::use<Self>::tcp::client<Server>` — an HTTP-parsing TCP session bound to its listener.
 
-<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:100-139 -->
+<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:108-147 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
