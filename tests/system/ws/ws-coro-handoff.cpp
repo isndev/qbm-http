@@ -230,6 +230,26 @@ struct HandoffFixture {
         }
     }
 
+    /// Whether the worker reached the registerSession()==nullptr dead path, waited for with a bound.
+    ///
+    /// The route hands its socket to `registerSession`; with the registry full the call returns nullptr
+    /// and the socket it was given is destroyed inside it -- the FD is closed BEFORE the handler's
+    /// `store`. The client on the test thread observes that close, `run_sync` returns, and a read of
+    /// the flag at that instant can precede the worker's store by the few microseconds a preemption
+    /// costs (Huly QB-1152: 7 of 50 runs on Windows, never in 50 on Linux). The store is microseconds
+    /// behind the close, so a bound of 2 s separates "the worker has not written yet" from "the dead
+    /// path was never taken" -- the second stays a named failure.
+    [[nodiscard]] bool
+    reached_null_registration(std::chrono::milliseconds budget = 2s) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (!saw_null_registration.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= deadline)
+                return false;
+            std::this_thread::sleep_for(1ms);
+        }
+        return true;
+    }
+
     ~HandoffFixture() {
         running.store(false, std::memory_order_release);
         if (thread.joinable())
@@ -343,9 +363,11 @@ TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
 // registerSession() returning nullptr is a real (if rare) failure mode: the WS
 // io_handler's registry is full. The fixture deterministically pre-fills the
 // single slot (a filler session) BEFORE the test connects, so the one /ws
-// handoff is guaranteed to hit the cap and take the dead path — no race, no
-// hang. We assert the client is cleanly disconnected and the server actually
-// executed the nullptr branch.
+// handoff is guaranteed to hit the cap and take the dead path — no race on the
+// path itself, no hang. We assert the client is cleanly disconnected and the
+// server actually executed the nullptr branch; that second fact is read with a
+// bound, because the client observes the dropped FD before the worker's store
+// is necessarily visible (see HandoffFixture::reached_null_registration).
 TEST_F(WsCoroHandoff, RegisterSessionNullptrIsHandledGracefully) {
     HandoffFixture      fixture{/*force_registry_full=*/true};
     const std::uint16_t port = fixture.port;
@@ -367,7 +389,7 @@ TEST_F(WsCoroHandoff, RegisterSessionNullptrIsHandledGracefully) {
 
     const auto kind = qb::http::ws::run_sync(scenario());
     EXPECT_EQ(kind, qb::http::ws::IncomingFrame::Kind::Disconnected) << "the capped handoff must be dropped, not hang or echo";
-    EXPECT_TRUE(fixture.saw_null_registration.load(std::memory_order_acquire)) << "the registerSession()==nullptr dead path was never reached";
+    EXPECT_TRUE(fixture.reached_null_registration()) << "the registerSession()==nullptr dead path was never reached (2 s)";
 }
 
 TEST_F(WsCoroHandoff, PersistentHttp1ClientCanReuseConnectionBeforeUpgrade) {

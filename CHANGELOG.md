@@ -19,6 +19,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   A lifecycle test holds a port with an intruder listener and asserts the reported address, port and
   code (EADDRINUSE, WSAEADDRINUSE on Windows). Test fixtures only; no shipped code changes.
 
+- **The WebSocket handoff test no longer races its own server thread on Windows: the registerSession()==nullptr
+  case reads the dead-path flag with a 2 s bound instead of at the instant the client saw its socket dropped
+  (13 red runs in 200 on MSVC before, 0 after; Huly QB-1152).** `registerSession` closes the socket it is
+  handed before the test's handler can store its flag, so a preemption between the two left the flag unread;
+  the bound separates "not written yet" from "never taken", which stays a named failure. Test only; nothing
+  changes on the capped-handoff path, which still drops the connection.
+
 ## [3.3.0] - 2026-10-26
 
 ### Added
