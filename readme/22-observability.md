@@ -1,6 +1,6 @@
 # Observability: request ids, observers, access logs and metrics
 
-> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.2.1 (C++20 default, C++23 supported)
+> **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.3.0 (C++20 default, C++23 supported)
 
 What a server says about the requests it answers, and how it says it without paying for it on the requests nobody observes: a request id carried from the client to the logs, router observers that see every request once at each end, a one-line-per-request access log, request metrics, and their exposition in the Prometheus text format.
 
