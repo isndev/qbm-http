@@ -482,6 +482,9 @@ admit_snapshot_burst(Fixture &fixture, SnapshotBurst &burst, int first, std::uin
                     const auto [total, successful, failed] = fixture.client->get_stats(); // the read under measurement ...
                     burst.observation += successful - successful_before;                  // ... consumed, never discarded
                     burst.reads += total >= successful + failed ? 1u : 0u;                // all three fields read: the counters' own invariant
+                } else {
+                    (void) fixture; // the same closure in both cells: the pair differs by the read alone
+                    (void) successful_before;
                 }
                 burst.responses.push_back(std::move(response));
             });
