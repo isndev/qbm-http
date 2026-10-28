@@ -34,6 +34,7 @@
 #include "./compression.h"
 #include "./conditional.h"
 #include "./cors.h"
+#include "./csrf.h"
 #include "./error_handling.h"
 #include "./logging.h"
 #include "./rate_limit.h"
@@ -91,6 +92,7 @@ struct rate_limit_secure {}; ///< Strict rate limiter preset for production.
 
 // --- Security & delivery ---------------------------------------------
 struct security_headers {}; ///< Security-related response headers.
+struct csrf {};             ///< Cross-site request forgery protection (`CsrfMiddleware`).
 struct static_files {};     ///< Static file serving.
 
 // --- Structural middleware -------------------------------------------
@@ -222,6 +224,12 @@ template <typename SessionType, typename... Args>
 [[nodiscard]] auto
 make_dispatch(tags::security_headers, Args &&...args) {
     return qb::http::security_headers_middleware<SessionType>(std::forward<Args>(args)...);
+}
+
+template <typename SessionType, typename... Args>
+[[nodiscard]] auto
+make_dispatch(tags::csrf, Args &&...args) {
+    return qb::http::csrf_middleware<SessionType>(std::forward<Args>(args)...);
 }
 
 template <typename SessionType, typename... Args>

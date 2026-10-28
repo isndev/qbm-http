@@ -259,7 +259,7 @@ router.get("/admin", [](auto ctx) {
 
 Reach for the equivalent tag dispatch when you prefer the unified entry point. With `namespace mw = qb::http::middleware;`, `mw::make<mw::tags::auth, MySession>(opts)` forwards to the same factory; the other tags are `mw::tags::jwt_auth`, `mw::tags::role_auth`, and `mw::tags::optional_auth`.
 
-<!-- src: qbm/http/src/qbm/http/middleware/make.h:65-69,118-136 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:66-70,120-138 -->
 
 ### JwtMiddleware — raw payload, no User
 

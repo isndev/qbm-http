@@ -9,6 +9,33 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **Cross-site request forgery protection: `qb::http::CsrfMiddleware` and `qb::http::CsrfOptions` (Huly QB-95).**
+  The module had none: a browser attaches a site's cookies to every request sent to it, whichever page sent it, and
+  every application authenticated by a cookie had to build its own defence. `router().use(qb::http::csrf_middleware<S>())`
+  refuses an unsafe request another site's page made the browser send, with no token and no client code: `GET`,
+  `HEAD` and `OPTIONS` pass; otherwise `Sec-Fetch-Site` decides when the browser sends it (`same-origin` and `none`
+  pass, `same-site`, `cross-site` and any other value are refused), else `Origin` must name the request's own host and
+  port -- the `Host` field on HTTP/1.1, the `:authority` HTTP/2 and HTTP/3 rebuild the URI from, an absolute-form
+  target's authority -- compared case-insensitively on its effective port, the scheme left to HSTS; a request with
+  neither header passes, since every browser sends one of them on an unsafe request. That is the algorithm of Go
+  1.25's `net/http.CrossOriginProtection` and the current OWASP recommendation. Opt in to a second layer with
+  `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`): the OWASP signed double-submit cookie -- a random
+  nonce and its HMAC-SHA256 under the secret, domain-separated and length-prefixed, bound to the session when
+  `session_binding()` names it -- set as `__Host-csrf` (`Secure`, `Path=/`, no `Domain`, `SameSite=Lax`, readable by
+  the page's scripts) on every response to a request without a valid one, a refusal's included, after the handler
+  (a handler that rebuilds the response keeps it), and offered to the page in `qb::http::csrf_token_slot`; an unsafe
+  request echoes it in `X-CSRF-Token` or the `_csrf` field of a urlencoded or multipart/form-data body (a form
+  with a file input), compared in constant time.
+  `trusted_origin()` (validated: `scheme://host[:port]`, http or https) and `exempt(predicate)` skip both layers; a
+  refusal is `403 Forbidden` with the verdict in a `text/plain` body (`qb::http::CsrfVerdict`, `to_string`) unless
+  `on_reject()` writes it; `CsrfOptions::check(request)` gives the decision on its own; the factory tag is
+  `qb::http::middleware::tags::csrf`. Proven by `qbm-http-test-unit-middleware-csrf` (24 cases: every
+  `Sec-Fetch-Site` value, `Origin` against `Host` and against the URI's authority, default and explicit ports, IPv6,
+  case, `null`, an origin with a path, neither header, a missing authority; trusted origins and the forms they
+  refuse; exemptions; `on_reject`; the cookie, its attributes and its slot, no re-issue of a valid token, the header
+  and the form field, a missing, different, forged, other-secret or other-session token, malformed tokens, a
+  handler that rebuilds the response, the configuration refusals; without SSL, `tokens()` refusing).
+
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
   `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`
   (`BM_H2_StatsSnapshot{Unrequested,Requested}/requests:32`, `BM_H3_...`), run the same burst of 32 GETs at a

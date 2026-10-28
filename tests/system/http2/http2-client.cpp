@@ -42,6 +42,7 @@
  * @ingroup Http
  */
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -60,6 +61,7 @@
 #include <qbm/http/2/client.h>
 #include <qbm/http/2/http2.h>
 #include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
+#include <qbm/http/middleware/csrf.h>
 
 #include <qb/io/tcp/listener.h>
 #include <qb/io/tcp/ssl/listener.h>
@@ -115,6 +117,16 @@ public:
             ctx->response().add_header("X-Cookie-A", ctx->request().cookie_value("a"));
             ctx->response().add_header("X-Cookie-B", ctx->request().cookie_value("b"));
             ctx->response().body() = "cookies";
+            ctx->complete();
+        });
+
+        // 1c. Behind the CSRF middleware: HTTP/2 carries the authority in :authority, and its header names in lower
+        // case (Huly QB-95).
+        auto csrf = router().group("/csrf");
+        csrf->use(qb::http::csrf_middleware<H2Session>());
+        csrf->post("/post", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "posted";
             ctx->complete();
         });
 
@@ -399,6 +411,37 @@ TEST_F(Http2ClientTest, ACookieHeaderSplitIntoSeveralFieldLinesIsReadWhole) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.header("X-Cookie-A"), "1");
     EXPECT_EQ(response.header("X-Cookie-B"), "2") << "the second cookie field line was dropped";
+    client->disconnect();
+}
+
+TEST_F(Http2ClientTest, CsrfMiddlewareReadsTheAuthorityAndTheFetchMetadataOfAnHttp2Request) {
+    // The h2 server rebuilds the URI from :scheme and :authority and sends no Host: the middleware compares Origin with
+    // that authority. Header names arrive in lower case (Huly QB-95).
+    auto                              client = make_test_client();
+    std::array<qb::http::Response, 3> responses;
+    std::atomic<int>                  done{0};
+    auto                              post = [&](std::size_t const slot, std::vector<std::pair<std::string, std::string>> const &headers) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::POST;
+        request.uri()    = qb::io::uri("/csrf/post");
+        request.body()   = "x";
+        for (auto const &[name, value] : headers)
+            request.add_header(name, value);
+        EXPECT_TRUE(client->push_request(request, [&responses, &done, slot](qb::http::Response r) {
+            responses[slot] = std::move(r);
+            ++done;
+        }));
+    };
+    post(0, {{"origin", url()}});
+    post(1, {{"origin", "https://evil.test"}});
+    post(2, {{"sec-fetch-site", "cross-site"}, {"origin", url()}});
+    client->connect(nullptr);
+    ASSERT_TRUE(ServerThread::pump_until([&] { return done.load() == 3; }));
+    EXPECT_EQ(responses[0].status(), qb::http::status::OK) << responses[0].body().template as<std::string>();
+    EXPECT_EQ(responses[1].status(), qb::http::status::FORBIDDEN);
+    EXPECT_EQ(responses[1].body().template as<std::string>(), "Forbidden: origin mismatch");
+    EXPECT_EQ(responses[2].status(), qb::http::status::FORBIDDEN);
+    EXPECT_EQ(responses[2].body().template as<std::string>(), "Forbidden: cross-site request");
     client->disconnect();
 }
 

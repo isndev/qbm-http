@@ -156,7 +156,7 @@ int main(int argc, char *argv[]) {
 When you need per-connection state or custom event handling, define your own session and server through the `qb::http2::use<Derived>` template. The session derives from the internal HTTP/2 session machinery; the server derives from the internal acceptor and owns the router.
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:74-86 (server pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:76-88 (server pattern)
 #include <qbm/http/http.h>
 
 class MyServer;   // forward declaration
@@ -191,7 +191,7 @@ public:
 Inside a handler you set the response and call `ctx->complete()` as usual; the session writes it on the request's stream. To abort a single stream — for example to enforce an application policy — call `reset_stream` on the session, which sends `RST_STREAM` with the error code you choose:
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:206-214 (reset pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:218-226 (reset pattern)
 router().get("/api/cancel", [](auto ctx) {
     auto session = ctx->session();
     if (session) {
@@ -243,7 +243,7 @@ The rate-limited idle-stream sweep remains in `pending_write`: no more often tha
 <!-- src: qbm/http/src/qbm/http/2/http2.h:125-180,501-545; qbm/http/src/qbm/http/routing/context.h:553-566 -->
 
 Lifecycle controls exercise silent completion from POST, `REQUEST_COMPLETE` and member destruction, including the no-hook case; protocol clearing before another candidate; and multiple batches from valid stream waves that leave more than 50 retained contexts. The earlier extraction control preserves its one-POST behavior.
-<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2624-2626,2628-2630,2632-2634,2636-2638,2640-2717,2724-2850,2394-2470 -->
+<!-- src: qbm/http/tests/system/http2/http2-client.cpp:2667-2669,2671-2673,2675-2677,2679-2681,2683-2760,2767-2893,2437-2513 -->
 
 The sweep is **opportunistic**: it runs only when there is write activity. A purely idle connection with no writes never triggers the stream-level sweep — it is reclaimed instead by the 60 s `DEFAULT_SESSION_TIMEOUT`. Per-stream timestamps (`created_at`, `last_activity`) and `_last_stream_cleanup` use `std::chrono::steady_clock::time_point` directly, even though the durations they are compared against are `qb::duration`; this is a deliberate mixed time model in this slice.
 <!-- src: qbm/http/src/qbm/http/2/http2.h:117,232,501-514; qbm/http/src/qbm/http/2/protocol/stream.h:146-147,164-165 -->
@@ -256,7 +256,7 @@ The persistent client is `qb::http2::Client`, created through `qb::http2::make_c
 ### Callback API
 
 ```cpp
-// src: qbm/http/tests/system/http2/http2-client.cpp:362-371, 438-454 (client pattern)
+// src: qbm/http/tests/system/http2/http2-client.cpp:374-383, 481-497 (client pattern)
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
 
@@ -279,13 +279,13 @@ The URI-only `Request` constructor sets `GET`; the default constructor leaves th
 <!-- src: qbm/http/src/qbm/http/2/client.h:345,368; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->
 
 The completed batch is retired before its callback runs. The callback may disconnect the client or enqueue another batch; it still receives the completed responses exactly once.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:389-401; qbm/http/tests/system/http2/http2-client.cpp:669-720 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:389-401; qbm/http/tests/system/http2/http2-client.cpp:712-763 -->
 
 If the client fails a batch before every member is answered — an explicit `disconnect()`, a lost connection, an exhausted reconnection run — the batch callback still runs exactly once. The responses already received are kept as received (an empty `200` stays a `200`, a member refused at admission keeps its `400`), and every member still unanswered gets `503 Service Unavailable` with the failure reason as its body.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:332-339,744-759; qbm/http/tests/system/http2/http2-client.cpp:1307-1343 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:332-339,744-759; qbm/http/tests/system/http2/http2-client.cpp:1350-1386 -->
 
 `disconnect()` fails the outstanding work at once (`503`, body `"Connection closed"`), then closes the connection the way RFC 9113 §6.8 asks: `GOAWAY(NO_ERROR)` leaves after whatever the connection still had to send, and once it is out qb-io ends the transport the way it ends every connection an object closes: its sending side is shut down. The server reads the announcement, then EOF, without a reset, and cancels the streams it still had open for this client. A server that has stopped reading cannot hold the close: past `Client::GOAWAY_FLUSH_LIMIT` (1 s) the client stops waiting and the sending side is shut down anyway, dropping what was not delivered. The descriptor itself is released when the client connects again or is destroyed. Nothing needs to touch `transport()`. The client's `GOAWAY` names the last stream the server initiated that the client accepted (0 while push stays disabled), never the client's own requests.
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:136-151,154-214,1108-1118; qbm/http/src/qbm/http/2/client.h:306-319; qbm/http/src/qbm/http/2/protocol/client.h:1308-1333; qbm/http/tests/system/http2/http2-client.cpp:1013-1049,3127-3223 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:136-151,154-214,1108-1118; qbm/http/src/qbm/http/2/client.h:306-319; qbm/http/src/qbm/http/2/protocol/client.h:1308-1333; qbm/http/tests/system/http2/http2-client.cpp:1056-1092,3170-3266 -->
 
 If sending a queued request fails, its callback runs before the client tries the next pending request. That callback may disconnect or queue different work. The client retains itself during this drain and checks that the connection and HTTP/2 protocol are still live at each iteration; it does not send the next item through the retired protocol.
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:479-525 -->
@@ -360,7 +360,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<qbm/http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
   <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:878-884 -->
 - **The module is a compiled library, not header-only.** `src/qbm/http/2/http2.cpp` and `src/qbm/http/2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<qbm/http/http.h>`; do not `find_package` the headers alone.
-  <!-- src: qbm/http/CMakeLists.txt:79-88,115-170 -->
+  <!-- src: qbm/http/CMakeLists.txt:79-88,115-171 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).
   <!-- src: qbm/http/src/qbm/http/2/http2.h:269-277 -->
 - **The idle-stream sweep is opportunistic.** It runs only on write activity and no more than once per `CLEANUP_INTERVAL` (5 s). A fully idle connection relies on the 60 s session timeout instead — do not assume `STREAM_IDLE_TIMEOUT` fires on a silent connection.

@@ -2,7 +2,7 @@
 
 > **Audience:** Adopter · **Status:** stable · **Verified-against:** qbm-http @ qb 3.3.0 (C++20 default, C++23 supported)
 
-The middleware that ships with the module — CORS, JWT, rate limiting, compression, timing, request ids, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
+The middleware that ships with the module — CORS, CSRF protection, JWT, rate limiting, compression, timing, request ids, static files, full authentication, and security headers — together with the exact configuration options each exposes and the time type each duration field uses.
 
 **Prerequisites:** [the middleware model and chain order](./07-middleware.md), and [the request context](./10-request-context.md) for `ctx->set/get`. **See also:** [custom middleware](./09-custom-middleware.md), [authentication](./11-authentication.md), [validation](./12-validation.md), and the doc map [`README.md`](./README.md).
 
@@ -13,7 +13,7 @@ Each shipped middleware is a class template parameterized on your session type, 
 Two corrections to keep in mind throughout:
 
 - **The module is a compiled library, not header-only.** You link `qbm::http`; the umbrella header `<qbm/http/http.h>` brings the declarations in. Middleware headers live under `<qbm/http/middleware/>`.
-- **Several of these are SSL-gated.** JWT and full authentication are only compiled when the framework is built with `QB_HAS_SSL`; CSP nonce generation in the security-headers middleware also requires `QB_HAS_SSL`. The umbrella `<qbm/http/middleware/all.h>` guards the JWT and auth includes behind `#ifdef QB_HAS_SSL`. Compression depends on a separate flag, `QB_HAS_COMPRESSION`. See [feature gates](#feature-gates-and-includes) below.
+- **Several of these are SSL-gated.** JWT and full authentication are only compiled when the framework is built with `QB_HAS_SSL`; CSP nonce generation in the security-headers middleware and the CSRF middleware's tokens also require `QB_HAS_SSL`. The umbrella `<qbm/http/middleware/all.h>` guards the JWT and auth includes behind `#ifdef QB_HAS_SSL`. Compression depends on a separate flag, `QB_HAS_COMPRESSION`. See [feature gates](#feature-gates-and-includes) below.
 
 ## Including the middleware
 
@@ -434,6 +434,57 @@ router.use(sec);
 
 > **CSP nonce gate.** `with_csp_nonce(true)` requires `QB_HAS_SSL` — the per-request nonce comes from the framework CSPRNG. In a plain-HTTP build, leave nonce generation off; constructing the middleware with it enabled throws `std::logic_error`. The middleware itself remains available without SSL as long as you do not request nonces.
 
+## CSRF protection
+
+- **Header:** `<qbm/http/middleware/csrf.h>` · **Class:** `qb::http::CsrfMiddleware<SessionType>` · **Factory:** `csrf_middleware<SessionType>(CsrfOptions = {}, name)`
+- **Purpose:** refuse a cross-site request forgery — a page of another site making the user's browser send an unsafe request, with the user's cookies, to yours — before it reaches the handler.
+
+A browser attaches a site's cookies to every request sent to it, whichever page sent it. The middleware checks two things; a refusal is `403 Forbidden`, `text/plain`, the reason in the body (`Forbidden: origin mismatch`), and the chain stops.
+
+1. **Where the request comes from** — always on, nothing to configure, no token, no client code. `GET`, `HEAD` and `OPTIONS` pass (they must not change state). Otherwise the browser's `Sec-Fetch-Site` decides when it is present: `same-origin` and `none` (a typed address, a bookmark) pass, `same-site` and `cross-site` are refused — a sibling subdomain is another origin. Without it, `Origin` must name the request's own host and port: the `Host` field on HTTP/1.1, the `:authority` HTTP/2 and HTTP/3 carry in the URI. A request with neither header passes: every browser sends one of them on an unsafe request, so it is not a browser. This is the algorithm of Go's `net/http.CrossOriginProtection` (Go 1.25) and the current OWASP recommendation.
+2. **A signed double-submit token** — opt in with `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`), for defence in depth or for clients the first layer cannot see. Each response to a request without a valid token cookie sets one — `__Host-csrf`, `Secure`, `Path=/`, `SameSite=Lax`, readable by the page's scripts — holding a random value and its HMAC-SHA256 under the secret, bound to the session when `session_binding()` names it. An unsafe request must echo it in `X-CSRF-Token`, or in the `_csrf` field of an `application/x-www-form-urlencoded` or `multipart/form-data` body (a form with a file input); the request's token is in `qb::http::csrf_token_slot` for a page to embed in its forms.
+
+| Option | Default | What it does |
+|---|---|---|
+| `trusted_origin("https://app.example.com")` | none | an origin you control that may send unsafe requests (another host's front end); skips both layers. `scheme://host[:port]`, http or https, else `std::invalid_argument` |
+| `exempt(predicate)` | none | `bool(const Request&)`: a request it accepts skips both layers (a webhook authenticated otherwise) |
+| `tokens(secret)` | off | the token layer; changing the secret invalidates every token, re-issued on the next request |
+| `session_binding(fn)` | none | `std::string(const Request&)`, the session identifier a token is bound to — without it a token is only signed |
+| `cookie_name(name)` / `cookie_secure(bool)` | `__Host-csrf` / `true` | a `__Host-` or `__Secure-` name must stay `Secure`; for plain HTTP in development, name it otherwise and turn `Secure` off |
+| `cookie_same_site(SameSite)` / `cookie_max_age(qb::duration)` | `Lax` / none | the cookie's attributes (no `Max-Age`: a browser-session cookie) |
+| `header_name(name)` / `form_field(name)` | `X-CSRF-Token` / `_csrf` | where an unsafe request submits the token; an empty field name reads the header only |
+
+`CsrfOptions::check(request)` gives the decision on its own (`qb::http::CsrfVerdict`: `allowed`, `cross_site`, `origin_mismatch`, `token_missing`, `token_invalid`), and `on_reject(fn)` on the middleware writes your own refusal (`fn(Context&, CsrfVerdict)`; the middleware completes it).
+
+```cpp
+#include <qbm/http/http.h>
+#include <qbm/http/middleware/csrf.h>
+
+using MySession = qb::http::DefaultSession;
+
+// Where requests come from: enough for a browser application on one origin.
+router.use(qb::http::csrf_middleware<MySession>());
+
+// With tokens bound to the session cookie, and a front end on another host.
+qb::http::CsrfOptions options;
+options.tokens(secret)  // a std::string of 32 bytes or more, the same on every instance
+    .session_binding([](const qb::http::Request &r) { return r.cookie_value("sid"); })
+    .trusted_origin("https://app.example.com");
+auto csrf = qb::http::csrf_middleware<MySession>(std::move(options));
+csrf->on_reject([](qb::http::Context<MySession> &ctx, qb::http::CsrfVerdict verdict) {
+    ctx.response().status() = qb::http::status::FORBIDDEN;
+    ctx.response().body()   = qb::json{{"error", std::string(qb::http::to_string(verdict))}};
+});
+router.use(csrf);
+router.get("/form", [](auto ctx) {
+    const std::string *token = ctx->get_if(qb::http::csrf_token_slot);
+    ctx->html("<form method=post><input type=hidden name=_csrf value=\"" + (token ? *token : "") + "\"></form>");
+});
+```
+<!-- src: qbm/http/src/qbm/http/middleware/csrf.h:59 (CsrfVerdict), :73 (csrf_token_slot), :81 (CsrfOptions), :195 (CsrfMiddleware), :272 (csrf_middleware) -->
+
+> **Who needs it.** What a browser can send with the user's cookies: forms, an API a page calls with `fetch` and cookie authentication. An API authenticated by a bearer token in a header (JWT through `Authorization`) cannot be forged this way — a page of another site cannot set that header without a CORS preflight your server refuses.
+
 ## Structural and observability middleware
 
 Four more middleware ship for flow control and instrumentation. They take callables rather than option structs, so there is no duration surface; each has both a class template and a free factory.
@@ -488,14 +539,14 @@ auto rl   = mw::make<mw::tags::rate_limit_dev, MySession>();
 router.use(cors);
 router.use(rl);
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/make.h:295 (make<>); tags at qbm/http/src/qbm/http/middleware/make.h:63-111 -->
+<!-- src: qbm/http/src/qbm/http/middleware/make.h:303 (make<>); tags at qbm/http/src/qbm/http/middleware/make.h:64-113 -->
 
 The signature is `make<Tag, SessionType, Args...>(Args&&...)`; it forwards to the matching free factory. Tags mirror the factories above and live in `qb::http::middleware::tags`:
 
 - **CORS:** `cors`, `cors_dev`, `cors_secure`
 - **Compression:** `compression`, `compression_fast`, `compression_max`
 - **Rate limiting:** `rate_limit`, `rate_limit_dev`, `rate_limit_secure`
-- **Security & delivery:** `security_headers`, `static_files`
+- **Security & delivery:** `security_headers`, `csrf`, `static_files`
 - **Observability:** `logging`, `timing`, `request_id`
 - **Structural:** `transform`, `conditional`, `error_handling`
 - **SSL-gated (`QB_HAS_SSL`):** `jwt`, `auth`, `jwt_auth`, `role_auth`, `optional_auth`
@@ -517,6 +568,7 @@ The `jwt`/`auth`/`jwt_auth`/`role_auth`/`optional_auth` tags are compiled only u
 | Error handling | `<qbm/http/middleware/error_handling.h>` | none |
 | Static files | `<qbm/http/middleware/static_files.h>` | none |
 | Security headers | `<qbm/http/middleware/security_headers.h>` | none; CSP nonce needs `QB_HAS_SSL` |
+| CSRF protection | `<qbm/http/middleware/csrf.h>` | none; tokens need `QB_HAS_SSL` |
 | Compression | `<qbm/http/middleware/compression.h>` | codec work needs `QB_HAS_COMPRESSION` |
 | JWT | `<qbm/http/middleware/jwt.h>` | `QB_HAS_SSL` |
 | Authentication | `<qbm/http/middleware/auth.h>` | `QB_HAS_SSL` |
@@ -536,6 +588,7 @@ router.use(qb::http::jwt_middleware<MySession>("secret"));
 |---|---|---|
 | CORS preflight cache | `CorsOptions::max_age` | `qb::duration` |
 | Rate-limit window | `RateLimitOptions::window` | `qb::duration` |
+| CSRF token cookie lifetime | `CsrfOptions::cookie_max_age` | `qb::duration` |
 | JWT clock-skew leeway | `JwtOptions::leeway` | `std::chrono::seconds` (RFC NumericDate boundary) |
 | Auth token expiration | `auth::Options::token_expiration` | `std::chrono::seconds` |
 | Auth clock-skew tolerance | `auth::Options::clock_skew_tolerance` | `std::chrono::seconds` |
@@ -548,6 +601,7 @@ The `std::chrono::seconds` fields are at the JWT/RFC boundary, where NumericDate
 
 - **Order matters.** Add `cors`, `security_headers`, `rate_limit`, and `compression` at the router root before authentication so they apply to every response, including error responses; see the inheritance rules in [the middleware overview](./07-middleware.md). Note that global root middleware is *not* auto-prepended to a user-defined error chain set via `set_error_task_chain`.
 - **`permissive`/`dev` presets are for development.** `cors_dev_middleware` and `rate_limit_dev_middleware` are deliberately loose. Use the `secure` variants in production.
+- **CSRF tokens behind a load balancer.** Every instance must sign with the same secret, or a token issued by one is refused by the next. A token bound to the session changes at login: the login's own response still carries one bound to the session before it, and the first request after it is issued a new one — a page posts after a safe request (the redirect a login answers with does it), never right after the login itself.
 - **Per-listener state.** `RateLimitMiddleware` holds mutable counters; build one instance per listener, never share across cores.
 - **SSL gates are compile-time.** JWT and auth middleware do not exist in a non-SSL build. Wrap their construction in `#ifdef QB_HAS_SSL` or your code will not compile there.
 - **`max-age` is a string in two places.** Static-files `Cache-Control` and security-headers HSTS take literal header strings, not duration objects. Only CORS `max_age` and the rate-limit `window` are `qb::duration`.

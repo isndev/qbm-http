@@ -4,7 +4,7 @@
  *
  * This header acts as an umbrella include, bringing in all available middleware
  * functionalities provided by the `qb::http` module. By including this single file,
- * users can gain access to middleware for timing, logging, CORS, authentication,
+ * users can gain access to middleware for timing, logging, CORS, CSRF protection, authentication,
  * compression, security headers, static file serving, and more.
  *
  * @author qb - C++ Actor Framework
@@ -18,6 +18,7 @@
 #include "./access_log.h"
 #include "./conditional.h"
 #include "./cors.h"
+#include "./csrf.h"
 #include "./error_handling.h"
 #include "./logging.h"
 #include "./metrics.h"

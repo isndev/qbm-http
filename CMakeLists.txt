@@ -160,6 +160,7 @@ qb_register_module(
         src/qbm/http/validation/schema_validator.cpp
         # Middleware (non-template helpers split out of headers)
         src/qbm/http/middleware/cors.cpp
+        src/qbm/http/middleware/csrf.cpp
         src/qbm/http/middleware/compression.cpp
         src/qbm/http/middleware/rate_limit.cpp
         src/qbm/http/middleware/recaptcha.cpp

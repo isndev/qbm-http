@@ -159,6 +159,7 @@ qhttp_test(unit middleware-logging          unit/middleware/middleware-logging.c
 qhttp_test(unit middleware-security-headers unit/middleware/middleware-security-headers.cpp EXTRA_LABELS middleware)
 qhttp_test(unit middleware-compression      unit/middleware/middleware-compression.cpp      EXTRA_LABELS middleware)
 qhttp_test(unit middleware-cors             unit/middleware/middleware-cors.cpp             EXTRA_LABELS middleware)
+qhttp_test(unit middleware-csrf             unit/middleware/middleware-csrf.cpp             EXTRA_LABELS middleware)
 qhttp_test(unit middleware-recaptcha        unit/middleware/middleware-recaptcha.cpp        EXTRA_LABELS middleware)
 qhttp_test(unit middleware-error-handling   unit/middleware/middleware-error-handling.cpp   EXTRA_LABELS middleware)
 qhttp_test(unit middleware-validator        unit/middleware/middleware-validator.cpp        EXTRA_LABELS middleware)
