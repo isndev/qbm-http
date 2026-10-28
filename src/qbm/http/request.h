@@ -175,9 +175,10 @@ public:
      *
      * This method should be called after headers are available (e.g., by a server
      * processing an incoming request). It clears any existing cookies in the jar
-     * before parsing. Every `Cookie` field line is read: HTTP/2 and HTTP/3 may split the
-     * header into one line per cookie-pair (RFC 9113 8.2.3, RFC 9114 4.2.1), and the lines are
-     * read as if joined with "; " (Huly QB-1174).
+     * before parsing. Every `Cookie` field line of the header section is read: HTTP/2 and HTTP/3
+     * may split the header into one line per cookie-pair (RFC 9113 8.2.3, RFC 9114 4.2.1), and the
+     * lines are read as if joined with "; ", `max_cookie_header_size` applying to the whole (Huly
+     * QB-1174). A `Cookie` line of the trailer section is never read (RFC 9110 §6.5.1).
      * If the `Cookie` header is not present or empty, the cookie jar remains empty.
      * @throws std::runtime_error if `parse_cookies` encounters a parsing error; the jar is then empty. The
      *         servers call it under a `try` and serve such a request without cookies (an escaping throw would

@@ -1116,7 +1116,7 @@ TEST(RequestCookieHeader, EveryCookieLineIsReadAsIfJoined) {
     EXPECT_EQ(dup.cookie_value("k"), "first");
 }
 
-TEST(RequestCookieHeader, ARefusedLineLeavesNoCookieAndTheServersServeTheRequestAnyway) {
+TEST(RequestCookieHeader, ARefusedLineLeavesNoCookie) {
     Request req;
     req.add_header("cookie", "a=1");
     req.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v");
@@ -1128,4 +1128,71 @@ TEST(RequestCookieHeader, ARefusedLineLeavesNoCookieAndTheServersServeTheRequest
     none.add_header("cookie", "");
     EXPECT_NO_THROW(none.parse_cookie_header());
     EXPECT_EQ(none.cookie("a"), nullptr);
+}
+
+// The size cap is the header's, whatever its lines (Huly QB-1174 review): two lines of 10 KiB each pass the
+// per-line check and, joined, exceed max_cookie_header_size.
+namespace {
+/// A Cookie line of exactly @p size bytes: cookie-pairs `<tag><i>=vvv...` of at most 1000-byte values.
+std::string
+cookie_line(char const tag, std::size_t const size) {
+    std::string line;
+    for (int i = 0; line.size() < size; ++i) {
+        if (!line.empty())
+            line += "; ";
+        std::string const name = std::string(1, tag) + std::to_string(i) + "=";
+        line += name + std::string(std::min<std::size_t>(1000, size > line.size() + name.size() ? size - line.size() - name.size() : 1), 'v');
+    }
+    line.resize(size); // the last value trimmed to the size
+    return line;
+}
+} // namespace
+
+TEST(RequestCookieHeader, TheSizeCapIsTheJoinedHeaders) {
+    ASSERT_EQ(cookie_line('a', 10 * 1024).size(), 10u * 1024u);
+    Request one;
+    one.add_header("cookie", cookie_line('a', 10 * 1024));
+    EXPECT_NO_THROW(one.parse_cookie_header());
+    EXPECT_NE(one.cookie("a0"), nullptr);
+
+    Request split;
+    split.add_header("cookie", cookie_line('a', 10 * 1024));
+    split.add_header("cookie", cookie_line('b', 10 * 1024));
+    EXPECT_THROW(split.parse_cookie_header(), std::runtime_error);
+    EXPECT_EQ(split.cookie("a0"), nullptr);
+
+    // At the cap exactly, the lines joined with "; ": accepted; one more line of one byte: refused.
+    Request at_cap;
+    at_cap.add_header("cookie", cookie_line('a', 8000));
+    at_cap.add_header("cookie", cookie_line('b', max_cookie_header_size - 8000 - 2));
+    EXPECT_NO_THROW(at_cap.parse_cookie_header());
+    EXPECT_NE(at_cap.cookie("b0"), nullptr);
+    at_cap.add_header("cookie", "c");
+    EXPECT_THROW(at_cap.parse_cookie_header(), std::runtime_error);
+}
+
+// A received trailer field is also added to the header fields, after the header section's values: a Cookie line
+// in a trailer section is never read as a cookie (RFC 9110 §6.5.1) -- an intermediary that filters the header
+// section's cookies would otherwise be bypassed (Huly QB-1174 review). store_received_trailer() is how the three
+// protocols merge a trailer field.
+TEST(RequestCookieHeader, ACookieLineOfTheTrailerSectionIsNotRead) {
+    Request req;
+    req.add_header("cookie", "sid=abc");
+    qb::http::detail::store_received_trailer(req, "cookie", "admin=1; sid=forged");
+    ASSERT_EQ(req.header("cookie", 1), "admin=1; sid=forged"); // merged into the header fields, as in 3.x
+    req.parse_cookie_header();
+    EXPECT_EQ(req.cookie_value("sid"), "abc");
+    EXPECT_EQ(req.cookie("admin"), nullptr);
+
+    Request only_trailer; // no header-section Cookie at all
+    qb::http::detail::store_received_trailer(only_trailer, "cookie", "admin=1");
+    only_trailer.parse_cookie_header();
+    EXPECT_EQ(only_trailer.cookie("admin"), nullptr);
+
+    Request other_trailer; // a trailer of another name leaves every header line read
+    other_trailer.add_header("cookie", "a=1");
+    other_trailer.add_header("cookie", "b=2");
+    qb::http::detail::store_received_trailer(other_trailer, "x-checksum", "deadbeef");
+    other_trailer.parse_cookie_header();
+    EXPECT_EQ(other_trailer.cookie_value("b"), "2");
 }

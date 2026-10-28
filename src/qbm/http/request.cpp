@@ -40,8 +40,25 @@ Request::parse_cookie_header() {
     const auto lines = this->_headers.find("Cookie");
     if (lines == this->_headers.cend())
         return;
+    // The header section's lines only. A received trailer field is ALSO added to the header fields, after the
+    // header section's values of its name (store_received_trailer), and a cookie is never taken from a trailer
+    // section: RFC 9110 §6.5.1 forbids trusting a trailer field as a header field.
+    std::size_t count = lines->second.size();
+    if (has_trailers()) {
+        const auto &trailer_fields = static_cast<const Request &>(*this).trailers().headers();
+        if (const auto trailer_lines = trailer_fields.find("Cookie"); trailer_lines != trailer_fields.cend())
+            count -= std::min(count, trailer_lines->second.size());
+    }
     try {
-        for (const std::string &line : lines->second) {
+        // The cap is the header's, as if its lines were joined with "; ": splitting it does not lift it.
+        std::size_t joined = 0;
+        for (std::size_t i = 0; i < count; ++i)
+            if (!lines->second[i].empty())
+                joined += (joined ? 2 : 0) + lines->second[i].size();
+        if (joined > max_cookie_header_size)
+            throw std::runtime_error("Cookie header exceeds maximum allowed size of 16KB");
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::string &line = lines->second[i];
             if (line.empty())
                 continue;
             // As in one line, where parse_cookies() keeps a name's first value, the first line wins.

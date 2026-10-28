@@ -434,8 +434,15 @@ public:
  * "name=value; Path=/; Domain=example.com; Expires=Wed, 21 Oct 2015 07:28:00 GMT"
  *
  * Cookie attributes (Path, Domain, etc.) are not included in the returned map.
+ *
+ * @throws std::runtime_error past `max_cookie_header_size`, on a name or a value over its cap, or on a control
+ *         character.
  */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
+
+/// The largest `Cookie` header parse_cookies() reads -- 16 KiB, RFC 6265 §6.1 asks for at least 4096 bytes per
+/// cookie and 50 cookies -- and the largest a request may carry over all its `Cookie` lines.
+inline constexpr std::size_t max_cookie_header_size = 16 * 1024;
 
 /**
  * @brief Parse cookies from a string_view header

@@ -122,8 +122,7 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
     }
 
     // Security: Limit maximum cookie header size to prevent DoS (16KB as per RFC 6265 guidance)
-    constexpr size_t MAX_COOKIE_HEADER_SIZE = 16 * 1024;
-    if (len > MAX_COOKIE_HEADER_SIZE) {
+    if (len > max_cookie_header_size) {
         throw std::runtime_error("Cookie header exceeds maximum allowed size of 16KB");
     }
 

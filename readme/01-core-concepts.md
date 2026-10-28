@@ -85,7 +85,7 @@ Key accessors, each verified against `request.h`:
 | `cookie_value(name)` | `const std::string&` | the value, or a static empty string on a miss. For a custom fallback use `cookie_value_or(name, fallback)`, which returns `std::string` by value |
 | `has_cookie(name)` | `bool` | presence test |
 
-A server parses a request's cookies before routing it — HTTP/1.1, HTTP/2 and HTTP/3 alike, every `Cookie` line included (HTTP/2 and HTTP/3 let a client split the header into one line per cookie, RFC 9113 §8.2.3 / RFC 9114 §4.2.1) — so a handler reads `ctx->request().cookie_value(name)` directly. A header the parser refuses (a name over 1024 bytes, a value over 4096, a control character) is served without cookies. A request you build yourself — a test, a client — is not parsed: call `parse_cookie_header()` once the headers are present; it throws on such a header, the jar left empty (Huly QB-1174).
+A server parses a request's cookies before routing it — HTTP/1.1, HTTP/2 and HTTP/3 alike, every `Cookie` line of the header section included (HTTP/2 and HTTP/3 let a client split the header into one line per cookie, RFC 9113 §8.2.3 / RFC 9114 §4.2.1), never one of a trailer section (RFC 9110 §6.5.1) — so a handler reads `ctx->request().cookie_value(name)` directly. A header the parser refuses (a name over 1024 bytes, a value over 4096, a control character, over `max_cookie_header_size` — 16 KiB — its lines joined) is served without cookies. A request you build yourself — a test, a client — is not parsed: call `parse_cookie_header()` once the headers are present; it throws on such a header, the jar left empty (Huly QB-1174).
 
 <!-- src: qbm/http/tests/unit/cookie/cookie.cpp:488-494 -->
 ```cpp
