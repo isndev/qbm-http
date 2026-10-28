@@ -141,7 +141,7 @@ void on(RefreshCatalog const &) {
 
 The one-shot free functions (`GET`, `POST`, `REQUEST`, …) also have a callback form that heap-allocates a self-deleting session and delivers a `qb::http::async::Reply` (the request snapshot for that attempt plus the response), taking a `qb::duration` timeout:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1360-1376 (REQUEST, GET), 690-693 (Reply), 829-837 (the self-deleting session) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1537-1553 (REQUEST, GET), 690-693 (Reply), 829-837 (the self-deleting session) -->
 
 ```cpp
 qb::http::Request req{{"http://localhost:8080/users/42"}};
@@ -154,7 +154,7 @@ qb::http::GET(std::move(req), [](qb::http::async::Reply &&reply) {
 ```
 
 Capture by value what the callback must retain: a network completion runs from a later turn, while a local scheme or TLS-capability rejection can complete inline. The actor that issued an outstanding request may be gone when it completes.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1319-1333 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1496-1510 -->
 
 Both spellings share the same names: `GET`/`POST`/`REQUEST` have callback overloads and coroutine overloads that return `qb::http::async::awaiter<qb::http::async::Reply>`. Drive the latter with `co_await` inside a coroutine, or with `qb::http::run_sync(...)` from a plain function.
 

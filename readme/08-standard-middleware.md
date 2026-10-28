@@ -501,7 +501,7 @@ Four more middleware ship for flow control and instrumentation. They take callab
 <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:154, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:229, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
 
 Conditional selection is per context. Cancellation of a pending conditional request reaches its selected child, including a nested leaf, without re-evaluating the predicate or changing another context's selection. Completing or cancelling in the predicate prevents the old child from starting. See [Middleware](./07-middleware.md#conditional-middleware) for the cancellation boundary of a shared child instance.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1349-1381 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1356-1390 -->
 
 The access log (`AccessLog`) and the request metrics (`RequestMetrics`) live in `<qbm/http/middleware/access_log.h>` and `<qbm/http/middleware/metrics.h>` and are listed in `all.h`, but they are router observers, installed with `router.add_observer(...)`, not middleware: see [observability](./22-observability.md).
 

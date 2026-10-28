@@ -145,6 +145,12 @@ private:
     bool _closing{false};    ///< The connection's last response is published: the io closes once it is delivered
     bool _draining{false};   ///< The server drains (http1_begin_drain()): the last request received is answered `close`
     bool _drain_cut{false};  ///< Closed by the drain while idle: it reports DisconnectedReason::ServerDraining
+    /// The active context's incremental body while its head is out and its end() is not (Huly QB-86). Weak: the
+    /// producer owns the stream; a stream dropped without end() aborts, which reaches stream_abort().
+    std::weak_ptr<ResponseStream<Derived>> _stream{};
+    std::size_t                            _stream_high_watermark{qb::http::default_stream_high_watermark};
+    bool                                   _stream_live{false}; ///< a streamed head is out and its end() is not: eos does not end the response
+    bool                                   _stream_suppress_body{false}; ///< the stream answers a HEAD request: its head alone
     /// The original HTTP/1.1 protocol. An in-place WebSocket upgrade participates through its cold drain hook;
     /// a transport extracted to another owner is no longer this server's.
     qb::io::async::IProtocol const *_http_protocol{nullptr};
@@ -158,6 +164,18 @@ private:
     close_after_response() noexcept {
         _closing = true;
         this->close_after_deliver();
+    }
+
+    /// A live stream ends with the connection: its producer is told (Huly QB-86).
+    void
+    cancel_live_stream() noexcept {
+        if (!_stream_live)
+            return;
+        _stream_live          = false;
+        _stream_suppress_body = false;
+        if (auto stream = _stream.lock())
+            stream->cancel();
+        _stream.reset();
     }
 
     [[nodiscard]] static bool
@@ -381,9 +399,13 @@ private:
      * during active data transfer operations.
      */
     void
-    on([[maybe_unused]] qb::io::async::event::pending_write &&) {
+    on(qb::io::async::event::pending_write &&pending) {
         LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
         this->updateTimeout();
+        if (_stream_live) {
+            if (auto stream = _stream.lock()) // a strong reference for the call (Huly QB-86)
+                stream->notify_drain(pending.bytes);
+        }
     }
 
     /**
@@ -395,6 +417,13 @@ private:
      */
     void
     on([[maybe_unused]] qb::io::async::event::eos &&) {
+        if (_stream_live) {
+            // A streamed response: everything written so far is delivered, the producer may write on. The response
+            // ends at the stream's end(), whose last write brings the eos that takes the path below (Huly QB-86).
+            if (auto stream = _stream.lock())
+                stream->notify_drain(0);
+            return;
+        }
         LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event - response fully transmitted.");
 
         // Reached from the noexcept eos event. The POST_RESPONSE_SEND
@@ -432,6 +461,7 @@ private:
         // registered in the current backend until the session destructor runs,
         // causing spurious read events to fire in the wrong handler.
         this->stop();
+        cancel_live_stream();
         if (_context) {
             _context->cancel(); // no-op when suppress_response() was already called
             _context.reset();
@@ -473,6 +503,13 @@ private:
             };
             LOG_HTTP_INFO_PA(this->id(), "HTTP/1.1 session disconnected -> " << reason(e.reason));
         }
+        if (_stream_live) {
+            // The connection ended under a streamed response: the producer is told and the context ends, whatever the
+            // reason -- the message can no longer be completed (Huly QB-86).
+            cancel_live_stream();
+            if (_context && !_context->is_completed())
+                _context->cancel("the connection ended during a streamed response");
+        }
         if (e.reason == DisconnectedReason::ByUser && _context && !_context->is_completed()) {
             LOG_HTTP_DEBUG_PA(this->id(), "Cancelling incomplete context due to user disconnection.");
             _context->cancel();
@@ -513,6 +550,18 @@ public:
         // header section is over it (Huly QB-168). The input-buffer cap (QB_MAX_READ_BUFFER_SIZE) stays.
         this->set_max_message_size(std::numeric_limits<std::size_t>::max());
         _http_protocol = this->protocol(); // the tcp::client base installed it
+    }
+
+    /**
+     * @brief A session destroyed under a live stream tells its producer, as a disconnection would (Huly QB-86).
+     *
+     * The io_handler destroys its sessions with the server, without a disconnected event: nothing else would. A parked
+     * `drain()` is resumed with `false`; an `on_drain()` callback is deferred, which runs it or releases it with the
+     * event loop -- a callback that holds the stream would otherwise keep the stream, and itself, alive for good. The
+     * context is not cancelled here: its hooks are user code, and this is a destructor.
+     */
+    ~session() {
+        cancel_live_stream();
     }
 
     /**
@@ -617,8 +666,136 @@ public:
             send_refusal();
     }
 
+    // --- the streaming hooks of qb::http::ResponseStream (Huly QB-86; the streaming_session concept) ----------------
+
+    /// Whether this session can stream the response to `ctx` now. When the handler runs synchronously inside the
+    /// routing -- a middleware, a handler that does not suspend -- `_context` is not assigned yet (start_request()
+    /// stores it once route() returns): the context being routed for THIS session is adopted, and start_request()'s
+    /// own assignment then stores the same object.
+    [[nodiscard]] bool
+    stream_can_answer(ContextType &ctx) {
+        if (_stream_live || _closing)
+            return false;
+        if (_context)
+            return _context.get() == &ctx;
+        if (ctx.session().get() != static_cast<Derived *>(this))
+            return false;
+        _context = ctx.shared_from_this();
+        return true;
+    }
+
+    /// The request being answered is a HEAD: a streamed response sends its head alone.
+    [[nodiscard]] bool
+    stream_request_is_head() const noexcept {
+        return _active_request_method == qb::http::method::HEAD;
+    }
+
+    /// Write the head of `ctx.response()` now -- the keep-alive and HEAD rules of any response applied -- and keep
+    /// the stream to notify. `false` when it could not be written: the connection is then closed.
+    [[nodiscard]] bool
+    stream_head(ContextType &ctx, std::shared_ptr<ResponseStream<Derived>> const &stream) {
+        if (!_context || _context.get() != &ctx || _stream_live)
+            return false;
+        try {
+            auto &response = ctx.response();
+            prepare_response_for_active_request(response);
+            *this << MessageHead{response}; // the status line and the header section: the body follows
+            this->updateTimeout();
+            _stream_suppress_body = _active_request_method == qb::http::method::HEAD;
+            _stream               = stream;
+            _stream_live          = true;
+            return true;
+        } catch (const std::exception &e) {
+            LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 streamed response head threw: " << e.what());
+        } catch (...) {
+            LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 streamed response head threw an unknown exception");
+        }
+        this->disconnect(DisconnectedReason::ServerError);
+        return false;
+    }
+
+    /// Append a piece of a streamed body. A quiet stream refreshes the inactivity timeout with each piece.
+    void
+    stream_write(std::string_view bytes) {
+        if (!_stream_live || _stream_suppress_body)
+            return;
+        *this << bytes;
+        this->updateTimeout();
+    }
+    void
+    stream_write(Chunk const &chunk) {
+        if (!_stream_live || _stream_suppress_body)
+            return;
+        *this << chunk;
+        this->updateTimeout();
+    }
+
+    /// The bytes queued for the socket, not yet written: the session's output buffer (what `pendingWrite()` reads --
+    /// the transport is a private base of the tcp client, `out()` is the part of it a session sees).
+    [[nodiscard]] std::size_t
+    stream_pending() noexcept {
+        return this->out().size();
+    }
+
+    /// The hard cap of the output: qb-io's write-buffer cap, which `publish()` enforces by disconnecting. A tcp
+    /// session cannot change it (`set_max_write_buffer_size` belongs to its transport, a private base), so it is the
+    /// transport's default, `QB_MAX_WRITE_BUFFER_SIZE`.
+    [[nodiscard]] static constexpr std::size_t
+    stream_write_cap() noexcept {
+        return QB_MAX_WRITE_BUFFER_SIZE;
+    }
+
+    /// The bytes a producer may leave queued before it should wait (1 MiB by default).
+    [[nodiscard]] std::size_t
+    stream_high_watermark() const noexcept {
+        return _stream_high_watermark;
+    }
+    Derived &
+    stream_high_watermark(std::size_t bytes) noexcept {
+        _stream_high_watermark = bytes;
+        return static_cast<Derived &>(*this);
+    }
+
+    /// The end of a streamed body: the last-chunk when chunked, then what follows any response's last byte. The
+    /// message may end with nothing left to write (a declared length already delivered, a HEAD): the eos that
+    /// completes a response comes only from a write that drains the output, so the write path is armed again --
+    /// it finds nothing to write and reports eos, as drain_ready_response() relies on.
+    void
+    stream_end(bool chunked) {
+        if (!_stream_live)
+            return;
+        if (chunked && !_stream_suppress_body)
+            *this << Chunk{};
+        _stream_live          = false;
+        _stream_suppress_body = false;
+        _stream.reset();
+        this->updateTimeout();
+        // The server drains (Huly QB-167): decided at the head for a request answered then, re-read here for one
+        // whose drain began while it streamed. Closing a persistent connection after a complete response is legal.
+        if (_draining && _pending_requests.empty() && !another_request_buffered())
+            _active_should_keep_alive = false;
+        if (!_active_should_keep_alive)
+            close_after_response(); // not at the head: the io would have closed once the head drained
+        this->ready_to_write();
+    }
+
+    /// A streamed body cannot be completed correctly: the context ends now and the connection is closed.
+    void
+    stream_abort() noexcept {
+        if (!_stream_live)
+            return;
+        _stream_live          = false;
+        _stream_suppress_body = false;
+        _stream.reset();
+        if (_context && !_context->is_completed())
+            _context->cancel("the streamed response was aborted");
+        this->disconnect(DisconnectedReason::ServerError);
+    }
+
     void
     send_response(ContextType &ctx) {
+        if (ctx.is_streaming())
+            return; // its head left at begin_stream() and its body through the stream (Huly QB-86)
         if (_context && _context.get() != &ctx) {
             LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 response completed for a non-active context; closing session.");
             this->disconnect(DisconnectedReason::ServerError);
@@ -1682,6 +1859,10 @@ make_server() {
 template <typename Session = DefaultSession>
 using server = Server<Session>;
 
+// The HTTP/1.1 session streams (Huly QB-86). A session that stopped satisfying the hooks would answer every
+// begin_stream() with a buffered stream, silently: a compile error instead.
+static_assert(streaming_session<DefaultSession>, "the HTTP/1.1 session must offer ResponseStream's hooks");
+
 #if QB_HAS_SSL
 namespace ssl {
 template <typename SessionType>
@@ -1753,6 +1934,7 @@ make_server() {
 template <typename Session = DefaultSecureSession>
 using server = Server<Session>;
 
+static_assert(streaming_session<DefaultSecureSession>, "the HTTPS/1.1 session must offer ResponseStream's hooks");
 } // namespace ssl
 #endif // QB_HAS_SSL
 

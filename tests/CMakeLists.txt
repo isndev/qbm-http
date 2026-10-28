@@ -204,6 +204,7 @@ qhttp_test(system http1-client         system/http1/http1-client.cpp         REQ
 qhttp_test(system http1-loopback-basic system/http1/http1-loopback-basic.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl live EXTRA_LABELS http1)
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
+qhttp_test(system response-stream      system/routing/response-stream.cpp      REQUIRES live EXTRA_LABELS http1 routing) # Huly QB-86
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cpp REQUIRES live

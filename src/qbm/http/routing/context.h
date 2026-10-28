@@ -16,18 +16,19 @@
  */
 #pragma once
 
-#include <any>         // For std::any (custom_data)
-#include <charconv>    // For std::from_chars (typed path/query params)
-#include <cstdint>     // For std::uint64_t
-#include <functional>  // For std::function (LifecycleHook, _on_finalized_callback)
-#include <limits>      // For the lifecycle hook dispatch nesting limit
-#include <memory>      // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
-#include <optional>    // For std::optional
-#include <stdexcept>   // For std::bad_any_cast, std::runtime_error (potentially from user code)
-#include <string>      // For std::string
-#include <type_traits> // For std::is_arithmetic_v, std::is_same_v (typed accessors)
-#include <utility>     // For std::move
-#include <vector>      // For std::vector (task_chain, lifecycle_hooks)
+#include <any>          // For std::any (custom_data)
+#include <charconv>     // For std::from_chars (typed path/query params)
+#include <cstdint>      // For std::uint64_t
+#include <functional>   // For std::function (LifecycleHook, _on_finalized_callback)
+#include <limits>       // For the lifecycle hook dispatch nesting limit
+#include <memory>       // For std::shared_ptr, std::weak_ptr, std::enable_shared_from_this
+#include <optional>     // For std::optional
+#include <stdexcept>    // For std::bad_any_cast, std::runtime_error (potentially from user code)
+#include <string>       // For std::string
+#include <system_error> // For std::errc (begin_stream reads a declared Content-Length, Huly QB-86)
+#include <type_traits>  // For std::is_arithmetic_v, std::is_same_v (typed accessors)
+#include <utility>      // For std::move
+#include <vector>       // For std::vector (task_chain, lifecycle_hooks)
 
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map
 #include <qb/system/time.h>                    // For qb::mono_time, qb::mono_now (observed contexts)
@@ -40,6 +41,7 @@
 #include "./types.h"                           // For HookPoint, AsyncTaskResult, http_method_to_string, HTTP_STATUS_*
 #include "./middleware.h"                      // For the selected child's cancellation interface
 #include "./observer.h"                        // For IRequestObserver, RequestEnd, RequestOutcome
+#include "./response_stream.h"                 // For ResponseStream, stream_framing, streaming_session (Huly QB-86)
 
 // Forward declaration for RouterCore to break circular dependency if Context needs methods from it.
 namespace qb::http {
@@ -150,6 +152,11 @@ private:
     std::shared_ptr<const detail::observer_list<SessionType>> _observers;
     /// When the router received the request; read only for an observed context.
     qb::mono_time _observed_since{};
+    /// The incremental body of this response, once the handler began one (Huly QB-86). The handler owns the stream;
+    /// the context keeps a weak reference, so nothing cycles.
+    std::weak_ptr<ResponseStream<SessionType>> _stream;
+    bool _stream_begun = false; ///< begin_stream() ran or is running: a hook it runs gets nullptr, not a second stream
+    bool _streamed     = false; ///< the head left at begin_stream(): the response is on the wire, not in `_response`
 
     /**
      * @brief Consolidated lifecycle state (F24).
@@ -1352,6 +1359,8 @@ public:
         }
         _lc.is_cancelled              = true;
         _cancellation_reason_internal = reason;
+        if (auto stream = _stream.lock()) // a producer is told; a streamed head on the wire closes the connection (Huly QB-86)
+            stream->context_cancelled();
 
         if (_lc.task_in_flight != InFlightTask::None && _task_chain && _current_task_index < _task_chain->size()) {
             const auto in_flight = std::exchange(_lc.task_in_flight, InFlightTask::None);
@@ -1421,6 +1430,94 @@ public:
         _on_finalized_callback = nullptr;
         _lc.state              = State::Finalised;
         _lc.task_in_flight     = InFlightTask::None;
+    }
+
+    /**
+     * @brief Begin writing the body of this response piece by piece (Huly QB-86).
+     * @return The stream the handler writes through. The handler OWNS it: the context and the session keep weak
+     *         references, and a stream dropped before `end()` closes the connection. `nullptr` once the context is
+     *         finalised or cancelled, or from a PRE_RESPONSE_SEND hook this very call runs. A second call returns the
+     *         same stream while the handler holds it.
+     * @details Decides first whether this response can go to the wire as it is produced: the session offers the
+     *          streaming hooks (the HTTP/1.1 server session does; HTTP/2 and HTTP/3 do not yet) and answers this
+     *          context, the status carries a body (not 1xx, 204, 304), and the framing is one the peer reads -- a
+     *          `Content-Length` the handler set (the pieces are counted against it) or, when none is set and the
+     *          request is not HTTP/1.0, `Transfer-Encoding: chunked`. Then, and only on that path, the
+     *          PRE_RESPONSE_SEND hooks run and the head leaves at once. Otherwise the stream is BUFFERED: the pieces
+     *          gather in `response().body()` and leave whole at `end()` through the ordinary completion, hooks
+     *          included. Set the status and the headers before calling it: on the streaming path they are sent.
+     */
+    [[nodiscard]] std::shared_ptr<ResponseStream<SessionType>>
+    begin_stream() {
+        if (auto live = _stream.lock())
+            return live;
+        if (_stream_begun || is_finalised_internal() || _lc.is_cancelled)
+            return nullptr;
+        _stream_begun            = true;
+        auto           session   = _session.lock();
+        stream_framing framing   = stream_framing::buffered;
+        std::size_t    declared  = 0;
+        std::size_t    high      = 0;
+        bool           head_only = false;
+        if constexpr (streaming_session<SessionType>) {
+            if (session && !detail::status_carries_no_body(static_cast<int>(_response.status().code()))) {
+                if (_response.has_header("Content-Length")) {
+                    // A malformed Content-Length stays buffered: the ordinary serializer refuses it loudly.
+                    const auto   &length  = _response.header("Content-Length");
+                    std::uint64_t n       = 0;
+                    const auto [last, ec] = std::from_chars(length.data(), length.data() + length.size(), n);
+                    if (ec == std::errc{} && last == length.data() + length.size() && n <= std::numeric_limits<std::size_t>::max()) {
+                        framing  = stream_framing::content_length;
+                        declared = static_cast<std::size_t>(n);
+                    }
+                } else if (!_response.has_header("Transfer-Encoding") && !(_request.major_version == 1 && _request.minor_version == 0)) {
+                    framing = stream_framing::chunked; // never over a Transfer-Encoding the handler chose, never to HTTP/1.0
+                }
+                // Asked last, and only for a response that will stream: the session may adopt this context, which a
+                // buffered response must not see (its ordinary completion keeps the timing it always had).
+                if (framing != stream_framing::buffered && !session->stream_can_answer(*this))
+                    framing = stream_framing::buffered;
+                if (framing != stream_framing::buffered) {
+                    head_only = session->stream_request_is_head();
+                    high      = session->stream_high_watermark();
+                }
+            }
+        }
+        if (framing != stream_framing::buffered) {
+            execute_hook_internal(HookPoint::PRE_RESPONSE_SEND); // the head leaves now: the hooks' last chance at it
+            if (is_finalised_internal() || _lc.is_cancelled)
+                return nullptr; // a hook ended the request
+            if (framing == stream_framing::chunked)
+                _response.set_header("Transfer-Encoding", "chunked");
+        }
+        auto stream = std::make_shared<ResponseStream<SessionType>>(this->weak_from_this(), _session, framing, declared, head_only, high);
+        _stream     = stream;
+        if constexpr (streaming_session<SessionType>) {
+            if (framing != stream_framing::buffered) {
+                // From here the response belongs to the wire: whatever happens next, the ordinary completion must
+                // neither run the hooks again nor send `_response`.
+                _streamed = true;
+                if (!session->stream_head(*this, stream)) {
+                    // The head could not be written (the session closed the connection): the request is over.
+                    stream->cancel();
+                    cancel("the response head could not be sent");
+                }
+            }
+        }
+        return stream;
+    }
+
+    /// The head of this response went to the wire at `begin_stream()`: the body follows through the stream, and the
+    /// ordinary completion sends nothing more (Huly QB-86).
+    [[nodiscard]] bool
+    is_streaming() const noexcept {
+        return _streamed;
+    }
+
+    /// The stream `begin_stream()` returned, while its producer holds it; `nullptr` otherwise (Huly QB-86).
+    [[nodiscard]] std::shared_ptr<ResponseStream<SessionType>>
+    stream() const noexcept {
+        return _stream.lock();
     }
 
     /**

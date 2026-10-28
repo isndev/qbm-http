@@ -52,6 +52,27 @@ All notable changes to the qbm-http module are documented here. The format is ba
   lower-case names, `-system-http2-client`), and 53 mutants of the middleware, the cookie reads it relies on and the
   servers' cookie catches, each caught when planted.
 
+- **A response body streamed as it is produced, with backpressure, on HTTP/1.1 (Huly QB-86).**
+  `Context::begin_stream()` sends the head at once and returns a `qb::http::ResponseStream` the handler writes the
+  body through: `write(bytes)` returns at once with a verdict (`taken`, `wait`, `too_large`, `closed`),
+  `needs_drain()` says when the session holds `high_watermark()` bytes the socket has not taken (1 MiB by default;
+  `set_watermarks()` per stream, `stream_high_watermark()` per session), `co_await drain()` or `on_drain(fn)` waits
+  until the output falls to `low_watermark()`, and `end()` closes the message and completes the context. A
+  `Content-Length` the handler set is honoured and enforced -- a piece past it, or an `end()` short of it, closes the
+  connection rather than deliver a message the peer would misread; otherwise the response is chunked. The response
+  to HEAD sends its head alone. The producer owns the stream: one dropped before `end()` closes the connection, and
+  the peer leaving cancels it -- a parked `drain()` resumes with `false`, `write()` returns `closed`, the context is
+  cancelled -- as does the server being destroyed under it. A response that cannot be streamed -- a status without
+  a body, HTTP/1.0 without a length, a session without the hooks of the new `qb::http::streaming_session` concept,
+  which the HTTP/2 and HTTP/3 sessions do not offer yet -- gets a buffered stream with the same interface, sent
+  whole at `end()` through the ordinary completion, so a handler is written once. `PRE_RESPONSE_SEND` runs at
+  `begin_stream()` on the streaming path and is not run again at completion; a streamed body is still empty then,
+  so `CompressionMiddleware` leaves it uncompressed. `qbm-http-test-system-response-stream` covers each decision
+  over a raw loopback client that asserts the bytes of the wire: chunked and identity framing with keep-alive kept,
+  a length already drained before `end()`, HEAD, a synchronous handler, a client that reads nothing bounding the
+  server's output, a coroutine producer and a refused second `drain()`, the peer leaving, a dropped stream, a
+  pipelined request answered in order, HTTP/1.0 and 204 buffered, and a server torn down under a stalled producer.
+
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
   `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`
   (`BM_H2_StatsSnapshot{Unrequested,Requested}/requests:32`, `BM_H3_...`), run the same burst of 32 GETs at a

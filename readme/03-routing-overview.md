@@ -93,7 +93,7 @@ The assembled order for any endpoint is **parent middleware → this node's midd
 
 Calling `compile()` again recompiles from scratch — it is idempotent and safe to re-run after adding routes.
 
-<!-- src: qbm/http/src/qbm/http/routing/router.h:302,314,624-640 -->
+<!-- src: qbm/http/src/qbm/http/routing/router.h:302,314,625-641 -->
 
 ### Request dispatch
 
@@ -155,7 +155,7 @@ server->listen(qb::io::uri("http://0.0.0.0:8080"));         // begin accepting c
 
 Every handler **must** eventually call a terminal: `ctx->complete(AsyncTaskResult)` (default `AsyncTaskResult::COMPLETE`) or one of the terminal response helpers (`json`, `text`, `html`, `redirect`, `no_content`, `bad_request`, …) — each of those ends in `complete(AsyncTaskResult::COMPLETE)` for you. Forget it and the request hangs. The `Context::status(code)` setter is the exception: it sets the status, returns `Context&`, and does **not** terminate, so you can chain it ahead of a terminal call.
 
-<!-- src: qbm/http/src/qbm/http/routing/async_task.h:65-79; qbm/http/src/qbm/http/routing/context.h:1064-1265 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:65-79; qbm/http/src/qbm/http/routing/context.h:1071-1272 -->
 
 ### Read captured parameters
 

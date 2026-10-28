@@ -23,7 +23,8 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
    `ICustomRoute::process` or async callback must call `ctx->complete(...)` on every path or
    the request hangs; functional middleware may call `next()` instead. A `cancel()` override
    must never call `ctx->complete()`. Capture `ctx` (a `shared_ptr`) into async callbacks,
-   complete from the callback, and guard on `ctx->is_cancelled()`.
+   complete from the callback, and guard on `ctx->is_cancelled()`. A handler that streams its
+   body (`ctx->begin_stream()`) completes through `stream->end()`, never `complete()`.
 4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
    state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
    may be `nullptr` after a disconnect. A routed context retains its compiled parameter names
@@ -217,15 +218,31 @@ ctx->cancel("reason");                       // sets 503, finalizes; is_cancelle
 
 Terminal response helpers (each sets body/status/content-type **and** calls `complete()` — set custom headers/body first): `ctx->json(data, status=OK)`, `ctx->text(...)`, `ctx->html(...)`, `ctx->no_content()` (204), `ctx->redirect(url, status=FOUND)`, `ctx->bad_request/unauthorized/forbidden/not_found/internal_server_error(...)`. The one non-terminal helper is `ctx->status(code)` (chainable, does not finalize).
 
-Route pattern and observers (QB-90): `ctx->route_pattern()` is the canonical pattern of the route that matched (`/users/:id`; empty for a 404) -- name a request by it in metrics and logs, never by the raw path. `router().add_observer(std::make_shared<MyObserver>())` registers a `qb::http::IRequestObserver<S>`: `on_request(ctx)` when the request is received, `on_response(ctx, RequestEnd{outcome, duration})` exactly once when its response is decided (after `PRE_RESPONSE_SEND` and the hand-over to the session) -- for every routed request, 404/405/errors/departed clients included. Both are `noexcept` and run on the router's thread; an unobserved router pays one null test at each end of a request. `RequestMetrics` and `AccessLog` are observers. _(src/qbm/http/routing/observer.h:65; src/qbm/http/routing/router.h:294; src/qbm/http/routing/context.h:656)_
+Route pattern and observers (QB-90): `ctx->route_pattern()` is the canonical pattern of the route that matched (`/users/:id`; empty for a 404) -- name a request by it in metrics and logs, never by the raw path. `router().add_observer(std::make_shared<MyObserver>())` registers a `qb::http::IRequestObserver<S>`: `on_request(ctx)` when the request is received, `on_response(ctx, RequestEnd{outcome, duration})` exactly once when its response is decided (after `PRE_RESPONSE_SEND` and the hand-over to the session) -- for every routed request, 404/405/errors/departed clients included. Both are `noexcept` and run on the router's thread; an unobserved router pays one null test at each end of a request. `RequestMetrics` and `AccessLog` are observers. _(src/qbm/http/routing/observer.h:65; src/qbm/http/routing/router.h:294; src/qbm/http/routing/context.h:663)_
+
+Streaming a body (QB-86): set the status and headers, then `auto stream = ctx->begin_stream();`, a `qb::http::ResponseStream<S>` -- the head leaves at once (chunked unless the handler set `Content-Length`), the body follows through `stream->write(bytes)`, which returns `write_result::taken | wait | too_large | closed` at once, and `stream->end()` closes the message AND completes the context. The producer OWNS the `shared_ptr`: a stream dropped before `end()` closes the connection. Backpressure: when `stream->needs_drain()`, `co_await stream->drain()` (`false` = the peer left, stop) or `stream->on_drain(fn)` (one-shot, deferred to the end of a loop turn). HTTP/1.0 without a length, 1xx/204/304 and the HTTP/2 and HTTP/3 sessions get a BUFFERED stream with the same interface, sent whole at `end()`; HEAD sends the head alone. `PRE_RESPONSE_SEND` runs at `begin_stream()` when streaming, with the body still empty (no compression). _(src/qbm/http/routing/context.h:1451; src/qbm/http/routing/response_stream.h:154)_
+
+```cpp
+using Stream = qb::http::ResponseStream<MySession>;
+router().get("/events", [](std::shared_ptr<qb::http::Context<MySession>> ctx) -> qb::io::async::task<void> {
+    ctx->response().set_header("Content-Type", "text/event-stream");
+    auto stream = ctx->begin_stream();               // nullptr when the request already ended
+    if (!stream) co_return;
+    while (has_more()) {
+        if (stream->needs_drain() && !co_await stream->drain()) co_return;          // the peer left
+        if (stream->write(next_event()) != Stream::write_result::taken) co_return;  // dropped stream = closed connection
+    }
+    stream->end();                                   // completes ctx; never ctx->complete() for a stream
+});
+```
 
 Lifecycle hooks: `ctx->add_lifecycle_hook(fn)` or router-wide `router().add_lifecycle_hook(fn)`. `HookPoint`s: `PRE_ROUTING` (router-level only), `PRE_HANDLER_EXECUTION`, `POST_HANDLER_EXECUTION`, `PRE_RESPONSE_SEND` (best place for final headers), `POST_RESPONSE_SEND`, `REQUEST_COMPLETE`. Hook exceptions are caught and suppressed; a destructor-time hook must not call `shared_from_this()`.
 
-Hooks registered during dispatch are published after the outermost dispatch returns. The current dispatch and nested dispatches retain the old published list; the next separate phase sees additions in registration order. Active callable state is preserved, and registration affects only this context. _(src/qbm/http/routing/context.h:230-256,775-788)_
+Hooks registered during dispatch are published after the outermost dispatch returns. The current dispatch and nested dispatches retain the old published list; the next separate phase sees additions in registration order. Active callable state is preserved, and registration affects only this context. _(src/qbm/http/routing/context.h:237-263,782-795)_
 
 Router-extracted parameter values are owned; their key views are backed by compiled storage retained through the context's existing `IAsyncTask` chain. A retained context may outlive its router or session, including `REQUEST_COMPLETE`; `session()` remains weak and may return null. A 405 or error-chain transition retains the matching compilation's names. A standalone `PathParameters` copy still borrows keys: retain the original context or copy names into owned strings. _(src/qbm/http/routing/path_parameters.h:32-57; src/qbm/http/routing/async_task.h:92-115; src/qbm/http/routing/router_core.h:88-94,443-453)_
 
-Conditional middleware records the selected pending child on the context; cancellation notifies that child once, including a nested leaf. A predicate that completes/cancels or a child that throws after synchronous completion cannot replace newer work. The unchanged `IMiddleware::cancel()` has no context argument: do not promise per-operation native cancellation inside a shared user child. _(src/qbm/http/middleware/conditional.h:87-111; src/qbm/http/routing/context.h:1349-1381; src/qbm/http/routing/middleware.h:58-61)_
+Conditional middleware records the selected pending child on the context; cancellation notifies that child once, including a nested leaf. A predicate that completes/cancels or a child that throws after synchronous completion cannot replace newer work. The unchanged `IMiddleware::cancel()` has no context argument: do not promise per-operation native cancellation inside a shared user child. _(src/qbm/http/middleware/conditional.h:87-111; src/qbm/http/routing/context.h:1356-1390; src/qbm/http/routing/middleware.h:58-61)_
 
 Context and HTTP session templates contain updated private lifecycle bookkeeping. Rebuild consumers that share the same specializations with consistent headers; public signatures do not imply that mixed template definitions have compatible layout.
 
@@ -368,7 +385,7 @@ server->listen(qb::io::uri("https://0.0.0.0:8443"), "cert.pem", "key.pem");  // 
 server->start();
 ```
 
-For mTLS/cipher policy, configure a fresh `qb::io::ssl::Context::server(cert,key)` and pass it to `server->listen(uri, context)` (or `listen_no_start(uri, context)` then `start()`). HTTPS pins ALPN `http/1.1`; HTTP/2 pins `h2,http/1.1`. Rotate on the listener's owner thread with `set_tls_context(context)`: invalid input keeps the current context, and accepted connections keep their old context even if their handshake has not begun. **Context copies share `SSL_CTX`**; the setter mutates the supplied context's ALPN, so never pass a copy already in service or mutate it after publication. Preserve SNI by configuring each child with the protocol's ALPN before publishing a fresh root whose callback captures the child contexts by value. `reload_certificates(cert,key)` is synchronous sugar that replaces the **entire configuration with defaults**; mTLS, cipher policy, callbacks and session caches are not retained. Build a complete fresh context when those matter. Rotation does not guarantee TLS session resumption across contexts. These operations are SSL-only and cover h1/h2, not HTTP/3 or dual-stack. _(src/qbm/http/1.1/http.h:1006,1020,1030,1041; src/qbm/http/2/http2.h:918,929,937,948)_
+For mTLS/cipher policy, configure a fresh `qb::io::ssl::Context::server(cert,key)` and pass it to `server->listen(uri, context)` (or `listen_no_start(uri, context)` then `start()`). HTTPS pins ALPN `http/1.1`; HTTP/2 pins `h2,http/1.1`. Rotate on the listener's owner thread with `set_tls_context(context)`: invalid input keeps the current context, and accepted connections keep their old context even if their handshake has not begun. **Context copies share `SSL_CTX`**; the setter mutates the supplied context's ALPN, so never pass a copy already in service or mutate it after publication. Preserve SNI by configuring each child with the protocol's ALPN before publishing a fresh root whose callback captures the child contexts by value. `reload_certificates(cert,key)` is synchronous sugar that replaces the **entire configuration with defaults**; mTLS, cipher policy, callbacks and session caches are not retained. Build a complete fresh context when those matter. Rotation does not guarantee TLS session resumption across contexts. These operations are SSL-only and cover h1/h2, not HTTP/3 or dual-stack. _(src/qbm/http/1.1/http.h:1183,1197,1207,1218; src/qbm/http/2/http2.h:918,929,937,948)_
 
 Client verification is secure by default (`verify_peer=true`); disable only for trusted/self-signed endpoints, and set it before connecting.
 
@@ -513,6 +530,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 - Capture `ctx` (a shared_ptr) into async callbacks; complete from the callback, not before the handler returns. Guard `ctx->is_cancelled()` in the callback.
 - Never store per-request state on a handler/middleware/task object — it is shared across concurrent (pipelined/multiplexed) requests. Use the `Context` (`Slot<T>`).
 - Null-check `ctx->session()` — it is weak-locked and may be `nullptr` after disconnect.
+- A streamed response (`ctx->begin_stream()`) is completed by `stream->end()`: hold the returned `shared_ptr` until then (dropping it closes the connection) and wait on `drain()` whenever `needs_drain()`.
 - Gate SSL features on `QB_HAS_SSL`, HTTP/3 on `QBM_HTTP_HAS_HTTP3` (never on the private `QBM_HTTP_HAS_SSL`).
 - Link `qbm::http`; this is a compiled library.
 
@@ -523,7 +541,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 - Request cookies: the h1, h2 and h3 servers parse them before routing (every `Cookie` line of the header section, never a trailer's; read as a browser sends them: split on `;` alone, a `"`-wrapped value without its quotes and nothing unescaped, every other byte kept; a malformed pair -- no `=` (a nameless cookie), an empty or `$` name, a control character other than HTAB, a name over 1024 bytes or a value over 4096 -- is dropped, the others kept; only a header over 16 KiB joined is refused and served without cookies, Huly QB-1174, QB-95); a `Request` you build needs `req.parse_cookie_header()`, which throws only on that 16 KiB refusal (jar left empty). Read a `__Host-`/`__Secure-` cookie with `cookie_value_exact(name)`: the jar folds case. Response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.
-- `out << msg` writes a COMPLETE HTTP/1.1 message — an empty chunked body is its last-chunk — and a request with a raw SP, control byte or DEL in its URI's query throws `std::length_error` (percent-encode it; `qb::io::uri` already refuses them in a path), as does one with no method (a default-constructed `Request`) or an invalid URI; an empty path goes out as `/`. A refusal writes nothing and keeps what the pipe held before it (QB-1066). A chunked message's `Trailer`-announced fields and its `trailers()` go out after the last chunk, and received trailer fields land in `trailers()` and, for 3.x, in `headers()` too, as on HTTP/2 and HTTP/3 (QB-1067, QB-1073). To stream chunks yourself, write `qb::http::MessageHead{msg}` (start line + header section only), then the `Chunk`s and the terminating `Chunk{}`.
+- `out << msg` writes a COMPLETE HTTP/1.1 message — an empty chunked body is its last-chunk — and a request with a raw SP, control byte or DEL in its URI's query throws `std::length_error` (percent-encode it; `qb::io::uri` already refuses them in a path), as does one with no method (a default-constructed `Request`) or an invalid URI; an empty path goes out as `/`. A refusal writes nothing and keeps what the pipe held before it (QB-1066). A chunked message's `Trailer`-announced fields and its `trailers()` go out after the last chunk, and received trailer fields land in `trailers()` and, for 3.x, in `headers()` too, as on HTTP/2 and HTTP/3 (QB-1067, QB-1073). To stream chunks yourself, write `qb::http::MessageHead{msg}` (start line + header section only), then the `Chunk`s and the terminating `Chunk{}`; in a routed handler, `ctx->begin_stream()` does it with backpressure.
 - Assigning a C++-constructed `qb::json` with invalid UTF-8 to `Body` throws for const and rvalue JSON alike and clears partial output; a routed `Context::json` handler becomes a 500 instead of terminating the process.
 - HTTP/2 / HTTP/3 are TLS-only with ALPN; no plaintext h2c. HTTP/2 client `connect(nullptr)` for fire-and-forget.
 - The request limits are the server's `set_request_limits(qb::http::request_limits)` on HTTP/1.1, HTTP/2, HTTP/3 and
@@ -532,14 +550,14 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   one is answered before the handler runs, the same everywhere: `414` target, `431` field name, value or a section's
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the
   stream then `RST_STREAM(NO_ERROR)`, h3 on the stream then STOP_SENDING(`H3_NO_ERROR`) (Huly QB-168, QB-94; until 3.3
-  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:684-686; 2/http2.h:661-663;
+  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:861-863; 2/http2.h:661-663;
   3/http3.h:633-635)_
 - To stop an HTTP/1.1 server, `drain(deadline, on_drained)`: the listener closes, idle sessions close, busy ones answer
   what they received -- the last answer `Connection: close` -- and `on_drained` reports `drained` or `deadline` once,
   on the server's loop (Huly QB-167). An in-place WebSocket upgrade still owned by that server receives Close
   `1001 Going Away` and counts until it closes or the deadline aborts it (QB-1097); an extracted session belongs
   to its new owner and remains outside this drain. Close observers still run; a custom observer checks the
-  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:791-832,871-892,923-927;
+  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:968-1009,1048-1069,1100-1104;
   ws/ws.h:510-563,655-674)_
 - HTTP/2 and HTTP/3 drain connections in two GOAWAYs (Huly QB-91). The notice names the largest stream id.
   HTTP/2 sends its final GOAWAY on the notice PING's ACK and names the last stream opened; HTTP/3 names the first
