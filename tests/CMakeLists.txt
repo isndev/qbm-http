@@ -101,8 +101,15 @@ qb_add_test(MODULE qbm-http TIER unit NAME llhttp-link-names
             LABELS http1)
 # llhttp-symbols (Huly QB-1139): the census behind that witness -- no symbol libqbm-http DEFINES and exports keeps the
 # fork's or upstream's C name (http_*, llhttp_*), and the fork's carry qb_llhttp_ (qb's cmake/qbSymbolPrefix.cmake).
-qb_add_symbol_prefix_test(NAME qbm-http-test-unit-llhttp-symbols TARGET qbm-http
-                          BANNED http_ llhttp_ REQUIRED qb_llhttp_ LABELS tier:unit module:qbm-http http1)
+# Guarded on the command: this module's own CI pairs a pull request with qb's BASE branch (tests.yml), which gains
+# the helper only when qb's half of the change is integrated. Said at configure time, never silently; the
+# superproject's qbm-tests lane builds the paired qb and always registers it.
+if(COMMAND qb_add_symbol_prefix_test)
+    qb_add_symbol_prefix_test(NAME qbm-http-test-unit-llhttp-symbols TARGET qbm-http
+                              BANNED http_ llhttp_ REQUIRED qb_llhttp_ LABELS tier:unit module:qbm-http http1)
+else()
+    qb_status_message("qbm-http-test-unit-llhttp-symbols not registered: this qb has no qb_add_symbol_prefix_test()")
+endif()
 qhttp_test(unit validation-rules     unit/validation/validation-rules.cpp     EXTRA_LABELS validation)
 qhttp_test(unit validation-schema    unit/validation/validation-schema.cpp    EXTRA_LABELS validation)
 qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EXTRA_LABELS validation)
