@@ -441,8 +441,8 @@ router.use(sec);
 
 A browser attaches a site's cookies to every request sent to it, whichever page sent it. The middleware checks two things; a refusal is `403 Forbidden`, `text/plain`, the reason in the body (`Forbidden: origin mismatch`), and the chain stops.
 
-1. **Where the request comes from** — always on, nothing to configure, no token, no client code. `GET`, `HEAD` and `OPTIONS` pass (they must not change state). Otherwise the browser's `Sec-Fetch-Site` decides when it is present: `same-origin` and `none` (a typed address, a bookmark) pass, `same-site` and `cross-site` are refused — a sibling subdomain is another origin. Without it, `Origin` must name the request's own host and port: the `Host` field on HTTP/1.1, the `:authority` HTTP/2 and HTTP/3 carry in the URI. A request with neither header passes: every browser sends one of them on an unsafe request, so it is not a browser. This is the algorithm of Go's `net/http.CrossOriginProtection` (Go 1.25) and the current OWASP recommendation.
-2. **A signed double-submit token** — opt in with `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`), for defence in depth or for clients the first layer cannot see. Each response to a request without a valid token cookie sets one — `__Host-csrf`, `Secure`, `Path=/`, `SameSite=Lax`, readable by the page's scripts — holding a random value and its HMAC-SHA256 under the secret, bound to the session when `session_binding()` names it. An unsafe request must echo it in `X-CSRF-Token`, or in the `_csrf` field of an `application/x-www-form-urlencoded` or `multipart/form-data` body (a form with a file input); the request's token is in `qb::http::csrf_token_slot` for a page to embed in its forms.
+1. **Where the request comes from** — always on, nothing to configure, no token, no client code. `GET`, `HEAD` and `OPTIONS` pass (they must not change state). Otherwise the browser's `Sec-Fetch-Site` decides when it is present: `same-origin` and `none` (a typed address, a bookmark) pass, `same-site` and `cross-site` are refused — a sibling subdomain is another origin. Without it, `Origin` must name the request's own host and port — the `Host` field, or the authority of a target that carries a scheme (HTTP/2 and HTTP/3 rebuild it from `:scheme` and `:authority`; an absolute-form HTTP/1.1 target), never the `//host` of an origin-form path — and, over a TLS connection, the `https` scheme (behind a TLS-terminating proxy the scheme is not compared, as in Go, and HSTS covers that case). A request with neither header passes: every browser sends one of them on an unsafe request, so it is not a browser. This is the algorithm of Go's `net/http.CrossOriginProtection` (Go 1.25) and the current OWASP recommendation.
+2. **A signed double-submit token** — opt in with `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`), for defence in depth or for clients the first layer cannot see. Each response to a request without a valid token cookie sets one — never a refusal of where the request comes from, so another site's page cannot rotate it — `__Host-csrf`, `Secure`, `Path=/`, `SameSite=Lax`, readable by the page's scripts, read back under exactly that name — holding a random value and its HMAC-SHA256 under the secret, bound to the session when `session_binding()` names it. An unsafe request must echo it in `X-CSRF-Token`, or in the `_csrf` field of an `application/x-www-form-urlencoded` or `multipart/form-data` body (a form with a file input); the request's token is in `qb::http::csrf_token_slot` for a page to embed in its forms.
 
 | Option | Default | What it does |
 |---|---|---|
@@ -451,10 +451,10 @@ A browser attaches a site's cookies to every request sent to it, whichever page 
 | `tokens(secret)` | off | the token layer; changing the secret invalidates every token, re-issued on the next request |
 | `session_binding(fn)` | none | `std::string(const Request&)`, the session identifier a token is bound to — without it a token is only signed |
 | `cookie_name(name)` / `cookie_secure(bool)` | `__Host-csrf` / `true` | a `__Host-` or `__Secure-` name must stay `Secure`; for plain HTTP in development, name it otherwise and turn `Secure` off |
-| `cookie_same_site(SameSite)` / `cookie_max_age(qb::duration)` | `Lax` / none | the cookie's attributes (no `Max-Age`: a browser-session cookie) |
+| `cookie_same_site(SameSite)` / `cookie_max_age(qb::duration)` | `Lax` / none | the cookie's attributes (no `Max-Age`: a browser-session cookie; 1 s to 400 days else `std::invalid_argument`; `SameSite::None` needs `Secure`) |
 | `header_name(name)` / `form_field(name)` | `X-CSRF-Token` / `_csrf` | where an unsafe request submits the token; an empty field name reads the header only |
 
-`CsrfOptions::check(request)` gives the decision on its own (`qb::http::CsrfVerdict`: `allowed`, `cross_site`, `origin_mismatch`, `token_missing`, `token_invalid`), and `on_reject(fn)` on the middleware writes your own refusal (`fn(Context&, CsrfVerdict)`; the middleware completes it).
+`CsrfOptions::check(request, secure_connection)` gives the decision on its own (`qb::http::CsrfVerdict`: `allowed`, `cross_site`, `origin_mismatch`, `token_missing`, `token_invalid`), and `on_reject(fn)` on the middleware writes your own refusal (`fn(Context&, CsrfVerdict)`; the middleware completes it).
 
 ```cpp
 #include <qbm/http/http.h>
@@ -481,9 +481,11 @@ router.get("/form", [](auto ctx) {
     ctx->html("<form method=post><input type=hidden name=_csrf value=\"" + (token ? *token : "") + "\"></form>");
 });
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/csrf.h:59 (CsrfVerdict), :73 (csrf_token_slot), :81 (CsrfOptions), :195 (CsrfMiddleware), :272 (csrf_middleware) -->
+<!-- src: qbm/http/src/qbm/http/middleware/csrf.h:64 (CsrfVerdict), :78 (csrf_token_slot), :86 (CsrfOptions), :218 (CsrfMiddleware), :296 (csrf_middleware) -->
 
 > **Who needs it.** What a browser can send with the user's cookies: forms, an API a page calls with `fetch` and cookie authentication. An API authenticated by a bearer token in a header (JWT through `Authorization`) cannot be forged this way — a page of another site cannot set that header without a CORS preflight your server refuses.
+
+> **What it does not cover.** A WebSocket upgrade is a `GET`: check its `Origin` in the upgrade handler (cross-site WebSocket hijacking). A DNS-rebound name makes `Origin` equal `Host`: serve only the host names you expect. Without `session_binding()` any visitor can obtain a valid token pair for themselves (the `__Host-` cookie is what keeps it out of the victim's browser), and a token has no expiry of its own: rotate the secret, or set `cookie_max_age`. Requests that arrive at once without a cookie (tabs restored together, a page's first parallel calls) are each issued a token and the last cookie set wins: a script reads the token from the cookie when it sends.
 
 ## Structural and observability middleware
 

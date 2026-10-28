@@ -9,11 +9,13 @@
  * 1. **Where the request comes from** (always on, nothing to configure). A safe method (`GET`, `HEAD`,
  *    `OPTIONS`) passes. Otherwise the browser's `Sec-Fetch-Site` decides when it is present --
  *    `same-origin` and `none` (the user typed the address, a bookmark) pass, `same-site` and `cross-site`
- *    are refused; without it the `Origin` header must name the request's own host and port (`Host`, or the
- *    `:authority` of HTTP/2 and HTTP/3); a request with neither header passes, since a browser sends one of
- *    the two on every unsafe request (all of them since 2023) and anything else is not a browser. The
- *    algorithm and its trade-offs are those of Go's `net/http.CrossOriginProtection` (Go 1.25), the
- *    current OWASP recommendation, which needs no token and no client-side code.
+ *    are refused; without it the `Origin` header must name the request's own host and port -- `Host`, or
+ *    the authority of a target that carries a scheme (HTTP/2 and HTTP/3 rebuild it from `:scheme` and
+ *    `:authority`; an absolute-form HTTP/1.1 target), never the `//host` of an origin-form path -- and,
+ *    over a TLS connection, the `https` scheme; a request with neither header passes, since a browser
+ *    sends one of the two on every unsafe request (all of them since 2023) and anything else is not a
+ *    browser. The algorithm and its trade-offs are those of Go's `net/http.CrossOriginProtection` (Go
+ *    1.25), the current OWASP recommendation, which needs no token and no client-side code.
  * 2. **A signed double-submit token** (opt in, `CsrfOptions::tokens(secret)`, needs `QB_HAS_SSL`) for
  *    defence in depth: a cookie carrying a random value and its HMAC-SHA256 under a server secret, bound to
  *    the user's session when `session_binding()` names it, which an unsafe request must echo in a header
@@ -21,7 +23,9 @@
  *
  * A trusted origin (`trusted_origin()`) and an exempt request (`exempt()`) skip both layers. The middleware
  * belongs on what a browser with the user's cookies can reach: an API authenticated by a bearer token in a
- * header, never by a cookie, cannot be forged this way.
+ * header, never by a cookie, cannot be forged this way. Out of its reach: a WebSocket upgrade is a `GET`
+ * (check its `Origin` in the upgrade handler: cross-site WebSocket hijacking), and a DNS-rebound name makes
+ * `Origin` equal `Host` (serve only the host names you expect).
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -49,6 +53,7 @@
 #include "../routing/middleware.h"
 #include "../routing/slot.h"
 #include "../types.h"
+#include "./security_headers.h" // internal::arrived_over_secure_transport
 
 namespace qb::http {
 
@@ -89,6 +94,12 @@ public:
     static constexpr std::size_t min_secret_size = 32;
 
     CsrfOptions();
+    CsrfOptions(CsrfOptions const &)                = default;
+    CsrfOptions &operator=(CsrfOptions const &)     = default;
+    CsrfOptions(CsrfOptions &&) noexcept            = default;
+    CsrfOptions &operator=(CsrfOptions &&) noexcept = default;
+    /// Wipes the token secret.
+    ~CsrfOptions();
 
     /**
      * @brief Trusts @p origin to send unsafe requests (a front end on another host): its requests skip the
@@ -133,6 +144,8 @@ public:
     CsrfOptions &cookie_same_site(SameSite same_site);
 
     /// `Max-Age` on the token cookie; none by default (it ends with the browser session).
+    /// @throws std::invalid_argument outside [1 s, 400 days] -- zero deletes the cookie, and a browser caps it
+    ///         at 400 days (RFC 6265bis §5.5).
     CsrfOptions &cookie_max_age(qb::duration max_age);
 
     /// The header an unsafe request submits its token in, `X-CSRF-Token` by default.
@@ -151,8 +164,15 @@ public:
     /**
      * @brief The decision on @p request: `allowed` or the reason it is refused. Token issuance is the
      *        middleware's; this reads the token cookie and the submitted token as the request carries them.
+     * @param secure_connection The request arrived over TLS on this connection (the middleware reads it from
+     *        the session's transport): its `Origin` must then be `https`. False when TLS ends at a proxy in
+     *        front: the scheme is then not compared, as in Go, and HSTS covers the downgrade.
      */
-    [[nodiscard]] CsrfVerdict check(Request const &request) const;
+    [[nodiscard]] CsrfVerdict check(Request const &request, bool secure_connection = false) const;
+
+    /// The token cookie @p request carries, under exactly `cookie_name()` -- case included: a `__host-csrf`
+    /// another host planted is no `__Host-csrf` --; empty when there is none.
+    [[nodiscard]] std::string_view cookie_token(Request const &request) const;
 
     /// A new token for @p request's session (tokens on). @throws std::logic_error when tokens are off.
     [[nodiscard]] std::string issue_token(Request const &request) const;
@@ -164,7 +184,7 @@ public:
     [[nodiscard]] Cookie token_cookie(std::string token) const;
 
 private:
-    [[nodiscard]] CsrfVerdict check_source(Request const &request) const;
+    [[nodiscard]] CsrfVerdict check_source(Request const &request, bool secure_connection) const;
     [[nodiscard]] bool        exempted(Request const &request) const;
     [[nodiscard]] CsrfVerdict check_token(Request const &request) const;
     [[nodiscard]] std::string signature(std::string_view nonce, Request const &request) const;
@@ -186,8 +206,11 @@ private:
  *
  * A refused request is answered `403 Forbidden`, `text/plain`, the verdict in the body, unless
  * `on_reject()` writes the response; the chain stops there. Tokens on, every response to a request whose
- * cookie is absent or not valid for its session carries a fresh token cookie, a refusal's included, and the
- * request's token is in `csrf_token_slot`.
+ * cookie is absent or not valid for its session carries a fresh token cookie -- a token refusal's included,
+ * never one refused for where it comes from (another site's page must not rotate the user's cookie) -- and
+ * the request's token is in `csrf_token_slot`. Requests that arrive at once without a cookie (tabs restored
+ * together, a page's first parallel calls) are each issued their own token and the last cookie set wins: a
+ * page reads the token from the cookie when it sends, or from the slot of the response it renders.
  *
  * @tparam SessionType The session type carried by the request context.
  */
@@ -211,11 +234,13 @@ public:
 
     void
     process(ContextPtr ctx) override {
-        auto const &request = ctx->request();
-        if (_options->tokens_enabled()) {
-            std::string const &cookie = request.cookie_value(_options->cookie_name());
+        auto const       &request = ctx->request();
+        CsrfVerdict const verdict = _options->check(request, internal::arrived_over_secure_transport(*ctx));
+        // Refused for where it comes from: nothing issued, so another site's page cannot rotate the cookie.
+        if (_options->tokens_enabled() && verdict != CsrfVerdict::cross_site && verdict != CsrfVerdict::origin_mismatch) {
+            std::string_view const cookie = _options->cookie_token(request);
             if (!cookie.empty() && _options->token_valid(cookie, request)) {
-                ctx->set(csrf_token_slot, cookie);
+                ctx->set(csrf_token_slot, std::string(cookie));
             } else {
                 std::string token = _options->issue_token(request);
                 ctx->set(csrf_token_slot, token);
@@ -226,7 +251,6 @@ public:
                 });
             }
         }
-        CsrfVerdict const verdict = _options->check(request);
         if (verdict == CsrfVerdict::allowed) {
             ctx->complete(AsyncTaskResult::CONTINUE);
             return;

@@ -17,6 +17,7 @@
 #include "../origin.h"
 
 #ifdef QB_HAS_SSL
+#include <openssl/crypto.h>
 #include <qb/io/crypto.h>
 #endif
 
@@ -59,11 +60,13 @@ parse_origin(std::string_view const text) {
     return parsed;
 }
 
-/// The authority the request was sent to: `:authority` for HTTP/2 and HTTP/3 and an absolute-form HTTP/1.1
-/// target (the URI carries it, RFC 9112 §3.2.2), the `Host` field otherwise.
+/// The authority the request was sent to: the URI's when the target carries a scheme -- HTTP/2 and HTTP/3
+/// rebuild it from `:scheme` and `:authority`, an absolute-form HTTP/1.1 target names it (RFC 9112 §3.2.2) --,
+/// the `Host` field otherwise. Never the URI's host alone: an origin-form `//host/path` is a path on HTTP/1.1,
+/// which a reference parser reads as an authority the sender chose.
 [[nodiscard]] std::string
 request_authority(Request const &request) {
-    if (!request.uri().host().empty())
+    if (!request.uri().scheme().empty() && !request.uri().host().empty())
         return origin::authority(request.uri());
     return request.header("Host");
 }
@@ -110,6 +113,33 @@ form_value(std::string_view const body, std::string const &name) {
         start = end + 1;
     }
     return {};
+}
+
+/// Whether the first cookie-pair named @p name, case aside, in the request's `Cookie` lines -- the one the
+/// case-insensitive jar keeps -- is spelled exactly @p name. The jar folds the names it stores, so the spelling is
+/// read from the lines. Called with a value in the jar only, which a header-section line gave: those lines come
+/// before any trailer section's (store_received_trailer appends), so the first match is always the header's.
+[[nodiscard]] bool
+first_cookie_spelled(Request const &request, std::string_view const name) {
+    auto const &fields = request.headers();
+    auto const  lines  = fields.find("Cookie");
+    if (lines == fields.cend())
+        return false;
+    for (std::string_view line : lines->second) {
+        while (!line.empty()) {
+            auto const end  = line.find(';');
+            auto       pair = line.substr(0, end);
+            line            = end == std::string_view::npos ? std::string_view{} : line.substr(end + 1);
+            pair            = pair.substr(0, pair.find('='));
+            while (!pair.empty() && (pair.front() == ' ' || pair.front() == '\t'))
+                pair.remove_prefix(1);
+            while (!pair.empty() && (pair.back() == ' ' || pair.back() == '\t'))
+                pair.remove_suffix(1);
+            if (iequals(pair, name))
+                return pair == name;
+        }
+    }
+    return false;
 }
 
 /// The value of field @p name in a `multipart/form-data` body -- an HTML form with a file input -- its first part
@@ -176,6 +206,13 @@ to_string(CsrfVerdict const verdict) noexcept {
 }
 
 CsrfOptions::CsrfOptions() = default;
+
+CsrfOptions::~CsrfOptions() {
+#ifdef QB_HAS_SSL
+    if (!_secret.empty())
+        OPENSSL_cleanse(_secret.data(), _secret.size());
+#endif
+}
 
 CsrfOptions &
 CsrfOptions::trusted_origin(std::string_view const origin) {
@@ -246,6 +283,8 @@ CsrfOptions::cookie_same_site(SameSite const same_site) {
 
 CsrfOptions &
 CsrfOptions::cookie_max_age(qb::duration const max_age) {
+    if (max_age < std::chrono::seconds(1) || max_age > std::chrono::hours(24 * 400))
+        throw std::invalid_argument("CsrfOptions::cookie_max_age: between 1 s and 400 days");
     _max_age = max_age;
     return *this;
 }
@@ -285,10 +324,10 @@ CsrfOptions::form_field() const noexcept {
 }
 
 CsrfVerdict
-CsrfOptions::check(Request const &request) const {
+CsrfOptions::check(Request const &request, bool const secure_connection) const {
     if (safe_method(request.method()))
         return CsrfVerdict::allowed;
-    CsrfVerdict const source = check_source(request);
+    CsrfVerdict const source = check_source(request, secure_connection);
     if (source == CsrfVerdict::allowed && !tokens_enabled())
         return CsrfVerdict::allowed;
     if (exempted(request))
@@ -299,7 +338,7 @@ CsrfOptions::check(Request const &request) const {
 }
 
 CsrfVerdict
-CsrfOptions::check_source(Request const &request) const {
+CsrfOptions::check_source(Request const &request, bool const secure_connection) const {
     // Fetch Metadata first: a browser that sends it says where the request comes from, whatever Origin says.
     if (std::string const &site = request.header("Sec-Fetch-Site"); !site.empty())
         return site == "same-origin" || site == "none" ? CsrfVerdict::allowed : CsrfVerdict::cross_site;
@@ -307,7 +346,10 @@ CsrfOptions::check_source(Request const &request) const {
     if (origin_value.empty())
         return CsrfVerdict::allowed; // neither header: no browser sends an unsafe request like this
     auto const origin_uri = parse_origin(origin_value);
-    return origin_uri && origin_is_request_authority(*origin_uri, request) ? CsrfVerdict::allowed : CsrfVerdict::origin_mismatch;
+    // Over TLS here, an http page of the same host is another origin: an active attacker's, on a host without HSTS.
+    if (!origin_uri || (secure_connection && !iequals(origin_uri->scheme(), "https")))
+        return CsrfVerdict::origin_mismatch;
+    return origin_is_request_authority(*origin_uri, request) ? CsrfVerdict::allowed : CsrfVerdict::origin_mismatch;
 }
 
 bool
@@ -324,11 +366,21 @@ CsrfOptions::exempted(Request const &request) const {
     return std::any_of(_exempt.begin(), _exempt.end(), [&](RequestPredicate const &predicate) { return predicate(request); });
 }
 
+std::string_view
+CsrfOptions::cookie_token(Request const &request) const {
+    std::string const &value = request.cookie_value(_cookie_name);
+    if (value.empty() || !first_cookie_spelled(request, _cookie_name))
+        return {};
+    return value;
+}
+
 CsrfVerdict
 CsrfOptions::check_token(Request const &request) const {
 #ifdef QB_HAS_SSL
-    std::string const &cookie    = request.cookie_value(_cookie_name);
-    std::string        submitted = request.header(_header_name);
+    std::string_view const cookie = cookie_token(request);
+    if (cookie.empty())
+        return CsrfVerdict::token_missing; // before any body is read: a request without the cookie costs nothing
+    std::string submitted = request.header(_header_name);
     if (submitted.empty() && !_form_field.empty()) {
         // A form cannot set a header: its field submits the token -- read only when the header is absent.
         std::string const &type = request.content_type().type();
@@ -337,7 +389,7 @@ CsrfOptions::check_token(Request const &request) const {
         else if (iequals(type, "multipart/form-data"))
             submitted = multipart_value(request, _form_field);
     }
-    if (cookie.empty() || submitted.empty())
+    if (submitted.empty())
         return CsrfVerdict::token_missing;
     if (!equal_in_constant_time(cookie, submitted) || !token_valid(cookie, request))
         return CsrfVerdict::token_invalid;

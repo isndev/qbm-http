@@ -159,9 +159,29 @@ TEST_F(CsrfMiddlewareTest, OriginMatchingTheHostIsPassed) {
     expect_served();
     run(CsrfOptions{}, post({{"Origin", "http://[::1]:8080"}, {"Host", "[::1]:8080"}}));
     expect_served();
-    // The authority does not say whether the request arrived over TLS: an http page of the same host passes.
+    // Not over TLS here (a TLS-terminating proxy hides it): an http page of the same host passes, as in Go.
     run(CsrfOptions{}, post({{"Origin", "http://example.test"}}));
     expect_served();
+}
+
+TEST_F(CsrfMiddlewareTest, AnOriginFormNetworkPathNamesNoAuthority) {
+    // On HTTP/1.1 `//evil.test/mw_test` is a path, which a URI reference parser reads as the authority evil.test:
+    // the Origin it names passed as the request's own (the third review). The Host field decides.
+    run(CsrfOptions{}, post({{"Origin", "https://evil.test"}}, "//evil.test/mw_test"));
+    expect_refused(CsrfVerdict::origin_mismatch);
+    run(CsrfOptions{}, post({{"Origin", "https://example.test"}}, "//other.test/mw_test"));
+    expect_served();
+}
+
+TEST_F(CsrfMiddlewareTest, OverTlsTheOriginMustBeHttps) {
+    // The mock session has no transport: the https scheme of its URI stands for a TLS connection, as for HTTP/3.
+    run(CsrfOptions{}, post({{"Origin", "http://example.test"}}, "https://example.test/mw_test"));
+    expect_refused(CsrfVerdict::origin_mismatch);
+    run(CsrfOptions{}, post({{"Origin", "https://example.test"}}, "https://example.test/mw_test"));
+    expect_served();
+    CsrfOptions direct; // check() alone: the connection is the caller's to say
+    EXPECT_EQ(direct.check(post({{"Origin", "http://example.test"}}), true), CsrfVerdict::origin_mismatch);
+    EXPECT_EQ(direct.check(post({{"Origin", "http://example.test"}}), false), CsrfVerdict::allowed);
 }
 
 TEST_F(CsrfMiddlewareTest, OriginNotMatchingTheHostIsRefused) {
@@ -277,6 +297,10 @@ TEST_F(CsrfMiddlewareTest, CookieConfigurationRefusals) {
     CsrfOptions secure;
     EXPECT_NO_THROW(secure.cookie_same_site(qb::http::SameSite::None));
     EXPECT_THROW(secure.cookie_name("csrf").cookie_secure(false), std::invalid_argument); // SameSite=None needs Secure
+    EXPECT_THROW(options.cookie_max_age(qb::duration::zero()), std::invalid_argument);    // deletes the cookie
+    EXPECT_THROW(options.cookie_max_age(-std::chrono::seconds(1)), std::invalid_argument);
+    EXPECT_THROW(options.cookie_max_age(std::chrono::hours(24 * 401)), std::invalid_argument); // past the 400-day cap
+    EXPECT_NO_THROW(options.cookie_max_age(std::chrono::hours(24 * 400)));
 }
 
 #ifdef QB_HAS_SSL
@@ -328,6 +352,31 @@ TEST_F(CsrfMiddlewareTest, AResponseWithoutAValidCookieCarriesAFreshTokenAndTheS
     _router->route(_session, request(qb::http::method::GET, {{"Cookie", "__Host-csrf=" + token}}));
     EXPECT_TRUE(set_cookie().empty());
     EXPECT_EQ(slot, token);
+}
+
+TEST_F(CsrfMiddlewareTest, ARefusalOfWhereTheRequestComesFromIssuesNoCookie) {
+    // A cross-site form posting without the SameSite=Lax cookie was answered a fresh one: another site's page could
+    // rotate the user's token (the third review).
+    CsrfOptions options;
+    options.tokens(secret);
+    run(options, post({{"Sec-Fetch-Site", "cross-site"}}));
+    expect_refused(CsrfVerdict::cross_site);
+    EXPECT_TRUE(set_cookie().empty());
+    run(options, post({{"Origin", "https://evil.test"}}));
+    expect_refused(CsrfVerdict::origin_mismatch);
+    EXPECT_TRUE(set_cookie().empty());
+}
+
+TEST_F(CsrfMiddlewareTest, TheTokenCookieNameIsMatchedExactly) {
+    // The jar is case-insensitive: a `__host-csrf` another host planted (an older browser takes it with a Domain)
+    // came before the real cookie. It is no `__Host-csrf`.
+    CsrfOptions options;
+    options.tokens(secret);
+    std::string const token = options.issue_token(qb::http::Request{});
+    run(options, post({{"Cookie", "__host-csrf=" + token}, {"X-CSRF-Token", token}}));
+    expect_refused(CsrfVerdict::token_missing);
+    EXPECT_TRUE(options.cookie_token(post({{"Cookie", "__host-csrf=" + token}})).empty());
+    EXPECT_EQ(options.cookie_token(post({{"Cookie", "__Host-csrf=" + token}})), token);
 }
 
 TEST_F(CsrfMiddlewareTest, AnUnsafeRequestMustEchoTheCookieToken) {

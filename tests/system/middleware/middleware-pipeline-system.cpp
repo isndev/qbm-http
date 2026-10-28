@@ -374,6 +374,43 @@ TEST_F(MiddlewarePipelineTest, HstsIsNotSentOverPlainTcpForAnHttpsAbsoluteTarget
     EXPECT_NE(lowered.find("x-content-type-options"), std::string::npos) << "the middleware did run: " << head;
 }
 
+// HTTP/1.1 on the wire: an origin-form `//evil.test/csrf` target is a path, and the CSRF middleware reads the
+// authority from Host, never from what a URI reference parser makes of `//evil.test` (Huly QB-95, third review).
+TEST_F(MiddlewarePipelineTest, CsrfMiddlewareReadsTheHostFieldOfAnHttp11Request) {
+    auto server = start_pipeline_server(_port, [](PipelineServer &srv) {
+        srv.router().use(qb::http::csrf_middleware<PipelineSession>());
+        srv.router().post("/csrf", [](std::shared_ptr<PipelineCtx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "posted";
+            ctx->complete();
+        });
+    });
+    ASSERT_TRUE(server->ready());
+    auto status_of = [this](std::string const &target, std::string const &origin) {
+        qb::io::tcp::socket sock;
+        EXPECT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(_port)}), 0);
+        (void) sock.set_nonblocking(true);
+        const std::string request = "POST " + target + " HTTP/1.1\r\nHost: localhost:" + std::to_string(_port) + "\r\nOrigin: " + origin
+                                    + "\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx";
+        EXPECT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
+        std::string head;
+        for (int i = 0; i < 400 && head.find("\r\n\r\n") == std::string::npos; ++i) {
+            char buf[512];
+            if (const int n = sock.read(buf, sizeof(buf)); n > 0)
+                head.append(buf, static_cast<std::size_t>(n));
+            else
+                std::this_thread::sleep_for(5ms);
+        }
+        sock.close();
+        return head.substr(0, head.find("\r\n"));
+    };
+    const std::string self = "http://localhost:" + std::to_string(_port);
+    EXPECT_EQ(status_of("/csrf", self), "HTTP/1.1 200 OK");
+    EXPECT_EQ(status_of("//evil.test/csrf", "https://evil.test"), "HTTP/1.1 403 Forbidden") << "the //host of a path named the authority";
+    EXPECT_EQ(status_of("/csrf", "https://evil.test"), "HTTP/1.1 403 Forbidden");
+    EXPECT_EQ(status_of(self + "/csrf", self), "HTTP/1.1 200 OK") << "an absolute-form target's authority";
+}
+
 #ifdef QB_HAS_SSL
 class TlsPipelineServer;
 
