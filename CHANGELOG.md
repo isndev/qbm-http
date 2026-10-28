@@ -7,6 +7,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ## [Unreleased]
 
+### Added
+
+- **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
+  `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`
+  (`BM_H2_StatsSnapshot{Unrequested,Requested}/requests:32`, `BM_H3_...`), run the same burst of 32 GETs at a
+  concurrency limit of one -- one `push_request()` and one callback per response, on the warm TLS connection for
+  HTTP/2, on a fresh QUIC connection per burst opened outside timing for HTTP/3 -- with no snapshot and with one
+  `get_stats()` requested and consumed in every response callback: what a program pays to READ the three counters
+  the client always maintains (their maintenance has no switch and is not measured). The oracle, outside timing:
+  every response 200 with its id in order, the counters moved by exactly 32 / 32 / 0 between two snapshots, and
+  the Requested reads summing to 1 + ... + 32 because both clients count before they call back. Measured on an
+  i9-12900K as an A/A of the same build (three physical copies a side, eight seeded rounds, 48 processes a cell):
+  under WSL2 g++ 14.2 the request costs 13.25 → 13.23 µs over HTTP/2 and 33.56 → 33.54 µs over HTTP/3 with the read,
+  ratios 0.999 inside A/A bands of ±0.5 % and ±0.3 %; under Windows 11 MSVC 19.51, 27.04 → 27.14 µs and 60.84 → 60.78 µs,
+  ratios 1.004 and 0.999 inside ±1.6 % and ±0.6 % -- the read is below the owners' resolution on both toolchains, under
+  ~60 ns a response on g++. The cells sit in `dev/bench/instrument-cases.txt`, not in the gate; three mutants per owner (the read
+  not consumed, one request short, the read disarmed after the preflights) are refused.
+
 ### Fixed
 
 - **qbm-http and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is

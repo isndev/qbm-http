@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -258,6 +259,155 @@ BM_H3_ExplicitReconnect(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+// ---- QB-248: the cost of READING the client's statistics snapshot, once per response -------------------------------
+//
+// The HTTP/3 twin of the HTTP/2 pair (http2/client-loopback.bench.cpp): `Client::get_stats()` copies three counters
+// the client always maintains, with no switch, so their maintenance is not measured here (dev/bench/INSTRUMENTS.md);
+// the READ is. The work of `WarmResponseCallbacks` -- a fresh connection before every timed iteration, then 32
+// distinct GETs at a concurrency limit of one -- admitted by one `push_request()` and answered by one callback per
+// response, with no snapshot (Unrequested) and with one `get_stats()` requested and consumed in every response
+// callback (Requested). Outside timing, the oracle of every burst: the 32 responses 200 with their ids in order; the
+// counters moved by exactly 32 total, 32 successful and 0 failed (two oracle snapshots, in both modes); in Requested
+// the i-th callback saw i successes -- `Client::on_http3_response()` counts before it calls back -- so the reads sum
+// to 1 + ... + 32 = 528. Connection setup and teardown stay outside timing, as in the reference cell.
+using SnapshotStats = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
+
+constexpr int           kSnapshotRequests       = 32;
+constexpr std::uint64_t kSnapshotObservationSum = 528; // 1 + 2 + ... + 32: the i-th callback sees i successes
+
+struct SnapshotBurst {
+    std::vector<qb::http::Response> responses;
+    std::uint64_t                   observation = 0; ///< Requested: the sum over callbacks of (successful - before)
+    std::uint64_t                   reads       = 0; ///< Requested: snapshots requested and consumed
+
+    void
+    reset() {
+        responses.clear();
+        observation = 0;
+        reads       = 0;
+    }
+    bool
+    complete() const {
+        return responses.size() == static_cast<std::size_t>(kSnapshotRequests);
+    }
+};
+
+/// Admit the burst on `client`: one `push_request()` per GET; the callback stores the response and, in Requested, reads first.
+template <bool Snapshot>
+bool
+admit_snapshot_burst(qb::http3::Client &client, SnapshotBurst &burst, int first, std::uint64_t successful_before) {
+    auto work = requests(first, kSnapshotRequests);
+    for (auto &request : work) {
+        const bool admitted = client.push_request(std::move(request), [&client, &burst, successful_before](qb::http::Response response) {
+            if constexpr (Snapshot) {
+                const auto [total, successful, failed] = client.get_stats(); // the read under measurement ...
+                burst.observation += successful - successful_before;         // ... consumed, never discarded
+                burst.reads += total >= successful + failed ? 1u : 0u;       // all three fields read: the counters' own invariant
+            }
+            burst.responses.push_back(std::move(response));
+        });
+        if (!admitted)
+            return false;
+    }
+    return true;
+}
+
+/// The oracle of one burst, outside timing: the responses, the counter deltas, and the Requested reads' sum.
+bool
+valid_snapshot_burst(SnapshotBurst const &burst, int first, bool snapshot, SnapshotStats const &before, SnapshotStats const &after) {
+    const auto [total_before, successful_before, failed_before] = before;
+    const auto [total_after, successful_after, failed_after]    = after;
+    return valid(burst.responses, first, kSnapshotRequests) && total_after - total_before == static_cast<std::uint64_t>(kSnapshotRequests)
+           && successful_after - successful_before == static_cast<std::uint64_t>(kSnapshotRequests) && failed_after == failed_before
+           && burst.reads == (snapshot ? static_cast<std::uint64_t>(kSnapshotRequests) : 0u)
+           && burst.observation == (snapshot ? kSnapshotObservationSum : 0u);
+}
+
+/// One burst on a fresh connection, outside timing, with both oracles: the preflight of each mode.
+template <bool Snapshot>
+bool
+snapshot_preflight(Fixture &fixture, int first) {
+    auto client = fixture.connected_client();
+    if (!client)
+        return false;
+    SnapshotBurst burst;
+    burst.responses.reserve(kSnapshotRequests);
+    const auto before   = client->get_stats();
+    const bool admitted = admit_snapshot_burst<Snapshot>(*client, burst, first, std::get<1>(before));
+    const bool complete = admitted && http_client_bench::pump_until([&] { return burst.complete(); });
+    const bool valid    = complete && valid_snapshot_burst(burst, first, Snapshot, before, client->get_stats()) && client->is_connected();
+    client->disconnect();
+    return valid;
+}
+
+template <bool Snapshot>
+void
+measure_h3_stats_snapshot(benchmark::State &state) {
+    Fixture fixture;
+    if (!fixture.ready || !one_request(fixture, 999)) {
+        state.SkipWithError("HTTP/3 loopback handshake or response preflight failed");
+        return;
+    }
+    if (state.range(0) != kSnapshotRequests) {
+        state.SkipWithError("HTTP/3 stats snapshot roster requires 32 requests");
+        return;
+    }
+    // As in WarmResponseCallbacks: the fixture's first connection served the preflight request; every burst below
+    // runs on a connection of its own, opened and closed outside timing.
+    fixture.client->disconnect();
+    fixture.client.reset();
+    int first = 1000;
+    if (!snapshot_preflight<false>(fixture, first) || !snapshot_preflight<true>(fixture, first + kSnapshotRequests)) {
+        state.SkipWithError("HTTP/3 stats snapshot pair preflight violated its work/count contract");
+        return;
+    }
+    first += 2 * kSnapshotRequests;
+    SnapshotBurst burst;
+    burst.responses.reserve(kSnapshotRequests);
+    for (auto _ : state) {
+        state.PauseTiming();
+        auto client = fixture.connected_client();
+        if (!client) {
+            state.SkipWithError("HTTP/3 stats snapshot could not open a fresh connection");
+            return;
+        }
+        burst.reset();
+        const auto before = client->get_stats(); // oracle snapshot 1 of 2, outside timing
+        state.ResumeTiming();
+        const bool admitted  = admit_snapshot_burst<Snapshot>(*client, burst, first, std::get<1>(before));
+        const bool completed = admitted && http_client_bench::pump_until([&] { return burst.complete(); });
+        state.PauseTiming();
+        const auto after     = client->get_stats(); // oracle snapshot 2 of 2
+        const bool connected = client->is_connected();
+        if (!completed || !connected || !valid_snapshot_burst(burst, first, Snapshot, before, after)) {
+            client->disconnect();
+            state.SkipWithError("measured HTTP/3 stats snapshot burst failed responses or counter deltas");
+            return;
+        }
+        client->disconnect();
+        client.reset();
+        first += kSnapshotRequests;
+        state.ResumeTiming();
+    }
+    state.SetItemsProcessed(state.iterations() * kSnapshotRequests);
+    state.counters["work_units"]          = static_cast<double>(kSnapshotRequests);
+    state.counters["requested_snapshots"] = Snapshot ? static_cast<double>(kSnapshotRequests) : 0.0;
+    state.counters["oracle_snapshots"]    = 2.0;
+    state.counters["connections"]         = 1.0;
+    state.SetLabel("fresh connection per burst outside timing; 32 GETs at concurrency one, one callback per response; snapshot "
+                   "requested+consumed per response; counters always on");
+}
+
+void
+BM_H3_StatsSnapshotUnrequested(benchmark::State &state) {
+    measure_h3_stats_snapshot<false>(state);
+}
+
+void
+BM_H3_StatsSnapshotRequested(benchmark::State &state) {
+    measure_h3_stats_snapshot<true>(state);
+}
+
 } // namespace http3_client_loopback_bench
 
 namespace http3_data_credit_bench {
@@ -486,10 +636,22 @@ BM_H3_WarmDataCredit(benchmark::State &state) {
 
 using http3_client_loopback_bench::BM_H3_ContinuousStreamsCorrectness;
 using http3_client_loopback_bench::BM_H3_ExplicitReconnect;
+using http3_client_loopback_bench::BM_H3_StatsSnapshotRequested;
+using http3_client_loopback_bench::BM_H3_StatsSnapshotUnrequested;
 using http3_client_loopback_bench::BM_H3_WarmResponseCallbacks;
 using http3_data_credit_bench::BM_H3_WarmDataCredit;
 
 BENCHMARK(BM_H3_WarmResponseCallbacks)->Unit(benchmark::kMicrosecond)->UseRealTime();
+BENCHMARK(BM_H3_StatsSnapshotUnrequested)
+    ->Arg(http3_client_loopback_bench::kSnapshotRequests)
+    ->ArgName("requests")
+    ->Unit(benchmark::kMicrosecond)
+    ->UseRealTime();
+BENCHMARK(BM_H3_StatsSnapshotRequested)
+    ->Arg(http3_client_loopback_bench::kSnapshotRequests)
+    ->ArgName("requests")
+    ->Unit(benchmark::kMicrosecond)
+    ->UseRealTime();
 BENCHMARK(BM_H3_WarmDataCredit)->Unit(benchmark::kMicrosecond)->UseRealTime();
 BENCHMARK(BM_H3_ContinuousStreamsCorrectness)->Iterations(1);
 BENCHMARK(BM_H3_ExplicitReconnect)->Unit(benchmark::kMicrosecond);
