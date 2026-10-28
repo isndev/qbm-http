@@ -267,7 +267,7 @@ These gates are real `#ifdef` boundaries in the headers, so feature availability
 
 ### Feature and build matrix
 
-<!-- src: qbm/http/CMakeLists.txt:55-61, :79-112, :185-187, qbm/http/src/qbm/http/http.h:43-53 -->
+<!-- src: qbm/http/CMakeLists.txt:55-61, :79-112, :187-189, qbm/http/src/qbm/http/http.h:43-53 -->
 
 | Capability | Header / namespace | Compile gate | Required dependency |
 |---|---|---|---|
@@ -296,7 +296,7 @@ add_subdirectory(qb)                                  # configures qb-core + qb-
 qb_load_modules("${CMAKE_CURRENT_SOURCE_DIR}/qbm")    # discovers and registers qbm/http
 
 add_executable(app main.cpp)
-target_link_libraries(app PRIVATE qbm::http)          # PUBLIC-pulls qb::core, qb::io, llhttp
+target_link_libraries(app PRIVATE qbm::http)          # PUBLIC-pulls qb::core, qb::io; llhttp is inside it
 ```
 
 **Installed** — consume a `cmake --install`ed tree. You do **not** need a `find_package(qb)` line: the module's package config resolves qb (and, for an HTTP/3 build, nghttp3) itself.
@@ -403,7 +403,7 @@ Claude Desktop and other clients without native remote-MCP support wrap the same
 
 ## License
 
-Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) — a fork with the upstream `llhttp_*` symbols renamed to `http_*`, so it is owned rather than published: the C sources are vendored under `not-qb/llhttp` and its single public header is `src/qbm/http/vendor/llhttp.h`, reached as `<qbm/http/vendor/llhttp.h>`. I/O is handled entirely by qb-io.
+Apache License 2.0. See [LICENSE](./LICENSE). HTTP/1.1 parsing structures come from [llhttp](https://github.com/nodejs/llhttp) — a fork with the upstream `llhttp_*` symbols renamed to `http_*`, so it is owned rather than published: the C sources are vendored under `not-qb/llhttp` and compiled into libqbm-http itself, its functions link as `qb_llhttp_*` so a program may also link Node's http_parser, and its single public header is `src/qbm/http/vendor/llhttp.h`, reached as `<qbm/http/vendor/llhttp.h>`. I/O is handled entirely by qb-io.
 
 ---
 

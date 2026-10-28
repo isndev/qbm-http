@@ -87,6 +87,22 @@ qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXT
 qhttp_test(unit http1-request-smuggling unit/http1/http1-request-smuggling.cpp EXTRA_LABELS http1)
 qhttp_test(unit http1-serialization unit/http1/http1-serialization.cpp EXTRA_LABELS http1)
 qhttp_test(unit http1-protocol-framing unit/http1/http1-protocol-framing.cpp EXTRA_LABELS http1)
+# llhttp-link-names (Huly QB-1139): qbm-http's llhttp fork and Node's http_parser linked in one program each run their
+# own code. The fork links as qb_ + its upstream name; the stand-in defines the two C names the two parsers share
+# (http_should_keep_alive, http_errno_name) and is linked BEFORE qbm-http. Without the renaming the link holds two of
+# each: refused by GNU ld and MSVC, and on ld64 a Connection: close request comes out keep-alive. Registered with
+# qb_add_test directly so the stand-in comes first on the link line; a static archive with qb's flags, so its runtime
+# matches the test's, and a name that does not start with qbm- (DEPENDS reads such a name as a module).
+add_library(llhttp-link-names-foreign-http-parser STATIC unit/http1/llhttp-link-names/foreign-http-parser.cpp)
+_qb_apply_target_properties(llhttp-link-names-foreign-http-parser)
+qb_add_test(MODULE qbm-http TIER unit NAME llhttp-link-names
+            SOURCES unit/http1/llhttp-link-names/witness.cpp unit/http1/llhttp-link-names/caller.cpp
+            DEPENDS llhttp-link-names-foreign-http-parser qbm-http
+            LABELS http1)
+# llhttp-symbols (Huly QB-1139): the census behind that witness -- no symbol libqbm-http DEFINES and exports keeps the
+# fork's or upstream's C name (http_*, llhttp_*), and the fork's carry qb_llhttp_ (qb's cmake/qbSymbolPrefix.cmake).
+qb_add_symbol_prefix_test(NAME qbm-http-test-unit-llhttp-symbols TARGET qbm-http
+                          BANNED http_ llhttp_ REQUIRED qb_llhttp_ LABELS tier:unit module:qbm-http http1)
 qhttp_test(unit validation-rules     unit/validation/validation-rules.cpp     EXTRA_LABELS validation)
 qhttp_test(unit validation-schema    unit/validation/validation-schema.cpp    EXTRA_LABELS validation)
 qhttp_test(unit validation-parameter unit/validation/validation-parameter.cpp EXTRA_LABELS validation)

@@ -62,8 +62,8 @@ endif()
 
 # Add the internal llhttp dependency
 add_subdirectory(not-qb/llhttp)
-# llhttp is a separate C target. qbm-http's PRIVATE flags cannot instrument its
-# already-compiled objects, so apply the same sanitizer profile explicitly.
+# llhttp is a separate C object library, folded into qbm-http below. qbm-http's PRIVATE flags do not
+# reach its objects, so apply the same sanitizer profile explicitly.
 if(QB_SANITIZE_COMPILE_OPTS)
     target_compile_options(llhttp PRIVATE ${QB_SANITIZE_COMPILE_OPTS})
 endif()
@@ -115,7 +115,7 @@ endif()
 qb_register_module(
     NAME http
     VERSION ${PROJECT_VERSION}
-    DEPENDS qb-core llhttp ${QBM_HTTP_EXTRA_DEPENDS}
+    DEPENDS qb-core ${QBM_HTTP_EXTRA_DEPENDS}
     SOURCES
         # Core files
         src/qbm/http/headers.cpp
@@ -171,16 +171,18 @@ qb_register_module(
     DEFINES
         QBM_HTTP_VERSION="${PROJECT_VERSION}"
         ${QBM_HTTP_EXTRA_DEFINES}
-    # llhttp is a bundled STATIC target that qbm-http links PUBLIC (1.1/protocol/base.h calls
-    # http_init/http_execute inline), so its name appears in qbm-httpTargets.cmake and it must
-    # travel in the same export set.
-    EXPORT_EXTRA_TARGETS
-        llhttp
     CONFIG_DEPENDENCIES
         cmake/qbm-httpDependencies.cmake.in
     INSTALL_CMAKE_FILES
         cmake/FindNghttp3.cmake
 )
+
+# The llhttp fork's objects are part of qbm-http's own archive (Huly QB-1139): no llhttp library is
+# built, linked, exported or installed. TARGET_OBJECTS rather than a link to the OBJECT library: a
+# link would put llhttp in qbm-http's link interface, and the export set would have to carry it
+# again. 1.1/protocol/base.h calls the parser inline, so a consumer resolves those calls in
+# libqbm-http, as qb_llhttp_*.
+target_sources(qbm-http PRIVATE $<TARGET_OBJECTS:llhttp>)
 
 if(QBM_HTTP_HAS_HTTP3)
     target_compile_definitions(qbm-http PUBLIC QBM_HTTP_HAS_HTTP3=1)

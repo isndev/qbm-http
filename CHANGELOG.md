@@ -9,6 +9,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **qbm-http and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is
+  installed any more (Huly QB-1139).** The llhttp fork's `http_` prefix keeps it from colliding with a system
+  llhttp, but it is http_parser's prefix too, and two names are shared outright with other signatures:
+  `http_should_keep_alive` and `http_errno_name`. A program that linked qbm-http and anything carrying
+  http_parser held two definitions of each and the link line chose: measured on ld64 against a stand-in, qbm-http's
+  HTTP/1.1 parser called the foreign `http_should_keep_alive` and a `Connection: close` request came out
+  keep-alive, behind a `duplicate symbol` warning; GNU ld and MSVC refuse the second definition. Every function
+  the fork defines (123) now links as `qb_` + its upstream name (`http_execute` is `qb_llhttp_execute`) through one
+  `#define` per name at the top of `src/qbm/http/vendor/llhttp.h`, read before any declaration; source keeps the
+  `http_` spelling. The fork is also compiled into qbm-http's own archive, as an `OBJECT` library folded in with
+  `$<TARGET_OBJECTS:llhttp>`: the installed tree carried `lib/libllhttp.a` (`lib/llhttp.lib`), the exact file the
+  vcpkg and Debian llhttp packages install, and `qbm::llhttp` in the export set -- both are gone, and
+  `find_package(qbm-http)` needs nothing new. `qbm-http-test-unit-llhttp-link-names` links an http_parser stand-in
+  BEFORE qbm-http and checks both sides (it fails as above without the renaming), and
+  `qbm-http-test-unit-llhttp-symbols` reads the built archive and fails on any exported `http_*` or `llhttp_*`
+  left unrenamed.
 - **The WebSocket loopback fixture binds 127.0.0.1 and keeps the OS error of a refused bind: the report
   names address, port and code instead of "failed" on an address it had not bound, and the hardening
   scenarios stop instead of driving their client at port 0 (Huly QB-1125).** `WsServerThread` listened

@@ -44,7 +44,7 @@ because `3/protocol/connection.h` uses all three. A libnghttp3 that has the head
 library but not those — Debian's 1.8.0, for instance — leaves HTTP/3 **off** with a status
 message naming what is missing, rather than switching HTTP/3 on and then failing to compile.
 
-<!-- src: qbm/http/CMakeLists.txt:90-112,185-187; qbm/http/cmake/FindNghttp3.cmake:23-102 -->
+<!-- src: qbm/http/CMakeLists.txt:90-112,187-189; qbm/http/cmake/FindNghttp3.cmake:23-102 -->
 
 Detection lives in one place: `qbm/http/cmake/FindNghttp3.cmake`, which the module appends to `CMAKE_MODULE_PATH` and *also* installs, so `find_package(qbm-http)` re-runs the exact same module. It consults `pkg-config` for hints only, then resolves the header and the library with `find_path` / `find_library` — so a `libnghttp3` installed without a `.pc` file is still found — and publishes an `UNKNOWN IMPORTED` target `Nghttp3::nghttp3` carrying the absolute library path. That absolute path is what survives export intact; the link *directories* an inline `pkg_check_modules` target would carry do not.
 

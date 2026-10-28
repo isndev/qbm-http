@@ -11,8 +11,8 @@
 # ships next to this file (CMAKE_MODULE_PATH is set up by qbm-httpConfig.cmake).
 #
 # OpenSSL and ZLIB are NOT resolved here: they arrive transitively through qb::io and are
-# already handled by qbConfig.cmake's own find_dependency() block. llhttp is a bundled static
-# fork travelling in qbm-http's own export set, so it needs nothing either.
+# already handled by qbConfig.cmake's own find_dependency() block. llhttp is a bundled fork whose
+# objects live inside libqbm-http itself (Huly QB-1139), so it needs nothing either.
 #
 
 if(@QBM_HTTP_HAS_HTTP3@)

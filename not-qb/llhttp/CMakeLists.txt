@@ -1,10 +1,18 @@
 project(llhttp)
 
-add_library(llhttp STATIC
+# An OBJECT library, folded into qbm-http's own archive (qbm/http/CMakeLists.txt), never a library of
+# its own (Huly QB-1139). As a STATIC target it travelled in qbm-http's export set and installed
+# lib/libllhttp.a (lib/llhttp.lib), the very file name the vcpkg and Debian llhttp packages install:
+# a file conflict for any packaging of qbm-http. Folded, there is no llhttp archive, no qbm::llhttp
+# and nothing in the export set; its symbols link as qb_llhttp_* (src/qbm/http/vendor/llhttp.h).
+add_library(llhttp OBJECT
         src/llhttp.c
         src/api.c
         src/http.c
 )
+# Its objects land in qbm-http, which may be a shared library: compile them position-independent
+# whatever the parent project's CMAKE_POSITION_INDEPENDENT_CODE says.
+set_target_properties(llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # No PUBLIC include directory, on purpose.
 #

@@ -30,9 +30,9 @@ installed tree alone, without going back to the source repository.
                version was still 9.2.1, which is what http_VERSION_MAJOR/MINOR/PATCH in
                src/qbm/http/vendor/llhttp.h say -- the parser is NOT the 9.2.1 release.
    License     MIT
-   Vendored    not-qb/llhttp/   (sources, compiled into libllhttp.a)
+   Vendored    not-qb/llhttp/   (sources, compiled into libqbm-http itself)
                src/qbm/http/vendor/llhttp.h  (the single public header)
-   Installed   the compiled parser inside libllhttp.a, and the public header at
+   Installed   the compiled parser inside libqbm-http, and the public header at
                <prefix>/include/qbm/http/vendor/llhttp.h
    License at  <prefix>/share/licenses/qbm-http/third-party/llhttp/LICENSE-MIT
                and in-header — every vendored llhttp file, including the installed
@@ -57,7 +57,12 @@ installed tree alone, without going back to the source repository.
      - not-qb/llhttp/src/llhttp.c: a trailing HTAB after the Content-Length digits or
        after `chunked` is optional whitespace, as a trailing SP already was
        (RFC 9110 §5.6.3, Huly QB-555) -- two `case 9:` branches, each marked
-       "qb local patch (Huly QB-555)".
+       "qb local patch (Huly QB-555)";
+     - src/qbm/http/vendor/llhttp.h: the link names (Huly QB-1139) -- one `#define`
+       per function the fork defines, mapping its http_ spelling to `qb_` + the
+       upstream name (http_execute -> qb_llhttp_execute), read before any
+       declaration. The http_ prefix is Node's older http_parser's too, and two
+       names are shared outright (http_should_keep_alive, http_errno_name).
 
    What the commit adds over the v9.2.1 release: the `on_protocol` and
    `on_protocol_complete` callbacks, HPE_CB_PROTOCOL_COMPLETE (38) and the RTSP/ICE
@@ -68,10 +73,11 @@ installed tree alone, without going back to the source repository.
    `make build/c/llhttp.c build/llhttp.h`, then the prefix rename above. The result
    equals not-qb/llhttp/src/llhttp.c byte for byte apart from the MIT notice and the
    QB-555 branches (verified 2026-10-15), and build/llhttp.h equals the public header
-   apart from the notice, the comment wording and HTTP_UNINITIALIZED; re-apply the
-   local changes listed above. Output generated at a later commit does not compare
-   line for line: dc5dc9a also changed upstream's code generator.
+   apart from the notice, the comment wording, HTTP_UNINITIALIZED and the link-name
+   block; re-apply the local changes listed above. Output generated at a later commit
+   does not compare line for line: dc5dc9a also changed upstream's code generator.
 
-   Both the static archive and the public header reach the consumer, so the MIT
-   permission notice is distributed two ways: inside every source file (and thus
-   inside the installed header) and as the standalone LICENSE-MIT above.
+   Both the compiled parser (inside libqbm-http) and the public header reach the
+   consumer, so the MIT permission notice is distributed two ways: inside every
+   source file (and thus inside the installed header) and as the standalone
+   LICENSE-MIT above.

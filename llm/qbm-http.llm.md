@@ -561,4 +561,4 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 
 ## Build / integration (one line)
 
-`add_subdirectory(qb)` (must precede), then `qb_load_modules("${CMAKE_CURRENT_SOURCE_DIR}/qbm")`, then `target_link_libraries(app PRIVATE qbm::http)` (PUBLIC-propagates qb::core/qb::io/llhttp and the `QB_HAS_SSL`/`QBM_HTTP_HAS_HTTP3` defines + `cxx_std_${QB_CXX_STANDARD}` — `cxx_std_20` by default, `cxx_std_23` when the C++23 preset is selected), and `#include <qbm/http/http.h>`.
+`add_subdirectory(qb)` (must precede), then `qb_load_modules("${CMAKE_CURRENT_SOURCE_DIR}/qbm")`, then `target_link_libraries(app PRIVATE qbm::http)` (PUBLIC-propagates qb::core/qb::io -- the llhttp fork is compiled into qbm::http itself, its functions linked as `qb_llhttp_*` -- and the `QB_HAS_SSL`/`QBM_HTTP_HAS_HTTP3` defines + `cxx_std_${QB_CXX_STANDARD}` — `cxx_std_20` by default, `cxx_std_23` when the C++23 preset is selected), and `#include <qbm/http/http.h>`.
