@@ -103,7 +103,7 @@ req.body() = R"({"key":"value"})";
 
 const std::string &ua = req.header("user-agent");      // case-insensitive; ref to default if absent (never throws)
 const std::string &q  = req.query("type");             // query param, "" if absent
-req.parse_cookie_header();                              // request cookies are NOT parsed automatically
+req.parse_cookie_header();                              // a request you BUILD; the h1/h2/h3 servers parse theirs
 const qb::http::Cookie *c = req.cookie("name1");       // nullptr if absent
 
 qb::http::Response res;                                 // defaults to 200 OK
@@ -383,7 +383,7 @@ An HTTP/3 event callback can release the last external `shared_ptr`: the client 
 
 The connection timeout belongs to one attempt: `disconnect()` of an in-progress attempt reports failure to its connection callbacks once, and that attempt's timer cannot fail a later attempt still connecting on the same client. _(src/qbm/http/3/client.cpp:101-114,119-171,470-527,623-640)_
 
-`max_streams_bidi` limits HTTP/3 requests in flight, not requests over the connection's lifetime. Qb returns a bidirectional slot on close for client-initiated streams delivered through `stream_open_cb`; ngtcp2 handles implicit openings itself. The loopback test completes 130 sequential requests on one connection with the default QUIC limit of 100. _(qb/src/qb/io/quic.cpp:1122,1626-1653; qbm/http/tests/system/http3/http3-loopback.cpp:1320-1379)_
+`max_streams_bidi` limits HTTP/3 requests in flight, not requests over the connection's lifetime. Qb returns a bidirectional slot on close for client-initiated streams delivered through `stream_open_cb`; ngtcp2 handles implicit openings itself. The loopback test completes 130 sequential requests on one connection with the default QUIC limit of 100. _(qb/src/qb/io/quic.cpp:1122,1626-1653; qbm/http/tests/system/http3/http3-loopback.cpp:1359-1418)_
 
 If QUIC closes synchronously during request submission, the request already removed from the queue receives a `503` and is not entered into the active registry of the closed connection, even if an old failure callback throws during teardown; its saved exception propagates afterward. Connect success/failure notify their other callbacks before propagating a user callback exception; explicit disconnect also completes transport cleanup. _(src/qbm/http/3/client.cpp:119-171,386-467,470-527,545-595)_
 
@@ -519,7 +519,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 
 - **DELETE ⇒ `qb::http::method::DEL`** and `router().del(...)`. `method::DELETE` does not exist.
 - `Body`/`Headers` are base classes — `req.set_header(...)`/`req.body()`, not `req.headers().set(...)`. After mutating `headers()` directly, call `refresh_content_type()`; `content_type()` derives itself from the raw header on the next read.
-- Request cookies need an explicit `req.parse_cookie_header()`; response cookie edits via the pointer/jar need `update_cookie_header(name)`.
+- Request cookies: the h1, h2 and h3 servers parse them before routing (every `Cookie` line; a refused header -- name over 1024 bytes, value over 4096, control character -- is served without cookies, Huly QB-1174); a `Request` you build needs `req.parse_cookie_header()`, which throws on a refused header (jar left empty). Response cookie edits via the pointer/jar need `update_cookie_header(name)`.
 - Terminal context helpers (`json`, `text`, `redirect`, `no_content`, the 4xx/5xx ones) call `complete()` internally — set custom headers/body first. Only `ctx->status(code)` is chainable.
 - `Body::as<T>()`/`try_as<T>()` and the assignment set are closed; non-supported `T` is a compile error. `as<T>()` throws on a malformed payload — reach for `try_as<T>() -> std::optional<T>` (`noexcept`) on request bodies.
 - `out << msg` writes a COMPLETE HTTP/1.1 message — an empty chunked body is its last-chunk — and a request with a raw SP, control byte or DEL in its URI's query throws `std::length_error` (percent-encode it; `qb::io::uri` already refuses them in a path), as does one with no method (a default-constructed `Request`) or an invalid URI; an empty path goes out as `/`. A refusal writes nothing and keeps what the pipe held before it (QB-1066). A chunked message's `Trailer`-announced fields and its `trailers()` go out after the last chunk, and received trailer fields land in `trailers()` and, for 3.x, in `headers()` too, as on HTTP/2 and HTTP/3 (QB-1067, QB-1073). To stream chunks yourself, write `qb::http::MessageHead{msg}` (start line + header section only), then the `Chunk`s and the terminating `Chunk{}`.

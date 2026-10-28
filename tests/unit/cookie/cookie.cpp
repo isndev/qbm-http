@@ -1096,3 +1096,36 @@ TEST_F(CookieJarTest, RemoveFindsANameWrittenWithUpperCaseLetters) {
     EXPECT_EQ(mixed.size(), 0u);
     EXPECT_FALSE(mixed.remove("SessionId")) << "a second removal finds nothing";
 }
+
+// A request's Cookie header may come as several field lines -- HTTP/2 and HTTP/3 let a client split it into one
+// line per cookie-pair (RFC 9113 8.2.3, RFC 9114 4.2.1) -- and parse_cookie_header() read only the first one
+// (Huly QB-1174). Every line is read now, as if joined with "; ".
+TEST(RequestCookieHeader, EveryCookieLineIsReadAsIfJoined) {
+    Request req;
+    req.add_header("cookie", "a=1");
+    req.add_header("Cookie", "b=2; c=3");
+    req.parse_cookie_header();
+    EXPECT_EQ(req.cookie_value("a"), "1");
+    EXPECT_EQ(req.cookie_value("b"), "2") << "the second line was dropped";
+    EXPECT_EQ(req.cookie_value("c"), "3");
+
+    Request dup; // a name's first value wins, across lines as within one
+    dup.add_header("cookie", "k=first; k=second");
+    dup.add_header("cookie", "k=third");
+    dup.parse_cookie_header();
+    EXPECT_EQ(dup.cookie_value("k"), "first");
+}
+
+TEST(RequestCookieHeader, ARefusedLineLeavesNoCookieAndTheServersServeTheRequestAnyway) {
+    Request req;
+    req.add_header("cookie", "a=1");
+    req.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v");
+    EXPECT_THROW(req.parse_cookie_header(), std::runtime_error);
+    EXPECT_EQ(req.cookie("a"), nullptr) << "a refused header yields no cookie, not the lines before the refused one";
+
+    Request none; // no header, an empty one: no cookie, no throw
+    EXPECT_NO_THROW(none.parse_cookie_header());
+    none.add_header("cookie", "");
+    EXPECT_NO_THROW(none.parse_cookie_header());
+    EXPECT_EQ(none.cookie("a"), nullptr);
+}

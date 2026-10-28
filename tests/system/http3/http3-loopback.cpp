@@ -470,6 +470,45 @@ TEST_F(Http3LoopbackTest, QueryAndRepeatedHeadersRoundTrip) {
     server->close();
 }
 
+TEST_F(Http3LoopbackTest, RequestCookiesAreParsedSplitLinesIncludedAndARefusedHeaderIsServed) {
+    // HTTP/3 parsed no Cookie header at all, and a client may split it into one line per cookie-pair
+    // (RFC 9114 4.2.1); a header the parser refuses is served without cookies (Huly QB-1174).
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/cookies", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().set_header("x-cookie-a", ctx->request().cookie_value("a"));
+        ctx->response().set_header("x-cookie-b", ctx->request().cookie_value("b"));
+        ctx->response().body() = "cookies";
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    qb::http::Request split{qb::io::uri("/cookies")};
+    split.add_header("cookie", "a=1");
+    split.add_header("cookie", "b=2");
+    auto response = qb::http::run_sync(client->push_request(std::move(split)));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("x-cookie-a"), "1");
+    EXPECT_EQ(response.header("x-cookie-b"), "2");
+
+    qb::http::Request refused{qb::io::uri("/cookies")};
+    refused.add_header("cookie", std::string(1025, 'n') + "=v; a=1");
+    response = qb::http::run_sync(client->push_request(std::move(refused)));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("x-cookie-a"), "");
+
+    response = qb::http::run_sync(client->push_request(qb::http::Request{qb::io::uri("/cookies")}));
+    EXPECT_EQ(response.status(), qb::http::status::OK) << "the server keeps serving";
+
+    client->disconnect();
+    server->close();
+}
+
 TEST_F(Http3LoopbackTest, LargePostBody) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();

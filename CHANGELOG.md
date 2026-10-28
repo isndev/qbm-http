@@ -27,6 +27,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
+  `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
+  outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over
+  1024 bytes, a value over 4096, a control character or a line over 16 KiB -- all within the default field limits
+  (8192). One unauthenticated request with `cookie: <1025 bytes>=v` ended the process (`libc++abi: terminating due to
+  uncaught exception of type std::runtime_error`, exit 134), in every release since 3.0.0. The HTTP/2 server now
+  parses under a `try` and serves such a request without cookies, as the HTTP/1.1 server always did. Two more cookie
+  defects went with it: the HTTP/3 server parsed no `Cookie` header at all (`cookie_value()` was empty on HTTP/3 and
+  on the HTTP/3 side of the dual-stack server), and `Request::parse_cookie_header()` read only the first `Cookie`
+  field line, while HTTP/2 and HTTP/3 let a client split it into one line per cookie (RFC 9113 §8.2.3, RFC 9114
+  §4.2.1) -- the second cookie was lost. Every line is read now, as if joined with `; ` (a name's first value wins), a
+  refused line leaves the jar empty, and the HTTP/3 server parses before routing under the same `try`. The docs said
+  the servers did not parse request cookies at all; they do, on all three protocols. Proven by a loopback case per
+  protocol (`qbm-http-test-system-http2-client`, `-http3-loopback`; HTTP/1.1 already had its own) and two unit cases
+  (`qbm-http-test-unit-cookie`), and by five mutants of the fix, all caught -- the unguarded HTTP/2 call reproduces
+  the termination.
 - **qbm-http and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is
   installed any more (Huly QB-1139).** The llhttp fork's `http_` prefix keeps it from colliding with a system
   llhttp, but it is http_parser's prefix too, and two names are shared outright with other signatures:

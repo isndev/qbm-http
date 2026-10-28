@@ -37,13 +37,21 @@ namespace qb::http {
 void
 Request::parse_cookie_header() {
     _cookies.clear();
-    const std::string &cookie_header_value = this->header("Cookie", 0);
-    if (cookie_header_value.empty()) {
+    const auto lines = this->_headers.find("Cookie");
+    if (lines == this->_headers.cend())
         return;
-    }
-    auto cookies_map = parse_cookies(std::string_view(cookie_header_value), false);
-    for (const auto &[name, value] : cookies_map) {
-        _cookies.add(name, value);
+    try {
+        for (const std::string &line : lines->second) {
+            if (line.empty())
+                continue;
+            // As in one line, where parse_cookies() keeps a name's first value, the first line wins.
+            for (const auto &[name, value] : parse_cookies(std::string_view(line), false))
+                if (_cookies.get(name) == nullptr)
+                    _cookies.add(name, value);
+        }
+    } catch (...) {
+        _cookies.clear(); // a refused header yields no cookie, not the lines before the refused one
+        throw;
     }
 }
 

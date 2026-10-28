@@ -170,7 +170,7 @@ When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that man
 
 ### `onMessage()` — dispatch
 
-`server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. They then **move** the parsed message into the I/O handler and reset the parser:
+`server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. The HTTP/2 and HTTP/3 servers parse the request's cookies under the same `try` before routing; the HTTP/2 server called the parser outside it until Huly QB-1174, and one request with a cookie name over 1024 bytes terminated the process. They then **move** the parsed message into the I/O handler and reset the parser:
 
 <!-- src: src/qbm/http/1.1/protocol/server.h:76-95 -->
 
@@ -256,7 +256,7 @@ assert(err != HPE_OK && err != HPE_PAUSED);
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: qbm/http/src/qbm/http/request.h:386; qbm/http/src/qbm/http/response.h:358; qbm/http/src/qbm/http/request.cpp:410-412; qbm/http/src/qbm/http/response.cpp:368-370 -->
+<!-- src: qbm/http/src/qbm/http/request.h:390; qbm/http/src/qbm/http/response.h:358; qbm/http/src/qbm/http/request.cpp:418-420; qbm/http/src/qbm/http/response.cpp:368-370 -->
 
 ```cpp
 template <>
@@ -272,7 +272,7 @@ These write the request line / status line, the headers, and the body to the out
 
 `out << qb::http::MessageHead{msg}` writes the start line and the header section and nothing after them — no body, no last-chunk — with the same validation. The HTTP/1.1 server session serializes every `HEAD` response that way, whatever framing headers it carries, and it is the head to write before a body you stream yourself as `Chunk`s.
 
-<!-- src: qbm/http/src/qbm/http/message_base.h:323-329; qbm/http/src/qbm/http/request.h:396; qbm/http/src/qbm/http/response.h:368 -->
+<!-- src: qbm/http/src/qbm/http/message_base.h:323-329; qbm/http/src/qbm/http/request.h:400; qbm/http/src/qbm/http/response.h:368 -->
 
 ## After the upgrade: WebSocket
 

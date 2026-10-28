@@ -109,6 +109,15 @@ public:
             ctx->complete();
         });
 
+        // 1b. The request's cookies, as the server parsed them (Huly QB-1174).
+        router().get("/api/cookies", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().add_header("X-Cookie-A", ctx->request().cookie_value("a"));
+            ctx->response().add_header("X-Cookie-B", ctx->request().cookie_value("b"));
+            ctx->response().body() = "cookies";
+            ctx->complete();
+        });
+
         // 2. POST echoing the request body back into the response.
         router().post("/api/data", [](auto ctx) {
             const std::string request_body = ctx->request().body().template as<std::string>();
@@ -365,6 +374,66 @@ protected:
 // ---------------------------------------------------------------------------
 // Single request round-trips
 // ---------------------------------------------------------------------------
+
+TEST_F(Http2ClientTest, ACookieHeaderSplitIntoSeveralFieldLinesIsReadWhole) {
+    // RFC 9113 8.2.3: an HTTP/2 client may split the Cookie header into one field line per cookie-pair (browsers do,
+    // for HPACK); the server reads them all, as if joined with "; " (Huly QB-1174).
+    auto client = make_test_client();
+
+    std::atomic<bool>  response_received{false};
+    qb::http::Response response;
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/cookies");
+    request.add_header("cookie", "a=1");
+    request.add_header("cookie", "b=2");
+
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        response          = std::move(r);
+        response_received = true;
+    }));
+    client->connect(nullptr);
+    ASSERT_TRUE(ServerThread::pump_until([&] { return response_received.load(); }));
+
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("X-Cookie-A"), "1");
+    EXPECT_EQ(response.header("X-Cookie-B"), "2") << "the second cookie field line was dropped";
+    client->disconnect();
+}
+
+TEST_F(Http2ClientTest, ACookieHeaderTheParserRefusesDoesNotStopTheServer) {
+    // A cookie name over COOKIE_NAME_MAX (1024) fits the field limits (8192) and makes parse_cookies() throw. The
+    // server ignores the cookies of such a request, as the HTTP/1.1 server does, and keeps serving (Huly QB-1174).
+    auto client = make_test_client();
+
+    std::atomic<int>   responses{0};
+    qb::http::Response refused, after;
+
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/cookies");
+    request.add_header("cookie", std::string(1025, 'n') + "=v; a=1");
+    ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
+        refused = std::move(r);
+        ++responses;
+    }));
+    client->connect(nullptr);
+    ASSERT_TRUE(ServerThread::pump_until([&] { return responses.load() == 1; })) << "the server did not answer";
+    EXPECT_EQ(refused.status(), qb::http::status::OK);
+    EXPECT_EQ(refused.header("X-Cookie-A"), "") << "a Cookie header the parser refuses yields no cookie";
+
+    qb::http::Request next;
+    next.method() = qb::http::Method::GET;
+    next.uri()    = qb::io::uri("/api/test");
+    ASSERT_TRUE(client->push_request(next, [&](qb::http::Response r) {
+        after = std::move(r);
+        ++responses;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return responses.load() == 2; })) << "the server stopped serving";
+    EXPECT_EQ(after.status(), qb::http::status::OK);
+    client->disconnect();
+}
 
 TEST_F(Http2ClientTest, SimpleGetRequest) {
     auto client = make_test_client();

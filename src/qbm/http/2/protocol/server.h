@@ -2119,7 +2119,16 @@ private:
             }
             stream.assembled_request.major_version = 2;
             stream.assembled_request.minor_version = 0;
-            stream.assembled_request.parse_cookie_header();
+            // A Cookie header the parser refuses (a name over COOKIE_NAME_MAX, a value over COOKIE_VALUE_MAX, a control
+            // character) throws: caught here, the request is served without cookies, as on HTTP/1.1. Uncaught, it
+            // reached the noexcept frame handlers and terminated the process (Huly QB-1174).
+            try {
+                stream.assembled_request.parse_cookie_header();
+            } catch (const std::exception &e) {
+                LOG_HTTP_WARN_PA(stream_id, "Failed to parse Cookie header: " << e.what());
+            } catch (...) {
+                LOG_HTTP_WARN_PA(stream_id, "Failed to parse Cookie header: unknown exception");
+            }
 
             // CRITICAL: Mark as dispatched BEFORE calling _io.on() because it might trigger immediate response
             // and close the stream, making the 'stream' reference invalid

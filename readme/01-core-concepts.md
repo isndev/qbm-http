@@ -80,12 +80,12 @@ Key accessors, each verified against `request.h`:
 | `uri()` | `const qb::io::uri&` / `qb::io::uri&` | scheme, host, path, query, fragment — a qb-io type |
 | `query(name, index = 0)` | `const std::string&` | a single query parameter; `index` selects among repeated keys. On a miss returns a process-wide static empty string (never a temporary). For a custom fallback use `query_or(name, fallback, index = 0)`, which returns `std::string` by value. Delegates to `uri().query(...)` |
 | `queries()` | the URI's query map | `qb::icase_unordered_map<std::vector<std::string>>` |
-| `parse_cookie_header()` | `void` | parses the `Cookie` header into the jar; call it before reading cookies |
+| `parse_cookie_header()` | `void` | parses every `Cookie` line into the jar; the servers call it before routing, call it yourself on a request you build |
 | `cookie(name)` | `const Cookie*` | `nullptr` if absent (case-insensitive name) |
 | `cookie_value(name)` | `const std::string&` | the value, or a static empty string on a miss. For a custom fallback use `cookie_value_or(name, fallback)`, which returns `std::string` by value |
 | `has_cookie(name)` | `bool` | presence test |
 
-Request cookies are not parsed automatically — call `parse_cookie_header()` once the headers are present, then read from the jar.
+A server parses a request's cookies before routing it — HTTP/1.1, HTTP/2 and HTTP/3 alike, every `Cookie` line included (HTTP/2 and HTTP/3 let a client split the header into one line per cookie, RFC 9113 §8.2.3 / RFC 9114 §4.2.1) — so a handler reads `ctx->request().cookie_value(name)` directly. A header the parser refuses (a name over 1024 bytes, a value over 4096, a control character) is served without cookies. A request you build yourself — a test, a client — is not parsed: call `parse_cookie_header()` once the headers are present; it throws on such a header, the jar left empty (Huly QB-1174).
 
 <!-- src: qbm/http/tests/unit/cookie/cookie.cpp:488-494 -->
 ```cpp
@@ -293,7 +293,7 @@ HTTP/2 and HTTP/3 reuse the message model wholesale: HPACK/QPACK decode into the
 ## Pitfalls
 
 - **`Body`/`Headers` are base classes, not members.** Call `req.set_header(...)` and `req.body()` on the message directly. There is no `req.headers().set(...)` setter — `headers()` returns the raw map for inspection or bulk replacement, after which you call `refresh_content_type()` (the typed `content_type()` re-derives on its next read).
-- **Request cookies need `parse_cookie_header()`.** The jar is empty until you parse. Reading `req.cookie("x")` before parsing returns `nullptr`.
+- **A request you build needs `parse_cookie_header()`.** A server parses the requests it routes; the jar of a `Request` you construct is empty until you parse it, and `req.cookie("x")` returns `nullptr` before that.
 - **Editing a response cookie in place desyncs the header.** After mutating through `cookie(name)` (non-const) or the `cookies()` jar, call `update_cookie_header(name)` or `update_cookie_headers()`.
 - **DELETE is `method::DEL`.** `method::DELETE` does not exist; use `DEL` or the `DELETE_METHOD` alias.
 - **`as<T>()` is closed.** Only `std::string`, `std::string_view`, `qb::json`, `Multipart`, and `Form` convert out of a `Body`; anything else fails to compile.

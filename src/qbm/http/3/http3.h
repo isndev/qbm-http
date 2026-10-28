@@ -924,6 +924,15 @@ public:
         auto session      = ensure_session(connection_id, stream_id);
         request.stream_id = stream_id;
         session->bind_http3_request_method(request.method());
+        // The cookies, as the HTTP/1.1 and HTTP/2 servers parse them; HTTP/3 parsed none (Huly QB-1174). A header the
+        // parser refuses is served without cookies.
+        try {
+            request.parse_cookie_header();
+        } catch (const std::exception &e) {
+            LOG_HTTP_WARN("Failed to parse Cookie header: " << e.what());
+        } catch (...) {
+            LOG_HTTP_WARN("Failed to parse Cookie header: unknown exception");
+        }
         auto context = _router.route(session, std::move(request));
         if (!context) {
             qb::http::Response not_found(qb::http::status::NOT_FOUND);
