@@ -460,6 +460,49 @@ TEST_F(MiddlewarePipelineTest, HstsIsSentOverTlsForAnOriginFormRequest) {
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.header("Strict-Transport-Security"), "max-age=31536000");
 }
+
+// The CSRF middleware's https rule on a real TLS connection (the fourth review: only the mock session's fallback
+// exercised it). Over TLS, an http:// Origin of the same host is another origin -- an active attacker's page on a
+// host without HSTS -- and is refused; the https one passes. The scheme comes from the connection, not the URI:
+// an HTTP/1.1 request is origin-form.
+TEST_F(MiddlewarePipelineTest, CsrfMiddlewareRequiresAnHttpsOriginOverTls) {
+    ASSERT_TRUE(qb::http::test::certs_available())
+        << "Missing TLS test resources: " << qb::http::test::ssl_cert_path() << " / " << qb::http::test::ssl_key_path();
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+
+    qb::http::test::ServerThread<TlsPipelineServer> server([cert, key](TlsPipelineServer &srv) -> bool {
+        auto tls = qb::io::ssl::Context::server(cert, key);
+        if (!tls.ok()) {
+            return false;
+        }
+        srv.transport().init(std::move(tls));
+        srv.router().use(qb::http::csrf_middleware<TlsPipelineSession>());
+        srv.router().post("/csrf", [](std::shared_ptr<qb::http::Context<TlsPipelineSession>> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "posted";
+            ctx->complete();
+        });
+        srv.router().compile();
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+            return false;
+        }
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server.ready());
+    const std::string authority = "localhost:" + std::to_string(server.port());
+
+    auto status_for = [&authority](std::string const &origin) {
+        qb::http::Request request{{"https://" + authority + "/csrf"}};
+        request.add_header("Origin", origin);
+        request.body() = "x";
+        // Self-signed test certificate: opt out of secure-by-default verification.
+        return qb::http::run_sync(qb::http::POST(request, qb::duration::zero(), /*verify_peer=*/false)).response.status();
+    };
+    EXPECT_EQ(status_for("https://" + authority), qb::http::status::OK);
+    EXPECT_EQ(status_for("http://" + authority), qb::http::status::FORBIDDEN) << "an http page's request over TLS";
+}
 #endif // QB_HAS_SSL
 
 // ---------------------------------------------------------------------------

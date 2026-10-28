@@ -379,6 +379,29 @@ TEST_F(CsrfMiddlewareTest, TheTokenCookieNameIsMatchedExactly) {
     EXPECT_EQ(options.cookie_token(post({{"Cookie", "__Host-csrf=" + token}})), token);
 }
 
+TEST_F(CsrfMiddlewareTest, ALookAlikeCookieSentFirstNeitherHidesNorReplacesTheToken) {
+    // The fourth review: the parser dropped whitespace inside a name, so `__Host -csrf` -- which a sibling host can
+    // set, a browser protecting only the exact prefix -- was stored as `__Host-csrf` and its value taken; and a
+    // planted `__host-csrf` sent first hid the real cookie (token_missing on every unsafe request). The token is
+    // the first pair spelled exactly `__Host-csrf`, wherever it comes.
+    CsrfOptions options;
+    options.tokens(secret);
+    std::string const real    = options.issue_token(qb::http::Request{});
+    std::string const planted = options.issue_token(qb::http::Request{});
+    for (std::string const look_alike : {"__Host -csrf", "__host-csrf", " __Host-csrf\t", "__HOST-CSRF"}) {
+        std::string const cookie = look_alike + "=" + planted + "; __Host-csrf=" + real;
+        if (look_alike == " __Host-csrf\t") { // the whitespace around a name is no part of it: this IS the cookie
+            EXPECT_EQ(options.cookie_token(post({{"Cookie", cookie}})), planted);
+            continue;
+        }
+        EXPECT_EQ(options.cookie_token(post({{"Cookie", cookie}})), real) << look_alike;
+        run(options, post({{"Cookie", cookie}, {"X-CSRF-Token", real}}));
+        expect_served();
+        run(options, post({{"Cookie", cookie}, {"X-CSRF-Token", planted}}));
+        expect_refused(CsrfVerdict::token_invalid);
+    }
+}
+
 TEST_F(CsrfMiddlewareTest, AnUnsafeRequestMustEchoTheCookieToken) {
     CsrfOptions options;
     options.tokens(secret);

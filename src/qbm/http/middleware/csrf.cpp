@@ -98,6 +98,7 @@ needs_secure(std::string_view const name) noexcept {
     return istarts_with(name, "__Host-") || istarts_with(name, "__Secure-");
 }
 
+#ifdef QB_HAS_SSL
 /// The value of field @p name in an `application/x-www-form-urlencoded` body, its first occurrence.
 [[nodiscard]] std::string
 form_value(std::string_view const body, std::string const &name) {
@@ -113,33 +114,6 @@ form_value(std::string_view const body, std::string const &name) {
         start = end + 1;
     }
     return {};
-}
-
-/// Whether the first cookie-pair named @p name, case aside, in the request's `Cookie` lines -- the one the
-/// case-insensitive jar keeps -- is spelled exactly @p name. The jar folds the names it stores, so the spelling is
-/// read from the lines. Called with a value in the jar only, which a header-section line gave: those lines come
-/// before any trailer section's (store_received_trailer appends), so the first match is always the header's.
-[[nodiscard]] bool
-first_cookie_spelled(Request const &request, std::string_view const name) {
-    auto const &fields = request.headers();
-    auto const  lines  = fields.find("Cookie");
-    if (lines == fields.cend())
-        return false;
-    for (std::string_view line : lines->second) {
-        while (!line.empty()) {
-            auto const end  = line.find(';');
-            auto       pair = line.substr(0, end);
-            line            = end == std::string_view::npos ? std::string_view{} : line.substr(end + 1);
-            pair            = pair.substr(0, pair.find('='));
-            while (!pair.empty() && (pair.front() == ' ' || pair.front() == '\t'))
-                pair.remove_prefix(1);
-            while (!pair.empty() && (pair.back() == ' ' || pair.back() == '\t'))
-                pair.remove_suffix(1);
-            if (iequals(pair, name))
-                return pair == name;
-        }
-    }
-    return false;
 }
 
 /// The value of field @p name in a `multipart/form-data` body -- an HTML form with a file input -- its first part
@@ -161,7 +135,6 @@ multipart_value(Request const &request, std::string const &name) {
     return {};
 }
 
-#ifdef QB_HAS_SSL
 /// A token is the nonce and its signature, both base64url, joined by a dot.
 constexpr std::size_t      nonce_bytes  = 32;
 constexpr std::string_view token_domain = "qb-csrf-v1";
@@ -207,12 +180,56 @@ to_string(CsrfVerdict const verdict) noexcept {
 
 CsrfOptions::CsrfOptions() = default;
 
-CsrfOptions::~CsrfOptions() {
-#ifdef QB_HAS_SSL
-    if (!_secret.empty())
-        OPENSSL_cleanse(_secret.data(), _secret.size());
-#endif
+namespace detail {
+
+wiped_bytes::wiped_bytes(wiped_bytes &&other) noexcept
+    : _bytes(std::move(other._bytes)) {
+    other._bytes.clear(); // the buffer moved with it: nothing of the secret is left behind
 }
+
+wiped_bytes &
+wiped_bytes::operator=(wiped_bytes const &other) {
+    if (this != &other) {
+        wipe();
+        _bytes = other._bytes;
+    }
+    return *this;
+}
+
+wiped_bytes &
+wiped_bytes::operator=(wiped_bytes &&other) noexcept {
+    if (this != &other) {
+        wipe();
+        _bytes = std::move(other._bytes);
+        other._bytes.clear();
+    }
+    return *this;
+}
+
+wiped_bytes::~wiped_bytes() {
+    wipe();
+}
+
+void
+wiped_bytes::assign(std::string_view const bytes) {
+    wipe();
+    _bytes.assign(bytes.begin(), bytes.end());
+}
+
+void
+wiped_bytes::wipe() noexcept {
+    // Every byte the buffer ever held is wiped before it is released or overwritten: a shorter value assigned later
+    // reuses a capacity already wiped, a longer one reallocates from a wiped buffer.
+#ifdef QB_HAS_SSL
+    if (!_bytes.empty())
+        OPENSSL_cleanse(_bytes.data(), _bytes.size());
+#else
+    std::fill(_bytes.begin(), _bytes.end(), static_cast<unsigned char>(0));
+#endif
+    _bytes.clear();
+}
+
+} // namespace detail
 
 CsrfOptions &
 CsrfOptions::trusted_origin(std::string_view const origin) {
@@ -238,7 +255,7 @@ CsrfOptions::tokens(std::string_view const secret) {
     if (secret.size() < min_secret_size)
         throw std::invalid_argument("CsrfOptions::tokens: the secret has " + std::to_string(secret.size()) + " bytes, at least "
                                     + std::to_string(min_secret_size) + " are needed");
-    _secret.assign(secret.begin(), secret.end());
+    _secret.assign(secret);
     return *this;
 #else
     (void) secret;
@@ -366,18 +383,15 @@ CsrfOptions::exempted(Request const &request) const {
     return std::any_of(_exempt.begin(), _exempt.end(), [&](RequestPredicate const &predicate) { return predicate(request); });
 }
 
-std::string_view
+std::string
 CsrfOptions::cookie_token(Request const &request) const {
-    std::string const &value = request.cookie_value(_cookie_name);
-    if (value.empty() || !first_cookie_spelled(request, _cookie_name))
-        return {};
-    return value;
+    return request.cookie_value_exact(_cookie_name);
 }
 
 CsrfVerdict
 CsrfOptions::check_token(Request const &request) const {
 #ifdef QB_HAS_SSL
-    std::string_view const cookie = cookie_token(request);
+    std::string const cookie = cookie_token(request);
     if (cookie.empty())
         return CsrfVerdict::token_missing; // before any body is read: a request without the cookie costs nothing
     std::string submitted = request.header(_header_name);
@@ -409,7 +423,7 @@ CsrfOptions::signature(std::string_view const nonce, Request const &request) con
     data.reserve(token_domain.size() + binding.size() + nonce.size() + 24);
     data.append(token_domain).append(1, '\n').append(std::to_string(binding.size())).append(1, '\n');
     data.append(binding).append(1, '\n').append(nonce);
-    return qb::crypto::base64url_encode(qb::crypto::hmac_sha256(_secret, data));
+    return qb::crypto::base64url_encode(qb::crypto::hmac_sha256(_secret.bytes(), data));
 #else
     (void) nonce;
     (void) request;

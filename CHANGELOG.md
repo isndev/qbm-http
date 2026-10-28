@@ -21,31 +21,34 @@ All notable changes to the qbm-http module are documented here. The format is ba
   TLS-terminating proxy the scheme is not compared, as in Go, and HSTS covers it); a request with neither header
   passes, since every browser sends one of them on an unsafe request. That is the algorithm of Go 1.25's
   `net/http.CrossOriginProtection` and the current OWASP recommendation. Opt in to a second layer with
-  `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`; wiped when the options are destroyed): the OWASP
+  `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`; wiped before it is released or replaced): the OWASP
   signed double-submit cookie -- a random nonce and its HMAC-SHA256 under the secret, domain-separated and
   length-prefixed, bound to the session when `session_binding()` names it -- set as `__Host-csrf` (`Secure`, `Path=/`,
-  no `Domain`, `SameSite=Lax`, readable by the page's scripts; read under exactly that name, case included) on every
-  response to a request without a valid one -- a token refusal's included, never one refused for where it comes from,
-  so another site's page cannot rotate it -- after the handler (a handler that rebuilds the response keeps it), and
-  offered to the page in `qb::http::csrf_token_slot`; an unsafe request echoes it in `X-CSRF-Token` or the `_csrf`
-  field of a urlencoded or multipart/form-data body (a form with a file input; the body is read only when the cookie
-  and the header leave it to), compared in constant time. `trusted_origin()` (validated: `scheme://host[:port]`, http
-  or https) and `exempt(predicate)` skip both layers; configuration a browser would silently defeat is refused (a
-  non-token cookie name, `Secure` off under a `__Host-`/`__Secure-` name or with `SameSite=None`, a `Max-Age` outside
-  1 s to 400 days, a short secret); a refusal is `403 Forbidden` with the verdict in a `text/plain` body
-  (`qb::http::CsrfVerdict`, `to_string`) unless `on_reject()` writes it; `CsrfOptions::check(request,
-  secure_connection)` gives the decision on its own; the factory tag is `qb::http::middleware::tags::csrf`. Out of its
-  reach, and said so: a WebSocket upgrade is a `GET` (cross-site WebSocket hijacking is the upgrade handler's), and a
-  DNS-rebound name makes `Origin` equal `Host`. Proven by `qbm-http-test-unit-middleware-csrf` (29 cases: every
-  `Sec-Fetch-Site` value, `Origin` against `Host` and against the URI's authority, an origin-form `//host` target,
-  default and explicit ports, IPv6, case, `null`, an origin with a path, neither header, a missing authority, the
-  scheme over TLS; trusted origins and the forms they refuse; exemptions; `on_reject`; the cookie, its attributes, its
-  exact name and its slot, no re-issue of a valid token, none on a refusal of where the request comes from, the header
-  and both form fields, a missing, different, forged, other-secret or other-session token, malformed tokens, a handler
-  that rebuilds the response, the configuration refusals; without SSL, `tokens()` refusing), two loopback cases on the
-  real servers (HTTP/1.1 on the wire with an origin-form `//evil.test/csrf` and an absolute-form target,
-  `qbm-http-test-system-middleware-pipeline-system`; HTTP/2 with `:authority` and lower-case names,
-  `-system-http2-client`), and 23 mutants of the middleware, all caught.
+  no `Domain`, `SameSite=Lax`, readable by the page's scripts; read back as the first cookie spelled exactly so, which
+  a `__host-csrf` or a `__Host -csrf` another host planted neither replaces nor hides) on every response to a request
+  without a valid one -- a token refusal's included, never one refused for where it comes from, so an unsafe request
+  another site's page makes rotates nothing (a cross-site link under `SameSite=Strict` and an exempt request do get
+  one) -- after the handler (a handler that rebuilds the response keeps it), and offered to the page in
+  `qb::http::csrf_token_slot`; an unsafe request echoes it in `X-CSRF-Token` or the `_csrf` field of a urlencoded or
+  multipart/form-data body (a form with a file input; the body is read only when the cookie and the header leave it
+  to), compared in constant time. `trusted_origin()` (validated: `scheme://host[:port]`, http or https) and
+  `exempt(predicate)` skip both layers; configuration a browser would silently defeat is refused (a non-token cookie
+  name, `Secure` off under a `__Host-`/`__Secure-` name or with `SameSite=None`, a `Max-Age` outside 1 s to 400 days,
+  a short secret); a refusal is `403 Forbidden` with the verdict in a `text/plain` body (`qb::http::CsrfVerdict`,
+  `to_string`) unless `on_reject()` writes it; `CsrfOptions::check(request, secure_connection)` gives the decision on
+  its own; the factory tag is `qb::http::middleware::tags::csrf`. Out of its reach, and said so: a WebSocket upgrade
+  is a `GET` (cross-site WebSocket hijacking is the upgrade handler's), and a DNS-rebound name makes `Origin` equal
+  `Host`. Proven by `qbm-http-test-unit-middleware-csrf` (30 cases: every `Sec-Fetch-Site` value, `Origin` against
+  `Host` and against the URI's authority, an origin-form `//host` target, default and explicit ports, IPv6, case,
+  `null`, an origin with a path, neither header, a missing authority, the scheme over TLS; trusted origins and the
+  forms they refuse; exemptions; `on_reject`; the cookie, its attributes, its exact name -- look-alikes sent first
+  included -- and its slot, no re-issue of a valid token, none on a refusal of where the request comes from, the
+  header and both form fields, a missing, different, forged, other-secret or other-session token, malformed tokens, a
+  handler that rebuilds the response, the configuration refusals; without SSL, `tokens()` refusing), three loopback
+  cases on the real servers (HTTP/1.1 on the wire with an origin-form `//evil.test/csrf` and an absolute-form target,
+  and HTTP/1.1 over TLS refusing an `http://` Origin, `qbm-http-test-system-middleware-pipeline-system`; HTTP/2 with
+  `:authority` and lower-case names, `-system-http2-client`), and 30 mutants of the middleware and the cookie reads it
+  relies on, all caught.
 
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
   `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`
@@ -64,6 +67,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   not consumed, one request short, the read disarmed after the preflights) are refused.
 
 ### Fixed
+
+- **A cookie name keeps the whitespace inside it: a `__Host -x` is no longer read as the `__Host-x` a browser
+  protects, and a prefixed cookie can be read by its exact name (Huly QB-95, its fourth review).** `parse_cookies()`
+  dropped every whitespace character of a name, so `__Host -csrf` -- a name another host can set, a browser protecting
+  only the exact prefix -- was stored as `__Host-csrf`, and when it came first in the header it took the real cookie's
+  place in the jar. Only the whitespace around a name or an unquoted value is removed now (RFC 6265bis §5.6); inside a
+  name it is part of it, and a value's trailing whitespace is trimmed. The jar still folds case and keeps a name's
+  first pair, so a planted `__host-x` sent first is still what `cookie_value("__Host-x")` returns:
+  `Request::cookie_value_exact(name)` reads the first pair spelled exactly `name` from the header section's lines
+  (never a trailer section's, nothing for a refused header), over `parse_cookie_pairs()`, which keeps the order, the
+  spelling and every duplicate. Proven by three unit cases (`qbm-http-test-unit-cookie`, 64 -> 67) and four mutants,
+  each caught: the inner whitespace dropped, the exact read folding case or reading the trailer section, the trailing
+  whitespace of a value kept.
 
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`

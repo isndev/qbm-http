@@ -92,33 +92,16 @@ is_cookie_attribute(std::string_view name, bool set_cookie_header) noexcept {
     return false;
 }
 
-/**
- * @brief Parse HTTP cookies from raw data
- * @param ptr Pointer to cookie data
- * @param len Length of cookie data
- * @param set_cookie_header Whether parsing a Set-Cookie header (true) or Cookie header
- * (false)
- * @return Map of cookie names to values
- *
- * Parses raw cookie data according to RFC 6265 and returns a case-insensitive map
- * of cookie names to values. Handles both Cookie and Set-Cookie headers based on
- * the set_cookie_header parameter.
- *
- * For Cookie headers (set_cookie_header=false), parses "name1=value1; name2=value2"
- * For Set-Cookie headers (set_cookie_header=true), parses individual cookies while
- * ignoring cookie attributes like Path, Domain, Expires, etc.
- *
- * Supports both quoted and unquoted values, and properly handles special characters.
- *
- * @throws std::runtime_error If parsing fails due to malformed data
- */
-qb::icase_unordered_map<std::string>
-parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
-    qb::icase_unordered_map<std::string> dict;
-
+namespace {
+/// The parser behind parse_cookies() and parse_cookie_pairs(): it calls @p emit(name, value) for each pair in the
+/// order the header lists them, names as sent. Whitespace around a name or an unquoted value is removed, whitespace
+/// inside one is part of it (RFC 6265bis §5.6): `__Host -x` is not `__Host-x`.
+template <typename Sink>
+void
+parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Sink &&emit) {
     // Security: Validate input parameters
     if (!ptr || len == 0) {
-        return dict;
+        return;
     }
 
     // Security: Limit maximum cookie header size to prevent DoS (16KB as per RFC 6265 guidance)
@@ -137,6 +120,10 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
     std::string       cookie_value;
     char              value_quote_character = '\0'; // '\'' or '"' if parsing a quoted value, else '\0'
     bool              value_escape          = false;
+    const auto        trim_end              = [](std::string &text) {
+        while (!text.empty() && utility::is_http_whitespace(text.back()))
+            text.pop_back();
+    };
 
     while (ptr < end) {
         const char current_char = *ptr;
@@ -145,6 +132,7 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                 if (current_char == '=') {
                     // End of name found. Value might be empty.
                     // Name itself can be empty if previous was like ";=", handled by is_cookie_attribute.
+                    trim_end(cookie_name);
                     value_quote_character = '\0'; // Reset for new value
                     cookie_value.clear();
                     parse_state = CookieParseState::COOKIE_PARSE_VALUE;
@@ -154,18 +142,20 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                     // ';' (RFC 6265 §4.2.1); ',' is a legal cookie-octet, so splitting on it would
                     // corrupt a value containing a comma. Comma stays a separator only for
                     // Set-Cookie parsing (unchanged).
+                    trim_end(cookie_name);
                     if (!cookie_name.empty()) {
                         // If a name was parsed
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
-                            dict.emplace(cookie_name, ""); // Empty value
+                            emit(cookie_name, std::string{}); // Empty value
                         }
                         cookie_name.clear();
                         // cookie_value is already empty or irrelevant here
                     }
                     // Stay in COOKIE_PARSE_NAME for the next potential cookie
-                } else if (!utility::is_http_whitespace(current_char)) {
-                    // Ignore whitespace
-                    if (utility::is_control(current_char) || cookie_name.length() >= COOKIE_NAME_MAX) {
+                } else if (!utility::is_http_whitespace(current_char) || !cookie_name.empty()) {
+                    // Leading whitespace is skipped; inside a name it is kept (trailing whitespace is trimmed at its end).
+                    if ((utility::is_control(current_char) && !utility::is_http_whitespace(current_char))
+                        || cookie_name.length() >= COOKIE_NAME_MAX) {
                         throw std::runtime_error("Invalid character or max length exceeded for cookie name.");
                     }
                     cookie_name.push_back(current_char);
@@ -179,8 +169,9 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                         // End of value (unquoted). ',' separates only for Set-Cookie; in a request
                         // Cookie header it is a legal cookie-octet (RFC 6265 §4.2.1), so a value
                         // like "a,b" must stay intact rather than split into a bogus extra cookie.
+                        trim_end(cookie_value);
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
-                            dict.emplace(cookie_name, cookie_value); // Value might be empty
+                            emit(cookie_name, cookie_value); // Value might be empty
                         }
                         cookie_name.clear();
                         cookie_value.clear();
@@ -208,7 +199,7 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
                     } else if (current_char == value_quote_character) {
                         // End of quoted value
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
-                            dict.emplace(cookie_name, cookie_value);
+                            emit(cookie_name, cookie_value);
                         }
                         cookie_name.clear();
                         cookie_value.clear();
@@ -243,13 +234,50 @@ parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
     if (parse_state == CookieParseState::COOKIE_PARSE_VALUE && (value_quote_character != '\0' || value_escape)) {
         throw std::runtime_error("Unterminated quoted cookie value.");
     }
+    trim_end(cookie_name);
+    if (parse_state == CookieParseState::COOKIE_PARSE_VALUE)
+        trim_end(cookie_value); // an unquoted value at the end of the header
     if (!cookie_name.empty()) {
         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
-            dict.emplace(std::move(cookie_name), std::move(cookie_value));
+            emit(cookie_name, cookie_value);
         }
     }
+}
+} // namespace
 
+/**
+ * @brief Parse HTTP cookies from raw data
+ * @param ptr Pointer to cookie data
+ * @param len Length of cookie data
+ * @param set_cookie_header Whether parsing a Set-Cookie header (true) or Cookie header
+ * (false)
+ * @return Map of cookie names to values
+ *
+ * Parses raw cookie data according to RFC 6265 and returns a case-insensitive map
+ * of cookie names to values. Handles both Cookie and Set-Cookie headers based on
+ * the set_cookie_header parameter.
+ *
+ * For Cookie headers (set_cookie_header=false), parses "name1=value1; name2=value2"
+ * For Set-Cookie headers (set_cookie_header=true), parses individual cookies while
+ * ignoring cookie attributes like Path, Domain, Expires, etc.
+ *
+ * Supports both quoted and unquoted values, and properly handles special characters.
+ *
+ * @throws std::runtime_error If parsing fails due to malformed data
+ */
+qb::icase_unordered_map<std::string>
+parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
+    qb::icase_unordered_map<std::string> dict;
+    parse_cookies_into(ptr, len, set_cookie_header, [&dict](std::string const &name, std::string const &value) { dict.emplace(name, value); });
     return dict;
+}
+
+std::vector<std::pair<std::string, std::string>>
+parse_cookie_pairs(std::string_view header, bool set_cookie_header) {
+    std::vector<std::pair<std::string, std::string>> pairs;
+    parse_cookies_into(header.data(), header.size(), set_cookie_header,
+                       [&pairs](std::string const &name, std::string const &value) { pairs.emplace_back(name, value); });
+    return pairs;
 }
 
 /**

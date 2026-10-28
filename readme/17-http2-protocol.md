@@ -273,7 +273,7 @@ client->push_request(std::move(req), [](qb::http::Response res) {
 ```
 
 The URI-only `Request` constructor sets `GET`; the default constructor leaves the method `UNINITIALIZED`. The HTTP/2 client resolves a relative URI against its base but does not fill in the method, which becomes the `:method` pseudo-header. For another verb, set the method explicitly before `push_request`.
-<!-- src: qbm/http/src/qbm/http/request.h:50-64,79-87; qbm/http/src/qbm/http/2/client.cpp:248-261; qbm/http/src/qbm/http/2/protocol/client.h:1660-1664 -->
+<!-- src: qbm/http/src/qbm/http/request.h:53-67,82-90; qbm/http/src/qbm/http/2/client.cpp:248-261; qbm/http/src/qbm/http/2/protocol/client.h:1660-1664 -->
 
 `push_request` triggers an implicit connect when needed, so you do not have to call `connect()` first; queued requests flush once the handshake completes. To run several requests as one batch with a single callback that fires when all responses are in (order preserved), use `push_requests(std::vector<Request>, BatchResponseCallback)` — each request travels on its own stream concurrently.
 <!-- src: qbm/http/src/qbm/http/2/client.h:345,368; qbm/http/tests/system/http2/http2-client-coro.cpp:264-285 -->

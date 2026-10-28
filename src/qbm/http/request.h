@@ -46,6 +46,9 @@ private:
     /** @brief A collection of cookies parsed from the `Cookie` header of the request. */
     CookieJar _cookies;
 
+    /// How many of the `Cookie` lines the header section sent: the trailer section's come after them.
+    [[nodiscard]] std::size_t header_section_cookie_lines() const;
+
 public:
     /**
      * @brief Default constructor.
@@ -219,6 +222,18 @@ public:
         const Cookie *c = _cookies.get(name);
         return c ? c->value() : fallback;
     }
+
+    /**
+     * @brief The value of the first cookie named exactly @p name -- its case included -- in the header section's
+     *        `Cookie` lines; empty when there is none.
+     * @details The jar folds names: `cookie_value("__Host-x")` is the first pair of ANY case, so a `__host-x` sent
+     *          first -- which another host can plant, where a browser protects only the exact `__Host-` prefix --
+     *          would be read instead. This reads the lines again (`parse_cookie_pairs()`), the trailer section's
+     *          excluded, as `parse_cookie_header()` reads them; nothing is found when the jar holds no such name, of
+     *          any case, or when the header was refused.
+     * @param name The cookie name, compared byte for byte.
+     */
+    [[nodiscard]] std::string cookie_value_exact(std::string_view name) const;
 
     /**
      * @brief Checks if a cookie with the given name exists in the request.

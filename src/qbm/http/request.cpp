@@ -34,21 +34,30 @@
 
 namespace qb::http {
 
+std::size_t
+Request::header_section_cookie_lines() const {
+    const auto lines = this->_headers.find("Cookie");
+    if (lines == this->_headers.cend())
+        return 0;
+    // The header section's lines only. A received trailer field is ALSO added to the header fields, after the
+    // header section's values of its name (store_received_trailer), and a cookie is never taken from a trailer
+    // section: RFC 9110 §6.5.1 forbids trusting a trailer field as a header field.
+    std::size_t count = lines->second.size();
+    if (has_trailers()) {
+        const auto &trailer_fields = trailers().headers();
+        if (const auto trailer_lines = trailer_fields.find("Cookie"); trailer_lines != trailer_fields.cend())
+            count -= std::min(count, trailer_lines->second.size());
+    }
+    return count;
+}
+
 void
 Request::parse_cookie_header() {
     _cookies.clear();
     const auto lines = this->_headers.find("Cookie");
     if (lines == this->_headers.cend())
         return;
-    // The header section's lines only. A received trailer field is ALSO added to the header fields, after the
-    // header section's values of its name (store_received_trailer), and a cookie is never taken from a trailer
-    // section: RFC 9110 §6.5.1 forbids trusting a trailer field as a header field.
-    std::size_t count = lines->second.size();
-    if (has_trailers()) {
-        const auto &trailer_fields = static_cast<const Request &>(*this).trailers().headers();
-        if (const auto trailer_lines = trailer_fields.find("Cookie"); trailer_lines != trailer_fields.cend())
-            count -= std::min(count, trailer_lines->second.size());
-    }
+    const std::size_t count = header_section_cookie_lines();
     try {
         // The cap is the header's, as if its lines were joined with "; ": splitting it does not lift it.
         std::size_t joined = 0;
@@ -70,6 +79,28 @@ Request::parse_cookie_header() {
         _cookies.clear(); // a refused header yields no cookie, not the lines before the refused one
         throw;
     }
+}
+
+std::string
+Request::cookie_value_exact(std::string_view const name) const {
+    if (_cookies.get(std::string(name)) == nullptr)
+        return {}; // no pair of any case, or a header the parse refused: no exact one either
+    const auto lines = this->_headers.find("Cookie");
+    if (lines == this->_headers.cend())
+        return {};
+    const std::size_t count = header_section_cookie_lines();
+    for (std::size_t i = 0; i < count; ++i) {
+        if (lines->second[i].empty())
+            continue;
+        try {
+            for (auto &[pair_name, value] : parse_cookie_pairs(std::string_view(lines->second[i]), false))
+                if (pair_name == name)
+                    return std::move(value);
+        } catch (...) {
+            return {}; // the jar's parse accepted these lines; a refusal here reads as none
+        }
+    }
+    return {};
 }
 
 } // namespace qb::http

@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <qb/system/container/unordered_map.h>
 #include <qb/system/time.h>
@@ -454,6 +455,16 @@ inline constexpr std::size_t max_cookie_header_size = 16 * 1024;
  * efficient way to parse cookies without copying the header data.
  */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(std::string_view header, bool set_cookie_header);
+
+/**
+ * @brief The cookies of @p header in the order it lists them, every pair kept (duplicates included) and each name as
+ *        it was sent -- its case and the whitespace inside it kept, the whitespace around it removed.
+ * @details parse_cookies() folds them into a case-insensitive map that keeps a name's first value; a reader that
+ *          must not take a look-alike for a name -- `__host-x` or `__Host -x` for the `__Host-x` a browser protects --
+ *          reads these (`Request::cookie_value_exact()`). Same parser, same refusals.
+ * @throws std::runtime_error As parse_cookies().
+ */
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> parse_cookie_pairs(std::string_view header, bool set_cookie_header);
 
 /**
  * @brief Parse a Set-Cookie header into a Cookie object

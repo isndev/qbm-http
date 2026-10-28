@@ -77,6 +77,36 @@ enum class CsrfVerdict : std::uint8_t {
 /// (`<input type="hidden" name="_csrf" value="...">`) or a script to send back: `ctx->get_if(csrf_token_slot)`.
 inline constexpr Slot<std::string> csrf_token_slot{"qb.http.csrf.token"};
 
+namespace detail {
+
+/// Key material wiped (OPENSSL_cleanse) before it is released or replaced -- at destruction, on an assignment, by
+/// `assign()` -- and left empty when moved from: what CsrfOptions keeps its token secret in.
+class wiped_bytes {
+public:
+    wiped_bytes()                    = default;
+    wiped_bytes(wiped_bytes const &) = default;
+    wiped_bytes(wiped_bytes &&other) noexcept;
+    wiped_bytes &operator=(wiped_bytes const &other);
+    wiped_bytes &operator=(wiped_bytes &&other) noexcept;
+    ~wiped_bytes();
+
+    void assign(std::string_view bytes);
+    [[nodiscard]] bool
+    empty() const noexcept {
+        return _bytes.empty();
+    }
+    [[nodiscard]] std::vector<unsigned char> const &
+    bytes() const noexcept {
+        return _bytes;
+    }
+
+private:
+    void                       wipe() noexcept;
+    std::vector<unsigned char> _bytes;
+};
+
+} // namespace detail
+
 /**
  * @brief Configuration of CsrfMiddleware, and its decisions, usable on their own (`check()`, `issue_token()`).
  *
@@ -94,12 +124,6 @@ public:
     static constexpr std::size_t min_secret_size = 32;
 
     CsrfOptions();
-    CsrfOptions(CsrfOptions const &)                = default;
-    CsrfOptions &operator=(CsrfOptions const &)     = default;
-    CsrfOptions(CsrfOptions &&) noexcept            = default;
-    CsrfOptions &operator=(CsrfOptions &&) noexcept = default;
-    /// Wipes the token secret.
-    ~CsrfOptions();
 
     /**
      * @brief Trusts @p origin to send unsafe requests (a front end on another host): its requests skip the
@@ -168,11 +192,12 @@ public:
      *        the session's transport): its `Origin` must then be `https`. False when TLS ends at a proxy in
      *        front: the scheme is then not compared, as in Go, and HSTS covers the downgrade.
      */
-    [[nodiscard]] CsrfVerdict check(Request const &request, bool secure_connection = false) const;
+    [[nodiscard]] CsrfVerdict check(Request const &request, bool secure_connection) const;
 
-    /// The token cookie @p request carries, under exactly `cookie_name()` -- case included: a `__host-csrf`
-    /// another host planted is no `__Host-csrf` --; empty when there is none.
-    [[nodiscard]] std::string_view cookie_token(Request const &request) const;
+    /// The token cookie @p request carries: the first pair named exactly `cookie_name()` (`Request::cookie_value_exact`)
+    /// -- a `__host-csrf` or a `__Host -csrf` another host planted is no `__Host-csrf`, and does not hide the real
+    /// one sent after it --; empty when there is none.
+    [[nodiscard]] std::string cookie_token(Request const &request) const;
 
     /// A new token for @p request's session (tokens on). @throws std::logic_error when tokens are off.
     [[nodiscard]] std::string issue_token(Request const &request) const;
@@ -191,7 +216,7 @@ private:
 
     std::vector<qb::io::uri>      _trusted;
     std::vector<RequestPredicate> _exempt;
-    std::vector<unsigned char>    _secret;
+    detail::wiped_bytes           _secret; ///< Wiped before it is released or replaced
     SessionBinding                _binding;
     std::string                   _cookie_name = "__Host-csrf";
     std::string                   _header_name = "X-CSRF-Token";
@@ -207,8 +232,10 @@ private:
  * A refused request is answered `403 Forbidden`, `text/plain`, the verdict in the body, unless
  * `on_reject()` writes the response; the chain stops there. Tokens on, every response to a request whose
  * cookie is absent or not valid for its session carries a fresh token cookie -- a token refusal's included,
- * never one refused for where it comes from (another site's page must not rotate the user's cookie) -- and
- * the request's token is in `csrf_token_slot`. Requests that arrive at once without a cookie (tabs restored
+ * never one refused for where it comes from (an unsafe request another site's page makes rotates nothing) -- and
+ * the request's token is in `csrf_token_slot`. A request that does not carry the cookie still gets one: a
+ * cross-site link under `cookie_same_site(SameSite::Strict)` (the browser withholds a Strict cookie on it), an
+ * exempt request. Requests that arrive at once without a cookie (tabs restored
  * together, a page's first parallel calls) are each issued their own token and the last cookie set wins: a
  * page reads the token from the cookie when it sends, or from the slot of the response it renders.
  *
@@ -238,9 +265,9 @@ public:
         CsrfVerdict const verdict = _options->check(request, internal::arrived_over_secure_transport(*ctx));
         // Refused for where it comes from: nothing issued, so another site's page cannot rotate the cookie.
         if (_options->tokens_enabled() && verdict != CsrfVerdict::cross_site && verdict != CsrfVerdict::origin_mismatch) {
-            std::string_view const cookie = _options->cookie_token(request);
+            std::string cookie = _options->cookie_token(request);
             if (!cookie.empty() && _options->token_valid(cookie, request)) {
-                ctx->set(csrf_token_slot, std::string(cookie));
+                ctx->set(csrf_token_slot, std::move(cookie));
             } else {
                 std::string token = _options->issue_token(request);
                 ctx->set(csrf_token_slot, token);

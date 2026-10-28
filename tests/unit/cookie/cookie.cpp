@@ -1196,3 +1196,53 @@ TEST(RequestCookieHeader, ACookieLineOfTheTrailerSectionIsNotRead) {
     other_trailer.parse_cookie_header();
     EXPECT_EQ(other_trailer.cookie_value("b"), "2");
 }
+
+// A name with whitespace inside is a name of its own; only the whitespace around a name or an unquoted value is
+// removed (RFC 6265bis §5.6). `__Host -csrf` was read as `__Host-csrf`, the name a browser protects, so a cookie
+// another host planted under it took the real one's place (the CSRF fourth review).
+TEST_F(CookieTest, ParseCookiesKeepsTheWhitespaceInsideANameAndTrimsItsEnds) {
+    auto cookies = parse_cookies(std::string("__Host -csrf=planted; __Host-csrf=real;  a =1 ; b= two words  ;c=3 "), false);
+    ASSERT_TRUE(cookies.find("__Host -csrf") != cookies.end());
+    EXPECT_EQ("planted", cookies["__Host -csrf"]);
+    ASSERT_TRUE(cookies.find("__Host-csrf") != cookies.end());
+    EXPECT_EQ("real", cookies["__Host-csrf"]);
+    ASSERT_TRUE(cookies.find("a") != cookies.end());
+    EXPECT_EQ("1", cookies["a"]);
+    EXPECT_EQ("two words", cookies["b"]); // the whitespace inside an unquoted value stays, the trailing goes
+    EXPECT_EQ("3", cookies["c"]);
+    EXPECT_TRUE(cookies.find("__Host-csrf ") == cookies.end());
+}
+
+TEST_F(CookieTest, ParseCookiePairsKeepsTheOrderTheSpellingAndEveryDuplicate) {
+    const auto pairs = parse_cookie_pairs("__host-csrf=a; __Host-csrf=b; __Host-csrf=c; x=1", false);
+    ASSERT_EQ(pairs.size(), 4u);
+    EXPECT_EQ(pairs[0], (std::pair<std::string, std::string>{"__host-csrf", "a"}));
+    EXPECT_EQ(pairs[1], (std::pair<std::string, std::string>{"__Host-csrf", "b"}));
+    EXPECT_EQ(pairs[2], (std::pair<std::string, std::string>{"__Host-csrf", "c"}));
+    EXPECT_EQ(pairs[3], (std::pair<std::string, std::string>{"x", "1"}));
+    EXPECT_THROW((void) parse_cookie_pairs("a=\x01", false), std::runtime_error) << "the same refusals as parse_cookies";
+}
+
+TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
+    Request req; // the jar keeps the first pair of ANY case: the planted lower-case one
+    req.add_header("cookie", "__host-csrf=planted; __Host -csrf=spaced");
+    req.add_header("cookie", "__Host-csrf=real; __Host-csrf=later");
+    req.parse_cookie_header();
+    EXPECT_EQ(req.cookie_value("__Host-csrf"), "planted");
+    EXPECT_EQ(req.cookie_value_exact("__Host-csrf"), "real") << "the look-alikes sent first hide the real one";
+    EXPECT_EQ(req.cookie_value_exact("__host-csrf"), "planted");
+    EXPECT_EQ(req.cookie_value_exact("__Host -csrf"), "spaced");
+    EXPECT_EQ(req.cookie_value_exact("absent"), "");
+
+    Request trailer; // a trailer's line is no more read by name than by jar
+    trailer.add_header("cookie", "__host-csrf=planted");
+    qb::http::detail::store_received_trailer(trailer, "cookie", "__Host-csrf=forged");
+    trailer.parse_cookie_header();
+    EXPECT_EQ(trailer.cookie_value_exact("__Host-csrf"), "");
+
+    Request refused; // a header the parse refused yields no cookie, by name or by jar
+    refused.add_header("cookie", "__Host-csrf=real");
+    refused.add_header("cookie", "bad=\x01");
+    EXPECT_THROW(refused.parse_cookie_header(), std::runtime_error);
+    EXPECT_EQ(refused.cookie_value_exact("__Host-csrf"), "");
+}
