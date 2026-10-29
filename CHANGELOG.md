@@ -70,6 +70,48 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A request's URI is the target the client sent: an HTTP/1.1 `//host/path` is a path, a target that is none of the
+  four forms is answered 400, and an HTTP/2 or HTTP/3 `:path` or `host` field names no other authority (Huly
+  QB-1177).** The HTTP/1.1 server read every request target as a URI reference (RFC 3986 §4.1), where an origin-form
+  `//evil.test/transfer` -- an absolute path whose first segment is empty (RFC 9112 §3.2.1) -- names the host
+  `evil.test`: `request.uri().host()` was the one the client chose, whatever `Host` said, and the route served was
+  `/transfer`. `///x` came out as `/x`, `//u@a/x` gained a userinfo, a CONNECT `example.com:443` was the scheme
+  `example.com` and the path `443`, and a target with a byte the parser refuses -- `/a|b`, `/a{b}`, sent raw -- was
+  dispatched with an empty path, to the route of `/`. `qb::http::origin::request_target_uri()` reads the target by
+  its form now (RFC 9112 §3.2), once it has ended (llhttp's `on_url_complete`, instead of on each piece of it):
+  origin-form with `qb::io::uri::origin_form()` -- `//a/b` is the path `//a/b` with an empty host, routed by its
+  segments (`/a/b`), the authority being the `Host` field; absolute-form as a URI whose authority has a host and no
+  userinfo (`http://victim.test@evil.test/x` and `http:///x` are refused); the authority-form of CONNECT, and only
+  of it, with `qb::io::uri::authority_form()`, the host and the port (`[::1]:443` included, so a CONNECT is routed at
+  the path `/`); the asterisk-form of OPTIONS, and only of it, as `*`. Anything else -- a fragment, `*` for another
+  method (`GET *` was a 404), a byte the parser refuses, a target llhttp refuses itself such as `?x`, which closed the
+  connection on silence -- names no resource: the server answers `400 Bad Request` and closes, as it answers a target
+  over the URL limit 414, and the percent-encoded spelling (`/a%7Cb`) is served (QB-1187 weighs the bytes browsers
+  send raw). The HTTP/2 and HTTP/3 servers composed `:scheme://:authority` followed by `:path` by hand: on HTTP/2 a
+  `:path` `@evil.test/x` made `evil.test` the host, and on both `OPTIONS *` the host `example.test*`.
+  `qb::http::origin::request_uri()` composes it for both: `:path` is an absolute path, with no fragment, space or
+  control byte, or the `*` of an OPTIONS request (its URI is `*`, without an authority, as HTTP/1.1's); `:scheme` a
+  scheme; `:authority` one `is_request_authority()` accepts -- an IP literal that is an IPv6 address, or a reg-name or
+  an IPv4 address with no `:`, `[` or `]` and well-formed percent-encodings, and a port of digits no greater than
+  65535 (the authorities `:443`, `a:b:c` and `h:99999` were accepted, `[127.0.0.1]` read as the IPv4 host
+  `127.0.0.1`, and a reg-name could hold any byte the URI parser let through; the redirect target check, which had its
+  own copy of the grammar, shares this one) -- and the text one the parser accepts. HTTP/3 also refuses a `host` field that does not name
+  `:authority` (RFC 9114 §4.3.1), which nghttp3 passes and `header("Host")` returned as a second authority the client
+  chose. A malformed request is `RST_STREAM(PROTOCOL_ERROR)` on HTTP/2 and its stream refused with `H3_MESSAGE_ERROR`
+  on HTTP/3; nghttp3 refuses several shapes itself, a connection error. An origin-form request's `uri().host()` is
+  empty: its authority is the `Host` field, which the server does not validate yet (QB-1186). `CsrfMiddleware` never
+  read an origin-form authority (QB-95). `uri().path()` is the target's own path on every protocol, `//` and empty
+  segments included: a guard that tests a prefix (`uri().path().starts_with("/admin")`) does not see `//admin/x`,
+  which the router serves as `/admin/x` -- guard the route group -- and a file path built by stripping one slash is
+  absolute for `//etc/passwd` (the static files middleware strips them all), and a `Location` or a link that echoes it
+  without collapsing its leading slashes names another host. A directory listing of a path that
+  begins with `//` led every link with it -- `href="//file1.txt"`, a link to the host `file1.txt` -- and leads it with
+  one slash now. Tests: the HTTP/1.1 router on the wire (`//a/where/x` reaches `/a/where/*`, `///where/x` keeps its
+  slashes, `//u@a/where/x` is no route, the refused targets 400, a pipelined request before a refused one answered
+  and the one after it never read, `OPTIONS *` reaching the router), a target split over two reads, both readers'
+  accepted and refused targets and fields, the authority grammar, HTTP/2 and HTTP/3 servers fed them -- each refusal
+  on the layer that makes it --, the listing's links.
+
 - **A request's `Cookie` header is read as a browser sends it: pairs split on `;` alone, a malformed pair dropped
   instead of the header -- one cookie another host plants can no longer take the place of a prefixed cookie for its
   exact-name read, hide it, or wipe the jar, short of a nameless one on a browser older than RFC 6265bis (Huly QB-95,

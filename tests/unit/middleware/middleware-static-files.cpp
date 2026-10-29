@@ -906,6 +906,24 @@ TEST_F(StaticFilesMiddlewareTest, DirectoryListingEnabled) {
     EXPECT_FALSE(_session->_final_handler_called);
 }
 
+// A request path that begins with `//` -- an HTTP/1.1 origin-form path since Huly QB-1177 -- never begins a link with
+// it: `href="//file1.txt"` is a network-path reference, a link to the host `file1.txt`.
+TEST_F(StaticFilesMiddlewareTest, DirectoryListingLinksNeverBeginWithTwoSlashes) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_directory_listing(true).with_serve_index_file(false);
+    struct Case {
+        std::string path, link;
+    };
+    for (auto const &c :
+         {Case{"//", "<a href=\"/file1.txt\">file1.txt</a>"}, Case{"///subdir/", "<a href=\"/subdir/file2.css\">file2.css</a>"}}) {
+        configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, c.path));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << c.path;
+        const std::string body = _session->_response.body().as<std::string>();
+        EXPECT_NE(body.find(c.link), std::string::npos) << c.path << "\n" << body;
+        EXPECT_EQ(body.find("href=\"//"), std::string::npos) << c.path << "\n" << body;
+    }
+}
+
 TEST_F(StaticFilesMiddlewareTest, DirectoryListingSubdir) {
     qb::http::StaticFilesOptions options(_test_root_dir);
     options.with_directory_listing(true).with_serve_index_file(false);

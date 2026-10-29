@@ -276,14 +276,14 @@ Before the first reply, setup exceptions propagate to the caller. A recoverable 
 | Method and content | 301/302 turn POST into GET and drop content. 303 drops content and uses GET, except HEAD remains HEAD. 307/308 preserve method and logical body |
 | Timeout | The supplied connect/inactivity timeout applies separately to every attempt; zero disables it. It is not a whole-chain deadline |
 
-<!-- src: qbm/http/src/qbm/http/detail/redirect.cpp:282-319; qbm/http/src/qbm/http/redirect.h:128-150,174-200 -->
+<!-- src: qbm/http/src/qbm/http/detail/redirect.cpp:233-270; qbm/http/src/qbm/http/redirect.h:128-150,174-200 -->
 
 Location resolution preserves encoded octets, repeated/trailing slashes and an explicitly empty query. A relative Location is resolved against the preceding attempt. An absent fragment inherits the prior fragment; an explicit empty `#` clears it, and fragments stay out of the wire target. Missing or multiple Location values, invalid syntax or percent escapes, userinfo, scoped IPv6 and IPvFuture are not followed. A single empty Location is an empty URI reference and is still bounded by the hop cap. A forbidden target or next-attempt preparation failure returns the last completed reply through the usual one-shot response processing.
 
 Each attempt receives a fresh copy of the logical request body, so replay does not compress an already-compressed snapshot. Body-dropping rewrites clear trailers and body/framing metadata; preserved-body rewrites recalculate Content-Length, and Host is rebuilt for the destination. Cross-origin permission can therefore also permit replaying a retained body to the new origin.
 
 History retains complete request and response bodies. The cap bounds followed hops, not retained bytes: storage grows with actual followed exchanges rather than being reserved up front from `max_hops`. A very large cap permits a correspondingly large history.
-<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,128-150,174-200; qbm/http/src/qbm/http/detail/redirect.cpp:80-110,113-161,172-200,210-278,282-319 -->
+<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,128-150,174-200; qbm/http/src/qbm/http/origin.cpp:159-216; qbm/http/src/qbm/http/detail/redirect.cpp:64-112,123-151,161-229,233-270 -->
 
 ## Persistent client capability matrix
 

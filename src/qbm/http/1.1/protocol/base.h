@@ -115,6 +115,7 @@ struct request_limits {
 #include <qb/system/allocator/pipe.h>
 #include "../../headers.h"      // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
 #include "../../message_base.h" // detail::store_received_trailer (trailers(), Huly QB-1073)
+#include "../../origin.h"       // origin::request_target_uri: the request target, by its form (Huly QB-1177)
 #include "../../types.h"
 #include "../../utility.h"
 
@@ -185,8 +186,9 @@ private:
         return HPE_USER;
     }
 
-    /// Fails the message for a size limit and records the status it answers (refusal_status()): the
-    /// server's session answers it, then closes, instead of closing on silence (Huly QB-168).
+    /// Fails the message for a size limit or a target that names no resource, and records the status it
+    /// answers (refusal_status()): the server's session answers it, then closes, instead of closing on
+    /// silence (Huly QB-168).
     static int
     refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
         self_of(parser)->_refusal_status = status;
@@ -250,10 +252,9 @@ private:
      * @param length Length of URL data
      * @return Result code (0 for success)
      *
-     * Called when the URL portion of a request is parsed.
-     * Extracts and stores the URL for further processing.
-     * This is only used for request messages; for response
-     * messages, this callback does nothing.
+     * Called when the URL portion of a request is parsed, possibly in several pieces: each is appended to
+     * the target, which on_url_complete() reads once it has ended. This is only used for request messages;
+     * for response messages, this callback does nothing.
      */
     static int
     on_url(http_t *parser, const char *at, size_t length) {
@@ -263,18 +264,41 @@ private:
             if (next_url_size > self->_limits.max_url_length) {
                 return refuse_with_status(parser, "HTTP URL exceeds configured size limit", HTTP_STATUS_URI_TOO_LONG);
             }
-            auto &msg    = self->msg;
-            msg.method() = static_cast<http_method>(parser->method);
+            self->msg.method() = static_cast<http_method>(parser->method);
             if (self->_url_bytes_seen == 0) {
                 self->_url_buffer.clear();
                 self->_url_buffer.reserve(std::min(next_url_size, protocol_limits::MAX_URL_LENGTH)); // a hint, not the limit
             }
             self->_url_buffer.append(at, length);
             self->_url_bytes_seen = next_url_size;
-            msg.uri()             = self->_url_buffer;
         } else {
             (void) at;
             (void) length;
+        }
+        return 0;
+    }
+
+    /**
+     * @brief Builds the request's URI once its target has ended
+     * @param parser Parser instance
+     * @return 0, or the refusal of the request: 400
+     *
+     * The target's form decides what is an authority (RFC 9112 §3.2), and origin::request_target_uri()
+     * reads it: an origin-form target (`/path?query`) by qb::io::uri::origin_form(), so `//a/b` is the
+     * path `//a/b` and the authority is the Host field's, never the `a` a URI reference names (Huly
+     * QB-1177); an absolute-form one as a URI with an authority and no userinfo; the authority-form of a
+     * CONNECT request as a host and a port; the asterisk-form of an OPTIONS request as `*`. Any other
+     * target names no resource and is answered 400 (one with a byte the URI parser refuses reached the
+     * route of the empty path, a fragment the route of its path, a GET `*` a 404).
+     */
+    static int
+    on_url_complete(http_t *parser) {
+        if constexpr (MessageType::type == HTTP_REQUEST) {
+            auto *self = self_of(parser);
+            auto  uri = qb::http::origin::request_target_uri(self->_url_buffer, parser->method == HTTP_CONNECT, parser->method == HTTP_OPTIONS);
+            if (!uri)
+                return refuse_with_status(parser, "HTTP request target names no resource", HTTP_STATUS_BAD_REQUEST);
+            self->msg.uri() = std::move(*uri);
         }
         return 0;
     }
@@ -570,7 +594,7 @@ private:
         &Parser::on_body,              // on body
         &Parser::on_message_complete,  // on message complete
         &Parser::default_http_cb,      // on protocol complete
-        &Parser::default_http_cb,      // on url complete
+        &Parser::on_url_complete,      // on url complete: builds the request's URI
         &Parser::default_http_cb,      // on status complete
         &Parser::default_http_cb,      // on method complete
         &Parser::default_http_cb,      // on version complete
@@ -603,7 +627,7 @@ private:
         &Parser::on_body,              // on body
         &Parser::on_message_complete,  // on message complete
         &Parser::default_http_cb,      // on protocol complete
-        &Parser::default_http_cb,      // on url complete
+        &Parser::on_url_complete,      // on url complete: builds the request's URI
         &Parser::default_http_cb,      // on status complete
         &Parser::default_http_cb,      // on method complete
         &Parser::default_http_cb,      // on version complete
@@ -628,7 +652,7 @@ private:
     /// The limits of the next message: set_request_limits(), normalized (a 0 "none" stored as the largest size, so
     /// each check stays one comparison). Configuration, kept across reset().
     qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
-    int                      _refusal_status = 0; ///< The status a limit breach of the current message answers (refusal_status())
+    int                      _refusal_status = 0; ///< The status a refusal of the current message answers (refusal_status())
 
 public:
     /**
@@ -742,10 +766,12 @@ public:
     }
 
     /**
-     * @brief The HTTP status a limit breach of the current message answers, or 0.
+     * @brief The HTTP status a refusal of the current message answers, or 0.
      *
      * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
-     * 431 or 413. 0 for any other failure -- a malformed message is not answered. reset() clears it.
+     * 431 or 413; or on a target origin::request_target_uri() refuses: 400 (on_url_complete()). 0 for any
+     * other failure, which the protocol's fail_message() answers only for a request line llhttp refuses
+     * at its target (400) -- any other malformed message is not answered. reset() clears it.
      */
     [[nodiscard]] int
     refusal_status() const noexcept {
@@ -846,18 +872,23 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     /// delivers the accumulated body on disconnect.
     bool _close_delimited = false;
 
-    /// True once a request was refused for a size limit (fail_message()): the stream has lost its framing
+    /// True once a request was refused, for a limit or its target (fail_message()): the stream lost its framing
     /// -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
     bool _refused = false;
 
-    /// The message failed. A request refused for a size limit the server can answer (the parser's
+    /// The message failed. A request refused for a limit or its target the server can answer (the parser's
     /// refusal_status(), the io's `http1_refuse_request`) is handed to the io, which answers it and ends the
-    /// connection; what the peer sends next is dropped. Anything else -- a malformed message, an io that
-    /// cannot answer -- invalidates the protocol, which closes the connection, as it always did.
+    /// connection; what the peer sends next is dropped. A request line llhttp refuses at or just after its
+    /// target (HPE_INVALID_URL) names no resource either, and is answered 400 the same way (RFC 9112 §3,
+    /// Huly QB-1177). Anything else -- a malformed
+    /// message, an io that cannot answer -- invalidates the protocol, which closes the connection.
     std::size_t
     fail_message() noexcept {
         if constexpr (requires(IO_Handler &io) { io.http1_refuse_request(qb::http::Status{}); }) {
-            if (const int status = _http_obj.refusal_status()) {
+            int status = _http_obj.refusal_status();
+            if (status == 0 && http_get_errno(static_cast<http_t *>(&_http_obj)) == HPE_INVALID_URL)
+                status = HTTP_STATUS_BAD_REQUEST;
+            if (status != 0) {
                 _refused      = true;
                 body_offset   = 0;
                 header_parsed = 0;

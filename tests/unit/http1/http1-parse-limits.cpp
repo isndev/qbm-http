@@ -246,6 +246,30 @@ TEST_F(IncomingParserLimitsTest, FragmentedUrlIsReassembledCorrectly) {
     EXPECT_EQ(parser.get_parsed_message().uri().source(), "/api/v1/users?name=alice");
 }
 
+// The target is read by its form once it has ended, never piece by piece (Huly QB-1177): a `//` split over two
+// pieces is still an origin-form path, and a refused byte in the second piece is the refusal 400.
+TEST_F(IncomingParserLimitsTest, FragmentedTargetIsReadByItsFormOnceItHasEnded) {
+    {
+        qb::http::Parser<Request> parser;
+        const std::string         chunk1 = "GET /";
+        const std::string         chunk2 = "/evil.test/x?q=1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        EXPECT_EQ(parser.parse(chunk1.data(), chunk1.size()), HPE_OK);
+        EXPECT_EQ(parser.parse(chunk2.data(), chunk2.size()), HPE_PAUSED);
+        auto const &uri = parser.get_parsed_message().uri();
+        EXPECT_TRUE(uri.host().empty());
+        EXPECT_EQ(uri.path(), "//evil.test/x");
+        EXPECT_EQ(uri.query("q"), "1");
+    }
+    {
+        qb::http::Parser<Request> parser;
+        const std::string         chunk1 = "GET /a";
+        const std::string         chunk2 = "|b HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        EXPECT_EQ(parser.parse(chunk1.data(), chunk1.size()), HPE_OK);
+        EXPECT_NE(parser.parse(chunk2.data(), chunk2.size()), HPE_PAUSED);
+        EXPECT_EQ(parser.refusal_status(), HTTP_STATUS_BAD_REQUEST);
+    }
+}
+
 TEST_F(IncomingParserLimitsTest, FragmentedUrlRespectsCumulativeLimit) {
     qb::http::Parser<Request> parser;
 

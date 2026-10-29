@@ -46,7 +46,7 @@ struct SlowRequests final : qb::http::IRequestObserver<qb::http::DefaultSession>
 };
 router().add_observer(std::make_shared<SlowRequests>());
 ```
-<!-- src: qbm/http/src/qbm/http/routing/observer.h:65; qbm/http/src/qbm/http/routing/router.h:294 -->
+<!-- src: qbm/http/src/qbm/http/routing/observer.h:66; qbm/http/src/qbm/http/routing/router.h:294 -->
 
 `RequestEnd` says how the request ended and how long it took (`qbm/http/src/qbm/http/routing/observer.h:39`):
 
@@ -60,7 +60,7 @@ router().add_observer(std::make_shared<SlowRequests>());
 
 Both functions run on the router's thread and are `noexcept`: an exception escaping one terminates. An observer is shared by every request of its router, like a middleware: per-request state goes in the context. A context keeps the observers registered when it was created; `router.clear()` removes them all; a null observer is ignored.
 
-A request a session answers without routing it reaches no observer: a request over a size limit, which the protocol refuses before routing (`414`, `431`, `413`), and the HTTP/3 server's fallback `404` when its router hands back no context at all (only a router without its core, which a constructed `Router` never is).
+A request a session answers without routing it reaches no observer: a request over a size limit, which the protocol refuses before routing (`414`, `431`, `413`), a request whose target names no resource (`400`, Huly QB-1177), and the HTTP/3 server's fallback `404` when its router hands back no context at all (only a router without its core, which a constructed `Router` never is).
 
 ### What an unobserved router pays
 

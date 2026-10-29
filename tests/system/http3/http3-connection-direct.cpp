@@ -889,6 +889,100 @@ TEST(Http3ConnectionDirect, AnUnknownRequestMethodRefusesTheStreamNotTheConnecti
 }
 
 /**
+ * @test The request's URI is the one :scheme, :authority and :path name, its authority :authority's
+ * @brief A `//evil.test/x` :path stays a path under `example.test`, an OPTIONS `*` is the URI `*`, a `host` field
+ *        naming :authority is accepted (Huly QB-1177).
+ */
+TEST(Http3ConnectionDirect, TheTargetPseudoHeadersNameTheRequestUri) {
+    {
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, request_fields("//evil.test/x")), true);
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+        auto const &uri = pair.server_owner.requests.front().uri();
+        EXPECT_EQ(uri.host(), "example.test");
+        EXPECT_TRUE(uri.user_info().empty());
+        EXPECT_EQ(uri.path(), "//evil.test/x");
+    }
+    {
+        // The asterisk-form of an OPTIONS request: the URI `*`. Composed by hand, it was the host `example.test*`.
+        auto fields           = request_fields("*");
+        fields.front().second = "OPTIONS";
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+        EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "*");
+        EXPECT_TRUE(pair.server_owner.requests.front().uri().host().empty());
+    }
+    {
+        // A `host` field that names :authority, in another case: the same authority.
+        auto fields = request_fields();
+        fields.emplace_back("host", "EXAMPLE.test");
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+        EXPECT_EQ(pair.server_owner.requests.front().uri().host(), "example.test");
+    }
+}
+
+/**
+ * @test A :path, :authority or :scheme that names no target never reaches the server
+ * @brief Composed onto `example.test`, the :path `@evil.test/x` named the host evil.test, and a path byte the URI
+ *        parser refuses left the request at the empty path (Huly QB-1177). nghttp3 (1.18.0) refuses the first shapes
+ *        itself, a connection error; the others pass it, and qbm-http refuses their stream.
+ */
+TEST(Http3ConnectionDirect, AMalformedTargetPseudoHeaderNeverReachesTheServer) {
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    auto with    = [](std::string const &name, std::string value) {
+        auto fields = request_fields();
+        for (auto &[field, field_value] : fields)
+            if (field == name)
+                field_value = std::move(value);
+        return fields;
+    };
+    auto with_host = [](std::vector<std::string> hosts) {
+        auto fields = request_fields();
+        for (auto &host : hosts)
+            fields.emplace_back("host", std::move(host));
+        return fields;
+    };
+    auto trace_of = [](Fields const &fields) {
+        std::string trace;
+        for (auto const &[name, value] : fields)
+            trace += name + ": " + value + "; ";
+        return trace;
+    };
+    // What nghttp3 refuses itself -- 1.18.0 measured: a connection error -- and qbm-http refuses next: whichever layer
+    // does, with H3_MESSAGE_ERROR, and the request never reaches the owner. nghttp3 is a system library, not pinned.
+    for (Fields const &fields :
+         {with(":path", "@evil.test/x"), with(":path", "evil.test/x"), with(":authority", "user@example.test"),
+          with(":authority", "example.test/evil"), with(":scheme", "ht/tps"), with_host({"example.test", "example.test"})}) {
+        SCOPED_TRACE(trace_of(fields));
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty()) << "a malformed request must never reach the owner";
+        const auto message_error = static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR);
+        const bool by_nghttp3    = pair.server_owner.close.has_value() && pair.server_owner.close->first == message_error;
+        const bool by_qbm_http   = !pair.server_owner.close.has_value() && pair.server_owner.resets.size() == 1u
+                                   && pair.server_owner.resets.front().second == message_error;
+        EXPECT_TRUE(by_nghttp3 || by_qbm_http) << "refused by neither layer with H3_MESSAGE_ERROR";
+    }
+    // What nghttp3 lets through, qbm-http refuses on the stream: a path byte the URI parser refuses, an :authority that
+    // is no authority, a `host` field that names another authority (RFC 9114 §4.3.1).
+    for (Fields const &fields :
+         {with(":path", "/a|b"), with(":authority", "a:b:c"), with(":authority", "example.test:99999"), with(":authority", "evil]"),
+          with_host({"evil.test"})}) {
+        SCOPED_TRACE(trace_of(fields));
+        Pair       pair;
+        const auto states = pair.server.stream_state_count();
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_server_refused_stream_and_serves_next(pair, states);
+    }
+}
+
+/**
  * @test A `trailer` field inside the trailer section refuses the stream only
  * @brief A second HEADERS frame after the body is the trailer section. nghttp3 drops a `content-length`
  *        there and rejects a pseudo-header, but has no rule for `trailer` itself; is_forbidden_h3_trailer

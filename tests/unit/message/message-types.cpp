@@ -548,4 +548,162 @@ TEST(OriginTest, AuthorityIsWhatEveryProtocolSends) {
     EXPECT_EQ(authority(qb::io::uri("/relative/path")), "");
 }
 
+// The URI an HTTP/2 or HTTP/3 request names with its pseudo-header fields (Huly QB-1177): its authority is
+// :authority, whatever :path holds. Composed by hand, `@evil.test/x` onto `victim.test` named the host evil.test.
+TEST(OriginTest, RequestUriIsWhatThePseudoHeadersName) {
+    using qb::http::origin::request_uri;
+    struct Named {
+        std::string_view scheme, authority, path, host, port, uri_path, query;
+    };
+    for (auto const &c :
+         {Named{"https", "victim.test", "//evil.test/x", "victim.test", "443", "//evil.test/x", ""},
+          Named{"https", "victim.test:8443", "/a/b?c=d", "victim.test", "8443", "/a/b", "c=d"},
+          Named{"http", "[2001:db8::1]:8080", "/", "2001:db8::1", "8080", "/", ""},
+          Named{"https", "victim.test", "/a@b:c", "victim.test", "443", "/a@b:c", ""}}) {
+        auto const uri = request_uri(c.scheme, c.authority, c.path, false);
+        ASSERT_TRUE(uri.has_value()) << c.authority << c.path;
+        EXPECT_TRUE(uri->is_valid());
+        EXPECT_EQ(uri->scheme(), c.scheme);
+        EXPECT_TRUE(uri->user_info().empty()) << c.path;
+        EXPECT_EQ(uri->host(), c.host) << c.path;
+        EXPECT_EQ(uri->port(), c.port) << c.path;
+        EXPECT_EQ(uri->path(), c.uri_path) << c.path;
+        EXPECT_EQ(uri->encoded_queries(), c.query) << c.path;
+    }
+    // The asterisk-form of an OPTIONS request: `*`, without an authority, as HTTP/1.1 reads it.
+    auto const asterisk = request_uri("https", "victim.test", "*", true);
+    ASSERT_TRUE(asterisk.has_value());
+    EXPECT_EQ(asterisk->path(), "*");
+    EXPECT_TRUE(asterisk->host().empty());
+
+    struct Malformed {
+        std::string_view scheme, authority, path;
+        bool             options;
+    };
+    for (auto const &c :
+         {Malformed{"https", "victim.test", "@evil.test/x", false},
+          Malformed{"https", "victim.test", "evil.test/x", false},
+          Malformed{"https", "victim.test", "?q", false},
+          Malformed{"https", "victim.test", "*", false},
+          Malformed{"https", "victim.test", "", true},
+          Malformed{"https", "user@victim.test", "/x", false},
+          Malformed{"https", "victim.test/evil", "/x", false},
+          Malformed{"https", "victim.test?q", "/x", false},
+          Malformed{"https", "victim.test#f", "/x", false},
+          Malformed{"https", "", "/x", false},
+          Malformed{"ht/tps", "victim.test", "/x", false},
+          Malformed{"", "victim.test", "/x", false},
+          Malformed{"https", "victim.test", "/a|b", false},
+          Malformed{"https", "victim test", "/x", false},
+          Malformed{"https", "", "*", true},
+          Malformed{"https", ":443", "/x", false},
+          Malformed{"https", "a:b:c", "/x", false},
+          Malformed{"https", "victim.test:99999", "/x", false},
+          Malformed{"https", "evil]", "/x", false},
+          Malformed{"https", "[]", "/x", false},
+          Malformed{"https", "[zz::1]", "/x", false},
+          Malformed{"https", "[127.0.0.1]", "/x", false},
+          Malformed{"https", "victim.test", "/x#f", false},
+          Malformed{"https", "victim.test", "/x y", false},
+          Malformed{"https", "victim.test", "/x?a b", false},
+          Malformed{"https", "victim.test", "/x\x01", false},
+          Malformed{"https", "victim.test", "/x\x7f", false},
+          Malformed{"https", "victim.test", "/x?\x01", false},
+          Malformed{"https", "victim.test", "/x?\x7f", false},
+          Malformed{"https", "victim.test", "/x?a\tb", false}}) {
+        EXPECT_FALSE(request_uri(c.scheme, c.authority, c.path, c.options).has_value())
+            << '"' << c.scheme << "\" \"" << c.authority << "\" \"" << c.path << '"';
+    }
+}
+
+// The authority a request may name (Huly QB-1177): a host and an optional port, never a userinfo, a path or a second
+// colon in a reg-name, a port no greater than 65535. What the URI parser alone accepted -- a host that is a colon and a
+// port, an IPv6 address without its brackets -- is refused.
+TEST(OriginTest, IsRequestAuthorityIsAHostAndAnOptionalPort) {
+    using qb::http::origin::is_request_authority;
+    for (std::string_view const ok :
+         {"example.test", "example.test:8443", "example.test:", "127.0.0.1:80", "[::1]", "[2001:db8::1]:443", "[::ffff:10.0.0.1]:8080",
+          "xn--bcher-kva.test", "a-b.c_d~e:0", "h:65535", "h:00080", "h:000000000080", "caf%C3%A9.test"}) {
+        EXPECT_TRUE(is_request_authority(ok)) << ok;
+    }
+    for (std::string_view const bad :
+         {"", ":443", "::1", "a:b:c", "h:99999", "h:65536", "h:123456", "h:8x", "evil]", "[]", "[::1", "[zz::1]", "[::1]x", "[::1]:x", "u@h",
+          "h/p", "h?q", "h#f", "[::1]/p", "h:4294967376" /* 2^32 + 80: wraps to 80 in 32 bits */,
+          // an IP literal is an IPv6 address: not an IPv4 one, a name, a number, colons alone, a zone
+          "[127.0.0.1]", "[cafe.de]", "[1]", "[::::]", "[fe80::1%25eth0]",
+          // a '%' begins a percent-encoded octet
+          "a%zz", "a%", "a%4", "a%4g",
+          // a reg-name holds unreserved characters, sub-delims and percent-encodings only
+          "a b", "a\tb", "a<b>", "a\"b", "a\\b", "a{b}", "a|b", "a^b", "a`b", "\xc3\xa9.test", "a\x7f",
+          // no IPvFuture
+          "[v7.x]",
+          // longer than any address buffer
+          "[0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000]"}) {
+        EXPECT_FALSE(is_request_authority(bad)) << bad;
+    }
+    // A NUL inside the brackets: inet_pton reads a C string and would stop at it, reading `::1`.
+    EXPECT_FALSE(is_request_authority(std::string_view{"[::1\0x]", 7}));
+    // The longest IPv6 text, 45 characters: the address buffer holds it and its NUL.
+    EXPECT_TRUE(is_request_authority("[ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]:443"));
+}
+
+// The URI of an HTTP/1.1 request, by its target's form (RFC 9112 §3.2, Huly QB-1177).
+TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
+    using qb::http::origin::request_target_uri;
+    // origin-form: a path, every byte of it; no scheme, no host -- the authority is Host's.
+    auto const origin = request_target_uri("//evil.test/x?q=1", false, false);
+    ASSERT_TRUE(origin.has_value());
+    EXPECT_TRUE(origin->host().empty());
+    EXPECT_EQ(origin->path(), "//evil.test/x");
+    EXPECT_EQ(origin->query("q"), "1");
+    // absolute-form: a URI, its authority the request's.
+    auto const absolute = request_target_uri("http://victim.test:8080/x", false, false);
+    ASSERT_TRUE(absolute.has_value());
+    EXPECT_EQ(absolute->host(), "victim.test");
+    EXPECT_EQ(absolute->port(), "8080");
+    EXPECT_EQ(absolute->path(), "/x");
+    // authority-form, CONNECT's: the host and the port. Read as a reference, `example.com:443` was a scheme.
+    auto const connect = request_target_uri("example.com:443", true, false);
+    ASSERT_TRUE(connect.has_value());
+    EXPECT_TRUE(connect->scheme().empty());
+    EXPECT_EQ(connect->host(), "example.com");
+    EXPECT_EQ(connect->port(), "443");
+    auto const connect_v6 = request_target_uri("[::1]:443", true, false);
+    ASSERT_TRUE(connect_v6.has_value());
+    EXPECT_EQ(connect_v6->host(), "::1");
+    // asterisk-form, OPTIONS's: `*`.
+    auto const asterisk = request_target_uri("*", false, true);
+    ASSERT_TRUE(asterisk.has_value());
+    EXPECT_EQ(asterisk->path(), "*");
+
+    struct Refused {
+        std::string_view target;
+        bool             connect, options;
+    };
+    for (auto const &c :
+         {Refused{"", false, false},
+          Refused{"/x#f", false, false},
+          Refused{"/a|b", false, false},
+          Refused{"*", false, false},
+          Refused{"*x", false, true},
+          Refused{"*//evil.test/x", false, true},
+          Refused{"http://victim.test@evil.test/x", false, false},
+          Refused{"http:///x", false, false},
+          Refused{"http://:80/x", false, false},
+          Refused{"ht/tp://h/x", false, false},
+          Refused{"h/x", false, false},
+          Refused{"example.com:443", false, false},
+          Refused{"/x", true, false},
+          Refused{"example.com", true, false},
+          Refused{"http://example.com:443", true, false},
+          Refused{"u@example.com:443", true, false},
+          Refused{"example.com:99999", true, false},
+          Refused{"[zz::1]:443", true, false},
+          Refused{"[1.2.3.4]:443", true, false},
+          Refused{"http://[127.0.0.1]/x", false, false}}) {
+        EXPECT_FALSE(request_target_uri(c.target, c.connect, c.options).has_value())
+            << '"' << c.target << "\" connect=" << c.connect << " options=" << c.options;
+    }
+}
+
 } // namespace

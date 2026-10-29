@@ -321,6 +321,21 @@ public:
         // ---- The control: a zero delay completes inline, before the handler returns ----
         router().get("/async-inline", [](std::shared_ptr<Context> ctx) { complete_from_callback(ctx, qb::duration::zero(), "inline-done"); });
 
+        // ---- What the request target named: the route, and the URI the server built from it ----
+        // Three routes a target can land on, each echoing the request's URI and its Host field.
+        const auto target_echo = [](std::string tag) {
+            return [tag = std::move(tag)](std::shared_ptr<Context> ctx) {
+                auto const &uri          = ctx->request().uri();
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().body()   = "route=" + tag + ";path=" + std::string{uri.path()} + ";host=" + std::string{uri.host()}
+                                           + ";userinfo=" + std::string{uri.user_info()} + ";Host=" + ctx->request().header("Host");
+                ctx->complete();
+            };
+        };
+        router().get("/", target_echo("root"));
+        router().get("/where/*rest", target_echo("plain"));
+        router().get("/a/where/*rest", target_echo("a"));
+
         // ---- Middleware-induced error -> global error chain -> 503 ----
         {
             auto err_group = router().group("/mw-error");
@@ -374,6 +389,23 @@ protected:
     [[nodiscard]] std::string
     url(const std::string &path) const {
         return "http://localhost:" + std::to_string(_port) + path;
+    }
+
+    /// One request line on a connection of its own, with `Host: localhost`: the status line and the body.
+    [[nodiscard]] std::pair<std::string, std::string>
+    exchange(const std::string &method, const std::string &target) const {
+        qb::io::tcp::socket socket;
+        if (socket.connect_v4("127.0.0.1", _port) != qb::io::SocketStatus::Done)
+            return {"no connection", {}};
+        if (!write_all(socket, method + " " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+            return {"not sent", {}};
+        const std::string wire = read_wire_response(socket);
+        socket.disconnect();
+        const auto line  = wire.find("\r\n");
+        const auto split = wire.find("\r\n\r\n");
+        if (line == std::string::npos || split == std::string::npos)
+            return {wire, {}};
+        return {wire.substr(0, line), wire.substr(split + 4)};
     }
 };
 
@@ -524,6 +556,53 @@ TEST_F(RouterE2ETest, ConcurrentInFlightRequestsAllComplete) {
         EXPECT_EQ(replies[i].response.status(), qb::http::status::OK) << "i=" << i;
         EXPECT_EQ(replies[i].response.body().template as<std::string>(), "concurrent:req" + std::to_string(i)) << "i=" << i;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The request target's form decides what is an authority (Huly QB-1177)
+// ---------------------------------------------------------------------------
+
+// An origin-form target is an absolute path (RFC 9112 §3.2.1), and `absolute-path = 1*( "/" segment )` admits an
+// empty first segment: `//a/where/x` is the path `//a/where/x`, not the host `a` and the path `/where/x` a URI
+// reference parser makes of it. The route served is the one the path's segments name; the authority is Host's.
+TEST_F(RouterE2ETest, AnOriginFormDoubleSlashIsAPathNotAnAuthority) {
+    using Wire = std::pair<std::string, std::string>;
+    EXPECT_EQ(exchange("GET", "//a/where/x"), (Wire{"HTTP/1.1 200 OK", "route=a;path=//a/where/x;host=;userinfo=;Host=localhost"}));
+    EXPECT_EQ(exchange("GET", "///where/x"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=///where/x;host=;userinfo=;Host=localhost"}));
+    EXPECT_EQ(exchange("GET", "//u@a/where/x").first, "HTTP/1.1 404 Not Found") << "its first segment is `u@a`: no route, no userinfo";
+    EXPECT_EQ(exchange("GET", "/where/x"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host=localhost"}));
+    // The control: an absolute-form target is a URI, and the request's authority is its own (RFC 9112 §3.2.2).
+    EXPECT_EQ(exchange("GET", url("/where/x")), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=localhost"}));
+}
+
+// A target that is none of the four forms (RFC 9112 §3.2), one the URI parser refuses or one llhttp refuses itself
+// (`?x`) names no resource: it is answered 400 -- not served at the path a refused parse leaves empty, the route of
+// `/`, nor closed on silence.
+TEST_F(RouterE2ETest, ATargetThatNamesNoResourceIsABadRequest) {
+    for (std::string const target :
+         {"/where/a|b", "/where/a{b}", "*", "/where/x#f", "http://u@localhost/where/x", "http:///where/x", "http://[127.0.0.1]/where/x", "?x"})
+        EXPECT_EQ(exchange("GET", target).first, "HTTP/1.1 400 Bad Request") << target;
+    EXPECT_EQ(exchange("GET", "/where/a%7Cb").first, "HTTP/1.1 200 OK") << "the same byte, percent-encoded";
+    EXPECT_EQ(exchange("OPTIONS", "*").first, "HTTP/1.1 404 Not Found") << "the asterisk-form of OPTIONS reaches the router";
+}
+
+// Pipelined on one connection: the request before a refused target is answered, then the 400, then the connection
+// closes -- what follows the refused target is never read as a request.
+TEST_F(RouterE2ETest, ARefusedTargetIsAnsweredAfterThePipelinedRequestBeforeIt) {
+    qb::io::tcp::socket socket;
+    ASSERT_EQ(socket.connect_v4("127.0.0.1", _port), qb::io::SocketStatus::Done);
+    ASSERT_TRUE(write_all(socket, "GET /where/first HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                                  "GET /where/a|b HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                                  "GET /where/third HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string wire = read_wire_response(socket);
+    socket.disconnect();
+    const auto first   = wire.find("HTTP/1.1 200 OK");
+    const auto refused = wire.find("HTTP/1.1 400 Bad Request");
+    ASSERT_NE(first, std::string::npos) << wire;
+    ASSERT_NE(refused, std::string::npos) << wire;
+    EXPECT_LT(first, refused) << wire;
+    EXPECT_NE(wire.find("path=/where/first"), std::string::npos) << wire;
+    EXPECT_EQ(wire.find("path=/where/third"), std::string::npos) << "a request after the refused target was served: " << wire;
 }
 
 } // namespace

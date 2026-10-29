@@ -24,7 +24,7 @@
  */
 #pragma once
 
-#include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
+#include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
 #include "./base.h"       // For qb::protocol::http2::Http2Protocol and frame types
 
 namespace qb::http::well_known {
@@ -1880,10 +1880,15 @@ private:
             }
             stream.assembled_request.method() = method_from_string_view;
 
-            std::string uri_str = std::string(scheme_sv.value()) + "://";
-            uri_str += std::string(authority_sv.value());
-            uri_str += std::string(path_sv.value());
-            stream.assembled_request.uri() = qb::io::uri::parse(uri_str);
+            // The URI the three fields name, its authority :authority's: a :path that is no absolute path, a
+            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177).
+            auto uri = qb::http::origin::request_uri(scheme_sv.value(), authority_sv.value(), path_sv.value(),
+                                                     method_from_string_view == qb::http::method::OPTIONS);
+            if (!uri) {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority or :path pseudo-header.");
+                return false;
+            }
+            stream.assembled_request.uri() = std::move(*uri);
 
             if (stream.end_stream_received) { // end_stream_received would have been set by on(HeadersFrame) if END_STREAM was on the header
                 if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {

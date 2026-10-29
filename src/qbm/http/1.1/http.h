@@ -141,7 +141,7 @@ private:
     bool                         _active_should_keep_alive{false};
     bool                         _keep_alive{false}; ///< Application override for persistent connections
     std::size_t                  _max_pipelined_requests{128};
-    int  _refusal_status{0}; ///< The answer owed to a request refused for a size limit, once the ones before it are answered
+    int  _refusal_status{0}; ///< The answer owed to a request the parser refused (a limit, a bad target), once the ones before it are answered
     bool _closing{false};    ///< The connection's last response is published: the io closes once it is delivered
     bool _draining{false};   ///< The server drains (http1_begin_drain()): the last request received is answered `close`
     bool _drain_cut{false};  ///< Closed by the drain while idle: it reports DisconnectedReason::ServerDraining
@@ -275,7 +275,7 @@ private:
         }
     }
 
-    /// Answers the request refused for a size limit (http1_refuse_request()): its status, an empty body,
+    /// Answers the request the parser refused (http1_refuse_request()): its status, an empty body,
     /// `Connection: close`. on(eos) closes the connection once it is written.
     void
     send_refusal() {
@@ -600,8 +600,8 @@ public:
     }
 
     /**
-     * @brief Protocol hook: a request was refused for a limit -- 414 for its target, 431 for its fields,
-     *        413 for its body or a chunk (the parser's refusal_status()).
+     * @brief Protocol hook: a request was refused -- 414 for its target, 431 for its fields, 413 for its body
+     *        or a chunk, 400 for a target that names no resource (refusal_status(), or llhttp's own refusal).
      * @param status The status that answers it.
      *
      * The answer -- the status, an empty body, `Connection: close` -- goes out once every request
