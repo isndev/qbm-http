@@ -117,18 +117,20 @@ namespace qb::http::origin {
 [[nodiscard]] bool is_request_authority(std::string_view text) noexcept;
 
 /**
- * @brief The URI of a request received over HTTP/2 or HTTP/3, from its `:scheme`, `:authority` and
- *        `:path` pseudo-header fields (RFC 9113 §8.3.1, RFC 9114 §4.3.1): one reader for the two
+ * @brief The URI of a request received over HTTP/2 or HTTP/3, from its `:scheme`, `:authority` (or `host`)
+ *        and `:path` fields (RFC 9113 §8.3.1, RFC 9114 §4.3.1): one reader for the two
  *        servers that composed it on their own (Huly QB-1177).
  *
- * - `scheme://authority` followed by the path. The URI's authority is `:authority`, never one a
- *   `:path` or a userinfo part chose: composed onto `victim.test`, the `:path` `@evil.test/x` named
- *   the host `evil.test`. A `:path` `//a/b` stays the path it is.
+ * - `scheme://authority` followed by the path. The URI's authority is `:authority` (or the `host` field
+ *   that stands for it, Huly QB-1195), never one a `:path` or a userinfo part chose: composed onto
+ *   `victim.test`, the `:path` `@evil.test/x` named the host `evil.test`. A `:path` `//a/b` stays the
+ *   path it is.
  * - The asterisk-form of an OPTIONS request is the URI `*`, without an authority, as HTTP/1.1's is:
- *   the request names no resource of the authority, which `:authority` gave.
+ *   the request names no resource of the authority, which `:authority` or `host` gave.
  *
  * @param scheme          `:scheme`: a URI scheme (RFC 3986 §3.1).
- * @param authority       `:authority`: an authority is_request_authority() accepts.
+ * @param authority       `:authority`, or the `host` field that stands for it: an authority
+ *                        is_request_authority() accepts.
  * @param path            `:path`: an absolute path and an optional query, no fragment, no space or control
  *                        byte; or `*` for an OPTIONS request.
  * @param options_request Whether the request's method is OPTIONS.

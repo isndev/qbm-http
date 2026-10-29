@@ -58,7 +58,9 @@ TEST(Http3ProtocolValidationTest, RejectsPseudoHeadersAfterRegularHeaders) {
     EXPECT_FALSE(qb::protocol::http3::detail::pseudo_headers_before_regular_headers(block));
 }
 
-TEST(Http3ProtocolValidationTest, RequiresNonEmptyAuthorityAndPathForRequests) {
+// :authority is optional -- a `host` field may name the authority instead (RFC 9114 section 4.3.1, Huly QB-1195) --
+// but never empty; :method, :scheme and :path are required and never empty.
+TEST(Http3ProtocolValidationTest, RequiresMethodSchemePathAndNoEmptyAuthority) {
     std::optional<std::string> method    = "GET";
     std::optional<std::string> scheme    = "https";
     std::optional<std::string> authority = "example.test";
@@ -70,11 +72,40 @@ TEST(Http3ProtocolValidationTest, RequiresNonEmptyAuthorityAndPathForRequests) {
     EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
 
     authority = std::nullopt;
-    EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
+    EXPECT_TRUE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path))
+        << "without :authority, the request's `host` field names its authority";
+
+    for (auto *required : {&method, &scheme, &path}) {
+        auto const kept = *required;
+        *required       = std::nullopt;
+        EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
+        *required = "";
+        EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
+        *required = kept;
+    }
 
     authority = "example.test";
     path      = "";
     EXPECT_FALSE(qb::protocol::http3::detail::has_required_request_pseudo_headers(method, scheme, authority, path));
+}
+
+// A request names one authority by its `host` fields (Huly QB-1195): at most one beside :authority, exactly one
+// without it -- the fields over the request limits counted, the first of them among the kept ones. nghttp3 refuses a
+// second `host` and a request with neither itself; this is qbm-http's own rule, nghttp3 being a system library.
+TEST(Http3ProtocolValidationTest, ARequestNamesOneAuthorityByItsHostFields) {
+    using qb::protocol::http3::detail::has_one_request_authority;
+    EXPECT_TRUE(has_one_request_authority(true, 0, 0));
+    EXPECT_TRUE(has_one_request_authority(true, 1, 0));
+    EXPECT_TRUE(has_one_request_authority(true, 1, 1)) << "the one host over the limits is the kept one";
+    EXPECT_FALSE(has_one_request_authority(true, 2, 0));
+    EXPECT_FALSE(has_one_request_authority(true, 1, 2)) << "a second host over the limits, dropped, still counts";
+    EXPECT_FALSE(has_one_request_authority(false, 0, 0)) << "neither :authority nor host";
+    EXPECT_TRUE(has_one_request_authority(false, 1, 0));
+    EXPECT_TRUE(has_one_request_authority(false, 1, 1));
+    EXPECT_FALSE(has_one_request_authority(false, 2, 0));
+    EXPECT_FALSE(has_one_request_authority(false, 2, 1));
+    EXPECT_FALSE(has_one_request_authority(false, 1, 3));
+    EXPECT_FALSE(has_one_request_authority(false, 0, 1)) << "no host kept: nothing to compose the URI from";
 }
 
 // ---------------------------------------------------------------------------

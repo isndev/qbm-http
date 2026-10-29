@@ -323,7 +323,9 @@ public:
     [[nodiscard]] static std::optional<std::uint64_t> parse_content_length(std::string_view value) noexcept;
 
     /**
-     * @brief Validate request pseudo-headers
+     * @brief Validate request pseudo-headers: `:method`, `:scheme` and `:path` once each and non-empty, and
+     *        `:authority` once and non-empty -- or, without it, one non-empty `host` field among @p headers
+     *        (RFC 9114 §4.3.1, Huly QB-1195). Presence only: no value is compared or parsed as an authority.
      * @param headers List of header fields
      * @return Validation result with details
      */

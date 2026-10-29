@@ -112,7 +112,8 @@ SettingsHelper::calculate_safe_max_frame_size(const qb::unordered_map<Http2Setti
 bool
 HeaderValidator::is_forbidden_header(std::string_view name) {
     // The connection-specific fields RFC 9113 §8.2.2 names and the h2c upgrade's http2-settings. "te" is judged by
-    // its value, by the callers; "host" by the server, against :authority (RFC 9113 §8.3.1, Huly QB-1189).
+    // its value, by the callers; "host" by the server: one field, naming :authority (RFC 9113 §8.3.1, Huly QB-1189)
+    // or, without it, the request's authority (RFC 9114 §4.3.1, Huly QB-1195).
     static constexpr std::array<std::string_view, 6> forbidden = {"connection",        "upgrade",          "http2-settings",
                                                                   "transfer-encoding", "proxy-connection", "keep-alive"};
 
@@ -218,11 +219,17 @@ HeaderValidator::parse_content_length(std::string_view value) noexcept {
 
 SettingsHelper::ValidationResult
 HeaderValidator::validate_request_pseudo_headers(const std::vector<qb::protocol::hpack::HeaderField> &headers) {
-    bool has_method = false, has_path = false, has_scheme = false, has_authority = false;
+    bool        has_method = false, has_path = false, has_scheme = false, has_authority = false;
+    std::size_t hosts = 0, empty_hosts = 0; // without :authority, one `host` field names the authority (Huly QB-1195)
 
     for (const auto &header : headers) {
-        if (!is_pseudo_header(header.name))
+        if (!is_pseudo_header(header.name)) {
+            if (header.name == "host") {
+                ++hosts;
+                empty_hosts += header.value.empty();
+            }
             continue;
+        }
 
         if (header.name == ":method") {
             if (has_method) {
@@ -261,9 +268,9 @@ HeaderValidator::validate_request_pseudo_headers(const std::vector<qb::protocol:
         }
     }
 
-    if (!has_method || !has_path || !has_scheme || !has_authority) {
+    if (!has_method || !has_path || !has_scheme || (!has_authority && (hosts != 1 || empty_hosts != 0))) {
         return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR,
-                                                         "Missing required pseudo-headers (:method, :path, :scheme, :authority)");
+                                                         "Missing required pseudo-headers (:method, :path, :scheme), or no authority");
     }
 
     return SettingsHelper::ValidationResult::valid();

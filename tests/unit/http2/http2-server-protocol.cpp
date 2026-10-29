@@ -2111,27 +2111,105 @@ TEST(HTTP2ServerProtocol, AMalformedTargetPseudoHeaderIsStreamError) {
     }
 }
 
-// A request without :authority is a stream error, a `host` field or not: the server takes the request's
-// authority from :authority alone, and a `host` field never stands in for it (Huly QB-1189).
-TEST(HTTP2ServerProtocol, MissingAuthorityPseudoHeaderIsStreamError) {
-    for (const bool with_host : {false, true}) {
+// A request that names its authority neither in :authority nor in a `host` field, or in an empty :authority, is
+// malformed: a stream error, the connection kept. RFC 9114 section 4.3.1 requires one of the two for a scheme with a
+// mandatory authority (http, https); qbm-http composes no URI without an authority, whatever the scheme (Huly
+// QB-1195).
+TEST(HTTP2ServerProtocol, ARequestWithoutAnAuthorityIsStreamError) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    for (auto const &fields :
+         {Fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/noauth"}},
+          Fields{{":method", "GET"}, {":scheme", "http"}, {":path", "/noauth"}, {"x-a", "1"}},
+          Fields{{":method", "GET"}, {":scheme", "urn"}, {":path", "/noauth"}},
+          Fields{{":method", "OPTIONS"}, {":scheme", "https"}, {":path", "*"}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/empty"}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/empty"}, {"host", ""}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/empty"}, {"host", "example.test"}}}) {
         Http2FakeIO    io;
         ServerProtocol protocol(io);
         do_handshake(protocol, io);
         ASSERT_TRUE(protocol.ok());
-
-        std::vector<qb::protocol::hpack::HeaderField> fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/noauth"}};
-        if (with_host) {
-            fields.push_back({"host", "example.test"});
-        }
         push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
                    encode_hpack_headers(fields));
         drive(protocol, io);
 
-        EXPECT_TRUE(protocol.ok()) << "host " << with_host;
-        EXPECT_EQ(io.request_count, 0) << "host " << with_host;
-        EXPECT_EQ(io.stream_error_count, 1) << "host " << with_host;
-        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << "host " << with_host;
+        const auto label =
+            fields[1].value + " " + fields[2].name + "=" + fields[2].value + " ... " + fields.back().name + "=" + fields.back().value;
+        EXPECT_TRUE(protocol.ok()) << label;
+        EXPECT_EQ(io.request_count, 0) << label;
+        EXPECT_EQ(io.stream_error_count, 1) << label;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << label;
+    }
+}
+
+// Without :authority, the one `host` field names the request's authority: RFC 9114 section 4.3.1 asks for one of the
+// two, RFC 9113 section 8.3.1 sets Host aside only when :authority is present, and a user agent sends Host unless
+// it sends :authority (RFC 9110 section 7.2). The request's URI is the one the same value sent as :authority
+// composes -- one reader, origin::request_uri() -- and header("Host") gives it. The server required :authority and
+// reset every such stream (Huly QB-1195).
+TEST(HTTP2ServerProtocol, AHostFieldNamesTheAuthorityOfARequestWithoutOne) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    struct Named {
+        std::string method, scheme, authority, path;
+    };
+    const auto serve = [](Fields const &fields) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.stream_error_count, 0);
+        return io.last_request;
+    };
+    for (auto const &c :
+         {Named{"GET", "https", "example.test", "/h?x=1"}, Named{"GET", "http", "EXAMPLE.Test", "/h"},
+          Named{"GET", "https", "example.test:8443", "//evil.test/x"}, Named{"GET", "https", "[2001:db8::1]:8443", "/v6"},
+          Named{"GET", "http", "127.0.0.1:80", "/v4"}, Named{"OPTIONS", "https", "example.test", "*"},
+          Named{"POST", "https", "example.test:", "/empty-port"}}) {
+        SCOPED_TRACE(c.method + " " + c.scheme + " " + c.authority + " " + c.path);
+        const auto by_authority = serve({{":method", c.method}, {":scheme", c.scheme}, {":authority", c.authority}, {":path", c.path}});
+        const auto by_host      = serve({{":method", c.method}, {":scheme", c.scheme}, {":path", c.path}, {"x-a", "1"}, {"host", c.authority}});
+        ASSERT_TRUE(by_authority.has_value()) << "the control: the value sent as :authority is routed";
+        ASSERT_TRUE(by_host.has_value()) << "the request naming its authority in its host field is routed";
+        EXPECT_EQ(by_host->header("Host"), c.authority);
+        EXPECT_EQ(by_host->method(), by_authority->method());
+        EXPECT_EQ(by_host->uri().source(), by_authority->uri().source());
+        EXPECT_EQ(by_host->uri().scheme(), by_authority->uri().scheme());
+        EXPECT_EQ(by_host->uri().host(), by_authority->uri().host());
+        EXPECT_EQ(by_host->uri().port(), by_authority->uri().port());
+        EXPECT_EQ(by_host->uri().path(), by_authority->uri().path());
+        EXPECT_TRUE(by_host->uri().user_info().empty());
+    }
+}
+
+// Without :authority, a `host` field that is no authority -- empty, a userinfo, a path, no host, a port that is none,
+// an IP literal that is no IPv6 address, a list of two authorities (its space) -- or a second `host` field makes the
+// request malformed: a stream error, the connection kept, as an :authority of that shape does (Huly QB-1195).
+TEST(HTTP2ServerProtocol, AHostFieldThatIsNoAuthorityIsStreamError) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    for (auto const &host :
+         {Fields{{"host", ""}}, Fields{{"host", "user@example.test"}}, Fields{{"host", "example.test/evil"}}, Fields{{"host", ":443"}},
+          Fields{{"host", "a:b:c"}}, Fields{{"host", "example.test:99999"}}, Fields{{"host", "evil]"}}, Fields{{"host", "[127.0.0.1]"}},
+          Fields{{"host", "example.test, evil.test"}}, Fields{{"host", "example.test"}, {"host", "example.test"}},
+          Fields{{"host", "example.test"}, {"host", "evil.test"}}, Fields{{"host", "example.test"}, {"x-a", "1"}, {"host", "evil.test"}}}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        Fields fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/h"}};
+        fields.insert(fields.end(), host.begin(), host.end());
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
+
+        const auto label = host.back().value + " (" + std::to_string(host.size()) + " fields)";
+        EXPECT_TRUE(protocol.ok()) << "stream-level: the connection survives " << label;
+        EXPECT_EQ(io.request_count, 0) << label << " reached the server as "
+                                       << (io.last_request ? io.last_request->uri().source() : std::string{});
+        EXPECT_EQ(io.stream_error_count, 1) << label;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << label;
     }
 }
 
@@ -4163,6 +4241,114 @@ TEST(HTTP2ServerProtocol, AMalformedFieldOverTheLimitsStaysAStreamError) {
     EXPECT_EQ(io.stream_error_count, 4) << "the malformed host, before the 414";
     EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
     EXPECT_TRUE(emitted_header_blocks(io.output, 9).empty()) << "a malformed request is not answered";
+}
+
+// The `host` field that names the authority of a request without :authority is a field like any other: over the
+// value limit, well-formed, the request is answered 431; a second one stays the stream error it is, before the
+// limits (Huly QB-1195).
+TEST(HTTP2ServerProtocol, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldLimits) {
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_header_value_length = 12;
+    do_handshake(protocol, io);
+    const auto get = [&](uint32_t stream_id, std::vector<qb::protocol::hpack::HeaderField> const &hosts) {
+        std::vector<qb::protocol::hpack::HeaderField> headers{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
+        headers.insert(headers.end(), hosts.begin(), hosts.end());
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, stream_id,
+                   encode_hpack_headers(headers));
+        drive(protocol, io);
+    };
+
+    get(1, {{"host", "example.test"}});
+    EXPECT_EQ(io.request_count, 1) << "a host of exactly the value limit is routed";
+    EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty());
+
+    get(3, {{"host", "example.test:8"}});
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.stream_error_count, 0) << "a well-formed host over the value limit is no stream error";
+    expect_refused_with(io.output, 3, "431");
+
+    get(5, {{"host", "example.test"}, {"host", "example.test:8"}});
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.stream_error_count, 1) << "a second host field is malformed, over the limit or not";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 5).empty()) << "a malformed request is not answered";
+
+    // Another field over the value limit, before or after the host: the request is answered 431, its host the
+    // one authority it names.
+    get(7, {{"x-v", "1234567890123"}, {"host", "example.test"}});
+    get(9, {{"host", "example.test"}, {"x-v", "1234567890123"}});
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.stream_error_count, 1) << "a request over the limits whose host names its authority is no stream error";
+    expect_refused_with(io.output, 7, "431");
+    expect_refused_with(io.output, 9, "431");
+
+    // An empty :authority is malformed before any limit is judged: beside a field over the value limit, the request
+    // is a stream error, never a 431 -- with or without a host field naming an authority.
+    for (auto const &[stream_id, fields] : std::vector<std::pair<uint32_t, std::vector<qb::protocol::hpack::HeaderField>>>{
+             {11, {{":authority", ""}, {"x-v", "1234567890123"}}}, {13, {{":authority", ""}, {"host", ""}, {"x-v", "1234567890123"}}}
+         }) {
+        get(stream_id, fields);
+        EXPECT_TRUE(emitted_header_blocks(io.output, stream_id).empty()) << stream_id << ": a malformed request is not answered";
+    }
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.stream_error_count, 3) << "an empty :authority is malformed, over the limits or not";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+
+    // A malformed request beside a field over the limits stays a stream error, whatever field makes it malformed: a
+    // host that is no authority (over the limit itself, or empty), a second host (in either order), an :authority
+    // that is no authority, a :path that is no absolute path. The limits are answered once the method and the URI
+    // are known well-formed, as on HTTP/3 (Huly QB-1195: a malformed :authority or :path got 431 first).
+    uint32_t next = 15;
+    for (auto const &fields : std::vector<std::vector<qb::protocol::hpack::HeaderField>>{
+             {{"host", "example.test:99999"}},
+             {{"host", ""}, {"x-v", "1234567890123"}},
+             {{"host", "example.test:8"}, {"host", "example.test"}},
+             {{":authority", "a:b:c"}, {"x-v", "1234567890123"}}
+         }) {
+        const auto errors = io.stream_error_count;
+        get(next, fields);
+        EXPECT_EQ(io.stream_error_count, errors + 1) << next << ": malformed beside the limits";
+        EXPECT_TRUE(emitted_header_blocks(io.output, next).empty()) << next << ": a malformed request is not answered";
+        next += 2;
+    }
+    const auto errors = io.stream_error_count;
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next,
+               encode_hpack_headers(
+                   {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|b"}, {"x-v", "1234567890123"}}));
+    drive(protocol, io);
+    EXPECT_EQ(io.stream_error_count, errors + 1) << "a :path that is no absolute path, beside the limits";
+    EXPECT_TRUE(emitted_header_blocks(io.output, next).empty()) << "a malformed request is not answered";
+
+    // Another field over the value limit, then the host over it too: the host still names the authority, 431.
+    get(next + 2, {{"x-v", "1234567890123"}, {"host", "example.test:8"}});
+    EXPECT_EQ(io.stream_error_count, errors + 1);
+    expect_refused_with(io.output, next + 2, "431");
+
+    // A method the server does not know beside a field over the limits: reset, never 431. A :path that is no
+    // absolute path over the target limit: a stream error, never 414 -- the limits are answered after the method and
+    // the URI, as on HTTP/3 (Huly QB-1195).
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next + 4,
+               encode_hpack_headers(
+                   {{":method", "BREW"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}, {"x-v", "1234567890123"}}));
+    drive(protocol, io);
+    EXPECT_TRUE(emitted_header_blocks(io.output, next + 4).empty()) << "an unknown method beside the limits is not answered";
+    EXPECT_EQ(last_rst_stream_error(io.output, next + 4), ErrorCode::PROTOCOL_ERROR);
+    io.limits.max_url_length = 8;
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next + 6,
+               encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|bcdefghij"}}));
+    drive(protocol, io);
+    EXPECT_EQ(io.stream_error_count, errors + 3) << "the unknown method, then the malformed :path over the target limit";
+    EXPECT_TRUE(emitted_header_blocks(io.output, next + 6).empty()) << "a malformed request is not answered 414";
+    EXPECT_EQ(last_rst_stream_error(io.output, next + 6), ErrorCode::PROTOCOL_ERROR);
+    // The control: the same :path, well-formed, its host the authority -- answered 414.
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next + 8,
+               encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":path", "/abcdefghij"}, {"host", "example.test"}}));
+    drive(protocol, io);
+    EXPECT_EQ(io.stream_error_count, errors + 3);
+    expect_refused_with(io.output, next + 8, "414");
+    EXPECT_EQ(io.request_count, 1);
 }
 
 // The default limits are the HTTP/1.1 constants, on a server that never set its own (Huly QB-94): a field value of

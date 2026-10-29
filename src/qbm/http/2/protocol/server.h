@@ -1766,9 +1766,8 @@ private:
         if (!is_trailers_block) { // Main headers (request)
             stream.headers_received_main = true;
             // Validate pseudo-headers and convert to qb::http::Request components
-            std::optional<std::string_view> method_sv, scheme_sv, path_sv, authority_sv;
+            std::optional<std::string_view> method_sv, scheme_sv, path_sv, authority_sv, host_sv;
             bool                            pseudo_headers_finished = false;
-            bool                            host_seen               = false;
 
             std::string temp_method_str; // Temporary for method conversion
 
@@ -1832,14 +1831,15 @@ private:
                         return false;
                     }
                     // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
-                    // (RFC 9113 §8.3.1) -- HTTP/3's check. It was refused as a connection-specific field (Huly QB-1189).
+                    // (RFC 9113 §8.3.1) -- HTTP/3's check (Huly QB-1189) -- or, without :authority, the request's
+                    // authority (RFC 9114 §4.3.1, Huly QB-1195).
                     if (name == "host") [[unlikely]] {
-                        if (host_seen || !authority_sv || !qb::http::utility::iequals(value, *authority_sv)) {
+                        if (host_sv || (authority_sv && !qb::http::utility::iequals(value, *authority_sv))) {
                             this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                  "A host header field that is not one naming the :authority before it.");
+                                                  "A second host header field, or one not naming the :authority before it.");
                             return false;
                         }
-                        host_seen = true;
+                        host_sv = value;
                     }
                     if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
                         || ++fields > limits.max_headers_count) [[unlikely]] {
@@ -1870,17 +1870,11 @@ private:
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
                 return false;
             }
-            if (!authority_sv || authority_sv.value().empty()) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing or empty :authority pseudo-header.");
-                return false;
-            }
-            if (path_sv.value().size() > limits.max_url_length) [[unlikely]] {
-                this->refuse_request(stream.id, qb::http::status::URI_TOO_LONG, "HTTP/2 :path exceeds configured size limit");
-                return false;
-            }
-            if (fields_over_limits) [[unlikely]] {
-                this->refuse_request(stream.id, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE,
-                                     "HTTP/2 request header fields exceed configured limits");
+            // The request's authority: :authority, else its `host` field -- one of the two (RFC 9114 §4.3.1, Huly
+            // QB-1195). No URI is composed without one, whatever the scheme; an empty one is no authority, below.
+            const auto request_authority = authority_sv ? authority_sv : host_sv;
+            if (!request_authority) {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :authority and host header field.");
                 return false;
             }
 
@@ -1891,15 +1885,28 @@ private:
             }
             stream.assembled_request.method() = method_from_string_view;
 
-            // The URI the three fields name, its authority :authority's: a :path that is no absolute path, a
-            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177).
-            auto uri = qb::http::origin::request_uri(scheme_sv.value(), authority_sv.value(), path_sv.value(),
+            // The URI the three fields name, its authority the request's: a :path that is no absolute path, a
+            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177), a `host` that names
+            // the authority read as :authority is (QB-1195).
+            auto uri = qb::http::origin::request_uri(scheme_sv.value(), *request_authority, path_sv.value(),
                                                      method_from_string_view == qb::http::method::OPTIONS);
             if (!uri) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority or :path pseudo-header.");
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority, host or :path field.");
                 return false;
             }
             stream.assembled_request.uri() = std::move(*uri);
+
+            // Over the limits, the request is answered once it is known well-formed -- its method and its URI
+            // included, as HTTP/3 answers it: a malformed :scheme, :path, :authority or `host` stays a stream error (QB-1195).
+            if (path_sv.value().size() > limits.max_url_length) [[unlikely]] {
+                this->refuse_request(stream.id, qb::http::status::URI_TOO_LONG, "HTTP/2 :path exceeds configured size limit");
+                return false;
+            }
+            if (fields_over_limits) [[unlikely]] {
+                this->refuse_request(stream.id, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                                     "HTTP/2 request header fields exceed configured limits");
+                return false;
+            }
 
             if (stream.end_stream_received) { // end_stream_received would have been set by on(HeadersFrame) if END_STREAM was on the header
                 if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
