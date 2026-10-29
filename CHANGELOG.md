@@ -16,11 +16,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   and `OPTIONS` pass; otherwise `Sec-Fetch-Site` decides when the browser sends it (`same-origin` and `none` pass,
   `same-site`, `cross-site` and any other value are refused), else `Origin` must name the request's own host and port
   -- the `Host` field, or the authority of a target that carries a scheme (HTTP/2 and HTTP/3 rebuild it from `:scheme`
-  and `:authority`; an absolute-form HTTP/1.1 target), never the `//host` of an origin-form path -- compared
-  case-insensitively on its effective port, and over a TLS connection with the `https` scheme (behind a
-  TLS-terminating proxy the scheme is not compared, as in Go, and HSTS covers it); a request with neither header
-  passes, since every browser sends one of them on an unsafe request. That is the algorithm of Go 1.25's
-  `net/http.CrossOriginProtection` and the current OWASP recommendation. Opt in to a second layer with
+  and `:authority`, or the `host` field that stands for it; an absolute-form HTTP/1.1 target), never the `//host` of
+  an origin-form path -- compared case-insensitively on its effective port, and over a TLS connection with the `https`
+  scheme (behind a TLS-terminating proxy the scheme is not compared, as in Go, and HSTS covers it); a request with
+  neither header passes, since every browser sends one of them on an unsafe request. That is the algorithm of Go
+  1.25's `net/http.CrossOriginProtection` and the current OWASP recommendation. Opt in to a second layer with
   `CsrfOptions::tokens(secret)` (at least 32 bytes; `QB_HAS_SSL`; wiped before it is released or replaced): the OWASP
   signed double-submit cookie -- a random nonce and its HMAC-SHA256 under the secret, domain-separated and
   length-prefixed, bound to the session when `session_binding()` names it -- set as `__Host-csrf` (`Secure`, `Path=/`,
@@ -192,12 +192,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   to an origin server), else the request is malformed (`RST_STREAM(PROTOCOL_ERROR)`, the connection kept) --
   another authority or port, an empty value, a second field --, refused before a field over the request limits or a
   `:path` over the target limit is answered, as a malformed regular field is; `header("Host")` is never a second
-  authority the client chose. `:authority` stays required: a `host` field does not stand in for it (RFC 9113 §8.3.1
-  has a client that generates the request, and an intermediary that forwards one, write `:authority` whenever the
-  target has an authority, and the HTTP/3 server requires it alike; RFC 7540 and RFC 9114 let a client send `Host`
-  alone). The server sends a response's `host` field, as HTTP/1.1 does (HTTP/3 drops every `host` field it would
-  send), and the client delivers it. The client never sends `host`: a request's `Host` header names `:authority`
-  when its URI has no host and is dropped otherwise. Push promises are unchanged. The check costs nothing
+  authority the client chose; without `:authority`, the `host` field names the request's authority (the next
+  entry, Huly QB-1195). The server sends a response's `host` field, as HTTP/1.1 does (HTTP/3 drops every `host`
+  field it would send), and the client delivers it. The client never sends `host`: a request's `Host` header names
+  `:authority` when its URI has no host and is dropped otherwise. Push promises are unchanged. The check costs nothing
   measurable: the new `qbm-http-bench-http2-server-request` (a browser-shaped GET with 14 fields, framed, decoded,
   validated, dispatched and answered on a socket-less server, logging at WARN; 3 copies of each binary in a seeded
   order over 10 rounds, macOS arm64) read every difference inside the spread of one binary's copies (up to 1.4 %):
@@ -209,6 +207,39 @@ All notable changes to the qbm-http module are documented here. The format is ba
   well-formed `host` over the value limit answered 431, a malformed one beside a field or a `:path` over the limits
   a stream error; every connection-specific field refused in a request received, a response sent and a response
   received; a response with `host` sent and delivered; the client's emitted header block.
+
+- **An HTTP/2 or HTTP/3 request may name its authority in its `host` field alone, without `:authority` (Huly
+  QB-1195).** Both servers required `:authority`: measured on the base, a request that named its authority in its one
+  `host` field was reset with `RST_STREAM(PROTOCOL_ERROR)` on HTTP/2 and its stream refused with `H3_MESSAGE_ERROR` on
+  HTTP/3 (by qbm-http: nghttp3 lets it through), although RFC 9114 §4.3.1 asks for an `:authority` or a `Host` field,
+  RFC 9113 §8.3.1 sets `Host` aside only when `:authority` is present, and a user agent sends `Host` unless it sends
+  `:authority` (RFC 9110 §7.2) -- the rule that has a client write `:authority` binds clients, not what a server
+  accepts. A request's authority is now its `:authority`, else its one `host` field, read as `:authority` is: an
+  authority `qb::http::origin::is_request_authority()` accepts, composed into the URI by
+  `qb::http::origin::request_uri()`, `header("Host")` giving it. A request that names neither, whatever its scheme (qb
+  composes no URI without an authority), an empty `:authority`, a second `host` field or a `host` field that is no
+  authority (`:443`, `a:b:c`, `example.test:99999`, `[127.0.0.1]`) stays malformed, as does a `host` field beside
+  `:authority` that does not name it (QB-1177, QB-1189): `RST_STREAM(PROTOCOL_ERROR)` on HTTP/2, the stream refused
+  with `H3_MESSAGE_ERROR` on HTTP/3, where nghttp3 (1.18.0 measured) refuses some shapes itself first, a connection
+  error -- no authority at all, an empty field, a second `host` field, a `host` holding `@`, `/` or a space. The
+  `host` field that stands for `:authority` is held to the field limits like any field: over the value limit, the
+  request is answered 431, once it is known well-formed. On HTTP/2 the 414 and 431 answers now come after the method
+  and the URI are composed, as on HTTP/3: an unknown `:method`, or a malformed `:scheme`, `:authority` or `:path`,
+  beside a field or a `:path` over the limits was answered 431 or 414 and is now a stream error, as a malformed `host`
+  already was. On HTTP/3 a field over the limits is dropped, but the first `host` field of the header section over
+  them is now kept for the checks and the others counted (trailer sections are unchanged): a `host` over the limits
+  beside `:authority` that names another authority refuses the stream, where it was answered 431 unread, and a second
+  one stays malformed. `HeaderValidator::validate_request_pseudo_headers()`, a public helper the server does not call,
+  accepts a request without `:authority` when one non-empty `host` field is among the fields it is given (it checks
+  presence, no value against another, as before). The HTTP/2 request path costs nothing measurable:
+  `qbm-http-bench-http2-server-request` against QB-1189 (3 copies of each binary in a seeded order over 10 rounds,
+  macOS arm64) read a browser-shaped GET 3343 to 3351 ns a request (+0.2 %), the same with a `host` field 3429 to 3418
+  (-0.3 %), and the first with both sides built with 64-byte function and loop alignment 3385 to 3368 (-0.5 %), each
+  inside the spread of one binary's copies (up to 1.2 %). Tests: on both servers, a request naming its authority in
+  its `host` field served with the URI the same value sent as `:authority` composes (another case, a port, an empty
+  port, an IPv6 and an IPv4 literal, `//` in the path, `OPTIONS *`, `http`); every refused shape -- on HTTP/3 refused
+  by qbm-http where nghttp3 lets it through, by either layer where nghttp3 refuses it first --; the field limits both
+  ways, each malformed shape beside them a stream error; the validator.
 
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`

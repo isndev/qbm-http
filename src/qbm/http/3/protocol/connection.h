@@ -216,17 +216,36 @@ pseudo_headers_before_regular_headers(header_block const &block) noexcept {
 }
 
 /**
- * @brief Check that all mandatory request pseudo-headers are present and non-empty.
+ * @brief Check that the mandatory request pseudo-headers are present and non-empty, and @c :authority, if
+ *        present, non-empty (RFC 9114 §4.3.1).
+ *
+ * @c :authority is optional: without it, the request's one @c host field names its authority (Huly QB-1195).
+ *
  * @param method    Value of @c :method, if seen.
  * @param scheme    Value of @c :scheme, if seen.
  * @param authority Value of @c :authority, if seen.
  * @param path      Value of @c :path, if seen.
- * @return @c true only when every one of the four is present and non-empty.
+ * @return @c true when @c :method, @c :scheme and @c :path are present and non-empty and @c :authority is absent
+ *         or non-empty.
  */
 inline bool
 has_required_request_pseudo_headers(std::optional<std::string> const &method, std::optional<std::string> const &scheme,
                                     std::optional<std::string> const &authority, std::optional<std::string> const &path) noexcept {
-    return method && !method->empty() && scheme && !scheme->empty() && authority && !authority->empty() && path && !path->empty();
+    return method && !method->empty() && scheme && !scheme->empty() && (!authority || !authority->empty()) && path && !path->empty();
+}
+
+/**
+ * @brief Check that a request names one authority by its `host` fields (RFC 9114 §4.3.1, Huly QB-1195): at most
+ *        one `host` field beside @c :authority, exactly one without it.
+ * @param has_authority     Whether the request carries @c :authority.
+ * @param kept_hosts        The `host` fields among the request's headers.
+ * @param hosts_over_limits The `host` fields over the request limits; the first of them is among @p kept_hosts.
+ * @return @c true when the request may be composed: then, without @c :authority, one `host` field is kept.
+ */
+inline bool
+has_one_request_authority(bool has_authority, std::size_t kept_hosts, std::size_t hosts_over_limits) noexcept {
+    const auto hosts = kept_hosts + (hosts_over_limits > 1 ? hosts_over_limits - 1 : 0);
+    return hosts <= 1 && (has_authority || kept_hosts == 1);
 }
 
 /**
@@ -571,6 +590,9 @@ private:
         /// message): it has been reset, what still arrives on it is dropped, and the message is
         /// never handed to the owner.
         bool refused = false;
+        /// The `host` fields of the request's header section over the request limits: the first is kept, as one
+        /// within them is, the others are counted -- a request carries one `host` field at most (Huly QB-1195).
+        std::size_t host_fields_over_limits = 0;
     };
 
     Owner                                                          &_owner;
@@ -878,11 +900,12 @@ private:
     static int
     begin_headers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-            st.incoming_headers       = {};
-            st.incoming_header_fields = 0;
-            st.fields_over_limits     = false;
-            st.path_over_limit        = false;
+            auto &st                   = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers        = {};
+            st.incoming_header_fields  = 0;
+            st.fields_over_limits      = false;
+            st.path_over_limit         = false;
+            st.host_fields_over_limits = 0;
             return 0;
         });
     }
@@ -914,6 +937,10 @@ private:
                     return 0;
                 }
                 st.fields_over_limits = true; // a request: answered 431 at the end of its section (Huly QB-94)
+                // A `host` of the header section names the authority: the first one over the limits is kept for
+                // materialize_headers()'s checks, as one within them is; any other is counted (Huly QB-1195).
+                if (header_name == "host" && !st.main_headers_seen && st.host_fields_over_limits++ == 0)
+                    st.incoming_headers.add(std::move(header_name), std::move(header_value));
                 return 0;
             }
             if (header_name == ":path" && header_value.size() > limits.max_url_length) [[unlikely]] {
@@ -1133,17 +1160,24 @@ private:
             if (parsed_method == qb::http::method::UNINITIALIZED) {
                 return false;
             }
-            // The URI the three fields name, its authority :authority's: a :path that is no absolute path, a
-            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177).
-            auto uri = qb::http::origin::request_uri(*scheme, *authority, *path, parsed_method == qb::http::method::OPTIONS);
-            if (!uri) {
+            // A `host` field names the authority too: one, and :authority's (RFC 9114 §4.3.1). Read otherwise,
+            // `header("Host")` was a second authority the client chose. Without :authority, it is the request's
+            // authority: one of the two, or no URI is composed, whatever the scheme (Huly QB-1195). The fields over
+            // the limits count: the first is among the headers, the others were dropped.
+            auto const host = st.request.headers().find("host");
+            if (!detail::has_one_request_authority(authority.has_value(), host != st.request.headers().end() ? host->second.size() : 0,
+                                                   st.host_fields_over_limits)) {
                 return false;
             }
-            // A `host` field names the authority too: one, and :authority's (RFC 9114 §4.3.1). Read otherwise,
-            // `header("Host")` was a second authority the client chose.
-            if (auto const host = st.request.headers().find("host");
-                host != st.request.headers().end()
-                && (host->second.size() != 1 || !qb::http::utility::iequals(host->second.front(), *authority))) {
+            if (authority && host != st.request.headers().end() && !qb::http::utility::iequals(host->second.front(), *authority)) {
+                return false;
+            }
+            // The URI the three fields name, its authority the request's: a :path that is no absolute path, a
+            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177), a `host` that names
+            // the authority read as :authority is (QB-1195).
+            auto uri = qb::http::origin::request_uri(*scheme, authority ? std::string_view{*authority} : host->second.front(), *path,
+                                                     parsed_method == qb::http::method::OPTIONS);
+            if (!uri) {
                 return false;
             }
             st.request.method()      = parsed_method;

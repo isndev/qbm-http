@@ -983,6 +983,102 @@ TEST(Http3ConnectionDirect, AMalformedTargetPseudoHeaderNeverReachesTheServer) {
 }
 
 /**
+ * @test Without :authority, the one `host` field names the request's authority
+ * @brief RFC 9114 section 4.3.1: a request for a scheme with a mandatory authority carries an :authority or a Host
+ *        field. The request's URI is the one the same value sent as :authority composes (origin::request_uri()),
+ *        and header("Host") gives it. nghttp3 lets such a request through; the server required :authority and
+ *        refused every such stream (Huly QB-1195).
+ */
+TEST(Http3ConnectionDirect, AHostFieldNamesTheAuthorityOfARequestWithoutOne) {
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    struct Named {
+        std::string method, scheme, authority, path;
+    };
+    auto serve = [](Fields const &fields) -> std::optional<qb::http::Request> {
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        pair.settle();
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+        EXPECT_TRUE(pair.server_owner.resets.empty());
+        if (pair.server_owner.requests.size() != 1u)
+            return std::nullopt;
+        return pair.server_owner.requests.front();
+    };
+    for (auto const &c :
+         {Named{"GET", "https", "example.test", "/h?x=1"}, Named{"GET", "http", "EXAMPLE.Test", "/h"},
+          Named{"GET", "https", "example.test:8443", "//evil.test/x"}, Named{"GET", "https", "[2001:db8::1]:8443", "/v6"},
+          Named{"GET", "http", "127.0.0.1:80", "/v4"}, Named{"OPTIONS", "https", "example.test", "*"},
+          Named{"POST", "https", "example.test:", "/empty-port"}}) {
+        SCOPED_TRACE(c.method + " " + c.scheme + " " + c.authority + " " + c.path);
+        const auto by_authority = serve({{":method", c.method}, {":scheme", c.scheme}, {":authority", c.authority}, {":path", c.path}});
+        const auto by_host      = serve({{":method", c.method}, {":scheme", c.scheme}, {":path", c.path}, {"x-a", "1"}, {"host", c.authority}});
+        ASSERT_TRUE(by_authority.has_value()) << "the control: the value sent as :authority is served";
+        ASSERT_TRUE(by_host.has_value()) << "the request naming its authority in its host field is served";
+        EXPECT_EQ(by_host->header("Host"), c.authority);
+        EXPECT_EQ(by_host->method(), by_authority->method());
+        EXPECT_EQ(by_host->uri().source(), by_authority->uri().source());
+        EXPECT_EQ(by_host->uri().scheme(), by_authority->uri().scheme());
+        EXPECT_EQ(by_host->uri().host(), by_authority->uri().host());
+        EXPECT_EQ(by_host->uri().port(), by_authority->uri().port());
+        EXPECT_EQ(by_host->uri().path(), by_authority->uri().path());
+        EXPECT_TRUE(by_host->uri().user_info().empty());
+    }
+}
+
+/**
+ * @test A request that names no authority, or names it in a `host` field that is no authority, never reaches the server
+ * @brief Neither :authority nor `host`, an empty :authority, a `host` field that is no authority, a second `host`
+ *        field: malformed (RFC 9114 section 4.3.1, Huly QB-1195). nghttp3 (1.18.0) refuses the first shapes itself,
+ *        a connection error; the others pass it -- an authority its character check admits -- and qbm-http refuses
+ *        their stream.
+ */
+TEST(Http3ConnectionDirect, ARequestWithoutAnAuthorityNeverReachesTheServer) {
+    using Fields   = std::vector<std::pair<std::string, std::string>>;
+    auto with_host = [](std::vector<std::string> hosts) {
+        Fields fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/h"}};
+        for (auto &host : hosts)
+            fields.emplace_back("host", std::move(host));
+        return fields;
+    };
+    auto trace_of = [](Fields const &fields) {
+        std::string trace;
+        for (auto const &[name, value] : fields)
+            trace += name + ": " + value + "; ";
+        return trace;
+    };
+    // What nghttp3 refuses itself -- 1.18.0 measured: a connection error -- and qbm-http refuses next: whichever layer
+    // does, with H3_MESSAGE_ERROR, and the request never reaches the owner. nghttp3 is a system library, not pinned.
+    for (Fields const &fields :
+         {with_host({}), Fields{{":method", "OPTIONS"}, {":scheme", "https"}, {":path", "*"}},
+          Fields{{":method", "GET"}, {":scheme", "urn"}, {":path", "/h"}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/h"}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/h"}, {"host", ""}},
+          Fields{{":method", "GET"}, {":scheme", "https"}, {":authority", ""}, {":path", "/h"}, {"host", "example.test"}}, with_host({""}),
+          with_host({"user@example.test"}), with_host({"example.test/evil"}), with_host({"example.test, evil.test"}),
+          with_host({"example.test", "example.test"}), with_host({"example.test", "evil.test"})}) {
+        SCOPED_TRACE(trace_of(fields));
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty()) << "a malformed request must never reach the owner";
+        const auto message_error = static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR);
+        const bool by_nghttp3    = pair.server_owner.close.has_value() && pair.server_owner.close->first == message_error;
+        const bool by_qbm_http   = !pair.server_owner.close.has_value() && pair.server_owner.resets.size() == 1u
+                                   && pair.server_owner.resets.front().second == message_error;
+        EXPECT_TRUE(by_nghttp3 || by_qbm_http) << "refused by neither layer with H3_MESSAGE_ERROR";
+    }
+    // What nghttp3 lets through, qbm-http refuses on the stream: a `host` field that is no authority
+    // (origin::is_request_authority(): no host, a port that is none, an IP literal that is no IPv6 address).
+    for (Fields const &fields :
+         {with_host({":443"}), with_host({"a:b:c"}), with_host({"example.test:99999"}), with_host({"evil]"}), with_host({"[127.0.0.1]"})}) {
+        SCOPED_TRACE(trace_of(fields));
+        Pair       pair;
+        const auto states = pair.server.stream_state_count();
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_server_refused_stream_and_serves_next(pair, states);
+    }
+}
+
+/**
  * @test A `trailer` field inside the trailer section refuses the stream only
  * @brief A second HEADERS frame after the body is the trailer section. nghttp3 drops a `content-length`
  *        there and rejects a pseudo-header, but has no rule for `trailer` itself; is_forbidden_h3_trailer
@@ -1424,4 +1520,111 @@ TEST(Http3ConnectionDirect, ServerAnswersATrailerSectionOverTheFieldLimitsWith43
     pair.server.read_stream(4, h3_data_frame("abc"), false);
     pair.server.read_stream(4, h3_headers_frame(4, {{"x-a", "1"}, {"x-b", "2"}}), true);
     ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "2 trailer fields are at the limit";
+}
+
+// The `host` field that names the authority of a request without :authority is a field like any other: over the
+// value limit, the request is answered 431 -- once it is known well-formed, as HTTP/2 answers it -- and a second
+// `host` field stays malformed, counted over the limit or not (Huly QB-1195). nghttp3 (1.18.0) refuses a second
+// `host` field itself, a connection error: either layer, one pair each.
+TEST(Http3ConnectionDirect, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldLimits) {
+    qb::http::request_limits limits;
+    limits.max_header_value_length = 12;
+    auto with_hosts                = [](std::vector<std::string> hosts) {
+        std::vector<std::pair<std::string, std::string>> fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
+        for (auto &host : hosts)
+            fields.emplace_back("host", std::move(host));
+        return fields;
+    };
+    {
+        LimitedPair pair{limits};
+        pair.server.read_stream(0, h3_headers_frame(0, with_hosts({"example.test"})), true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "a host of exactly the value limit is served";
+        EXPECT_EQ(pair.server_owner.requests.front().uri().host(), "example.test");
+
+        pair.server.read_stream(4, h3_headers_frame(4, with_hosts({"example.test:8"})), true);
+        EXPECT_EQ(pair.server_owner.requests.size(), 1u) << "a refused request is never delivered";
+        EXPECT_TRUE(stopped_without_error(pair.server_owner, 4)) << "answered 431, then asked to stop sending without an error";
+        EXPECT_FALSE(reset(pair.server_owner, 4)) << "a well-formed host over the value limit is answered, not refused";
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+
+        // Another field over the value limit, before or after the host: the request is answered 431, its host the
+        // one authority it names -- a field dropped for the limits is counted as a `host` field only if it is one.
+        auto fields = with_hosts({"example.test"});
+        fields.emplace_back("x-v", "1234567890123");
+        pair.server.read_stream(8, h3_headers_frame(8, fields), true);
+        fields = with_hosts({});
+        fields.emplace_back("x-v", "1234567890123");
+        fields.emplace_back("host", "example.test");
+        pair.server.read_stream(12, h3_headers_frame(12, fields), true);
+        EXPECT_EQ(pair.server_owner.requests.size(), 1u);
+        // Another field over the limits, then the host over them too: the host is still the first `host` field over
+        // the limits, kept.
+        fields = with_hosts({});
+        fields.emplace_back("x-v", "1234567890123");
+        fields.emplace_back("host", "example.test:8");
+        pair.server.read_stream(20, h3_headers_frame(20, fields), true);
+        for (std::uint64_t stream_id : {8u, 12u, 20u}) {
+            EXPECT_TRUE(stopped_without_error(pair.server_owner, stream_id)) << stream_id << " answered 431";
+            EXPECT_FALSE(reset(pair.server_owner, stream_id)) << stream_id << " answered, not refused";
+        }
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+
+        // A `host` over the limits beside :authority that names it: a field over the limits like any other, 431.
+        pair.server.read_stream(
+            24,
+            h3_headers_frame(
+                24, {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test:8"}, {":path", "/"}, {"host", "example.test:8"}}),
+            true);
+        EXPECT_TRUE(stopped_without_error(pair.server_owner, 24)) << "answered 431";
+        EXPECT_FALSE(reset(pair.server_owner, 24));
+    }
+    // A malformed request beside the limits stays malformed, its stream refused, never answered 431 (Huly QB-1195): a
+    // `host` that is no authority (nghttp3 lets `example.test:99999` through), a `host` over the limits that names
+    // another authority than :authority -- kept for that check, it was dropped and answered 431 unread --, a :path
+    // that is no absolute path beside a field over the limits.
+    for (auto const &fields : std::vector<std::vector<std::pair<std::string, std::string>>>{
+             {{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", "example.test:99999"}},
+             {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}, {"host", "evil.example.test"}},
+             {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|b"}, {"x-v", "1234567890123"}}
+         }) {
+        std::string trace;
+        for (auto const &[name, value] : fields)
+            trace += name + ": " + value + "; ";
+        SCOPED_TRACE(trace);
+        LimitedPair pair{limits};
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_FALSE(stopped_without_error(pair.server_owner, 0)) << "a malformed request is not answered";
+        EXPECT_TRUE(reset(pair.server_owner, 0)) << "its stream is refused";
+        EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
+    }
+    // In a trailer section, a `host` over the limits is dropped as every field over them is, and the request answered
+    // 431: only the header section's `host` names the authority, and trailer sections are judged as before.
+    {
+        LimitedPair                                      pair{limits};
+        std::vector<std::pair<std::string, std::string>> fields{
+            {":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}
+        };
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        pair.server.read_stream(0, h3_headers_frame(0, {{"host", "example.test:8"}}), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431";
+        EXPECT_FALSE(reset(pair.server_owner, 0)) << "answered, not refused";
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    for (auto const &hosts :
+         {std::vector<std::string>{"example.test", "example.test:8"}, std::vector<std::string>{"example.test:8", "example.test"},
+          std::vector<std::string>{"example.test:8", "example.test:9"}}) {
+        SCOPED_TRACE(hosts.front() + ", " + hosts.back());
+        LimitedPair pair{limits};
+        pair.server.read_stream(0, h3_headers_frame(0, with_hosts(hosts)), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_FALSE(stopped_without_error(pair.server_owner, 0)) << "a malformed request is not answered";
+        const auto message_error = static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR);
+        const bool by_nghttp3    = pair.server_owner.close.has_value() && pair.server_owner.close->first == message_error;
+        const bool by_qbm_http   = !pair.server_owner.close.has_value() && pair.server_owner.resets.size() == 1u
+                                   && pair.server_owner.resets.front().second == message_error;
+        EXPECT_TRUE(by_nghttp3 || by_qbm_http) << "refused by neither layer with H3_MESSAGE_ERROR";
+    }
 }

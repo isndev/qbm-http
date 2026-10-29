@@ -46,12 +46,30 @@ TEST(HTTP2HeaderValidator, RejectsUnknownRequestPseudoHeaders) {
     EXPECT_EQ(result.error_code, h2::ErrorCode::PROTOCOL_ERROR);
 }
 
-TEST(HTTP2HeaderValidator, RequiresAuthorityPseudoHeaderInRequests) {
+TEST(HTTP2HeaderValidator, RequiresAnAuthorityInRequests) {
     std::vector<qb::protocol::hpack::HeaderField> headers{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
 
     const auto result = h2::HeaderValidator::validate_request_pseudo_headers(headers);
     EXPECT_FALSE(result.is_valid);
     EXPECT_EQ(result.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+}
+
+// Without :authority, one non-empty `host` field names the authority, as the server reads a request (Huly QB-1195);
+// none, an empty one or two do not.
+TEST(HTTP2HeaderValidator, AHostFieldStandsForAMissingAuthority) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    const Fields pseudo{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
+    auto         with = [&](Fields regular) {
+        Fields headers = pseudo;
+        headers.insert(headers.end(), regular.begin(), regular.end());
+        return h2::HeaderValidator::validate_request_pseudo_headers(headers);
+    };
+    EXPECT_TRUE(with({{"accept", "*/*"}, {"host", "example.test"}}).is_valid);
+    for (auto const &regular : {Fields{{"host", ""}}, Fields{{"host", "example.test"}, {"host", "example.test"}}, Fields{{"accept", "*/*"}}}) {
+        const auto result = with(regular);
+        EXPECT_FALSE(result.is_valid) << regular.size() << " fields, the first " << regular.front().name;
+        EXPECT_EQ(result.error_code, h2::ErrorCode::PROTOCOL_ERROR);
+    }
 }
 
 TEST(HTTP2HeaderValidator, AcceptsCompleteRequestPseudoHeaderSet) {
