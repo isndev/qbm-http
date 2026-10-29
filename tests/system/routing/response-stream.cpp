@@ -33,7 +33,8 @@
  *   - the end of a stream: a piece past a declared length, an `end()` short of it, an explicit `abort()` and a
  *     dropped stream close the connection without a terminator; the peer leaving, an application `cancel()`, an
  *     extraction and the inactivity timeout cancel the stream and the context; a piece refreshes the timeout;
- *   - what observers read of a streamed response: the head's status, the streamed bytes (AccessLog, RequestMetrics);
+ *   - what observers read of a streamed response: the head's status, the streamed bytes (AccessLog, RequestMetrics),
+ *     a stream its producer dropped mid-body included;
  *   - a pipelined request is answered after the streamed one, in order;
  *   - buffered: HTTP/1.0 without a length and a 204, whole, with their hooks run at completion; a buffered `abort()`
  *     answers 500 without the failed body's headers, and leaves a cancelled answer alone; a buffered body stops at
@@ -108,6 +109,7 @@ struct Observed {
     std::atomic<bool>        release{false};               ///< the test lets a slow producer end
     std::atomic<bool>        stream_cancelled_seen{false}; ///< a producer found its stream cancelled
     std::atomic<bool>        closed_verdict_seen{false};   ///< a producer's write was answered `closed`
+    std::atomic<std::size_t> written_at_close{0};          ///< what a ticking producer's stream had taken when it was closed
     std::atomic<int>         refused_stream{-1};           ///< begin_stream() under a held-back completion: 1 refused, 0 a stream
     std::atomic<bool>        dropped_callback_ran{false};  ///< the on_drain() callback of a dropped stream ran
     std::atomic<bool>        dropped_callback_set{false};  ///< it was registered, not deferred at once
@@ -137,6 +139,7 @@ struct Observed {
         release               = false;
         stream_cancelled_seen = false;
         closed_verdict_seen   = false;
+        written_at_close      = 0;
         refused_stream        = -1;
         dropped_callback_ran  = false;
         dropped_callback_set  = false;
@@ -314,6 +317,7 @@ void
 tick_until_closed(std::shared_ptr<S> s, std::chrono::milliseconds period) {
     const auto r = s->write("tick;");
     if (r == S::write_result::closed || s->cancelled()) {
+        g_seen.written_at_close      = s->written(); // published before `cancelled`, which the cases wait on
         g_seen.cancelled             = true;
         g_seen.stream_cancelled_seen = s->cancelled();
         g_seen.closed_verdict_seen   = r == S::write_result::closed;
@@ -748,6 +752,22 @@ public:
             record(ctx, stream);
             (void) stream->write("partial;");
             // `stream` goes out of scope here: its producer is gone.
+        });
+
+        // A producer that writes 24 bytes over two turns, then drops its handle mid-body: observers read the bytes that
+        // left, though the stream they would be read from is gone by the time the context is cancelled.
+        router().get("/drop-counted", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            record(ctx, stream);
+            (void) stream->write("piece-0;");
+            qb::io::async::callback(
+                [stream = std::move(stream)]() mutable {
+                    (void) stream->write("piece-1;");
+                    (void) stream->write("piece-2;");
+                    stream.reset(); // the producer drops its handle
+                },
+                1ms);
         });
 
         // A buffered stream (HTTP/1.0) aborted: a 500 without the failed body's headers (review m3).
@@ -1467,6 +1487,8 @@ TEST_F(ResponseStreamTest, AnExplicitAbortClosesTheConnectionWithoutALastChunk) 
     EXPECT_TRUE(c.read_until([&] { return c.eof; })) << c.buffer;
     EXPECT_FALSE(parse_response(c.buffer).complete) << c.buffer;
     EXPECT_TRUE(g_seen.producer_done.load());
+    ASSERT_TRUE(wait_for([] { return access_of("/abort").has_value(); })) << "no access-log record";
+    EXPECT_EQ(access_of("/abort")->bytes, 8u) << "the bytes streamed before the abort";
 }
 
 TEST_F(ResponseStreamTest, ThePeerLeavingMidStreamCancelsTheStreamAndTheContext) {
@@ -1482,6 +1504,7 @@ TEST_F(ResponseStreamTest, ThePeerLeavingMidStreamCancelsTheStreamAndTheContext)
     ASSERT_TRUE(wait_for([] { return access_of("/forever").has_value(); })) << "no access-log record";
     EXPECT_EQ(access_of("/forever")->status, 200) << "the head that left said 200";
     EXPECT_GT(access_of("/forever")->bytes, 0u) << "a streamed response logged as an empty body";
+    EXPECT_EQ(access_of("/forever")->bytes, g_seen.written_at_close.load()) << "the bytes the stream had taken when the peer left";
 }
 
 TEST_F(ResponseStreamTest, AnApplicationCancelClosesAStreamedConnectionAndObserversKeepTheHeadsStatus) {
@@ -1495,6 +1518,7 @@ TEST_F(ResponseStreamTest, AnApplicationCancelClosesAStreamedConnectionAndObserv
     ASSERT_TRUE(wait_for([] { return access_of("/app-cancel").has_value(); })) << "no access-log record";
     EXPECT_EQ(access_of("/app-cancel")->status, 200);
     EXPECT_GE(access_of("/app-cancel")->bytes, 2u) << "the bytes streamed before the cancel";
+    EXPECT_EQ(access_of("/app-cancel")->bytes, g_seen.written_at_close.load()) << "the bytes the stream had taken when it was cancelled";
     EXPECT_EQ(server->server().metrics->count(qb::http::method::GET, "/app-cancel", 200), 1u);
     EXPECT_EQ(server->server().metrics->count(qb::http::method::GET, "/app-cancel", 503), 0u);
 }
@@ -1553,6 +1577,16 @@ TEST_F(ResponseStreamTest, AStreamDroppedWithACallbackRegisteredReleasesItWithou
     ASSERT_TRUE(d.read_until([&] { return parse_response(d.buffer).complete; })) << d.buffer;
     EXPECT_TRUE(g_seen.dropped_callback_set.load()) << "the callback was not registered: the case proves nothing";
     EXPECT_FALSE(g_seen.dropped_callback_ran.load()) << "the callback of a stream that is gone ran";
+}
+
+TEST_F(ResponseStreamTest, AStreamDroppedMidBodyReportsTheBytesItStreamedToObservers) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/drop-counted")));
+    EXPECT_TRUE(c.read_until([&] { return c.eof; })) << "a dropped stream closes the connection";
+    ASSERT_TRUE(wait_for([] { return access_of("/drop-counted").has_value(); })) << "no access-log record";
+    EXPECT_EQ(access_of("/drop-counted")->status, 200) << "the head that left";
+    EXPECT_EQ(access_of("/drop-counted")->bytes, 24u) << "the bytes the stream handed to its session before its producer dropped it";
 }
 
 TEST_F(ResponseStreamTest, APipelinedRequestIsAnsweredAfterTheStreamedOneInOrder) {

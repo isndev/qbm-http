@@ -379,6 +379,10 @@ public:
             }
             return;
         }
+        // The bytes that left are recorded here: the context's cancel() reads them from the stream only while it is
+        // alive, and the abort of a producer that dropped its handle runs from the destructor, when it no longer is.
+        if (ctx && ctx->_streamed)
+            ctx->_streamed_bytes = _written;
         if (auto session = _session.lock()) {
             if constexpr (streaming_session<SessionType>)
                 session->stream_abort(); // cancels the context, then disconnects
