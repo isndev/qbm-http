@@ -71,10 +71,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
 ### Fixed
 
 - **A request's `Cookie` header is read as a browser sends it: pairs split on `;` alone, a malformed pair dropped
-  instead of the header -- one cookie another host plants can no longer take the place of a prefixed cookie for its
-  exact-name read, hide it, or wipe the jar, short of a nameless one on a browser older than RFC 6265bis (Huly QB-95,
-  its fourth to seventh reviews).** The parser read a request header with Set-Cookie's grammar, and three
-  cookie-tossing paths followed. Whitespace inside a name was dropped, so `__Host -csrf` -- which another host can
+  instead of the header, so a cookie another host plants can no longer replace, hide or wipe a prefixed one (Huly
+  QB-95, its fourth to seventh reviews).** One case is left, the CsrfMiddleware entry's: a nameless `=__Host-csrf=X`
+  on a browser older than RFC 6265bis, which no server can tell from the real one. The parser read a request header
+  with Set-Cookie's grammar, and three cookie-tossing paths followed. Whitespace inside a name was dropped, so
+  `__Host -csrf` -- which another host can
   set, a browser protecting only the exact prefix -- was stored as `__Host-csrf`; after a quoted value a `,` separated
   pairs and a quoted value ran across `;`, so a cookie of another name valued `"x",__Host-csrf=E` added a
   `__Host-csrf` of its choice ahead of the real one, and one opening a quote that a later cookie's closed swallowed
