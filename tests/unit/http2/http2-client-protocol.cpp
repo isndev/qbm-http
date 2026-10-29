@@ -26,6 +26,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -2018,6 +2019,33 @@ TEST(HTTP2ClientProtocol, RequestAuthorityIsWhatEveryProtocolSends) {
     }
 }
 
+// A request's `Host` header never leaves as a `host` field, so the client cannot send one that differs from
+// :authority (RFC 9113 section 8.3.1, which the server enforces since Huly QB-1189): :authority is the URI's
+// authority when the URI has a host -- the header is then dropped --, the header's value otherwise.
+TEST(HTTP2ClientProtocol, ARequestHostHeaderNeverLeavesAsAHostField) {
+    const std::vector<std::tuple<std::string, std::string, std::string>> cases = {
+        {"https://example.test/a", "example.test", "example.test"},
+        {"https://example.test/a", "Other.test", "example.test"},
+        {"/a", "from-host.test:8443", "from-host.test:8443"},
+    };
+    for (const auto &[uri, host, authority] : cases) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        const std::size_t                          before = io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri(uri);
+        req.set_header("Host", host);
+        ASSERT_TRUE(protocol.send_request(std::move(req), 1)) << uri << " " << host;
+        const auto blocks = sent_header_blocks(io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 1u) << uri << " " << host;
+        EXPECT_EQ(blocks[0].value(":authority"), authority) << uri << " " << host;
+        EXPECT_EQ(blocks[0].count(":authority"), 1u) << uri << " " << host;
+        EXPECT_EQ(blocks[0].count("host"), 0u) << uri << " " << host;
+    }
+}
+
 // ===========================================================================
 // A request's trailers() leave in its trailer section once the body is out --
 // without send_request_trailers(), on a protocol that otherwise waits for it --
@@ -2954,21 +2982,47 @@ TEST(HTTP2ClientProtocol, ResponseInvalidRegularHeaderValueRstsStream) {
     ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
 }
 
-// A forbidden connection-specific response header (`connection`) ->
-// PROTOCOL_ERROR RST (is_forbidden_response_header branch).
+// A connection-specific response field (RFC 9113 section 8.2.2), `te` whatever its value, or `http2-settings`
+// -> PROTOCOL_ERROR RST (is_forbidden_response_header branch).
 TEST(HTTP2ClientProtocol, ResponseForbiddenConnectionHeaderRstsStream) {
+    for (const auto &[name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"connection", "keep-alive"},
+             {"proxy-connection", "keep-alive"},
+             {"keep-alive", "timeout=5"},
+             {"transfer-encoding", "chunked"},
+             {"upgrade", "h2c"},
+             {"te", "trailers"},
+             {"http2-settings", "AAMAAABk"}
+         }) {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        open_stream_one(protocol, 45, "/forbidden");
+
+        const std::size_t before = io.output.size();
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {name, value}}));
+
+        EXPECT_TRUE(protocol.ok()) << name;
+        EXPECT_EQ(io.response_count, 0) << name;
+        EXPECT_EQ(io.stream_error_count, 1) << name;
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR) << name;
+        ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX) << name;
+    }
+}
+
+// `host` is no connection-specific field (RFC 9113 section 8.2.2): a response carrying one is delivered with it,
+// as the HTTP/1.1 and HTTP/3 clients deliver it. The stream was reset (Huly QB-1189).
+TEST(HTTP2ClientProtocol, ResponseWithAHostFieldIsDelivered) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
-    open_stream_one(protocol, 45, "/forbidden");
+    open_stream_one(protocol, 46, "/host");
 
-    const std::size_t before = io.output.size();
-    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"connection", "keep-alive"}}));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "200"}, {"host", "example.test"}}));
 
     EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.response_count, 0);
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
-    ASSERT_NE(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX);
+    EXPECT_EQ(io.stream_error_count, 0);
+    ASSERT_EQ(io.response_count, 1);
+    ASSERT_TRUE(io.last_response.has_value());
+    EXPECT_EQ(io.last_response->header("Host"), "example.test");
 }
 
 // A non-numeric content-length value fails parse_content_length ->

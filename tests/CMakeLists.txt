@@ -289,6 +289,7 @@ qhttp_bench(http1-serialize  benchmark/http1/http1-serialize.bench.cpp   EXTRA_L
 qhttp_bench(http1-access-log-loopback benchmark/http1/access-log-loopback.bench.cpp EXTRA_LABELS http1 middleware)
 qhttp_bench(hpack            benchmark/http2/hpack.bench.cpp             EXTRA_LABELS http2)
 qhttp_bench(frame-codec      benchmark/http2/frame-codec.bench.cpp       EXTRA_LABELS http2)
+qhttp_bench(http2-server-request benchmark/http2/server-request.bench.cpp EXTRA_LABELS http2)
 qhttp_bench(http2-client-loopback benchmark/http2/client-loopback.bench.cpp REQUIRES ssl EXTRA_LABELS http2 ssl)
 qhttp_bench(cors             benchmark/middleware/cors.bench.cpp         EXTRA_LABELS middleware)
 qhttp_bench(static-files     benchmark/middleware/static-files.bench.cpp EXTRA_LABELS middleware)

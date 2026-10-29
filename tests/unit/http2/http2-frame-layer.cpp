@@ -431,10 +431,13 @@ TEST(HTTP2FrameLayerHeaderValidator, ForbiddenHeaders) {
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("transfer-encoding"));
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("proxy-connection"));
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("keep-alive"));
-    EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("host"));
 
     // "te" is special-cased: not forbidden by name (value is checked elsewhere).
     EXPECT_FALSE(h2::HeaderValidator::is_forbidden_header("te"));
+
+    // "host" is no connection-specific field (RFC 9113 section 8.2.2): the server checks a request's
+    // against :authority instead (Huly QB-1189).
+    EXPECT_FALSE(h2::HeaderValidator::is_forbidden_header("host"));
 
     // Ordinary headers are allowed.
     EXPECT_FALSE(h2::HeaderValidator::is_forbidden_header("content-type"));
@@ -445,9 +448,10 @@ TEST(HTTP2FrameLayerHeaderValidator, ForbiddenResponseHeaders) {
     // "te" IS forbidden in responses (the request-only exception does not apply).
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_response_header("te"));
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_response_header("connection"));
-    // content-length is permitted in responses.
+    // content-length is permitted in responses, and host (Huly QB-1189).
     EXPECT_FALSE(h2::HeaderValidator::is_forbidden_response_header("content-length"));
     EXPECT_FALSE(h2::HeaderValidator::is_forbidden_response_header("content-type"));
+    EXPECT_FALSE(h2::HeaderValidator::is_forbidden_response_header("host"));
 }
 
 TEST(HTTP2FrameLayerHeaderValidator, ForbiddenTrailerHeaders) {
@@ -892,7 +896,7 @@ TEST(HTTP2FramerDrive, InvalidPrefaceBytesAreProtocolError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- zero-payload frame dispatch (2/protocol/base.h:1118-1197) ------------------------
+// --- zero-payload frame dispatch (2/protocol/base.h:1122-1201) ------------------------
 
 TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
     Http2FakeIO      io;

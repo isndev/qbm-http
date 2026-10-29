@@ -111,12 +111,10 @@ SettingsHelper::calculate_safe_max_frame_size(const qb::unordered_map<Http2Setti
 
 bool
 HeaderValidator::is_forbidden_header(std::string_view name) {
-    static constexpr std::array<std::string_view, 8> forbidden = {"connection",        "upgrade",          "http2-settings", "te",
-                                                                  "transfer-encoding", "proxy-connection", "keep-alive",     "host"};
-
-    // Exception: "te: trailers" is allowed
-    if (name == "te")
-        return false; // Let caller check the value
+    // The connection-specific fields RFC 9113 §8.2.2 names and the h2c upgrade's http2-settings. "te" is judged by
+    // its value, by the callers; "host" by the server, against :authority (RFC 9113 §8.3.1, Huly QB-1189).
+    static constexpr std::array<std::string_view, 6> forbidden = {"connection",        "upgrade",          "http2-settings",
+                                                                  "transfer-encoding", "proxy-connection", "keep-alive"};
 
     return std::find(forbidden.begin(), forbidden.end(), name) != forbidden.end();
 }

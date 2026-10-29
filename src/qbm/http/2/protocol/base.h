@@ -239,7 +239,11 @@ public:
 class HeaderValidator {
 public:
     /**
-     * @brief Check if header name is forbidden in HTTP/2
+     * @brief Check if header name is forbidden in HTTP/2: a connection-specific field RFC 9113 §8.2.2 names
+     *        (`connection`, `proxy-connection`, `keep-alive`, `transfer-encoding`, `upgrade`) or the h2c
+     *        upgrade's `http2-settings`. `te` is left to the callers: a request may carry `te: trailers`, a
+     *        response none. `host` is none of them: the server checks a request's against `:authority`
+     *        (RFC 9113 §8.3.1, Huly QB-1189).
      * @param name Header name (lowercase)
      * @return true if header is forbidden
      */
