@@ -170,7 +170,7 @@ When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that man
 
 ### `onMessage()` — dispatch
 
-`server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a malformed `Cookie` / `Set-Cookie` header is logged and ignored rather than escaping to `std::terminate`. The HTTP/2 and HTTP/3 servers parse the request's cookies under the same `try` before routing; the HTTP/2 server called the parser outside it until Huly QB-1174, and one request with a cookie name over 1024 bytes terminated the process. They then **move** the parsed message into the I/O handler and reset the parser:
+`server::onMessage` and `client::onMessage` are the dispatch step. Both are `noexcept` (they sit on a noexcept `AProtocol` boundary), so each wraps cookie parsing in a `try/catch` — a `Cookie` header over 16 KiB (the one refusal of the request parser, which drops a malformed pair and keeps the others) or a malformed `Set-Cookie` is logged and ignored rather than escaping to `std::terminate`. The HTTP/2 and HTTP/3 servers parse the request's cookies under the same `try` before routing; the HTTP/2 server called the parser outside it until Huly QB-1174, and one request with a cookie name over 1024 bytes terminated the process. They then **move** the parsed message into the I/O handler and reset the parser:
 
 <!-- src: src/qbm/http/1.1/protocol/server.h:76-95 -->
 

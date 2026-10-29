@@ -93,14 +93,15 @@ is_cookie_attribute(std::string_view name, bool set_cookie_header) noexcept {
 }
 
 namespace {
-/// A request `Cookie` header -- `name=value` pairs a browser joins with "; " (RFC 6265 §5.4) -- read as the header
-/// it is, not as a Set-Cookie: @p emit(name, value) for each valid pair, in order. The pairs are split on ';' alone
-/// (a ',' or a '"' is no separator: a quoted value cannot carry a pair past its quotes), the whitespace around a name
-/// and a value is removed, and a value in '"' is read without them, its quoted-pairs (`\x`) read. A pair is
-/// DROPPED, the others kept, when its name is not an RFC 9110 token (empty, a '$' legacy attribute, whitespace or a
-/// separator inside it: `__Host -x`) or is over COOKIE_NAME_MAX, or when its value is a malformed quoted string,
-/// holds a '"' unquoted or a control character, or is over COOKIE_VALUE_MAX: a cookie another host planted with a
-/// malformed value costs that cookie, not the header. Only a header over max_cookie_header_size is refused.
+/// A request `Cookie` header -- `name=value` pairs a browser joins with "; " (RFC 6265 §5.4) -- read as a browser
+/// sends it, not as a Set-Cookie: @p emit(name, value) for each pair, in order. The pairs are split on ';' alone (a
+/// ',' or a '"' separates nothing, so no value can carry a pair past its own part), the whitespace around a name and
+/// a value (SP, HTAB) is removed, and a value wrapped in '"' is read without the two quotes, nothing inside
+/// unescaped: RFC 6265 has no quoted-pair, and parse_set_cookie() strips the quotes alone. Every other byte is kept
+/// -- a '"', a '[', a space or a UTF-8 byte inside a name or a value: browsers send them, and the exact-name read
+/// tells `__Host -x` from `__Host-x`. A pair is DROPPED, the others kept, when its name is empty or a '$' legacy
+/// attribute, holds a control character other than HTAB (RFC 6265bis §5.6) or is over COOKIE_NAME_MAX, or when its
+/// value holds such a character or is over COOKIE_VALUE_MAX. Only a header over max_cookie_header_size is refused.
 template <typename Sink>
 void
 parse_request_cookies_into(std::string_view header, Sink &&emit) {
@@ -114,6 +115,9 @@ parse_request_cookies_into(std::string_view header, Sink &&emit) {
             text.remove_suffix(1);
         return text;
     };
+    const auto has_control = [](std::string_view text) {
+        return std::any_of(text.begin(), text.end(), [](char c) { return c != '\t' && utility::is_control(static_cast<unsigned char>(c)); });
+    };
     while (!header.empty()) {
         const auto end  = header.find(';');
         const auto part = trim(header.substr(0, end));
@@ -123,37 +127,13 @@ parse_request_cookies_into(std::string_view header, Sink &&emit) {
         const auto equal = part.find('=');
         const auto name  = trim(part.substr(0, equal));
         auto       value = equal == std::string_view::npos ? std::string_view{} : trim(part.substr(equal + 1));
-        if (name.empty() || name.size() > COOKIE_NAME_MAX || name.front() == '$'
-            || !std::all_of(name.begin(), name.end(), [](char c) { return is_cookie_name_char(static_cast<unsigned char>(c)); }))
+        if (name.empty() || name.size() > COOKIE_NAME_MAX || name.front() == '$' || has_control(name))
             continue;
-        std::string text;
-        if (!value.empty() && value.front() == '"') {
-            // A quoted value: its quoted-pairs read (`\"` is a '"'), an unescaped '"' before the closing one, an
-            // escape that would take the closing quote, or no closing quote at all make the pair malformed.
-            bool closed = false;
-            for (std::size_t i = 1; i < value.size(); ++i) {
-                char c = value[i];
-                if (c == '"') {
-                    closed = i + 1 == value.size();
-                    break;
-                }
-                if (c == '\\') {
-                    if (i + 2 >= value.size())
-                        break; // the escape would take the closing quote
-                    c = value[++i];
-                }
-                text.push_back(c);
-            }
-            if (!closed)
-                continue;
-        } else if (value.find('"') != std::string_view::npos) {
-            continue; // a '"' inside an unquoted value
-        } else {
-            text.assign(value);
-        }
-        if (text.size() > COOKIE_VALUE_MAX || std::any_of(text.begin(), text.end(), [](char c) { return utility::is_control(c); }))
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+            value = value.substr(1, value.size() - 2);
+        if (value.size() > COOKIE_VALUE_MAX || has_control(value))
             continue;
-        emit(std::string(name), text);
+        emit(std::string(name), std::string(value));
     }
 }
 
@@ -202,10 +182,10 @@ parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Si
                     parse_state = CookieParseState::COOKIE_PARSE_VALUE;
                 } else if (current_char == ';' || (set_cookie_header && current_char == ',')) {
                     // Separator found before '=', means empty value for previous name (if any).
-                    // For a request Cookie header (set_cookie_header=false) the ONLY separator is
-                    // ';' (RFC 6265 §4.2.1); ',' is a legal cookie-octet, so splitting on it would
-                    // corrupt a value containing a comma. Comma stays a separator only for
-                    // Set-Cookie parsing (unchanged).
+                    // This machine reads Set-Cookie alone (both callers pass true): a request
+                    // Cookie header is parse_request_cookies_into()'s, split on ';' only, where ','
+                    // is a legal cookie-octet. The `set_cookie_header &&` guard is kept for the
+                    // signature's sake.
                     trim_end(cookie_name);
                     if (!cookie_name.empty()) {
                         // If a name was parsed
@@ -230,9 +210,9 @@ parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Si
                 if (value_quote_character == '\0') {
                     // Value is not (yet) quoted
                     if (current_char == ';' || (set_cookie_header && current_char == ',')) {
-                        // End of value (unquoted). ',' separates only for Set-Cookie; in a request
-                        // Cookie header it is a legal cookie-octet (RFC 6265 §4.2.1), so a value
-                        // like "a,b" must stay intact rather than split into a bogus extra cookie.
+                        // End of value (unquoted). ',' separates Set-Cookie values in this machine,
+                        // which reads Set-Cookie alone; a request Cookie header keeps "a,b" whole
+                        // (parse_request_cookies_into, RFC 6265 §4.2.1).
                         trim_end(cookie_value);
                         if (!is_cookie_attribute(cookie_name, set_cookie_header)) {
                             emit(cookie_name, cookie_value); // Value might be empty
@@ -325,9 +305,9 @@ parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Si
  * For Set-Cookie headers (set_cookie_header=true), parses individual cookies while
  * ignoring cookie attributes like Path, Domain, Expires, etc.
  *
- * Supports both quoted and unquoted values, and properly handles special characters.
+ * A request header drops a malformed pair and keeps the others (parse_request_cookies_into).
  *
- * @throws std::runtime_error If parsing fails due to malformed data
+ * @throws std::runtime_error For a header over max_cookie_header_size, or a malformed Set-Cookie
  */
 qb::icase_unordered_map<std::string>
 parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {

@@ -369,26 +369,41 @@ TEST_F(CookieTest, ParseMultipleCookies) {
         EXPECT_EQ("123", cookies["another"]);
     }
 
-    // Quoted-pair escapes inside quoted values
+    // A backslash inside a quoted value is a byte of it: RFC 6265 has no quoted-pair, and nothing is unescaped
     {
         auto cookies = parse_cookies(std::string(R"(name="a\"b\\c"; another=123)"), false);
         ASSERT_EQ(2, cookies.size());
-        EXPECT_EQ("a\"b\\c", cookies["name"]);
+        EXPECT_EQ(R"(a\"b\\c)", cookies["name"]);
         EXPECT_EQ("123", cookies["another"]);
     }
 }
 
-TEST_F(CookieTest, ParseCookiesRejectMalformedQuotedValues) {
-    // A malformed quoted value costs its pair, the header's other pairs kept: unterminated, junk after the closing
-    // quote, an escape that would take the closing quote, a control character.
-    for (std::string const &header :
-         {std::string(R"(name="unterminated; another=123)"), std::string(R"(name="value"junk; another=123)"),
-          std::string(R"(name="trailing\"; another=123)"), std::string("name=\"bad\nvalue\"; another=123"),
-          std::string(R"(name=va"lue; another=123)")}) {
-        auto cookies = parse_cookies(header, false);
-        EXPECT_TRUE(cookies.find("name") == cookies.end()) << header;
-        EXPECT_EQ("123", cookies["another"]) << header;
+TEST_F(CookieTest, ParseCookiesReadsQuotesAsABrowserSendsThem) {
+    // A value wrapped in '"' is read without the two quotes, nothing inside unescaped (RFC 6265 has no quoted-pair,
+    // and parse_set_cookie() strips the quotes alone). Any other '"' is a byte of the value -- a JSON value written
+    // through document.cookie, an unclosed quote -- and a quote never runs past its pair: the fifth review's drop of
+    // such a cookie lost what browsers send (the CSRF sixth review). A '\'' is no quote.
+    struct Case {
+        std::string header;
+        std::string value;
+    };
+    for (Case const &c :
+         {Case{R"(name="unterminated; another=123)", R"("unterminated)"}, Case{R"(name="value"junk; another=123)", R"("value"junk)"},
+          Case{R"(name="trailing\"; another=123)", R"(trailing\)"}, Case{R"(name=va"lue; another=123)", R"(va"lue)"},
+          Case{R"(name={"theme":"dark"}; another=123)", R"({"theme":"dark"})"}, Case{R"(name="C:\dir\f"; another=123)", R"(C:\dir\f)"},
+          Case{R"(name='x'; another=123)", R"('x')"}, Case{R"(name="; another=123)", R"(")"}, Case{R"(name=""; another=123)", ""}}) {
+        auto cookies = parse_cookies(c.header, false);
+        ASSERT_TRUE(cookies.find("name") != cookies.end()) << c.header;
+        EXPECT_EQ(c.value, cookies["name"]) << c.header;
+        EXPECT_EQ("123", cookies["another"]) << c.header;
     }
+    // A control character other than HTAB costs its pair, quoted or not; a tab inside a value stays (RFC 6265bis 5.6).
+    auto controls = parse_cookies(std::string("name=\"bad\nvalue\"; bell=a\x07; del=a\x7f; tab=x\ty; another=123"), false);
+    EXPECT_TRUE(controls.find("name") == controls.end());
+    EXPECT_TRUE(controls.find("bell") == controls.end());
+    EXPECT_TRUE(controls.find("del") == controls.end());
+    EXPECT_EQ("x\ty", controls["tab"]);
+    EXPECT_EQ("123", controls["another"]);
 }
 
 TEST_F(CookieTest, ParseCookiesSplitsARequestHeaderOnSemicolonsAlone) {
@@ -397,11 +412,14 @@ TEST_F(CookieTest, ParseCookiesSplitsARequestHeaderOnSemicolonsAlone) {
     // or one opening a quote that a later cookie's closes -- added a pair of its choice ahead of the real one, or
     // swallowed the real one (the CSRF fifth review). Neither ',' nor '"' separates; a quote ends at its part.
     auto injected = parse_cookie_pairs(R"(a="x",__Host-csrf=evil; __Host-csrf=real)", false);
-    ASSERT_EQ(injected.size(), 1u);
-    EXPECT_EQ(injected[0], (std::pair<std::string, std::string>{"__Host-csrf", "real"})) << "the planted pair is no pair";
+    ASSERT_EQ(injected.size(), 2u);
+    EXPECT_EQ(injected[0], (std::pair<std::string, std::string>{"a", R"("x",__Host-csrf=evil)"})) << "the plant is a's value";
+    EXPECT_EQ(injected[1], (std::pair<std::string, std::string>{"__Host-csrf", "real"}));
     auto hiding = parse_cookie_pairs(R"(a="zz; __Host-csrf=real; b=")", false);
-    ASSERT_EQ(hiding.size(), 1u);
-    EXPECT_EQ(hiding[0], (std::pair<std::string, std::string>{"__Host-csrf", "real"})) << "the real pair is not swallowed";
+    ASSERT_EQ(hiding.size(), 3u);
+    EXPECT_EQ(hiding[0], (std::pair<std::string, std::string>{"a", R"("zz)"}));
+    EXPECT_EQ(hiding[1], (std::pair<std::string, std::string>{"__Host-csrf", "real"})) << "the real pair is not swallowed";
+    EXPECT_EQ(hiding[2], (std::pair<std::string, std::string>{"b", R"(")"}));
     auto comma = parse_cookies(std::string("list=a,b,c; x=1"), false);
     EXPECT_EQ("a,b,c", comma["list"]) << "a ',' inside a value stays";
 }
@@ -1014,11 +1032,13 @@ TEST_F(CookieTest, ParseCookiesSetCookieHeaderFiltersKnownAttributes) {
 // begins with '$' (RFC 2109 legacy) is treated as an attribute and dropped.
 TEST_F(CookieTest, ParseCookiesDropsDollarPrefixedLegacyAttributes) {
     // $Version / $Path are legacy attributes; "real" must survive in both modes.
-    auto cookies = parse_cookies(std::string("$Version=1; real=ok; $Path=/"), true);
-    EXPECT_TRUE(cookies.find("$Version") == cookies.end());
-    EXPECT_TRUE(cookies.find("$Path") == cookies.end());
-    ASSERT_TRUE(cookies.find("real") != cookies.end());
-    EXPECT_EQ("ok", cookies["real"]);
+    for (bool set_cookie : {true, false}) {
+        auto cookies = parse_cookies(std::string("$Version=1; real=ok; $Path=/"), set_cookie);
+        EXPECT_TRUE(cookies.find("$Version") == cookies.end()) << set_cookie;
+        EXPECT_TRUE(cookies.find("$Path") == cookies.end()) << set_cookie;
+        ASSERT_TRUE(cookies.find("real") != cookies.end()) << set_cookie;
+        EXPECT_EQ("ok", cookies["real"]);
+    }
 }
 
 // parse_cookies enforces the 16KB DoS guard.
@@ -1059,7 +1079,7 @@ TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
 // Quoted value exceeding COOKIE_VALUE_MAX via an escaped char throws
 // (parse_cookies, value_escape branch). Fill to the limit with plain chars, then an escape.
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
-    // COOKIE_VALUE_MAX plain characters and one escaped: the value read is over the cap, the pair dropped.
+    // COOKIE_VALUE_MAX plain characters and a backslash pair, both bytes of the value: over the cap, the pair dropped.
     std::string header  = "big=\"" + std::string(COOKIE_VALUE_MAX, 'a') + "\\q\"; ok=1";
     auto        cookies = parse_cookies(header, false);
     EXPECT_TRUE(cookies.find("big") == cookies.end());
@@ -1155,11 +1175,12 @@ TEST(RequestCookieHeader, ARefusedLineLeavesNoCookie) {
 
     Request bad_pair; // a malformed pair costs that pair: a cookie another host planted does not empty the jar
     bad_pair.add_header("cookie", "a=1");
-    bad_pair.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v; tab=x\ty; quote=\"open");
+    bad_pair.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v; bell=x\ay; tab=x\ty; quote=\"open");
     EXPECT_NO_THROW(bad_pair.parse_cookie_header());
     EXPECT_EQ(bad_pair.cookie_value("a"), "1");
-    EXPECT_EQ(bad_pair.cookie("tab"), nullptr);
-    EXPECT_EQ(bad_pair.cookie("quote"), nullptr);
+    EXPECT_EQ(bad_pair.cookie("bell"), nullptr);
+    EXPECT_EQ(bad_pair.cookie_value("tab"), "x\ty") << "a tab is no control character here (RFC 6265bis 5.6)";
+    EXPECT_EQ(bad_pair.cookie_value("quote"), "\"open") << "an unclosed quote is a byte of the value";
 
     Request none; // no header, an empty one: no cookie, no throw
     EXPECT_NO_THROW(none.parse_cookie_header());
@@ -1235,21 +1256,30 @@ TEST(RequestCookieHeader, ACookieLineOfTheTrailerSectionIsNotRead) {
     EXPECT_EQ(other_trailer.cookie_value("b"), "2");
 }
 
-// A request cookie's name is a token (RFC 6265 §4.1.1): only the whitespace around a name or a value is removed,
-// and a name with whitespace or a separator inside is no cookie name -- its pair is dropped. `__Host -csrf` was read
-// as `__Host-csrf`, the name a browser protects, so a cookie another host planted under it took the real one's place
-// (the CSRF fourth review).
+// A request cookie's name is every byte a browser sends before its '=' but the whitespace around it, a control
+// character dropping the pair: a name with whitespace inside is a name of its own, as is one a PHP or a UTF-8 server
+// sets (`cart[1]`, `user:id`). `__Host -csrf` was read as `__Host-csrf`, the name a browser protects, so a cookie
+// another host planted under it took the real one's place (the CSRF fourth review); the fifth dropped every name that
+// is not a token, browsers' included (the sixth).
 TEST_F(CookieTest, ParseCookiesKeepsTheWhitespaceInsideANameAndTrimsItsEnds) {
-    auto cookies = parse_cookies(std::string("__Host -csrf=planted; __Host-csrf=real;  a =1 ; b= two words  ;c=3 ; d/e=4"), false);
-    EXPECT_TRUE(cookies.find("__Host -csrf") == cookies.end());
+    auto cookies = parse_cookies(std::string("__Host -csrf=planted; __Host-csrf=real;  a =1 ; b= two words  ;c=3 ; d/e=4; "
+                                             "cart[1]=5; user:id=6; \tt\t=7; \xc3\xa9t\xc3\xa9=8; bad\x01name=9"),
+                                 false);
+    ASSERT_TRUE(cookies.find("__Host -csrf") != cookies.end());
+    EXPECT_EQ("planted", cookies["__Host -csrf"]);
     ASSERT_TRUE(cookies.find("__Host-csrf") != cookies.end());
     EXPECT_EQ("real", cookies["__Host-csrf"]);
     ASSERT_TRUE(cookies.find("a") != cookies.end());
     EXPECT_EQ("1", cookies["a"]);
     EXPECT_EQ("two words", cookies["b"]); // the whitespace inside an unquoted value stays, the trailing goes
     EXPECT_EQ("3", cookies["c"]);
-    EXPECT_TRUE(cookies.find("d/e") == cookies.end());
-    EXPECT_EQ(cookies.size(), 4u);
+    EXPECT_EQ("4", cookies["d/e"]);
+    EXPECT_EQ("5", cookies["cart[1]"]);
+    EXPECT_EQ("6", cookies["user:id"]);
+    EXPECT_EQ("7", cookies["t"]) << "a tab around a name is trimmed like a space";
+    EXPECT_EQ("8", cookies["\xc3\xa9t\xc3\xa9"]);
+    EXPECT_TRUE(cookies.find("bad\x01name") == cookies.end()) << "a control character costs the pair";
+    EXPECT_EQ(cookies.size(), 10u);
 }
 
 TEST_F(CookieTest, ParseCookiePairsKeepsTheOrderTheSpellingAndEveryDuplicate) {
@@ -1271,7 +1301,7 @@ TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
     EXPECT_EQ(req.cookie_value("__Host-csrf"), "planted");
     EXPECT_EQ(req.cookie_value_exact("__Host-csrf"), "real") << "the look-alikes sent first hide the real one";
     EXPECT_EQ(req.cookie_value_exact("__host-csrf"), "planted");
-    EXPECT_EQ(req.cookie_value_exact("__Host -csrf"), "") << "no cookie name: dropped";
+    EXPECT_EQ(req.cookie_value_exact("__Host -csrf"), "spaced") << "a name of its own";
     EXPECT_EQ(req.cookie_value_exact("absent"), "");
 
     Request trailer; // a trailer's line is no more read by name than by jar

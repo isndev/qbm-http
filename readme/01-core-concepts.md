@@ -86,9 +86,9 @@ Key accessors, each verified against `request.h`:
 | `cookie_value_exact(name)` | `std::string` | the first cookie named exactly `name`, case included, from the header section's lines. The jar folds names, so `cookie_value("__Host-x")` may be a `__host-x` sent first, which another host can plant: read a prefixed cookie (`__Host-`, `__Secure-`) by its exact name |
 | `has_cookie(name)` | `bool` | presence test |
 
-A server parses a request's cookies before routing it — HTTP/1.1, HTTP/2 and HTTP/3 alike, every `Cookie` line of the header section included (HTTP/2 and HTTP/3 let a client split the header into one line per cookie, RFC 9113 §8.2.3 / RFC 9114 §4.2.1), never one of a trailer section (RFC 9110 §6.5.1) — so a handler reads `ctx->request().cookie_value(name)` directly. A malformed pair — a name that is not a token (whitespace or a separator inside it), a malformed quoted value, a control character, a name over 1024 bytes or a value over 4096 — is dropped and the others kept, so one cookie another host planted does not empty the jar; only a header over `max_cookie_header_size` (16 KiB, its lines joined) is refused, and served without cookies. The pairs are split on `;` alone: a `,` or a `"` separates nothing. A request you build yourself — a test, a client — is not parsed: call `parse_cookie_header()` once the headers are present; it throws on a header over the cap, the jar left empty (Huly QB-1174, QB-95).
+A server parses a request's cookies before routing it — HTTP/1.1, HTTP/2 and HTTP/3 alike, every `Cookie` line of the header section included (HTTP/2 and HTTP/3 let a client split the header into one line per cookie, RFC 9113 §8.2.3 / RFC 9114 §4.2.1), never one of a trailer section (RFC 9110 §6.5.1) — so a handler reads `ctx->request().cookie_value(name)` directly. The header is read as a browser sends it: the pairs are split on `;` alone (a `,` or a `"` separates nothing), the whitespace around a name and a value is removed, a value wrapped in `"` is read without the two quotes (nothing inside unescaped), and every other byte is kept — a `"`, a `[`, a space or a UTF-8 byte in a name or a value. A malformed pair — an empty or `$`-prefixed name, a control character other than a tab, a name over 1024 bytes or a value over 4096 — is dropped and the others kept, so one malformed cookie another host planted does not empty the jar; only a header over `max_cookie_header_size` (16 KiB, its lines joined) is refused, and served without cookies — a size several cookies planted near the value cap reach together (a cookie bomb), which then empties the jar. A request you build yourself — a test, a client — is not parsed: call `parse_cookie_header()` once the headers are present; it throws on a header over the cap, the jar left empty (Huly QB-1174, QB-95).
 
-<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:515-521 -->
+<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:533-539 -->
 ```cpp
 qb::http::Request request;
 request.add_header("Cookie", "name1=value1; name2=value2");
@@ -128,7 +128,7 @@ Status is the only response-specific scalar; everything else (headers, body) com
 
 `add_cookie` keeps the jar and the raw `Set-Cookie` headers in lockstep. If you mutate a cookie through the pointer or the jar reference, you must call `update_cookie_header(name)` (or `update_cookie_headers()`) afterward — the header text does not update itself.
 
-<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:538-540 -->
+<!-- src: qbm/http/tests/unit/cookie/cookie.cpp:556-558 -->
 ```cpp
 qb::http::Response response;
 response.add_cookie("session", "abc123");          // jar + Set-Cookie header, in sync

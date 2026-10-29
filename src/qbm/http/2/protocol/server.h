@@ -2119,8 +2119,8 @@ private:
             }
             stream.assembled_request.major_version = 2;
             stream.assembled_request.minor_version = 0;
-            // A Cookie header the parser refuses (a name over COOKIE_NAME_MAX, a value over COOKIE_VALUE_MAX, a control
-            // character) throws: caught here, the request is served without cookies, as on HTTP/1.1. Uncaught, it
+            // A Cookie header over max_cookie_header_size, its lines joined -- the one refusal left, a malformed pair is
+            // dropped -- throws: caught here, the request is served without cookies, as on HTTP/1.1. Uncaught, it
             // reached the noexcept frame handlers and terminated the process (Huly QB-1174).
             try {
                 stream.assembled_request.parse_cookie_header();

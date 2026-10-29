@@ -436,11 +436,13 @@ public:
  *
  * Cookie attributes (Path, Domain, etc.) are not included in the returned map.
  *
- * A request `Cookie` header (set_cookie_header = false) is split on ';' alone: a ',' or a '"' separates nothing, a
- * quoted value ends at its pair. A pair is dropped, the others kept, when its name is not an RFC 9110 token (empty,
- * `$`-prefixed, whitespace or a separator inside it) or is over COOKIE_NAME_MAX, or when its value is a malformed
- * quoted string, holds an unquoted '"' or a control character, or is over COOKIE_VALUE_MAX: a cookie another host
- * planted costs that cookie, not the header.
+ * A request `Cookie` header (set_cookie_header = false) is read as a browser sends it: split on ';' alone (a ',' or
+ * a '"' separates nothing), the whitespace around a name and a value removed, a value wrapped in '"' read without the
+ * two quotes (nothing inside unescaped), every other byte kept -- a '"', a '[', a space, a UTF-8 byte. A pair is
+ * dropped, the others kept, when its name is empty or `$`-prefixed, when its name or its value holds a control
+ * character other than HTAB, or is over its cap (COOKIE_NAME_MAX, COOKIE_VALUE_MAX): one malformed cookie another
+ * host planted costs that cookie. Only a header over `max_cookie_header_size` is refused -- a size several planted
+ * cookies near the value cap reach together (a cookie bomb), which then empties the jar.
  *
  * @throws std::runtime_error past `max_cookie_header_size`; for a Set-Cookie header, also on a name or a value over
  *         its cap or on a control character.

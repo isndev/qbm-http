@@ -388,7 +388,10 @@ TEST_F(CsrfMiddlewareTest, ALookAlikeCookieSentFirstNeitherHidesNorReplacesTheTo
     options.tokens(secret);
     std::string const real    = options.issue_token(qb::http::Request{});
     std::string const planted = options.issue_token(qb::http::Request{});
-    for (std::string const look_alike : {"__Host -csrf", "__host-csrf", " __Host-csrf\t", "__HOST-CSRF"}) {
+    for (std::string const look_alike :
+         {"__Host -csrf", "__host-csrf", " __Host-csrf\t", "__HOST-CSRF",
+          "__Host\xe2\x80\x90"
+          "csrf" /* a U+2010 hyphen */}) {
         std::string const cookie = look_alike + "=" + planted + "; __Host-csrf=" + real;
         if (look_alike == " __Host-csrf\t") { // the whitespace around a name is no part of it: this IS the cookie
             EXPECT_EQ(options.cookie_token(post({{"Cookie", cookie}})), planted);
