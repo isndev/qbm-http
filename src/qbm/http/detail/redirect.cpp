@@ -7,15 +7,10 @@
  */
 #include "./redirect.h"
 
-#include <charconv>
-#include <cstdint>
-#include <cstring>
 #include <initializer_list>
 #include <string>
-#include <system_error>
 #include <utility>
 
-#include <qb/io/system/sys__socket.h>
 #include <qb/utility/branch_hints.h>
 
 #include "../1.1/http.h"
@@ -65,50 +60,6 @@ component(std::string_view text, bool path, bool query_or_fragment) noexcept {
     return true;
 }
 
-bool
-port_valid(std::string_view port) noexcept {
-    if (port.empty()) {
-        return true; // An empty port selects the scheme default.
-    }
-    std::uint32_t value  = 0;
-    const auto    end    = port.data() + port.size();
-    const auto    parsed = std::from_chars(port.data(), end, value);
-    return parsed.ec == std::errc{} && parsed.ptr == end && value <= 65535u;
-}
-
-bool
-authority_valid(std::string_view authority) {
-    if (authority.empty() || authority.find('@') != std::string_view::npos) {
-        return false;
-    }
-    if (authority.front() == '[') {
-        const auto close = authority.find(']');
-        if (close == std::string_view::npos) {
-            return false;
-        }
-        // No name lookup, zone decoding or IPvFuture transport extension here.
-        const auto literal = authority.substr(1, close - 1);
-        if (literal.empty() || literal.size() >= INET6_ADDRSTRLEN || literal.find('%') != std::string_view::npos) {
-            return false;
-        }
-        char address[INET6_ADDRSTRLEN];
-        std::memcpy(address, literal.data(), literal.size());
-        address[literal.size()] = '\0';
-        in6_addr parsed{};
-        if (qb::io::inet::ip::compat::inet_pton(AF_INET6, address, &parsed) != 1) {
-            return false;
-        }
-        const auto suffix = authority.substr(close + 1);
-        return suffix.empty() || (suffix.front() == ':' && port_valid(suffix.substr(1)));
-    }
-    const auto colon = authority.find(':');
-    const auto host  = authority.substr(0, colon);
-    if (host.empty() || !component(host, false, false)) {
-        return false;
-    }
-    return colon == std::string_view::npos || port_valid(authority.substr(colon + 1));
-}
-
 std::optional<UriReference>
 split_reference(std::string_view source) {
     for (const auto byte : source) {
@@ -149,7 +100,7 @@ split_reference(std::string_view source) {
         const auto end  = source.find('/');
         parts.authority = source.substr(0, end);
         source          = end == std::string_view::npos ? std::string_view{} : source.substr(end);
-        if (!authority_valid(parts.authority)) {
+        if (!origin::is_request_authority(parts.authority)) { // the authority grammar every request reader shares (Huly QB-1177)
             return std::nullopt;
         }
     }

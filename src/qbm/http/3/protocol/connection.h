@@ -55,7 +55,7 @@
 #include "../../1.1/protocol/base.h"
 #include "../../headers.h"
 #include "../../logger.h"
-#include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
+#include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
 #include "../../request.h"
 #include "../../response.h"
 #include "../../utility.h"
@@ -1133,8 +1133,21 @@ private:
             if (parsed_method == qb::http::method::UNINITIALIZED) {
                 return false;
             }
+            // The URI the three fields name, its authority :authority's: a :path that is no absolute path, a
+            // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177).
+            auto uri = qb::http::origin::request_uri(*scheme, *authority, *path, parsed_method == qb::http::method::OPTIONS);
+            if (!uri) {
+                return false;
+            }
+            // A `host` field names the authority too: one, and :authority's (RFC 9114 §4.3.1). Read otherwise,
+            // `header("Host")` was a second authority the client chose.
+            if (auto const host = st.request.headers().find("host");
+                host != st.request.headers().end()
+                && (host->second.size() != 1 || !qb::http::utility::iequals(host->second.front(), *authority))) {
+                return false;
+            }
             st.request.method()      = parsed_method;
-            st.request.uri()         = qb::io::uri(*scheme + "://" + *authority + *path);
+            st.request.uri()         = std::move(*uri);
             st.request.major_version = 3;
             st.request.minor_version = 0;
             st.request.stream_id     = stream_id;

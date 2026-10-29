@@ -1096,6 +1096,31 @@ TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody
     EXPECT_EQ(io.input.size(), 0u) << "what followed the refused header section is dropped";
 }
 
+// A request target that names no resource is answered 400 (Huly QB-1177): one the reader refuses (`/a|b`, `*` for
+// GET) and one llhttp refuses itself (`?x`, HPE_INVALID_URL). Only those: a request malformed elsewhere -- its version,
+// its framing -- is still not answered, and the protocol ends.
+TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingElseIs) {
+    for (const char *target : {"/a|b", "*", "?x"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, std::string("GET ") + target + " HTTP/1.1\r\nHost: h\r\n\r\n");
+        EXPECT_EQ(step(proto, io), 0u) << target;
+        EXPECT_EQ(io.request_count, 0) << target;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << target;
+        EXPECT_TRUE(proto.ok()) << target << ": the io answers before the connection ends";
+    }
+    for (const char *malformed :
+         {"GET /x HTTP/9.9\r\nHost: h\r\n\r\n", "POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+          "G@T /x HTTP/1.1\r\nHost: h\r\n\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, malformed);
+        (void) step(proto, io);
+        EXPECT_TRUE(io.refusals.empty()) << malformed;
+        EXPECT_FALSE(proto.ok()) << malformed;
+    }
+}
+
 // The server's own cap, read live: a request AT it passes, one byte over is refused -- the declared
 // length and the bytes a chunked body delivers alike -- and a new value applies to the next request.
 TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {

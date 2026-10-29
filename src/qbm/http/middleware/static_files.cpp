@@ -323,6 +323,14 @@ generate_directory_listing_html(const std::filesystem::path &directory_path,
     // escaped for the attribute it is written into, '%' untouched, so `&copy;` stays a path and
     // never becomes a character reference (Huly QB-543).
     std::string base_link_path = std::string(request_uri_path);
+    // A link that begins with `//` is a network-path reference: the browser leaves for the host its first
+    // segment names. A request path may begin so -- `//` is an origin-form path (Huly QB-1177) -- and one
+    // slash leads every link.
+    if (const auto first = base_link_path.find_first_not_of('/'); first == std::string::npos) {
+        base_link_path = "/";
+    } else if (first > 1) {
+        base_link_path.erase(0, first - 1);
+    }
     if (base_link_path.empty() || base_link_path.back() != '/') {
         base_link_path += '/';
     }

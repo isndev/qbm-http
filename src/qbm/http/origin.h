@@ -1,11 +1,13 @@
 /**
  * @file qbm/http/origin.h
- * @brief Shared HTTP origin helpers: comparison, and the authority a request sends.
+ * @brief Shared HTTP origin helpers: comparison, the authority a request sends, and the URI a request
+ *        received with pseudo-header fields names.
  *
  * Provides case-insensitive scheme/host comparison and effective-port
  * resolution used to determine whether two URIs share the same web origin
- * (scheme + host + effective port), as defined by RFC 6454, and the one
- * authority writer every protocol uses for `Host` and `:authority`.
+ * (scheme + host + effective port), as defined by RFC 6454, the one
+ * authority writer every protocol uses for `Host` and `:authority`, and the
+ * one reader HTTP/2 and HTTP/3 servers use for `:scheme`, `:authority` and `:path`.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -98,5 +100,65 @@ namespace qb::http::origin {
  *         the URI has no host.
  */
 [[nodiscard]] std::string authority(qb::io::uri const &uri);
+
+/**
+ * @brief Whether @p text is an authority a request may name: `uri-host [ ":" port ]` (RFC 3986 §3.2)
+ *        without a userinfo part -- the `Host` of HTTP/1.1, the `:authority` of HTTP/2 and HTTP/3 (Huly
+ *        QB-1177).
+ *
+ * An IP literal between brackets that is an IPv6 address (`inet_pton`; no zone identifier, no
+ * IPvFuture), or a reg-name or an IPv4 address of unreserved characters, sub-delims and
+ * percent-encoded octets (RFC 3986 §3.2.2); then nothing, `:`, or `:` and a port of digits, leading
+ * zeros allowed, no greater than 65535. Never a userinfo. The redirect target check uses it too.
+ *
+ * @param text The field value.
+ * @return Whether the text has that shape.
+ */
+[[nodiscard]] bool is_request_authority(std::string_view text) noexcept;
+
+/**
+ * @brief The URI of a request received over HTTP/2 or HTTP/3, from its `:scheme`, `:authority` and
+ *        `:path` pseudo-header fields (RFC 9113 §8.3.1, RFC 9114 §4.3.1): one reader for the two
+ *        servers that composed it on their own (Huly QB-1177).
+ *
+ * - `scheme://authority` followed by the path. The URI's authority is `:authority`, never one a
+ *   `:path` or a userinfo part chose: composed onto `victim.test`, the `:path` `@evil.test/x` named
+ *   the host `evil.test`. A `:path` `//a/b` stays the path it is.
+ * - The asterisk-form of an OPTIONS request is the URI `*`, without an authority, as HTTP/1.1's is:
+ *   the request names no resource of the authority, which `:authority` gave.
+ *
+ * @param scheme          `:scheme`: a URI scheme (RFC 3986 §3.1).
+ * @param authority       `:authority`: an authority is_request_authority() accepts.
+ * @param path            `:path`: an absolute path and an optional query, no fragment, no space or control
+ *                        byte; or `*` for an OPTIONS request.
+ * @param options_request Whether the request's method is OPTIONS.
+ * @return The URI, or std::nullopt when the fields are malformed: an invalid scheme, an authority
+ *         is_request_authority() refuses, a path that neither begins with '/' nor is the `*` of an
+ *         OPTIONS request or that holds a `#`, a space or a control byte, or a text the URI parser
+ *         refuses. A malformed request is a stream error
+ *         (RFC 9113 §8.1.1, RFC 9114 §4.1.2).
+ */
+[[nodiscard]] std::optional<qb::io::uri> request_uri(std::string_view scheme, std::string_view authority, std::string_view path,
+                                                     bool options_request);
+
+/**
+ * @brief The URI of a request received over HTTP/1.1, from its request target, by the target's form
+ *        (RFC 9112 §3.2): the reader of the HTTP/1.1 server (Huly QB-1177).
+ *
+ * - origin-form (`/path?query`): qb::io::uri::origin_form(). `//a/b` is the path `//a/b`, never the
+ *   host `a`; the request's authority is its `Host` field.
+ * - absolute-form (`scheme://authority/path?query`): a URI, whose authority is the request's (RFC 9112
+ *   §3.2.2) and must be one is_request_authority() accepts -- no userinfo, a host.
+ * - authority-form, the target of a CONNECT request and of no other: qb::io::uri::authority_form(),
+ *   the host and the port.
+ * - asterisk-form, the target of an OPTIONS request and of no other: the URI `*`.
+ *
+ * @param target          The request target as it was received.
+ * @param connect_request Whether the request's method is CONNECT.
+ * @param options_request Whether the request's method is OPTIONS.
+ * @return The URI, or std::nullopt when the target is none of those forms -- a fragment, a `*` for
+ *         another method, a text the URI parser refuses: the server answers 400 (RFC 9112 §3.2).
+ */
+[[nodiscard]] std::optional<qb::io::uri> request_target_uri(std::string_view target, bool connect_request, bool options_request);
 
 } // namespace qb::http::origin

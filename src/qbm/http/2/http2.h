@@ -386,7 +386,7 @@ public:
 
     /**
      * @brief Protocol hook of the HTTP/1.1 fallback: a request was refused for a limit (414, 431 or 413,
-     *        Huly QB-168, QB-94).
+     *        Huly QB-168, QB-94) or for a target that names no resource (400, Huly QB-1177).
      * @param status The status that answers it.
      *
      * Answered with the status, an empty body and `Connection: close`, and on(eos) closes the connection,

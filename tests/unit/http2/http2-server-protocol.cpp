@@ -2020,6 +2020,64 @@ TEST(HTTP2ServerProtocol, EmptyPathPseudoHeaderIsStreamError) {
     EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
 }
 
+// The request's URI is the one :scheme, :authority and :path name, its authority :authority's (Huly QB-1177):
+// a `//evil.test/x` path stays a path, `*` is the asterisk-form of an OPTIONS request.
+TEST(HTTP2ServerProtocol, TheTargetPseudoHeadersNameTheRequestUri) {
+    struct Named {
+        std::string method, authority, path, host, uri_path;
+    };
+    for (auto const &c :
+         {Named{"GET", "example.test", "//evil.test/x", "example.test", "//evil.test/x"},
+          Named{"GET", "example.test:8443", "/a?b=1", "example.test", "/a"}, Named{"OPTIONS", "example.test", "*", "", "*"}}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        const auto encoded =
+            encode_hpack_headers({{":method", c.method}, {":scheme", "https"}, {":authority", c.authority}, {":path", c.path}});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
+        drive(protocol, io);
+
+        EXPECT_EQ(io.stream_error_count, 0) << c.path;
+        ASSERT_EQ(io.request_count, 1) << c.path;
+        EXPECT_EQ(io.last_request->uri().host(), c.host) << c.path;
+        EXPECT_TRUE(io.last_request->uri().user_info().empty()) << c.path;
+        EXPECT_EQ(io.last_request->uri().path(), c.uri_path) << c.path;
+    }
+}
+
+// A :path that is no absolute path, an :authority that is no authority, a :scheme that is no scheme, or a text the
+// URI parser refuses is a malformed request: a stream error, never a request whose URI names another authority --
+// composed onto `example.test`, the :path `@evil.test/x` used to be one for the host evil.test (Huly QB-1177).
+TEST(HTTP2ServerProtocol, AMalformedTargetPseudoHeaderIsStreamError) {
+    struct Malformed {
+        std::string method, scheme, authority, path;
+    };
+    for (auto const &c :
+         {Malformed{"GET", "https", "example.test", "@evil.test/x"}, Malformed{"GET", "https", "example.test", "evil.test/x"},
+          Malformed{"GET", "https", "example.test", "*"}, Malformed{"GET", "https", "user@example.test", "/x"},
+          Malformed{"GET", "https", "example.test/evil", "/x"}, Malformed{"GET", "ht/tps", "example.test", "/x"},
+          Malformed{"GET", "https", "example.test", "/a|b"}, Malformed{"GET", "https", ":443", "/x"}, Malformed{"GET", "https", "a:b:c", "/x"},
+          Malformed{"GET", "https", "example.test:99999", "/x"}, Malformed{"GET", "https", "evil]", "/x"},
+          Malformed{"GET", "https", "[127.0.0.1]", "/x"}, Malformed{"GET", "https", "example.test", "/x#f"},
+          Malformed{"GET", "https", "example.test", "/x y"}}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        const auto encoded =
+            encode_hpack_headers({{":method", c.method}, {":scheme", c.scheme}, {":authority", c.authority}, {":path", c.path}});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
+        drive(protocol, io);
+
+        EXPECT_TRUE(protocol.ok()) << "stream-level: the connection survives " << c.authority << c.path;
+        EXPECT_EQ(io.request_count, 0) << c.scheme << "://" << c.authority << " " << c.path << " reached the server as "
+                                       << (io.last_request ? io.last_request->uri().source() : std::string{});
+        EXPECT_EQ(io.stream_error_count, 1) << c.authority << c.path;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << c.authority << c.path;
+    }
+}
+
 TEST(HTTP2ServerProtocol, MissingAuthorityPseudoHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
