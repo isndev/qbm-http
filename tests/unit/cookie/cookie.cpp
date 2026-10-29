@@ -246,11 +246,13 @@ TEST_F(CookieTest, ParseCookiesExactlyLimitValueIsAccepted) {
 }
 
 TEST_F(CookieTest, ParseCookiesOverLimitValueIsRejected) {
-    // The FIRST rejected length is COOKIE_VALUE_MAX + 1: on the (MAX+1)-th value
-    // char the guard `length() >= COOKIE_VALUE_MAX` (parse_cookies, unquoted value) trips and
-    // throws, keeping memory bounded against a malicious oversized Cookie header.
+    // A value over COOKIE_VALUE_MAX costs its pair, not the header: a cookie planted with one must not take the
+    // others with it (the CSRF fifth review). At the cap it is kept.
     std::string over_limit_value(COOKIE_VALUE_MAX + 1, 'v');
-    EXPECT_THROW((void) parse_cookies(std::string("big=" + over_limit_value), false), std::runtime_error);
+    auto        cookies = parse_cookies(std::string("big=" + over_limit_value + "; ok=1"), false);
+    EXPECT_TRUE(cookies.find("big") == cookies.end());
+    EXPECT_EQ("1", cookies["ok"]);
+    EXPECT_EQ(COOKIE_VALUE_MAX, parse_cookies(std::string("cap=" + std::string(COOKIE_VALUE_MAX, 'v')), false)["cap"].size());
 }
 
 TEST_F(CookieTest, ParseCookiesExactlyLimitNameIsAccepted) {
@@ -264,10 +266,13 @@ TEST_F(CookieTest, ParseCookiesExactlyLimitNameIsAccepted) {
 }
 
 TEST_F(CookieTest, ParseCookiesOverLimitNameIsRejected) {
-    // The FIRST rejected name length is COOKIE_NAME_MAX + 1: the (MAX+1)-th name
-    // char trips the guard `length() >= COOKIE_NAME_MAX` (parse_cookies, name).
+    // A name over COOKIE_NAME_MAX costs its pair, not the header; whitespace before the '=' is no part of it.
     std::string over_limit_name(COOKIE_NAME_MAX + 1, 'n');
-    EXPECT_THROW((void) parse_cookies(std::string(over_limit_name + "=v"), false), std::runtime_error);
+    auto        cookies = parse_cookies(std::string(over_limit_name + "=v; ok=1"), false);
+    EXPECT_TRUE(cookies.find(over_limit_name) == cookies.end());
+    EXPECT_EQ("1", cookies["ok"]);
+    const std::string at_cap(COOKIE_NAME_MAX, 'n');
+    EXPECT_EQ("v", parse_cookies(std::string(at_cap + "  =v"), false)[at_cap]);
 }
 
 TEST_F(CookieTest, HostPrefixCookieNameIsPreservedAndRoundTrips) {
@@ -374,9 +379,31 @@ TEST_F(CookieTest, ParseMultipleCookies) {
 }
 
 TEST_F(CookieTest, ParseCookiesRejectMalformedQuotedValues) {
-    EXPECT_THROW((void) parse_cookies(std::string(R"(name="unterminated)"), false), std::runtime_error);
-    EXPECT_THROW((void) parse_cookies(std::string(R"(name="value"junk; another=123)"), false), std::runtime_error);
-    EXPECT_THROW((void) parse_cookies(std::string("name=\"bad\nvalue\""), false), std::runtime_error);
+    // A malformed quoted value costs its pair, the header's other pairs kept: unterminated, junk after the closing
+    // quote, an escape that would take the closing quote, a control character.
+    for (std::string const &header :
+         {std::string(R"(name="unterminated; another=123)"), std::string(R"(name="value"junk; another=123)"),
+          std::string(R"(name="trailing\"; another=123)"), std::string("name=\"bad\nvalue\"; another=123"),
+          std::string(R"(name=va"lue; another=123)")}) {
+        auto cookies = parse_cookies(header, false);
+        EXPECT_TRUE(cookies.find("name") == cookies.end()) << header;
+        EXPECT_EQ("123", cookies["another"]) << header;
+    }
+}
+
+TEST_F(CookieTest, ParseCookiesSplitsARequestHeaderOnSemicolonsAlone) {
+    // A request Cookie header is pairs joined by "; " (RFC 6265 §5.4). After a quoted value the parser took ',' as a
+    // separator and a quoted value ran across ';', so a cookie another host planted -- a value of `"x",__Host-csrf=E`,
+    // or one opening a quote that a later cookie's closes -- added a pair of its choice ahead of the real one, or
+    // swallowed the real one (the CSRF fifth review). Neither ',' nor '"' separates; a quote ends at its part.
+    auto injected = parse_cookie_pairs(R"(a="x",__Host-csrf=evil; __Host-csrf=real)", false);
+    ASSERT_EQ(injected.size(), 1u);
+    EXPECT_EQ(injected[0], (std::pair<std::string, std::string>{"__Host-csrf", "real"})) << "the planted pair is no pair";
+    auto hiding = parse_cookie_pairs(R"(a="zz; __Host-csrf=real; b=")", false);
+    ASSERT_EQ(hiding.size(), 1u);
+    EXPECT_EQ(hiding[0], (std::pair<std::string, std::string>{"__Host-csrf", "real"})) << "the real pair is not swallowed";
+    auto comma = parse_cookies(std::string("list=a,b,c; x=1"), false);
+    EXPECT_EQ("a,b,c", comma["list"]) << "a ',' inside a value stays";
 }
 
 //////////////////////////////////////////////////
@@ -1022,18 +1049,21 @@ TEST_F(CookieTest, ParseCookiesBareAttributeNameBeforeSeparatorIsDropped) {
 // Quoted value exceeding COOKIE_VALUE_MAX via a plain quoted char throws
 // (parse_cookies, plain quoted-character branch).
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
-    // Open quote, then COOKIE_VALUE_MAX+1 plain chars => length check trips.
-    std::string header = "big=\"" + std::string(COOKIE_VALUE_MAX + 1, 'a') + "\"";
-    EXPECT_THROW((void) parse_cookies(header, false), std::runtime_error);
+    // A quoted value of COOKIE_VALUE_MAX+1 characters costs its pair.
+    std::string header  = "big=\"" + std::string(COOKIE_VALUE_MAX + 1, 'a') + "\"; ok=1";
+    auto        cookies = parse_cookies(header, false);
+    EXPECT_TRUE(cookies.find("big") == cookies.end());
+    EXPECT_EQ("1", cookies["ok"]);
 }
 
 // Quoted value exceeding COOKIE_VALUE_MAX via an escaped char throws
 // (parse_cookies, value_escape branch). Fill to the limit with plain chars, then an escape.
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
-    // COOKIE_VALUE_MAX plain chars bring length to the limit, then "\\q" appends
-    // an escaped char while at capacity => the escaped-branch length check trips.
-    std::string header = "big=\"" + std::string(COOKIE_VALUE_MAX, 'a') + "\\q\"";
-    EXPECT_THROW((void) parse_cookies(header, false), std::runtime_error);
+    // COOKIE_VALUE_MAX plain characters and one escaped: the value read is over the cap, the pair dropped.
+    std::string header  = "big=\"" + std::string(COOKIE_VALUE_MAX, 'a') + "\\q\"; ok=1";
+    auto        cookies = parse_cookies(header, false);
+    EXPECT_TRUE(cookies.find("big") == cookies.end());
+    EXPECT_EQ("1", cookies["ok"]);
 }
 
 // parse_set_cookie with no ';' separator: the whole header is the cookie-pair
@@ -1117,11 +1147,19 @@ TEST(RequestCookieHeader, EveryCookieLineIsReadAsIfJoined) {
 }
 
 TEST(RequestCookieHeader, ARefusedLineLeavesNoCookie) {
-    Request req;
+    Request req; // only a header over max_cookie_header_size is refused, and then wholly
     req.add_header("cookie", "a=1");
-    req.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v");
+    req.add_header("cookie", "big=" + std::string(max_cookie_header_size, 'v'));
     EXPECT_THROW(req.parse_cookie_header(), std::runtime_error);
     EXPECT_EQ(req.cookie("a"), nullptr) << "a refused header yields no cookie, not the lines before the refused one";
+
+    Request bad_pair; // a malformed pair costs that pair: a cookie another host planted does not empty the jar
+    bad_pair.add_header("cookie", "a=1");
+    bad_pair.add_header("cookie", std::string(COOKIE_NAME_MAX + 1, 'n') + "=v; tab=x\ty; quote=\"open");
+    EXPECT_NO_THROW(bad_pair.parse_cookie_header());
+    EXPECT_EQ(bad_pair.cookie_value("a"), "1");
+    EXPECT_EQ(bad_pair.cookie("tab"), nullptr);
+    EXPECT_EQ(bad_pair.cookie("quote"), nullptr);
 
     Request none; // no header, an empty one: no cookie, no throw
     EXPECT_NO_THROW(none.parse_cookie_header());
@@ -1197,20 +1235,21 @@ TEST(RequestCookieHeader, ACookieLineOfTheTrailerSectionIsNotRead) {
     EXPECT_EQ(other_trailer.cookie_value("b"), "2");
 }
 
-// A name with whitespace inside is a name of its own; only the whitespace around a name or an unquoted value is
-// removed (RFC 6265bis §5.6). `__Host -csrf` was read as `__Host-csrf`, the name a browser protects, so a cookie
-// another host planted under it took the real one's place (the CSRF fourth review).
+// A request cookie's name is a token (RFC 6265 §4.1.1): only the whitespace around a name or a value is removed,
+// and a name with whitespace or a separator inside is no cookie name -- its pair is dropped. `__Host -csrf` was read
+// as `__Host-csrf`, the name a browser protects, so a cookie another host planted under it took the real one's place
+// (the CSRF fourth review).
 TEST_F(CookieTest, ParseCookiesKeepsTheWhitespaceInsideANameAndTrimsItsEnds) {
-    auto cookies = parse_cookies(std::string("__Host -csrf=planted; __Host-csrf=real;  a =1 ; b= two words  ;c=3 "), false);
-    ASSERT_TRUE(cookies.find("__Host -csrf") != cookies.end());
-    EXPECT_EQ("planted", cookies["__Host -csrf"]);
+    auto cookies = parse_cookies(std::string("__Host -csrf=planted; __Host-csrf=real;  a =1 ; b= two words  ;c=3 ; d/e=4"), false);
+    EXPECT_TRUE(cookies.find("__Host -csrf") == cookies.end());
     ASSERT_TRUE(cookies.find("__Host-csrf") != cookies.end());
     EXPECT_EQ("real", cookies["__Host-csrf"]);
     ASSERT_TRUE(cookies.find("a") != cookies.end());
     EXPECT_EQ("1", cookies["a"]);
     EXPECT_EQ("two words", cookies["b"]); // the whitespace inside an unquoted value stays, the trailing goes
     EXPECT_EQ("3", cookies["c"]);
-    EXPECT_TRUE(cookies.find("__Host-csrf ") == cookies.end());
+    EXPECT_TRUE(cookies.find("d/e") == cookies.end());
+    EXPECT_EQ(cookies.size(), 4u);
 }
 
 TEST_F(CookieTest, ParseCookiePairsKeepsTheOrderTheSpellingAndEveryDuplicate) {
@@ -1220,7 +1259,8 @@ TEST_F(CookieTest, ParseCookiePairsKeepsTheOrderTheSpellingAndEveryDuplicate) {
     EXPECT_EQ(pairs[1], (std::pair<std::string, std::string>{"__Host-csrf", "b"}));
     EXPECT_EQ(pairs[2], (std::pair<std::string, std::string>{"__Host-csrf", "c"}));
     EXPECT_EQ(pairs[3], (std::pair<std::string, std::string>{"x", "1"}));
-    EXPECT_THROW((void) parse_cookie_pairs("a=\x01", false), std::runtime_error) << "the same refusals as parse_cookies";
+    EXPECT_TRUE(parse_cookie_pairs("a=\x01", false).empty()) << "the same drops as parse_cookies";
+    EXPECT_THROW((void) parse_cookie_pairs("a=" + std::string(max_cookie_header_size, 'v'), false), std::runtime_error);
 }
 
 TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
@@ -1231,7 +1271,7 @@ TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
     EXPECT_EQ(req.cookie_value("__Host-csrf"), "planted");
     EXPECT_EQ(req.cookie_value_exact("__Host-csrf"), "real") << "the look-alikes sent first hide the real one";
     EXPECT_EQ(req.cookie_value_exact("__host-csrf"), "planted");
-    EXPECT_EQ(req.cookie_value_exact("__Host -csrf"), "spaced");
+    EXPECT_EQ(req.cookie_value_exact("__Host -csrf"), "") << "no cookie name: dropped";
     EXPECT_EQ(req.cookie_value_exact("absent"), "");
 
     Request trailer; // a trailer's line is no more read by name than by jar
@@ -1240,9 +1280,9 @@ TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
     trailer.parse_cookie_header();
     EXPECT_EQ(trailer.cookie_value_exact("__Host-csrf"), "");
 
-    Request refused; // a header the parse refused yields no cookie, by name or by jar
+    Request refused; // a header the parse refused (over max_cookie_header_size) yields no cookie, by name or by jar
     refused.add_header("cookie", "__Host-csrf=real");
-    refused.add_header("cookie", "bad=\x01");
+    refused.add_header("cookie", "big=" + std::string(max_cookie_header_size, 'v'));
     EXPECT_THROW(refused.parse_cookie_header(), std::runtime_error);
     EXPECT_EQ(refused.cookie_value_exact("__Host-csrf"), "");
 }

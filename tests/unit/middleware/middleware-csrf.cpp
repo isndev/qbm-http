@@ -400,6 +400,17 @@ TEST_F(CsrfMiddlewareTest, ALookAlikeCookieSentFirstNeitherHidesNorReplacesTheTo
         run(options, post({{"Cookie", cookie}, {"X-CSRF-Token", planted}}));
         expect_refused(CsrfVerdict::token_invalid);
     }
+    // The fifth review: a cookie of ANOTHER name whose value carries a pair -- `"x",__Host-csrf=...` after a quoted
+    // value, or a quote that runs across ';' to a later cookie's -- added a `__Host-csrf` ahead of the real one, or
+    // swallowed it. A request Cookie header splits on ';' alone and a quote ends at its pair.
+    std::string const injected = R"(a="x",__Host-csrf=)" + planted + "; __Host-csrf=" + real;
+    EXPECT_EQ(options.cookie_token(post({{"Cookie", injected}})), real);
+    run(options, post({{"Cookie", injected}, {"X-CSRF-Token", planted}}));
+    expect_refused(CsrfVerdict::token_invalid);
+    std::string const swallowing = R"(a="zz; __Host-csrf=)" + real + R"(; b=")";
+    EXPECT_EQ(options.cookie_token(post({{"Cookie", swallowing}})), real);
+    run(options, post({{"Cookie", swallowing}, {"X-CSRF-Token", real}}));
+    expect_served();
 }
 
 TEST_F(CsrfMiddlewareTest, AnUnsafeRequestMustEchoTheCookieToken) {

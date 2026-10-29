@@ -446,8 +446,9 @@ TEST_F(Http2ClientTest, CsrfMiddlewareReadsTheAuthorityAndTheFetchMetadataOfAnHt
 }
 
 TEST_F(Http2ClientTest, ACookieHeaderTheParserRefusesDoesNotStopTheServer) {
-    // A cookie name over COOKIE_NAME_MAX (1024) fits the field limits (8192) and makes parse_cookies() throw. The
-    // server ignores the cookies of such a request, as the HTTP/1.1 server does, and keeps serving (Huly QB-1174).
+    // Cookie lines that each fit the field limits (8192) but join past max_cookie_header_size (16 KiB) make
+    // parse_cookie_header() throw -- the one refusal left since a malformed pair is dropped instead (QB-95). The server
+    // ignores the cookies of such a request, as the HTTP/1.1 server does, and keeps serving (Huly QB-1174).
     auto client = make_test_client();
 
     std::atomic<int>   responses{0};
@@ -456,7 +457,9 @@ TEST_F(Http2ClientTest, ACookieHeaderTheParserRefusesDoesNotStopTheServer) {
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
     request.uri()    = qb::io::uri("/api/cookies");
-    request.add_header("cookie", std::string(1025, 'n') + "=v; a=1");
+    request.add_header("cookie", "a=1");
+    for (int line = 0; line < 3; ++line)
+        request.add_header("cookie", "pad" + std::to_string(line) + "=" + std::string(6000, 'v'));
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
         refused = std::move(r);
         ++responses;

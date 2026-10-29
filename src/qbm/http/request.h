@@ -183,7 +183,10 @@ public:
      * lines are read as if joined with "; ", `max_cookie_header_size` applying to the whole (Huly
      * QB-1174). A `Cookie` line of the trailer section is never read (RFC 9110 §6.5.1).
      * If the `Cookie` header is not present or empty, the cookie jar remains empty.
-     * @throws std::runtime_error if `parse_cookies` encounters a parsing error; the jar is then empty. The
+     * A malformed pair -- a name that is no token, a malformed quoted value, a control character, a name or a value
+     * over its cap -- is dropped and the others kept (`parse_cookies()`): one cookie another host planted does not
+     * empty the jar.
+     * @throws std::runtime_error past `max_cookie_header_size`, the lines joined; the jar is then empty. The
      *         servers call it under a `try` and serve such a request without cookies (an escaping throw would
      *         reach their `noexcept` handlers and terminate the process).
      */

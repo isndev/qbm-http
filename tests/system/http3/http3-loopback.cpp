@@ -497,7 +497,9 @@ TEST_F(Http3LoopbackTest, RequestCookiesAreParsedSplitLinesIncludedAndARefusedHe
     EXPECT_EQ(response.header("x-cookie-b"), "2");
 
     qb::http::Request refused{qb::io::uri("/cookies")};
-    refused.add_header("cookie", std::string(1025, 'n') + "=v; a=1");
+    refused.add_header("cookie", "a=1"); // lines that join past max_cookie_header_size: the one refusal left (QB-95)
+    for (int line = 0; line < 3; ++line)
+        refused.add_header("cookie", "pad" + std::to_string(line) + "=" + std::string(6000, 'v'));
     response = qb::http::run_sync(client->push_request(std::move(refused)));
     EXPECT_EQ(response.status(), qb::http::status::OK);
     EXPECT_EQ(response.header("x-cookie-a"), "");

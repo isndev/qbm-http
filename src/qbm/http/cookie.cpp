@@ -93,9 +93,73 @@ is_cookie_attribute(std::string_view name, bool set_cookie_header) noexcept {
 }
 
 namespace {
-/// The parser behind parse_cookies() and parse_cookie_pairs(): it calls @p emit(name, value) for each pair in the
-/// order the header lists them, names as sent. Whitespace around a name or an unquoted value is removed, whitespace
-/// inside one is part of it (RFC 6265bis §5.6): `__Host -x` is not `__Host-x`.
+/// A request `Cookie` header -- `name=value` pairs a browser joins with "; " (RFC 6265 §5.4) -- read as the header
+/// it is, not as a Set-Cookie: @p emit(name, value) for each valid pair, in order. The pairs are split on ';' alone
+/// (a ',' or a '"' is no separator: a quoted value cannot carry a pair past its quotes), the whitespace around a name
+/// and a value is removed, and a value in '"' is read without them, its quoted-pairs (`\x`) read. A pair is
+/// DROPPED, the others kept, when its name is not an RFC 9110 token (empty, a '$' legacy attribute, whitespace or a
+/// separator inside it: `__Host -x`) or is over COOKIE_NAME_MAX, or when its value is a malformed quoted string,
+/// holds a '"' unquoted or a control character, or is over COOKIE_VALUE_MAX: a cookie another host planted with a
+/// malformed value costs that cookie, not the header. Only a header over max_cookie_header_size is refused.
+template <typename Sink>
+void
+parse_request_cookies_into(std::string_view header, Sink &&emit) {
+    const auto is_ows = [](char c) {
+        return c == ' ' || c == '\t';
+    };
+    const auto trim = [&](std::string_view text) {
+        while (!text.empty() && is_ows(text.front()))
+            text.remove_prefix(1);
+        while (!text.empty() && is_ows(text.back()))
+            text.remove_suffix(1);
+        return text;
+    };
+    while (!header.empty()) {
+        const auto end  = header.find(';');
+        const auto part = trim(header.substr(0, end));
+        header          = end == std::string_view::npos ? std::string_view{} : header.substr(end + 1);
+        if (part.empty())
+            continue;
+        const auto equal = part.find('=');
+        const auto name  = trim(part.substr(0, equal));
+        auto       value = equal == std::string_view::npos ? std::string_view{} : trim(part.substr(equal + 1));
+        if (name.empty() || name.size() > COOKIE_NAME_MAX || name.front() == '$'
+            || !std::all_of(name.begin(), name.end(), [](char c) { return is_cookie_name_char(static_cast<unsigned char>(c)); }))
+            continue;
+        std::string text;
+        if (!value.empty() && value.front() == '"') {
+            // A quoted value: its quoted-pairs read (`\"` is a '"'), an unescaped '"' before the closing one, an
+            // escape that would take the closing quote, or no closing quote at all make the pair malformed.
+            bool closed = false;
+            for (std::size_t i = 1; i < value.size(); ++i) {
+                char c = value[i];
+                if (c == '"') {
+                    closed = i + 1 == value.size();
+                    break;
+                }
+                if (c == '\\') {
+                    if (i + 2 >= value.size())
+                        break; // the escape would take the closing quote
+                    c = value[++i];
+                }
+                text.push_back(c);
+            }
+            if (!closed)
+                continue;
+        } else if (value.find('"') != std::string_view::npos) {
+            continue; // a '"' inside an unquoted value
+        } else {
+            text.assign(value);
+        }
+        if (text.size() > COOKIE_VALUE_MAX || std::any_of(text.begin(), text.end(), [](char c) { return utility::is_control(c); }))
+            continue;
+        emit(std::string(name), text);
+    }
+}
+
+/// The Set-Cookie side of parse_cookies() (set_cookie_header = true): it calls @p emit(name, value) for each pair
+/// in order, its attributes dropped. Whitespace around a name or an unquoted value is removed, whitespace inside one
+/// is part of it (RFC 6265bis §5.6).
 template <typename Sink>
 void
 parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Sink &&emit) {
@@ -268,15 +332,32 @@ parse_cookies_into(const char *ptr, const size_t len, bool set_cookie_header, Si
 qb::icase_unordered_map<std::string>
 parse_cookies(const char *ptr, const size_t len, bool set_cookie_header) {
     qb::icase_unordered_map<std::string> dict;
-    parse_cookies_into(ptr, len, set_cookie_header, [&dict](std::string const &name, std::string const &value) { dict.emplace(name, value); });
+    const auto                           keep_first = [&dict](std::string const &name, std::string const &value) {
+        dict.emplace(name, value);
+    };
+    if (set_cookie_header) {
+        parse_cookies_into(ptr, len, true, keep_first);
+    } else if (ptr && len) {
+        if (len > max_cookie_header_size)
+            throw std::runtime_error("Cookie header exceeds maximum allowed size of 16KB");
+        parse_request_cookies_into(std::string_view(ptr, len), keep_first);
+    }
     return dict;
 }
 
 std::vector<std::pair<std::string, std::string>>
 parse_cookie_pairs(std::string_view header, bool set_cookie_header) {
     std::vector<std::pair<std::string, std::string>> pairs;
-    parse_cookies_into(header.data(), header.size(), set_cookie_header,
-                       [&pairs](std::string const &name, std::string const &value) { pairs.emplace_back(name, value); });
+    const auto                                       keep_all = [&pairs](std::string const &name, std::string const &value) {
+        pairs.emplace_back(name, value);
+    };
+    if (set_cookie_header) {
+        parse_cookies_into(header.data(), header.size(), true, keep_all);
+    } else if (!header.empty()) {
+        if (header.size() > max_cookie_header_size)
+            throw std::runtime_error("Cookie header exceeds maximum allowed size of 16KB");
+        parse_request_cookies_into(header, keep_all);
+    }
     return pairs;
 }
 

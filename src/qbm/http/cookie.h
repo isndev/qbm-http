@@ -436,8 +436,14 @@ public:
  *
  * Cookie attributes (Path, Domain, etc.) are not included in the returned map.
  *
- * @throws std::runtime_error past `max_cookie_header_size`, on a name or a value over its cap, or on a control
- *         character.
+ * A request `Cookie` header (set_cookie_header = false) is split on ';' alone: a ',' or a '"' separates nothing, a
+ * quoted value ends at its pair. A pair is dropped, the others kept, when its name is not an RFC 9110 token (empty,
+ * `$`-prefixed, whitespace or a separator inside it) or is over COOKIE_NAME_MAX, or when its value is a malformed
+ * quoted string, holds an unquoted '"' or a control character, or is over COOKIE_VALUE_MAX: a cookie another host
+ * planted costs that cookie, not the header.
+ *
+ * @throws std::runtime_error past `max_cookie_header_size`; for a Set-Cookie header, also on a name or a value over
+ *         its cap or on a control character.
  */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
 
@@ -458,10 +464,10 @@ inline constexpr std::size_t max_cookie_header_size = 16 * 1024;
 
 /**
  * @brief The cookies of @p header in the order it lists them, every pair kept (duplicates included) and each name as
- *        it was sent -- its case and the whitespace inside it kept, the whitespace around it removed.
+ *        it was sent, its case kept.
  * @details parse_cookies() folds them into a case-insensitive map that keeps a name's first value; a reader that
- *          must not take a look-alike for a name -- `__host-x` or `__Host -x` for the `__Host-x` a browser protects --
- *          reads these (`Request::cookie_value_exact()`). Same parser, same refusals.
+ *          must not take a look-alike for a name -- a `__host-x` for the `__Host-x` a browser protects -- reads these
+ *          (`Request::cookie_value_exact()`). Same parser, same drops, same refusals.
  * @throws std::runtime_error As parse_cookies().
  */
 [[nodiscard]] std::vector<std::pair<std::string, std::string>> parse_cookie_pairs(std::string_view header, bool set_cookie_header);

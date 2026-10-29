@@ -47,7 +47,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   handler that rebuilds the response, the configuration refusals; without SSL, `tokens()` refusing), three loopback
   cases on the real servers (HTTP/1.1 on the wire with an origin-form `//evil.test/csrf` and an absolute-form target,
   and HTTP/1.1 over TLS refusing an `http://` Origin, `qbm-http-test-system-middleware-pipeline-system`; HTTP/2 with
-  `:authority` and lower-case names, `-system-http2-client`), and 30 mutants of the middleware and the cookie reads it
+  `:authority` and lower-case names, `-system-http2-client`), and 38 mutants of the middleware and the cookie reads it
   relies on, all caught.
 
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
@@ -68,65 +68,72 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
-- **A cookie name keeps the whitespace inside it: a `__Host -x` is no longer read as the `__Host-x` a browser
-  protects, and a prefixed cookie can be read by its exact name (Huly QB-95, its fourth review).** `parse_cookies()`
-  dropped every whitespace character of a name, so `__Host -csrf` -- a name another host can set, a browser protecting
-  only the exact prefix -- was stored as `__Host-csrf`, and when it came first in the header it took the real cookie's
-  place in the jar. Only the whitespace around a name or an unquoted value is removed now (RFC 6265bis §5.6); inside a
-  name it is part of it, and a value's trailing whitespace is trimmed. The jar still folds case and keeps a name's
-  first pair, so a planted `__host-x` sent first is still what `cookie_value("__Host-x")` returns:
+- **A request's `Cookie` header is read as one: pairs split on `;` alone, a malformed pair dropped instead of the
+  header -- a cookie another host plants can no longer replace, hide or wipe the others (Huly QB-95, its fourth and
+  fifth reviews).** The parser read a request header with Set-Cookie's grammar, and three cookie-tossing paths
+  followed. Whitespace inside a name was dropped, so `__Host -csrf` -- which another host can set, a browser
+  protecting only the exact prefix -- was stored as `__Host-csrf`; after a quoted value a `,` separated pairs and a
+  quoted value ran across `;`, so a cookie of another name valued `"x",__Host-csrf=E` added a `__Host-csrf` of its
+  choice ahead of the real one, and one opening a quote that a later cookie's closed swallowed the real one; and one
+  malformed pair -- a control character, an unclosed quote, a name over 1024 bytes -- refused the whole header, so one
+  planted cookie emptied the jar (every session cookie gone). A request header is now split on `;` alone, a quoted
+  value ends at its pair (its quoted-pairs still read), the whitespace around a name and a value is removed, and a
+  pair is dropped, the others kept, when its name is not a token (whitespace or a separator inside it, `$`-prefixed,
+  empty) or over its cap, or its value is a malformed quoted string, holds an unquoted `"` or a control character, or
+  is over its cap; only a header over `max_cookie_header_size` (16 KiB) is refused. The jar still folds case and keeps
+  a name's first pair, so a planted `__host-x` sent first is still what `cookie_value("__Host-x")` returns:
   `Request::cookie_value_exact(name)` reads the first pair spelled exactly `name` from the header section's lines
   (never a trailer section's, nothing for a refused header), over `parse_cookie_pairs()`, which keeps the order, the
-  spelling and every duplicate. Proven by three unit cases (`qbm-http-test-unit-cookie`, 64 -> 67) and four mutants,
-  each caught: the inner whitespace dropped, the exact read folding case or reading the trailer section, the trailing
-  whitespace of a value kept.
+  spelling and every duplicate. The Set-Cookie side of `parse_cookies()` keeps the whitespace inside a name too.
+  Proven by `qbm-http-test-unit-cookie` (64 -> 68 cases, the six that pinned a refused header moved to a dropped pair)
+  and twelve mutants, each caught: the inner whitespace of a name dropped, the exact read folding case or reading the
+  trailer section, the trailing whitespace of a value kept, a `,` separating, Set-Cookie's grammar for a request
+  header, a malformed value refusing the header, any name accepted, quoted-pairs not read, an unquoted `"` accepted,
+  the value not trimmed, no value cap.
 
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
   outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over
   1024 bytes, a value over 4096 or a control character -- all within the default field limits (8192) -- or a header
-  over 16 KiB. One unauthenticated request with `cookie: <1025 bytes>=v` ended the process (`libc++abi: terminating due to
-  uncaught exception of type std::runtime_error`, exit 134), in every release since 3.0.0. The HTTP/2 server now
-  parses under a `try` and serves such a request without cookies, as the HTTP/1.1 server always did. Two more cookie
-  defects went with it: the HTTP/3 server parsed no `Cookie` header at all (`cookie_value()` was empty on HTTP/3 and
-  on the HTTP/3 side of the dual-stack server), and `Request::parse_cookie_header()` read only the first `Cookie`
-  field line, while HTTP/2 and HTTP/3 let a client split it into one line per cookie (RFC 9113 §8.2.3, RFC 9114
-  §4.2.1) -- the second cookie was lost. Every line is read now, as if joined with `; ` (a name's first value wins), a
-  refused line leaves the jar empty, and the HTTP/3 server parses before routing under the same `try`. The docs said
-  the servers did not parse request cookies at all; they do, on all three protocols. Proven by a loopback case per
-  protocol (`qbm-http-test-system-http2-client`, `-http3-loopback`; HTTP/1.1 already had its own) and two unit cases
-  (`qbm-http-test-unit-cookie`), and by five mutants of the fix, all caught -- the unguarded HTTP/2 call reproduces
-  the termination. An independent review then found two gaps, closed before the fix landed: a `Cookie` line of a
-  request's trailer section was read as a cookie -- received trailer fields are also added to the header fields, and
-  RFC 9110 §6.5.1 forbids trusting one as a header field, so an intermediary that filters the header section's
-  cookies was bypassed -- and the 16 KiB cap applied per line, so a request split into 99 lines carried some 800 KB
-  of cookies. Only the header section's lines are read now, and `max_cookie_header_size` (16 KiB) caps them joined;
-  two unit cases more, each caught by its mutant.
-- **qbm-http and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is
-  installed any more (Huly QB-1139).** The llhttp fork's `http_` prefix keeps it from colliding with a system
-  llhttp, but it is http_parser's prefix too, and two names are shared outright with other signatures:
-  `http_should_keep_alive` and `http_errno_name`. A program that linked qbm-http and anything carrying
-  http_parser held two definitions of each and the link line chose: measured on ld64 against a stand-in, qbm-http's
-  HTTP/1.1 parser called the foreign `http_should_keep_alive` and a `Connection: close` request came out
-  keep-alive, behind a `duplicate symbol` warning; GNU ld and MSVC refuse the second definition. Every function
-  the fork defines (123) now links as `qb_` + its upstream name (`http_execute` is `qb_llhttp_execute`) through one
-  `#define` per name at the top of `src/qbm/http/vendor/llhttp.h`, read before any declaration; source keeps the
-  `http_` spelling. The fork is also compiled into qbm-http's own archive, as an `OBJECT` library folded in with
-  `$<TARGET_OBJECTS:llhttp>`: the installed tree carried `lib/libllhttp.a` (`lib/llhttp.lib`), the exact file the
-  vcpkg and Debian llhttp packages install, and `qbm::llhttp` in the export set -- both are gone, and
-  `find_package(qbm-http)` needs nothing new. `qbm-http-test-unit-llhttp-link-names` links an http_parser stand-in
-  BEFORE qbm-http and checks both sides (it fails as above without the renaming), and
-  `qbm-http-test-unit-llhttp-symbols` reads the built archive and fails on any exported `http_*` or `llhttp_*`
-  left unrenamed.
-- **The WebSocket loopback fixture binds 127.0.0.1 and keeps the OS error of a refused bind: the report
-  names address, port and code instead of "failed" on an address it had not bound, and the hardening
-  scenarios stop instead of driving their client at port 0 (Huly QB-1125).** `WsServerThread` listened
-  on every interface while its message said 127.0.0.1 and dropped the code; it now binds the loopback
-  like the module's other fixtures, reads `get_last_errno()` before anything else touches a socket --
-  a refused bind reads `listen_v4 failed on 127.0.0.1:<port> (native error 98: Address already in use)` --
-  and exposes `listening()`.
-  A lifecycle test holds a port with an intruder listener and asserts the reported address, port and
-  code (EADDRINUSE, WSAEADDRINUSE on Windows). Test fixtures only; no shipped code changes.
+  over 16 KiB. One unauthenticated request with `cookie: <1025 bytes>=v` ended the process (`libc++abi: terminating
+  due to uncaught exception of type std::runtime_error`, exit 134), in every release since 3.0.0. The HTTP/2 server
+  now parses under a `try` and serves such a request without cookies, as the HTTP/1.1 server always did. Two more
+  cookie defects went with it: the HTTP/3 server parsed no `Cookie` header at all (`cookie_value()` was empty on
+  HTTP/3 and on the HTTP/3 side of the dual-stack server), and `Request::parse_cookie_header()` read only the first
+  `Cookie` field line, while HTTP/2 and HTTP/3 let a client split it into one line per cookie (RFC 9113 §8.2.3, RFC
+  9114 §4.2.1) -- the second cookie was lost. Every line is read now, as if joined with `; ` (a name's first value
+  wins), a header over 16 KiB leaves the jar empty (a malformed pair is dropped since, see the entry above), and the
+  HTTP/3 server parses before routing under the same `try`. The docs said the servers did not parse request cookies at
+  all; they do, on all three protocols. Proven by a loopback case per protocol (`qbm-http-test-system-http2-client`,
+  `-http3-loopback`; HTTP/1.1 already had its own) and two unit cases (`qbm-http-test-unit-cookie`), and by five
+  mutants of the fix, all caught -- the unguarded HTTP/2 call reproduces the termination. An independent review then
+  found two gaps, closed before the fix landed: a `Cookie` line of a request's trailer section was read as a cookie --
+  received trailer fields are also added to the header fields, and RFC 9110 §6.5.1 forbids trusting one as a header
+  field, so an intermediary that filters the header section's cookies was bypassed -- and the 16 KiB cap applied per
+  line, so a request split into 99 lines carried some 800 KB of cookies. Only the header section's lines are read now,
+  and `max_cookie_header_size` (16 KiB) caps them joined; two unit cases more, each caught by its mutant. - **qbm-http
+  and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is installed any
+  more (Huly QB-1139).** The llhttp fork's `http_` prefix keeps it from colliding with a system llhttp, but it is
+  http_parser's prefix too, and two names are shared outright with other signatures: `http_should_keep_alive` and
+  `http_errno_name`. A program that linked qbm-http and anything carrying http_parser held two definitions of each and
+  the link line chose: measured on ld64 against a stand-in, qbm-http's HTTP/1.1 parser called the foreign
+  `http_should_keep_alive` and a `Connection: close` request came out keep-alive, behind a `duplicate symbol` warning;
+  GNU ld and MSVC refuse the second definition. Every function the fork defines (123) now links as `qb_` + its
+  upstream name (`http_execute` is `qb_llhttp_execute`) through one `#define` per name at the top of
+  `src/qbm/http/vendor/llhttp.h`, read before any declaration; source keeps the `http_` spelling. The fork is also
+  compiled into qbm-http's own archive, as an `OBJECT` library folded in with `$<TARGET_OBJECTS:llhttp>`: the
+  installed tree carried `lib/libllhttp.a` (`lib/llhttp.lib`), the exact file the vcpkg and Debian llhttp packages
+  install, and `qbm::llhttp` in the export set -- both are gone, and `find_package(qbm-http)` needs nothing new.
+  `qbm-http-test-unit-llhttp-link-names` links an http_parser stand-in BEFORE qbm-http and checks both sides (it fails
+  as above without the renaming), and `qbm-http-test-unit-llhttp-symbols` reads the built archive and fails on any
+  exported `http_*` or `llhttp_*` left unrenamed. - **The WebSocket loopback fixture binds 127.0.0.1 and keeps the OS
+  error of a refused bind: the report names address, port and code instead of "failed" on an address it had not bound,
+  and the hardening scenarios stop instead of driving their client at port 0 (Huly QB-1125).** `WsServerThread`
+  listened on every interface while its message said 127.0.0.1 and dropped the code; it now binds the loopback like
+  the module's other fixtures, reads `get_last_errno()` before anything else touches a socket -- a refused bind reads
+  `listen_v4 failed on 127.0.0.1:<port> (native error 98: Address already in use)` -- and exposes `listening()`. A
+  lifecycle test holds a port with an intruder listener and asserts the reported address, port and code (EADDRINUSE,
+  WSAEADDRINUSE on Windows). Test fixtures only; no shipped code changes.
 
 - **The WebSocket handoff test no longer races its own server thread on Windows: the registerSession()==nullptr
   case reads the dead-path flag with a 2 s bound instead of at the instant the client saw its socket dropped

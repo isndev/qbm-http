@@ -439,7 +439,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:487-491 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:490-494 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```
