@@ -77,7 +77,7 @@ Key accessors, each verified against `request.h`:
 | Member | Returns | Notes |
 |---|---|---|
 | `method()` | `const Method&` / `Method&` | the HTTP verb; see [methods and statuses](#methods-and-statuses) |
-| `uri()` | `const qb::io::uri&` / `qb::io::uri&` | scheme, host, path, query, fragment — a qb-io type. On a server, the target the client sent: an HTTP/1.1 origin-form target has no scheme and no host (the authority is the `Host` field) and keeps every byte of its path, `//a/b` included; an absolute-form one is a whole URI; HTTP/2 and HTTP/3 compose `:scheme://:authority` and `:path` (Huly QB-1177) |
+| `uri()` | `const qb::io::uri&` / `qb::io::uri&` | scheme, host, path, query, fragment — a qb-io type. On a server, the target the client sent: an HTTP/1.1 origin-form target has no scheme and no host (the authority is the `Host` field, which the server checks: one field, empty or a host and an optional port, Huly QB-1186) and keeps every byte of its path, `//a/b` included; an absolute-form one is a whole URI, whose authority the `Host` field then reads; HTTP/2 and HTTP/3 compose `:scheme://:authority` and `:path` (Huly QB-1177) |
 | `query(name, index = 0)` | `const std::string&` | a single query parameter; `index` selects among repeated keys. On a miss returns a process-wide static empty string (never a temporary). For a custom fallback use `query_or(name, fallback, index = 0)`, which returns `std::string` by value. Delegates to `uri().query(...)` |
 | `queries()` | the URI's query map | `qb::icase_unordered_map<std::vector<std::string>>` |
 | `parse_cookie_header()` | `void` | parses every `Cookie` line into the jar; the servers call it before routing, call it yourself on a request you build |

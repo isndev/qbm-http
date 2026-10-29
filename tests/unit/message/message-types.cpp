@@ -623,7 +623,9 @@ TEST(OriginTest, IsRequestAuthorityIsAHostAndAnOptionalPort) {
     using qb::http::origin::is_request_authority;
     for (std::string_view const ok :
          {"example.test", "example.test:8443", "example.test:", "127.0.0.1:80", "[::1]", "[2001:db8::1]:443", "[::ffff:10.0.0.1]:8080",
-          "xn--bcher-kva.test", "a-b.c_d~e:0", "h:65535", "h:00080", "h:000000000080", "caf%C3%A9.test"}) {
+          "xn--bcher-kva.test", "a-b.c_d~e:0", "h:65535", "h:00080", "h:000000000080", "caf%C3%A9.test",
+          // a percent-encoding before the port, at the very end, and one of ':' itself
+          "a%41:80", "a%41", "a%3A:80"}) {
         EXPECT_TRUE(is_request_authority(ok)) << ok;
     }
     for (std::string_view const bad :
@@ -632,7 +634,9 @@ TEST(OriginTest, IsRequestAuthorityIsAHostAndAnOptionalPort) {
           // an IP literal is an IPv6 address: not an IPv4 one, a name, a number, colons alone, a zone
           "[127.0.0.1]", "[cafe.de]", "[1]", "[::::]", "[fe80::1%25eth0]",
           // a '%' begins a percent-encoded octet
-          "a%zz", "a%", "a%4", "a%4g",
+          "a%zz", "a%", "a%4", "a%4g", "a%4:80", "a%:80",
+          // an '@' after the port's ':' is no digit of it
+          "h:80@x", "h:@", "h:@x",
           // a reg-name holds unreserved characters, sub-delims and percent-encodings only
           "a b", "a\tb", "a<b>", "a\"b", "a\\b", "a{b}", "a|b", "a^b", "a`b", "\xc3\xa9.test", "a\x7f",
           // no IPvFuture
@@ -641,10 +645,23 @@ TEST(OriginTest, IsRequestAuthorityIsAHostAndAnOptionalPort) {
           "[0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000:0000]"}) {
         EXPECT_FALSE(is_request_authority(bad)) << bad;
     }
+    // A percent-encoding cut by the end of the text: nothing past it is read (the octet after the view is '1').
+    EXPECT_FALSE(is_request_authority(std::string_view{"a%41", 3}));
     // A NUL inside the brackets: inet_pton reads a C string and would stop at it, reading `::1`.
     EXPECT_FALSE(is_request_authority(std::string_view{"[::1\0x]", 7}));
     // The longest IPv6 text, 45 characters: the address buffer holds it and its NUL.
     EXPECT_TRUE(is_request_authority("[ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255]:443"));
+}
+
+// Every octet a reg-name holds as itself is one the URI parser classes unreserved or sub-delim, and no other (Huly
+// QB-1186: the authority grammar reads them from a table, on the path of every request).
+TEST(OriginTest, IsRequestAuthorityClassesEveryOctetAsTheUriParserDoes) {
+    for (int c = 0; c < 256; ++c) {
+        std::string const octet(1, static_cast<char>(c));
+        EXPECT_EQ(qb::http::origin::is_request_authority(octet), qb::io::is_unreserved(c) || qb::io::is_sub_delim(c)) << "octet " << c;
+        EXPECT_EQ(qb::http::origin::is_request_authority("a" + octet + "b:8"), qb::io::is_unreserved(c) || qb::io::is_sub_delim(c))
+            << "octet " << c << " inside a host";
+    }
 }
 
 // The URI of an HTTP/1.1 request, by its target's form (RFC 9112 §3.2, Huly QB-1177).

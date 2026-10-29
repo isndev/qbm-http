@@ -10,6 +10,7 @@
 #include "./origin.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -168,28 +169,41 @@ is_port(std::string_view const port) noexcept {
     return parsed.ec == std::errc{} && parsed.ptr == end && value <= 65535u;
 }
 
-/// A reg-name or an IPv4 address (RFC 3986 §3.2.2): unreserved characters, sub-delims and percent-encoded octets.
-[[nodiscard]] bool
-is_reg_name(std::string_view const host) noexcept {
-    for (std::size_t i = 0; i < host.size(); ++i) {
-        auto const c = static_cast<unsigned char>(host[i]);
+/// The octets a reg-name holds as themselves (RFC 3986 §3.2.2): the unreserved characters and the sub-delims, as
+/// qb::io::is_unreserved() and is_sub_delim() class them -- one lookup an octet, on the path of every request, whose
+/// Host field and `:authority` are read here (Huly QB-1186). unit/message-types holds it to those two functions.
+constexpr auto reg_name_octet = [] {
+    std::array<bool, 256> table{};
+    for (unsigned char const c : std::string_view{"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;="})
+        table[c] = true;
+    return table;
+}();
+
+/// Where the reg-name or IPv4 address that begins @p text ends (RFC 3986 §3.2.2): the index of its first ':' -- or the
+/// size of @p text --, every octet before it unreserved, a sub-delim or a percent-encoding; npos for any other octet. One
+/// pass: a userinfo's '@' is no reg-name octet, nor a port digit after the ':'.
+[[nodiscard]] std::size_t
+reg_name_end(std::string_view const text) noexcept {
+    std::size_t i = 0;
+    for (; i < text.size() && text[i] != ':'; ++i) {
+        auto const c = static_cast<unsigned char>(text[i]);
         if (c == '%') {
-            if (host.size() - i < 3 || !std::isxdigit(static_cast<unsigned char>(host[i + 1]))
-                || !std::isxdigit(static_cast<unsigned char>(host[i + 2])))
-                return false;
+            if (text.size() - i < 3 || !std::isxdigit(static_cast<unsigned char>(text[i + 1]))
+                || !std::isxdigit(static_cast<unsigned char>(text[i + 2])))
+                return std::string_view::npos;
             i += 2;
-        } else if (!qb::io::is_unreserved(c) && !qb::io::is_sub_delim(c)) {
-            return false;
+        } else if (!reg_name_octet[c]) {
+            return std::string_view::npos;
         }
     }
-    return !host.empty();
+    return i;
 }
 
 } // namespace
 
 bool
 is_request_authority(std::string_view text) noexcept {
-    if (text.empty() || text.find('@') != std::string_view::npos)
+    if (text.empty())
         return false;
     if (text.front() == '[') {
         // An IP literal is an IPv6 address (RFC 3986 §3.2.2): `[127.0.0.1]` or `[cafe.de]` is none, and qb::io::uri
@@ -211,8 +225,8 @@ is_request_authority(std::string_view text) noexcept {
         auto const suffix = text.substr(close + 1);
         return suffix.empty() || (suffix.front() == ':' && is_port(suffix.substr(1)));
     }
-    auto const colon = text.find(':');
-    return is_reg_name(text.substr(0, colon)) && (colon == std::string_view::npos || is_port(text.substr(colon + 1)));
+    auto const host_end = reg_name_end(text);
+    return host_end != 0 && host_end != std::string_view::npos && (host_end == text.size() || is_port(text.substr(host_end + 1)));
 }
 
 std::optional<qb::io::uri>

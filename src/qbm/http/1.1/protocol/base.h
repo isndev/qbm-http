@@ -27,6 +27,7 @@
 #include <climits>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 /**
@@ -115,7 +116,7 @@ struct request_limits {
 #include <qb/system/allocator/pipe.h>
 #include "../../headers.h"      // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
 #include "../../message_base.h" // detail::store_received_trailer (trailers(), Huly QB-1073)
-#include "../../origin.h"       // origin::request_target_uri: the request target, by its form (Huly QB-1177)
+#include "../../origin.h"       // origin::request_target_uri (Huly QB-1177), is_request_authority (QB-1186)
 #include "../../types.h"
 #include "../../utility.h"
 
@@ -186,13 +187,22 @@ private:
         return HPE_USER;
     }
 
-    /// Fails the message for a size limit or a target that names no resource, and records the status it
-    /// answers (refusal_status()): the server's session answers it, then closes, instead of closing on
-    /// silence (Huly QB-168).
+    /// Fails the message for a size limit, a target that names no resource or a Host field that names no authority,
+    /// and records the status it answers (refusal_status()): the server's session answers it, then closes, instead of
+    /// closing on silence (Huly QB-168, QB-1186).
     static int
     refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
         self_of(parser)->_refusal_status = status;
         return fail_with_reason(parser, reason);
+    }
+
+    /// Ends @p value at its last octet that is no whitespace: the OWS around a field line value is not part of it (RFC
+    /// 9112 §5), and llhttp drops only the run before it -- `Host: a ` was the value `a `, no host (Huly QB-1186).
+    static String &
+    without_trailing_whitespace(String &value) noexcept {
+        if (!value.empty() && (value.back() == ' ' || value.back() == '\t')) [[unlikely]]
+            value.erase(value.find_last_not_of(" \t") + 1); // npos + 1 is 0 (llhttp hands no value of whitespace alone)
+        return value;
     }
 
     static bool
@@ -303,6 +313,54 @@ private:
         return 0;
     }
 
+    /// Counts and checks a request's Host field line as the header section stores it, so that check_host_field() looks
+    /// nothing up on the path of every request: a name of four octets is compared, any other costs one comparison.
+    static void
+    note_host_field(Parser *self, String const &name, String const &value) noexcept {
+        if constexpr (MessageType::type == HTTP_REQUEST) {
+            if (name.size() == 4 && utility::iequals(name, "host")) {
+                ++self->_host_fields;
+                self->_host_malformed |= !value.empty() && !qb::http::origin::is_request_authority(value);
+            }
+        }
+    }
+
+    /**
+     * @brief Checks a request's Host field once its header section has ended
+     * @param parser Parser instance
+     * @param msg The request
+     * @return 0, or the refusal of the request: 400
+     *
+     * The Host field names the request's authority (RFC 9112 §3.2): an HTTP/1.1 request carries one (HTTP/1.0 may
+     * send none), no request carries two field lines of it, and its value is empty -- a target URI with no
+     * authority -- or a host and an optional port, as origin::is_request_authority() reads one. An origin-form
+     * target's authority IS that field (§3.3): with two lines, `header("Host")` read the first while a proxy before
+     * the server may have routed by the other (Huly QB-1186). A target that names its authority itself -- the
+     * absolute-form (§3.2.2), or a CONNECT request's authority-form (§3.3) -- overrides the field, which is still
+     * required and checked: the field then reads the target's authority as the client wrote it, so no reader of it
+     * takes the host it named instead (an HTTP/1.0 request that sends none has none: the URI names it).
+     */
+    static int
+    check_host_field(http_t *parser, MessageType &msg) {
+        auto const *self = self_of(parser);
+        if (self->_host_fields == 0) {
+            if (parser->http_major > 1 || (parser->http_major == 1 && parser->http_minor >= 1))
+                return refuse_with_status(parser, "HTTP/1.1 request has no Host field", HTTP_STATUS_BAD_REQUEST);
+            return 0;
+        }
+        if (self->_host_fields != 1)
+            return refuse_with_status(parser, "HTTP request has more than one Host field", HTTP_STATUS_BAD_REQUEST);
+        if (self->_host_malformed)
+            return refuse_with_status(parser, "HTTP Host field is not a host and an optional port", HTTP_STATUS_BAD_REQUEST);
+        if (!msg.uri().host().empty()) { // the target's authority, as the client wrote it (§3.3)
+            std::string_view const target = msg.uri().source();
+            auto const             scheme = target.find("://");
+            auto const             begin  = scheme == std::string_view::npos ? 0 : scheme + 3;
+            msg.headers().find("host")->second.front().assign(target.substr(begin, target.find_first_of("/?", begin) - begin));
+        }
+        return 0;
+    }
+
     /**
      * @brief Status message parsing callback
      * @param parser Parser instance
@@ -351,7 +409,7 @@ private:
         if (qb::http::detail::is_forbidden_trailer_field(self->_last_header_key)) {
             return fail_with_reason(parser, "HTTP trailer section carries a field it must not (framing, connection, routing)");
         }
-        qb::http::detail::store_received_trailer(self->msg, self->_last_header_key, self->_last_header_value);
+        qb::http::detail::store_received_trailer(self->msg, self->_last_header_key, without_trailing_whitespace(self->_last_header_value));
         self->_last_header_key.clear();
         self->_last_header_value.clear();
         return 0;
@@ -391,6 +449,7 @@ private:
                 return refuse_with_status(parser, "HTTP header value exceeds configured size limit",
                                           HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
+            note_host_field(self, self->_last_header_key, without_trailing_whitespace(self->_last_header_value));
             self->msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
             self->_last_header_key.clear();
             self->_last_header_value.clear();
@@ -445,7 +504,8 @@ private:
      * Finalizes header processing and prepares for body parsing.
      * This callback:
      * 1. Sets the HTTP version
-     * 2. Reserves memory for the body based on Content-Length if available
+     * 2. Checks a request's Host field (check_host_field()) and reserves memory for the body based on
+     *    Content-Length if available
      * 3. Sets the upgrade flag if applicable
      * 4. Marks headers as completed and pauses the parser
      *
@@ -465,6 +525,7 @@ private:
                 return refuse_with_status(parser, "HTTP header value exceeds configured size limit",
                                           HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE);
             }
+            note_host_field(self, self->_last_header_key, without_trailing_whitespace(self->_last_header_value));
             msg.headers()[self->_last_header_key].push_back(self->_last_header_value);
             self->_last_header_key.clear();
             self->_last_header_value.clear();
@@ -485,6 +546,9 @@ private:
             parser->settings = const_cast<http_settings_s *>(&trailer_settings);
         }
         if constexpr (MessageType::type == HTTP_REQUEST) {
+            if (int const refused = check_host_field(parser, msg); refused != 0) {
+                return refused;
+            }
             // llhttp uses ULLONG_MAX as "unknown length". For HTTP requests,
             // absence of both Content-Length and Transfer-Encoding means an
             // empty body by default (RFC 9112 framing). Normalize this here
@@ -652,7 +716,9 @@ private:
     /// The limits of the next message: set_request_limits(), normalized (a 0 "none" stored as the largest size, so
     /// each check stays one comparison). Configuration, kept across reset().
     qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
-    int                      _refusal_status = 0; ///< The status a refusal of the current message answers (refusal_status())
+    int                      _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
+    std::size_t              _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
+    bool                     _host_malformed = false; ///< One of them names no authority (note_host_field())
 
 public:
     /**
@@ -723,6 +789,8 @@ public:
         _last_header_token = HeaderToken::NONE;
         _url_bytes_seen    = 0;
         _refusal_status    = 0;
+        _host_fields       = 0;
+        _host_malformed    = false;
     }
 
     /**
@@ -769,7 +837,8 @@ public:
      * @brief The HTTP status a refusal of the current message answers, or 0.
      *
      * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
-     * 431 or 413; or on a target origin::request_target_uri() refuses: 400 (on_url_complete()). 0 for any
+     * 431 or 413; on a target origin::request_target_uri() refuses: 400 (on_url_complete()); or on a Host field
+     * that names no authority: 400 (check_host_field()). 0 for any
      * other failure, which the protocol's fail_message() answers only for a request line llhttp refuses
      * at its target (400) -- any other malformed message is not answered. reset() clears it.
      */
@@ -872,11 +941,11 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     /// delivers the accumulated body on disconnect.
     bool _close_delimited = false;
 
-    /// True once a request was refused, for a limit or its target (fail_message()): the stream lost its framing
+    /// True once a request was refused, for a limit, its target or Host (fail_message()): the stream lost its framing
     /// -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
     bool _refused = false;
 
-    /// The message failed. A request refused for a limit or its target the server can answer (the parser's
+    /// The message failed. A request refused for a limit, its target or Host the server can answer (the parser's
     /// refusal_status(), the io's `http1_refuse_request`) is handed to the io, which answers it and ends the
     /// connection; what the peer sends next is dropped. A request line llhttp refuses at or just after its
     /// target (HPE_INVALID_URL) names no resource either, and is answered 400 the same way (RFC 9112 §3,

@@ -212,7 +212,7 @@ TEST(Http1ProtocolFraming, IncompleteBodyReturnsZeroUntilFullyBuffered) {
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
     // Headers + only part of the declared 10-byte body present.
-    feed(io, "POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\nABCDE");
+    feed(io, "POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 10\r\n\r\nABCDE");
     EXPECT_EQ(step(proto, io), 0u); // body incomplete -> 0, no dispatch
     EXPECT_EQ(io.request_count, 0);
     EXPECT_TRUE(proto.ok());
@@ -230,7 +230,7 @@ TEST(Http1ProtocolFraming, HeadersSplitMidLineReassembleAndFrame) {
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
     // First read ends mid header-block: parser cannot complete headers, returns 0.
-    feed(io, "GET /partial HTTP/1.1\r\nX-Cus");
+    feed(io, "GET /partial HTTP/1.1\r\nHost: example.test\r\nX-Cus");
     EXPECT_EQ(step(proto, io), 0u);
     EXPECT_EQ(io.request_count, 0);
     EXPECT_TRUE(proto.ok());
@@ -266,7 +266,7 @@ TEST(Http1ProtocolFraming, ConnectionCloseDerivesKeepAliveFalse) {
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
-    feed(io, "GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+    feed(io, "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n");
     EXPECT_GT(step(proto, io), 0u);
     ASSERT_TRUE(io.last_request.has_value());
     EXPECT_FALSE(io.last_request->keep_alive);
@@ -291,7 +291,7 @@ TEST(Http1ProtocolFraming, SingleChunkBodyFramesAndDechunks) {
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n"
              "5\r\nhello\r\n0\r\n\r\n");
 
     EXPECT_GT(step(proto, io), 0u);
@@ -305,7 +305,7 @@ TEST(Http1ProtocolFraming, MultipleChunksReassembleInOrder) {
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n"
              "3\r\nabc\r\n"
              "3\r\ndef\r\n"
              "1\r\ng\r\n"
@@ -322,7 +322,7 @@ TEST(Http1ProtocolFraming, ChunkedBodyIncompleteUntilZeroTerminatorArrives) {
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
     // Headers + one chunk, but no terminating 0-chunk yet.
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
     EXPECT_EQ(step(proto, io), 0u); // body loop returns 0 -> still accumulating
     EXPECT_EQ(io.request_count, 0);
     EXPECT_TRUE(proto.ok());
@@ -346,7 +346,7 @@ TEST(Http1ProtocolFraming, ChunkExtensionsAndTrailersAreAcceptedAndStripped) {
 
     // Chunk-size line carries an extension (";a=b"); a trailer header follows the
     // 0-chunk. Both must be tolerated and excluded from the dechunked body.
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n"
              "4;a=b\r\nbody\r\n"
              "0\r\n"
              "X-Trailer: t\r\n\r\n");
@@ -362,7 +362,7 @@ TEST(Http1ProtocolFraming, BadChunkSizeMarksProtocolNotOk) {
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
     // "zz" is not a valid hex chunk size.
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n");
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabc\r\n0\r\n\r\n");
     EXPECT_EQ(step(proto, io), 0u);
     EXPECT_FALSE(proto.ok());
     EXPECT_EQ(io.request_count, 0);
@@ -704,7 +704,7 @@ TEST(Http1ProtocolFraming, TypedContentTypeMatchesTheRawHeaderOnEveryFramingPath
     {
         ServerFakeIO                             io;
         qb::protocol::http::server<ServerFakeIO> proto(io);
-        feed(io, "POST /a HTTP/1.1\r\n" + ct + "Content-Length: 3\r\n\r\nabc");
+        feed(io, "POST /a HTTP/1.1\r\nHost: example.test\r\n" + ct + "Content-Length: 3\r\n\r\nabc");
         ASSERT_GT(step(proto, io), 0u);
         ASSERT_TRUE(io.last_request.has_value());
         typed(*io.last_request, "request, Content-Length");
@@ -712,7 +712,7 @@ TEST(Http1ProtocolFraming, TypedContentTypeMatchesTheRawHeaderOnEveryFramingPath
     {
         ServerFakeIO                             io;
         qb::protocol::http::server<ServerFakeIO> proto(io);
-        feed(io, "GET /b HTTP/1.1\r\n" + ct + "\r\n");
+        feed(io, "GET /b HTTP/1.1\r\nHost: example.test\r\n" + ct + "\r\n");
         ASSERT_GT(step(proto, io), 0u);
         ASSERT_TRUE(io.last_request.has_value());
         typed(*io.last_request, "request, no body");
@@ -720,7 +720,7 @@ TEST(Http1ProtocolFraming, TypedContentTypeMatchesTheRawHeaderOnEveryFramingPath
     {
         ServerFakeIO                             io;
         qb::protocol::http::server<ServerFakeIO> proto(io);
-        feed(io, "POST /c HTTP/1.1\r\n" + ct + "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
+        feed(io, "POST /c HTTP/1.1\r\nHost: example.test\r\n" + ct + "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
         ASSERT_GT(step(proto, io), 0u);
         ASSERT_TRUE(io.last_request.has_value());
         typed(*io.last_request, "request, chunked (control)");
@@ -765,9 +765,9 @@ TEST(Http1ProtocolFraming, TypedContentTypeMatchesTheRawHeaderOnEveryFramingPath
 TEST(Http1ProtocolFraming, ConsecutiveMessagesEachCarryTheirOwnContentType) {
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
-    feed(io, "POST /1 HTTP/1.1\r\nContent-Type: text/csv; charset=iso-8859-1\r\nContent-Length: 1\r\n\r\nx"
+    feed(io, "POST /1 HTTP/1.1\r\nHost: example.test\r\nContent-Type: text/csv; charset=iso-8859-1\r\nContent-Length: 1\r\n\r\nx"
              "GET /2 HTTP/1.1\r\nHost: h\r\n\r\n"
-             "POST /3 HTTP/1.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\ny\r\n0\r\n\r\n"
+             "POST /3 HTTP/1.1\r\nHost: example.test\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\ny\r\n0\r\n\r\n"
              "POST /4 HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nz\r\n0\r\n\r\n");
 
     ASSERT_GT(step(proto, io), 0u);
@@ -796,8 +796,10 @@ TEST(Http1ProtocolFraming, ConsecutiveMessagesEachCarryTheirOwnContentType) {
 TEST(Http1ProtocolFraming, EmptyChunkedMessagesFrameBeforeTheNextOne) {
     {
         qb::http::Request empty{qb::http::method::POST, {"http://example.test/empty"}};
+        empty.set_header("Host", "example.test");
         empty.set_header("Transfer-Encoding", "chunked");
         qb::http::Request next{qb::http::method::GET, {"http://example.test/next"}};
+        next.set_header("Host", "example.test");
 
         qb::allocator::pipe<char> wire;
         ASSERT_NO_THROW(wire << empty << next);
@@ -848,8 +850,10 @@ TEST(Http1ProtocolFraming, EmptyChunkedMessagesFrameBeforeTheNextOne) {
 // one message and the next one stays intact.
 TEST(Http1ProtocolFraming, AHandStreamedChunkedBodyFramesAfterItsHead) {
     qb::http::Request upload{qb::http::method::POST, {"http://example.test/stream"}};
+    upload.set_header("Host", "example.test");
     upload.set_header("Transfer-Encoding", "chunked");
     qb::http::Request next{qb::http::method::GET, {"http://example.test/after"}};
+    next.set_header("Host", "example.test");
 
     qb::allocator::pipe<char> wire;
     wire << qb::http::MessageHead{upload};
@@ -977,6 +981,7 @@ TEST(Http1ProtocolFraming, ATrailerFieldThatFramesOrRoutesRefusesTheMessage) {
 
 TEST(Http1ProtocolFraming, AnnouncedTrailerFieldsRoundTripThroughTheTrailerSection) {
     qb::http::Request request{qb::http::method::POST, {"http://example.test/up"}};
+    request.set_header("Host", "example.test");
     request.set_header("Transfer-Encoding", "chunked");
     request.set_header("Trailer", "X-Checksum");
     request.set_header("X-Checksum", "abc");
@@ -1121,6 +1126,45 @@ TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingE
     }
 }
 
+// A request whose Host field names no authority -- none on HTTP/1.1, two field lines, a value that is no host and
+// port -- is handed to the io for a 400 once its header section has ended (Huly QB-1186); HTTP/1.0 may send none.
+TEST(Http1ProtocolFraming, AHostFieldThatNamesNoAuthorityIsRefusedWith400) {
+    for (const char *head :
+         {"GET /x HTTP/1.1\r\n\r\n", "GET /x HTTP/1.1\r\nHost: h\r\nHOST: h\r\n\r\n", "GET /x HTTP/1.0\r\nHost: h\r\nHost: i\r\n\r\n",
+          "GET /x HTTP/1.1\r\nHost: h/x\r\n\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, head);
+        EXPECT_EQ(step(proto, io), 0u) << head;
+        EXPECT_EQ(io.request_count, 0) << head;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << head;
+        EXPECT_TRUE(proto.ok()) << head << ": the io answers before the connection ends";
+    }
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    feed(io, "GET /x HTTP/1.0\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_TRUE(io.refusals.empty());
+}
+
+// A field line's value excludes the whitespace around it (RFC 9112 §5): llhttp drops the run before it, the parser
+// the run after it -- a field followed by another, the last field of the header section, a trailer field alike.
+TEST(Http1ProtocolFraming, AFieldValueEndsAtItsLastOctetThatIsNoWhitespace) {
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test \t\r\nX-Inner: \t a  b \t \r\nTransfer-Encoding: chunked\r\nX-Last: c\t \r\n\r\n"
+             "3\r\nabc\r\n0\r\nX-Trailer: t \t\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 1);
+    auto const &request = *io.last_request;
+    EXPECT_EQ(request.header("Host"), "example.test");
+    EXPECT_EQ(request.header("X-Inner"), "a  b") << "the whitespace inside a value is part of it";
+    EXPECT_EQ(request.header("X-Last"), "c");
+    EXPECT_EQ(request.trailers().header("X-Trailer"), "t");
+    EXPECT_EQ(request.body().as<std::string>(), "abc");
+}
+
 // The server's own cap, read live: a request AT it passes, one byte over is refused -- the declared
 // length and the bytes a chunked body delivers alike -- and a new value applies to the next request.
 TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {
@@ -1128,13 +1172,13 @@ TEST(Http1ProtocolFraming, TheServerCapIsReadWhenEachRequestBegins) {
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
     io.limits.max_body_size = 16;
 
-    feed(io, "POST /a HTTP/1.1\r\nContent-Length: 16\r\n\r\n0123456789abcdef");
+    feed(io, "POST /a HTTP/1.1\r\nHost: example.test\r\nContent-Length: 16\r\n\r\n0123456789abcdef");
     EXPECT_GT(step(proto, io), 0u);
     ASSERT_EQ(io.request_count, 1) << "a body exactly at the cap is accepted";
     EXPECT_EQ(io.last_request->body().as<std::string>(), "0123456789abcdef");
 
     io.limits.max_body_size = 8; // the server lowers it between two requests
-    feed(io, "POST /b HTTP/1.1\r\nContent-Length: 9\r\n\r\n012345678");
+    feed(io, "POST /b HTTP/1.1\r\nHost: example.test\r\nContent-Length: 9\r\n\r\n012345678");
     EXPECT_EQ(step(proto, io), 0u);
     EXPECT_EQ(io.request_count, 1);
     ASSERT_EQ(io.refusals, std::vector<int>{413}) << "the next request is judged under the new cap";
@@ -1154,12 +1198,12 @@ TEST(Http1ProtocolFraming, AChunkedBodyPassingTheCapIsRefusedWith413) {
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
     io.limits.max_body_size = 8;
 
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
     EXPECT_GT(step(proto, io), 0u);
     ASSERT_EQ(io.request_count, 1) << "a chunked body exactly at the cap is accepted";
     EXPECT_EQ(io.last_request->body().as<std::string>(), "01234567");
 
-    feed(io, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n01234\r\n");
+    feed(io, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n01234\r\n");
     EXPECT_EQ(step(proto, io), 0u);
     EXPECT_TRUE(io.refusals.empty()) << "5 bytes of 8: not yet";
     feed(io, "4\r\n5678\r\n");
@@ -1175,7 +1219,8 @@ TEST(Http1ProtocolFraming, AZeroCapLeavesTheBodyUnbounded) {
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
     io.limits.max_body_size = 0;
 
-    feed(io, "POST /big HTTP/1.1\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\nxyz");
+    feed(io, "POST /big HTTP/1.1\r\nHost: example.test\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)
+                 + "\r\n\r\nxyz");
     EXPECT_EQ(step(proto, io), 0u) << "the body is still arriving";
     EXPECT_TRUE(io.refusals.empty());
     EXPECT_TRUE(proto.ok());
@@ -1187,7 +1232,8 @@ TEST(Http1ProtocolFraming, AnIoThatCannotAnswerStillClosesOnAnOversizedRequest) 
     ServerFakeIO                             io;
     qb::protocol::http::server<ServerFakeIO> proto(io);
 
-    feed(io, "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n");
+    feed(io, "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)
+                 + "\r\n\r\n");
     EXPECT_EQ(proto.getMessageSize(), 0u);
     EXPECT_FALSE(proto.ok());
     EXPECT_EQ(io.request_count, 0);
@@ -1268,7 +1314,7 @@ TEST(Http1ProtocolFraming, TheFieldValueLimitIsAnswered431) {
     EXPECT_EQ(over.refusals, std::vector<int>{431});
 
     // The last field of the section is judged at its end, not only when the next one begins.
-    const auto last = serve_under(limits, "GET / HTTP/1.1\r\nx-v: 123456789\r\n\r\n");
+    const auto last = serve_under(limits, "GET / HTTP/1.1\r\nHost: example.test\r\nx-v: 123456789\r\n\r\n");
     EXPECT_EQ(last.refusals, std::vector<int>{431});
 }
 
@@ -1289,11 +1335,13 @@ TEST(Http1ProtocolFraming, TheChunkLimitIsAnswered413) {
     qb::http::request_limits limits;
     limits.max_chunk_size = 8;
 
-    const auto at = serve_under(limits, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
+    const auto at =
+        serve_under(limits, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n8\r\n01234567\r\n0\r\n\r\n");
     EXPECT_EQ(at.requests, 1) << "a chunk of exactly 8 bytes is served";
     EXPECT_TRUE(at.refusals.empty());
 
-    const auto over = serve_under(limits, "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n012345678\r\n0\r\n\r\n");
+    const auto over =
+        serve_under(limits, "POST /up HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n012345678\r\n0\r\n\r\n");
     EXPECT_EQ(over.requests, 0);
     EXPECT_EQ(over.refusals, std::vector<int>{413});
 }
@@ -1304,10 +1352,10 @@ TEST(Http1ProtocolFraming, ATrailerSectionIsHeldToTheFieldLimitsOnItsOwn) {
     qb::http::request_limits limits;
     limits.max_headers_count       = 2;
     limits.max_header_value_length = 8;
-    const std::string head         = "POST /up HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n"; // 1 field
+    const std::string head         = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n"; // 2 fields
 
     const auto at = serve_under(limits, head + "x-a: 1\r\nx-b: 12345678\r\n\r\n");
-    EXPECT_EQ(at.requests, 1) << "1 header field, then 2 trailer fields: each section within its limit";
+    EXPECT_EQ(at.requests, 1) << "2 header fields, then 2 trailer fields: each section within its limit";
     EXPECT_TRUE(at.refusals.empty());
 
     const auto count_over = serve_under(limits, head + "x-a: 1\r\nx-b: 2\r\nx-c: 3\r\n\r\n");

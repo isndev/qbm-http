@@ -84,7 +84,7 @@ corpus_multi_header() {
 // POST with a Content-Length body (ContentLengthBodyIsCapturedAndMessageCompletes).
 std::string
 corpus_post_with_body() {
-    return "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    return "POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello";
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ expected_message(std::int64_t corpus) {
            {"Connection", {"Upgrade"}},
            {"Upgrade", {"h2c"}},
            {"X-Multi", {"alpha", "beta"}}}},
-         {HTTP_POST, "/x", "hello", false, {{"Content-Length", {"5"}}}}}
+         {HTTP_POST, "/x", "hello", false, {{"Host", {"example.test"}}, {"Content-Length", {"5"}}}}}
     };
     return expected[static_cast<std::size_t>(corpus)];
 }

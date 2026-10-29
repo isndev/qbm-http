@@ -57,7 +57,7 @@ struct RequestEnd {
  *          runs exactly once per context that `on_request` saw, when its response is decided: after the
  *          `PRE_RESPONSE_SEND` hooks and the hand-over to the session, so `ctx.response()` is what was sent (status,
  *          headers, body), and `ctx.route_pattern()` names the route that matched. A request a session answers
- *          without routing it -- a request over a size limit or whose target names no resource, refused by
+ *          without routing it -- a request over a size limit, whose target names no resource or Host no authority, refused by
  *          the protocol -- reaches no observer.
  *          An observer instance is shared by every request of its router: keep per-request state in the context.
  * @tparam SessionType The session type of the router.
