@@ -25,30 +25,32 @@ All notable changes to the qbm-http module are documented here. The format is ba
   signed double-submit cookie -- a random nonce and its HMAC-SHA256 under the secret, domain-separated and
   length-prefixed, bound to the session when `session_binding()` names it -- set as `__Host-csrf` (`Secure`, `Path=/`,
   no `Domain`, `SameSite=Lax`, readable by the page's scripts; read back as the first cookie spelled exactly so, which
-  a `__host-csrf` or a `__Host -csrf` another host planted neither replaces nor hides) on every response to a request
-  without a valid one -- a token refusal's included, never one refused for where it comes from, so an unsafe request
-  another site's page makes rotates nothing (a cross-site link under `SameSite=Strict` and an exempt request do get
-  one) -- after the handler (a handler that rebuilds the response keeps it), and offered to the page in
-  `qb::http::csrf_token_slot`; an unsafe request echoes it in `X-CSRF-Token` or the `_csrf` field of a urlencoded or
-  multipart/form-data body (a form with a file input; the body is read only when the cookie and the header leave it
-  to), compared in constant time. `trusted_origin()` (validated: `scheme://host[:port]`, http or https) and
-  `exempt(predicate)` skip both layers; configuration a browser would silently defeat is refused (a non-token cookie
-  name, `Secure` off under a `__Host-`/`__Secure-` name or with `SameSite=None`, a `Max-Age` outside 1 s to 400 days,
-  a short secret); a refusal is `403 Forbidden` with the verdict in a `text/plain` body (`qb::http::CsrfVerdict`,
-  `to_string`) unless `on_reject()` writes it; `CsrfOptions::check(request, secure_connection)` gives the decision on
-  its own; the factory tag is `qb::http::middleware::tags::csrf`. Out of its reach, and said so: a WebSocket upgrade
-  is a `GET` (cross-site WebSocket hijacking is the upgrade handler's), and a DNS-rebound name makes `Origin` equal
-  `Host`. Proven by `qbm-http-test-unit-middleware-csrf` (30 cases: every `Sec-Fetch-Site` value, `Origin` against
-  `Host` and against the URI's authority, an origin-form `//host` target, default and explicit ports, IPv6, case,
-  `null`, an origin with a path, neither header, a missing authority, the scheme over TLS; trusted origins and the
-  forms they refuse; exemptions; `on_reject`; the cookie, its attributes, its exact name -- look-alikes sent first
-  included -- and its slot, no re-issue of a valid token, none on a refusal of where the request comes from, the
-  header and both form fields, a missing, different, forged, other-secret or other-session token, malformed tokens, a
-  handler that rebuilds the response, the configuration refusals; without SSL, `tokens()` refusing), three loopback
-  cases on the real servers (HTTP/1.1 on the wire with an origin-form `//evil.test/csrf` and an absolute-form target,
-  and HTTP/1.1 over TLS refusing an `http://` Origin, `qbm-http-test-system-middleware-pipeline-system`; HTTP/2 with
-  `:authority` and lower-case names, `-system-http2-client`), and 46 mutants of the middleware and the cookie reads it
-  relies on, each caught when planted.
+  a `__host-csrf`, a `__Host -csrf` or a bare `__Host-csrf` another host planted neither replaces nor hides -- short
+  of a nameless `=__Host-csrf=X` on a browser older than RFC 6265bis, which no server can tell from the real one
+  (`csrf.h`)) on every response to a request without a valid one -- a token refusal's included, never one refused for
+  where it comes from, so an unsafe request another site's page makes rotates nothing (a cross-site link under
+  `SameSite=Strict` and an exempt request do get one) -- after the handler (a handler that rebuilds the response keeps
+  it), and offered to the page in `qb::http::csrf_token_slot`; an unsafe request echoes it in `X-CSRF-Token` or the
+  `_csrf` field of a urlencoded or multipart/form-data body (a form with a file input; the body is read only when the
+  cookie and the header leave it to), compared in constant time. `trusted_origin()` (validated:
+  `scheme://host[:port]`, http or https) and `exempt(predicate)` skip both layers; configuration a browser would
+  silently defeat is refused (a non-token cookie name, `Secure` off under a `__Host-`/`__Secure-` name or with
+  `SameSite=None`, a `Max-Age` outside 1 s to 400 days, a short secret); a refusal is `403 Forbidden` with the verdict
+  in a `text/plain` body (`qb::http::CsrfVerdict`, `to_string`) unless `on_reject()` writes it;
+  `CsrfOptions::check(request, secure_connection)` gives the decision on its own; the factory tag is
+  `qb::http::middleware::tags::csrf`. Out of its reach, and said so: a WebSocket upgrade is a `GET` (cross-site
+  WebSocket hijacking is the upgrade handler's), and a DNS-rebound name makes `Origin` equal `Host`. Proven by
+  `qbm-http-test-unit-middleware-csrf` (30 cases: every `Sec-Fetch-Site` value, `Origin` against `Host` and against
+  the URI's authority, an origin-form `//host` target, default and explicit ports, IPv6, case, `null`, an origin with
+  a path, neither header, a missing authority, the scheme over TLS; trusted origins and the forms they refuse;
+  exemptions; `on_reject`; the cookie, its attributes, its exact name -- look-alikes sent first included -- and its
+  slot, no re-issue of a valid token, none on a refusal of where the request comes from, the header and both form
+  fields, a missing, different, forged, other-secret or other-session token, malformed tokens, a handler that rebuilds
+  the response, the configuration refusals; without SSL, `tokens()` refusing), three loopback cases on the real
+  servers (HTTP/1.1 on the wire with an origin-form `//evil.test/csrf` and an absolute-form target, and HTTP/1.1 over
+  TLS refusing an `http://` Origin, `qbm-http-test-system-middleware-pipeline-system`; HTTP/2 with `:authority` and
+  lower-case names, `-system-http2-client`), and 53 mutants of the middleware, the cookie reads it relies on and the
+  servers' cookie catches, each caught when planted.
 
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
   `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`
@@ -69,32 +71,37 @@ All notable changes to the qbm-http module are documented here. The format is ba
 ### Fixed
 
 - **A request's `Cookie` header is read as a browser sends it: pairs split on `;` alone, a malformed pair dropped
-  instead of the header -- a cookie another host plants can no longer replace, hide or wipe the others (Huly QB-95, its
-  fourth to sixth reviews).** The parser read a request header with Set-Cookie's grammar, and three cookie-tossing paths
-  followed. Whitespace inside a name was dropped, so `__Host -csrf` -- which another host can set, a browser protecting
-  only the exact prefix -- was stored as `__Host-csrf`; after a quoted value a `,` separated pairs and a quoted value
-  ran across `;`, so a cookie of another name valued `"x",__Host-csrf=E` added a `__Host-csrf` of its choice ahead of
-  the real one, and one opening a quote that a later cookie's closed swallowed the real one; and one malformed pair -- a
-  control character, an unclosed quote, a name over 1024 bytes -- refused the whole header, so one planted cookie
-  emptied the jar (every session cookie gone). A request header now has its own parser: split on `;` alone, the
-  whitespace around a name and a value (SP, HTAB) removed, a value wrapped in `"` read without the two quotes and
-  nothing inside unescaped -- RFC 6265 has no quoted-pair, and `parse_set_cookie()` never unescaped (a quoted value used
-  to lose its `\`, and a `'` was taken for a quote) -- and every other byte kept, a `"`, a `[`, a space or a UTF-8 byte
-  in a name or a value included (`prefs={"theme":"dark"}`, PHP's `cart[1]`, which the fifth review's token-only names
-  and quote rules dropped; the sixth restored them). A pair is dropped, the others kept, when its name is empty or
-  `$`-prefixed, or its name or its value holds a control character other than HTAB or is over its cap (1024, 4096
-  bytes); only a header over `max_cookie_header_size` (16 KiB) is refused -- a size several cookies planted near the
-  value cap reach together (a cookie bomb), which then still empties the jar. The jar folds case and keeps a name's
-  first pair, so a planted `__host-x` sent first is still what `cookie_value("__Host-x")` returns:
-  `Request::cookie_value_exact(name)` reads the first pair spelled exactly `name` from the header section's lines (never
-  a trailer section's, nothing for a refused header), over `parse_cookie_pairs()`, which keeps the order, the spelling
-  and every duplicate. The Set-Cookie side of `parse_cookies()` keeps the whitespace inside a name too. Proven by
-  `qbm-http-test-unit-cookie` (64 -> 68 cases) and, on the final parser, eighteen mutants, each caught: a `,`
-  separating, Set-Cookie's grammar for a request header, a malformed value refusing the header, the value not trimmed,
-  no value cap, no name cap, the inner whitespace of a name dropped, the exact read folding case, an unquoted `"`
-  dropping the pair, quoted-pairs unescaped, names restricted to tokens, HTAB counted as a control character, only a
-  space trimmed, `$` names kept, a `'` taken for a quote, an opening quote stripped alone, a control character kept in a
-  name, DEL taken for no control character.
+  instead of the header -- one cookie another host plants can no longer take the place of a prefixed cookie for its
+  exact-name read, hide it, or wipe the jar, short of a nameless one on a browser older than RFC 6265bis (Huly QB-95,
+  its fourth to seventh reviews).** The parser read a request header with Set-Cookie's grammar, and three
+  cookie-tossing paths followed. Whitespace inside a name was dropped, so `__Host -csrf` -- which another host can
+  set, a browser protecting only the exact prefix -- was stored as `__Host-csrf`; after a quoted value a `,` separated
+  pairs and a quoted value ran across `;`, so a cookie of another name valued `"x",__Host-csrf=E` added a
+  `__Host-csrf` of its choice ahead of the real one, and one opening a quote that a later cookie's closed swallowed
+  the real one; and one malformed pair -- a control character, an unclosed quote, a name over 1024 bytes -- refused
+  the whole header, so one planted cookie emptied the jar (every session cookie gone). A request header now has its
+  own parser: split on `;` alone, the whitespace around a name and a value (SP, HTAB) removed, a value wrapped in `"`
+  read without the two quotes and nothing inside unescaped -- RFC 6265 has no quoted-pair, and `parse_set_cookie()`
+  never unescaped (a quoted value used to lose its `\`, and a `'` was taken for a quote) -- and every other byte kept,
+  a `"`, a `[`, a space or a UTF-8 byte in a name or a value included (`prefs={"theme":"dark"}`, PHP's `cart[1]`,
+  which the fifth review's token-only names and quote rules dropped; the sixth restored them). A pair is dropped, the
+  others kept, when it has no `=` -- a nameless cookie, which a browser sends as its value alone (RFC 6265bis), where
+  `flag` used to read as a cookie named `flag` and a bare `__Host-csrf` sent first hid the real one from the exact
+  read -- when its name is empty or `$`-prefixed, or its name or its value holds a control character other than HTAB
+  or is over its cap (1024, 4096 bytes); only a header over `max_cookie_header_size` (16 KiB) is refused -- a size
+  several cookies planted near the value cap reach together (a cookie bomb), which then still empties the jar. The jar
+  folds case and keeps a name's first pair, so a planted `__host-x` sent first is still what
+  `cookie_value("__Host-x")` returns: `Request::cookie_value_exact(name)` reads the first pair spelled exactly `name`
+  from the header section's lines (never a trailer section's, nothing for a refused header), over
+  `parse_cookie_pairs()`, which keeps the order, the spelling and every duplicate. The Set-Cookie side of
+  `parse_cookies()` keeps the whitespace inside a name too. Proven by `qbm-http-test-unit-cookie` (64 -> 69 cases)
+  and, on the final parser, twenty-four mutants, each caught: a `,` separating, Set-Cookie's grammar for a request
+  header, a malformed value refusing the header, the value not trimmed, no value cap, no name cap, the inner
+  whitespace of a name dropped, the exact read folding case, an unquoted `"` dropping the pair, quoted-pairs
+  unescaped, names restricted to tokens, HTAB counted as a control character, only a space trimmed, `$` names kept, a
+  `'` taken for a quote, an opening quote stripped alone, a control character kept in a name, DEL taken for no control
+  character; and, of the seventh review, a nameless cookie read as a name, a tab inside a name or a UTF-8 value
+  dropped, any `$` taken for a legacy prefix, a quoted value trimmed inside its quotes or measured with them.
 
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`

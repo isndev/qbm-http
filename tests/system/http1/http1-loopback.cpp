@@ -449,23 +449,19 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
     std::string response;
     std::thread worker([&] {
         async::init();
-        // An over-long cookie NAME (>= COOKIE_NAME_MAX = 1024 bytes) makes
-        // parse_cookies() throw std::runtime_error ("... max length exceeded
-        // for cookie name."). The bytes are all printable so the HTTP header
-        // value validator accepts the header (its cap is 8192), but cookie
-        // parsing rejects it. The server's onMessage catches the throw and
-        // dispatches the request anyway (noexcept-safe degradation).
-        const std::string giant_name(1100, 'c'); // > 1024, < 8192
-        std::string       raw = "GET /cookie HTTP/1.1\r\n"
-                                "Host: 127.0.0.1:"
-                                + std::to_string(port)
-                                + "\r\n"
-                                  "Cookie: "
-                                + giant_name
-                                + "=value\r\n"
-                                  "Connection: close\r\n"
-                                  "\r\n";
-        response              = raw_request_response(port, raw);
+        // Cookie lines that join past max_cookie_header_size (16 KiB) -- the one refusal of the request
+        // parser, which drops a malformed pair and keeps the others -- make parse_cookie_header() throw
+        // std::runtime_error. Each line is under the header value validator's cap (8192), so the request
+        // reaches onMessage, which catches the throw and dispatches it anyway (noexcept-safe degradation).
+        std::string raw = "GET /cookie HTTP/1.1\r\n"
+                          "Host: 127.0.0.1:"
+                          + std::to_string(port)
+                          + "\r\n"
+                            "Cookie: session=abc123\r\n";
+        for (int line = 0; line < 3; ++line)
+            raw += "Cookie: pad" + std::to_string(line) + "=" + std::string(6000, 'v') + "\r\n";
+        raw += "Connection: close\r\n\r\n";
+        response = raw_request_response(port, raw);
     });
 
     pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
@@ -473,7 +469,7 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
 
     // The request was still delivered to the handler (no terminate, no crash)...
     EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
-    // ...and the malformed Cookie left the request with NO parsed cookies
+    // ...and the refused header left the request with NO parsed cookies, the session's included
     // (parse_cookie_header() cleared _cookies before it threw).
     EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 0u) << "malformed cookie header must yield zero parsed cookies";
     EXPECT_TRUE(CookieEchoClient::session_cookie_seen.empty());

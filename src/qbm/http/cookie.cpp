@@ -99,9 +99,10 @@ namespace {
 /// a value (SP, HTAB) is removed, and a value wrapped in '"' is read without the two quotes, nothing inside
 /// unescaped: RFC 6265 has no quoted-pair, and parse_set_cookie() strips the quotes alone. Every other byte is kept
 /// -- a '"', a '[', a space or a UTF-8 byte inside a name or a value: browsers send them, and the exact-name read
-/// tells `__Host -x` from `__Host-x`. A pair is DROPPED, the others kept, when its name is empty or a '$' legacy
-/// attribute, holds a control character other than HTAB (RFC 6265bis §5.6) or is over COOKIE_NAME_MAX, or when its
-/// value holds such a character or is over COOKIE_VALUE_MAX. Only a header over max_cookie_header_size is refused.
+/// tells `__Host -x` from `__Host-x`. A pair is DROPPED, the others kept, when it has no '=' (a nameless cookie: a
+/// browser sends its value alone), when its name is empty or a '$' legacy attribute, holds a control character other
+/// than HTAB (RFC 6265bis §5.6) or is over COOKIE_NAME_MAX, or when its value holds such a character or is over
+/// COOKIE_VALUE_MAX. Only a header over max_cookie_header_size is refused.
 template <typename Sink>
 void
 parse_request_cookies_into(std::string_view header, Sink &&emit) {
@@ -119,14 +120,14 @@ parse_request_cookies_into(std::string_view header, Sink &&emit) {
         return std::any_of(text.begin(), text.end(), [](char c) { return c != '\t' && utility::is_control(static_cast<unsigned char>(c)); });
     };
     while (!header.empty()) {
-        const auto end  = header.find(';');
-        const auto part = trim(header.substr(0, end));
-        header          = end == std::string_view::npos ? std::string_view{} : header.substr(end + 1);
-        if (part.empty())
-            continue;
+        const auto end   = header.find(';');
+        const auto part  = header.substr(0, end); // an empty or blank part has no '=' either
+        header           = end == std::string_view::npos ? std::string_view{} : header.substr(end + 1);
         const auto equal = part.find('=');
+        if (equal == std::string_view::npos)
+            continue; // a nameless cookie, which a browser sends as its value alone (RFC 6265bis): no name to read
         const auto name  = trim(part.substr(0, equal));
-        auto       value = equal == std::string_view::npos ? std::string_view{} : trim(part.substr(equal + 1));
+        auto       value = trim(part.substr(equal + 1));
         if (name.empty() || name.size() > COOKIE_NAME_MAX || name.front() == '$' || has_control(name))
             continue;
         if (value.size() >= 2 && value.front() == '"' && value.back() == '"')

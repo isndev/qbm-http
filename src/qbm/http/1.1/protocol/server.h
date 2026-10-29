@@ -70,8 +70,8 @@ public:
      * to the appropriate handler based on the request path and method.
      * The response is automatically sent back to the client.
      *
-     * @security CRITICAL FIX: All cookie parsing exceptions are caught to prevent
-     * std::terminate() in noexcept context. Malformed cookies are logged and ignored.
+     * @security All cookie parsing exceptions are caught to prevent std::terminate() in noexcept context: a Cookie
+     * header over max_cookie_header_size (the one refusal; a malformed pair is dropped) is logged, cookies left empty.
      */
     void
     onMessage(std::size_t size) noexcept final {

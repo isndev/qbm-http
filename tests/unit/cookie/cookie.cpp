@@ -1047,14 +1047,28 @@ TEST_F(CookieTest, ParseCookiesRejectsOver16KBHeader) {
     EXPECT_THROW((void) parse_cookies(huge, false), std::runtime_error);
 }
 
-// A separator (';', or ',' in Set-Cookie mode) in NAME state with a buffered name but no '='
-// emits an empty-value cookie in parse_cookies, e.g. "flag; k=v".
-TEST_F(CookieTest, ParseCookiesNameWithoutEqualsBeforeSeparatorYieldsEmptyValue) {
-    auto cookies = parse_cookies(std::string("flag; k=v"), false);
-    ASSERT_TRUE(cookies.find("flag") != cookies.end());
-    EXPECT_EQ("", cookies["flag"]); // empty value emitted for the bare name
+// A part of a request header with no '=' is a nameless cookie, which a browser sends as its value alone (RFC 6265bis):
+// it has no name to be read by. Read as a name with an empty value, one planted before `__Host-csrf=...` hid the real
+// cookie from the exact-name read (the CSRF seventh review).
+TEST_F(CookieTest, ParseCookiesDropsARequestPairWithoutAnEqualsSign) {
+    auto cookies = parse_cookies(std::string("flag; k=v; =; =v"), false);
+    EXPECT_TRUE(cookies.find("flag") == cookies.end());
+    EXPECT_TRUE(cookies.find("") == cookies.end());
     ASSERT_TRUE(cookies.find("k") != cookies.end());
     EXPECT_EQ("v", cookies["k"]);
+    EXPECT_EQ(cookies.size(), 1u);
+}
+
+// What a browser may send, kept byte for byte: only a control character other than HTAB costs a pair (the CSRF seventh
+// review named the shapes no case pinned).
+TEST_F(CookieTest, ParseCookiesKeepsEveryByteButAControlCharacter) {
+    auto cookies =
+        parse_cookies(std::string("a\tb=1; v=\xc3\xa9; a$b=2; q=\" x \"; cap=\"") + std::string(COOKIE_VALUE_MAX, 'c') + "\"", false);
+    EXPECT_EQ("1", cookies["a\tb"]) << "a tab inside a name is part of it";
+    EXPECT_EQ("\xc3\xa9", cookies["v"]) << "a UTF-8 value";
+    EXPECT_EQ("2", cookies["a$b"]) << "only a leading '$' is a legacy attribute";
+    EXPECT_EQ(" x ", cookies["q"]) << "the whitespace inside the quotes is the value's";
+    EXPECT_EQ(COOKIE_VALUE_MAX, cookies["cap"].size()) << "the cap counts the value, not its quotes";
 }
 
 // In set_cookie_header mode, a bare attribute name before a separator is
@@ -1066,8 +1080,7 @@ TEST_F(CookieTest, ParseCookiesBareAttributeNameBeforeSeparatorIsDropped) {
     EXPECT_EQ("v", cookies["real"]);
 }
 
-// Quoted value exceeding COOKIE_VALUE_MAX via a plain quoted char throws
-// (parse_cookies, plain quoted-character branch).
+// A quoted value over COOKIE_VALUE_MAX costs its pair (it used to throw for the header).
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
     // A quoted value of COOKIE_VALUE_MAX+1 characters costs its pair.
     std::string header  = "big=\"" + std::string(COOKIE_VALUE_MAX + 1, 'a') + "\"; ok=1";
@@ -1076,8 +1089,7 @@ TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxPlainCharRejected) {
     EXPECT_EQ("1", cookies["ok"]);
 }
 
-// Quoted value exceeding COOKIE_VALUE_MAX via an escaped char throws
-// (parse_cookies, value_escape branch). Fill to the limit with plain chars, then an escape.
+// A quoted value whose backslash pair takes it over COOKIE_VALUE_MAX costs its pair: nothing inside is unescaped.
 TEST_F(CookieTest, ParseCookiesQuotedValueOverMaxEscapedCharRejected) {
     // COOKIE_VALUE_MAX plain characters and a backslash pair, both bytes of the value: over the cap, the pair dropped.
     std::string header  = "big=\"" + std::string(COOKIE_VALUE_MAX, 'a') + "\\q\"; ok=1";
@@ -1315,4 +1327,10 @@ TEST(RequestCookieHeader, CookieValueExactReadsTheFirstPairOfThatExactName) {
     refused.add_header("cookie", "big=" + std::string(max_cookie_header_size, 'v'));
     EXPECT_THROW(refused.parse_cookie_header(), std::runtime_error);
     EXPECT_EQ(refused.cookie_value_exact("__Host-csrf"), "");
+
+    Request bare; // a bare `__Host-csrf` sent first is a nameless cookie: it hides nothing (the CSRF seventh review)
+    bare.add_header("cookie", "__Host-csrf; __Host-csrf=real");
+    bare.parse_cookie_header();
+    EXPECT_EQ(bare.cookie_value_exact("__Host-csrf"), "real");
+    EXPECT_EQ(bare.cookie_value("__Host-csrf"), "real");
 }

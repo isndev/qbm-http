@@ -439,13 +439,14 @@ public:
  * A request `Cookie` header (set_cookie_header = false) is read as a browser sends it: split on ';' alone (a ',' or
  * a '"' separates nothing), the whitespace around a name and a value removed, a value wrapped in '"' read without the
  * two quotes (nothing inside unescaped), every other byte kept -- a '"', a '[', a space, a UTF-8 byte. A pair is
- * dropped, the others kept, when its name is empty or `$`-prefixed, when its name or its value holds a control
+ * dropped, the others kept, when it has no '=' (a nameless cookie, which a browser sends as its value alone), when
+ * its name is empty or `$`-prefixed, when its name or its value holds a control
  * character other than HTAB, or is over its cap (COOKIE_NAME_MAX, COOKIE_VALUE_MAX): one malformed cookie another
  * host planted costs that cookie. Only a header over `max_cookie_header_size` is refused -- a size several planted
  * cookies near the value cap reach together (a cookie bomb), which then empties the jar.
  *
  * @throws std::runtime_error past `max_cookie_header_size`; for a Set-Cookie header, also on a name or a value over
- *         its cap or on a control character.
+ *         its cap, a control character, an unterminated quote or anything but whitespace after a quoted value.
  */
 [[nodiscard]] qb::icase_unordered_map<std::string> parse_cookies(const char *ptr, size_t len, bool set_cookie_header);
 

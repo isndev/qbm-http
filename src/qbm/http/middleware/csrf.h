@@ -195,8 +195,12 @@ public:
     [[nodiscard]] CsrfVerdict check(Request const &request, bool secure_connection) const;
 
     /// The token cookie @p request carries: the first pair named exactly `cookie_name()` (`Request::cookie_value_exact`)
-    /// -- a `__host-csrf` or a `__Host -csrf` another host planted is no `__Host-csrf`, and does not hide the real
-    /// one sent after it --; empty when there is none.
+    /// -- a `__host-csrf`, a `__Host -csrf` or a bare `__Host-csrf` another host planted is no `__Host-csrf`, and does
+    /// not hide the real one sent after it --; empty when there is none. One shape no server can tell apart: a
+    /// nameless cookie set as `=__Host-csrf=X`, which a browser older than RFC 6265bis sends as `__Host-csrf=X`
+    /// (current ones refuse to store it). Sent first, it is read as the token: `session_binding()` makes a planted
+    /// token from another session fail, but an empty or junk X still hides the real one (token_missing,
+    /// token_invalid) for as long as the plant stays on such a browser.
     [[nodiscard]] std::string cookie_token(Request const &request) const;
 
     /// A new token for @p request's session (tokens on). @throws std::logic_error when tokens are off.
