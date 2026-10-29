@@ -1007,22 +1007,55 @@ TEST(HTTP2ServerProtocol, SendResponseOnUnknownStreamReturnsFalse) {
 }
 
 TEST(HTTP2ServerProtocol, SendResponseForbiddenHeaderIsStreamError) {
+    // The connection-specific fields of RFC 9113 section 8.2.2, `te` whatever its value, and `http2-settings`.
+    for (auto const &[name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"connection", "close"},
+             {"proxy-connection", "close"},
+             {"keep-alive", "timeout=5"},
+             {"transfer-encoding", "chunked"},
+             {"upgrade", "h2c"},
+             {"te", "trailers"},
+             {"http2-settings", "AAMAAABk"}
+         }) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+
+        auto headers = make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM,
+                                          default_request_headers("/forbidden"));
+        protocol.on(std::move(headers));
+        ASSERT_EQ(io.request_count, 1) << name;
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.set_header(name, value);
+
+        EXPECT_FALSE(protocol.send_response(1, response)) << name;
+        EXPECT_EQ(io.stream_error_count, 1) << name;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << name;
+    }
+}
+
+// `host` is no connection-specific field (RFC 9113 section 8.2.2): a response carrying one is sent with it, as
+// HTTP/1.1 sends it (HTTP/3 drops every `host` field it would send). It was a stream error, the response lost
+// (Huly QB-1189).
+TEST(HTTP2ServerProtocol, SendResponseWithAHostFieldSendsIt) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
 
-    auto headers = make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM,
-                                      default_request_headers("/forbidden"));
+    auto headers =
+        make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, default_request_headers("/host"));
     protocol.on(std::move(headers));
     ASSERT_EQ(io.request_count, 1);
 
     qb::http::Response response;
     response.status() = qb::http::status::OK;
-    // "connection" is a forbidden (hop-by-hop) response header in HTTP/2.
-    response.set_header("connection", "close");
+    response.set_header("Host", "example.test");
 
-    EXPECT_FALSE(protocol.send_response(1, response));
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_TRUE(protocol.send_response(1, response));
+    EXPECT_EQ(io.stream_error_count, 0);
+    const auto blocks = emitted_header_blocks(io.output, 1);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(blocks.front().value("host"), "example.test");
 }
 
 // ===========================================================================
@@ -2078,38 +2111,114 @@ TEST(HTTP2ServerProtocol, AMalformedTargetPseudoHeaderIsStreamError) {
     }
 }
 
+// A request without :authority is a stream error, a `host` field or not: the server takes the request's
+// authority from :authority alone, and a `host` field never stands in for it (Huly QB-1189).
 TEST(HTTP2ServerProtocol, MissingAuthorityPseudoHeaderIsStreamError) {
-    Http2FakeIO    io;
-    ServerProtocol protocol(io);
-    do_handshake(protocol, io);
-    ASSERT_TRUE(protocol.ok());
+    for (const bool with_host : {false, true}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
 
-    // No ":authority" (and no Host) -> missing-or-empty-authority guard.
-    const auto encoded = encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":path", "/noauth"}});
-    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
-    drive(protocol, io);
+        std::vector<qb::protocol::hpack::HeaderField> fields{{":method", "GET"}, {":scheme", "https"}, {":path", "/noauth"}};
+        if (with_host) {
+            fields.push_back({"host", "example.test"});
+        }
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_TRUE(protocol.ok()) << "host " << with_host;
+        EXPECT_EQ(io.request_count, 0) << "host " << with_host;
+        EXPECT_EQ(io.stream_error_count, 1) << "host " << with_host;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << "host " << with_host;
+    }
 }
 
+// A `host` field that names :authority is a request field like any other (RFC 9113 section 8.3.1: an
+// intermediary MAY retain it), compared without regard to case as HTTP/3 compares it: the request is routed and
+// header("Host") gives it. The server listed `host` among the connection-specific fields and reset every such
+// stream (Huly QB-1189).
+TEST(HTTP2ServerProtocol, AHostFieldThatNamesTheAuthorityIsAccepted) {
+    struct Named {
+        std::string authority, host, uri_host;
+    };
+    for (auto const &c :
+         {Named{"example.test", "example.test", "example.test"}, Named{"example.test", "EXAMPLE.Test", "example.test"},
+          Named{"example.test:8443", "example.test:8443", "example.test"}, Named{"[2001:db8::1]:8443", "[2001:DB8::1]:8443", "2001:db8::1"}}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        const auto encoded =
+            encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", c.authority}, {":path", "/h"}, {"host", c.host}});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
+        drive(protocol, io);
+
+        EXPECT_EQ(io.stream_error_count, 0) << c.host;
+        ASSERT_EQ(io.request_count, 1) << c.host;
+        EXPECT_EQ(io.last_request->header("Host"), c.host);
+        EXPECT_EQ(io.last_request->uri().host(), c.uri_host) << "the URI's authority stays :authority's";
+    }
+}
+
+// A `host` field that names another authority, another port, nothing, or that is sent twice makes the request
+// malformed (RFC 9113 section 8.3.1): a stream error, never a request whose header("Host") is a second authority
+// the client chose -- the rule HTTP/3 applies (Huly QB-1177, QB-1189). The two are compared as text, without regard
+// to case: `example.test:443` is not `example.test` there, even under https (an origin server may normalize as it
+// chooses), as on HTTP/3.
+TEST(HTTP2ServerProtocol, AHostFieldThatNamesAnotherAuthorityIsStreamError) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    for (auto const &host :
+         {Fields{{"host", "evil.test"}}, Fields{{"host", "example.test:8443"}}, Fields{{"host", "example.test:443"}}, Fields{{"host", ""}},
+          Fields{{"host", "example.test, evil.test"}}, Fields{{"host", "example.test"}, {"host", "example.test"}},
+          Fields{{"host", "example.test"}, {"host", "evil.test"}}, Fields{{"host", "example.test"}, {"x-a", "1"}, {"host", "evil.test"}}}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        Fields fields{{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/h"}};
+        fields.insert(fields.end(), host.begin(), host.end());
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
+
+        const auto label = host.back().value + " (" + std::to_string(host.size()) + " fields)";
+        EXPECT_TRUE(protocol.ok()) << "stream-level: the connection survives " << label;
+        EXPECT_EQ(io.request_count, 0) << label << " reached the server as host "
+                                       << (io.last_request ? io.last_request->header("Host") : std::string{});
+        EXPECT_EQ(io.stream_error_count, 1) << label;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << label;
+    }
+}
+
+// The connection-specific fields of RFC 9113 section 8.2.2, `te` with a value other than `trailers`, and the h2c
+// upgrade's `http2-settings` make a request malformed: a stream error. `host` is not one of them (Huly QB-1189).
 TEST(HTTP2ServerProtocol, ForbiddenConnectionHeaderInRequestIsStreamError) {
-    Http2FakeIO    io;
-    ServerProtocol protocol(io);
-    do_handshake(protocol, io);
-    ASSERT_TRUE(protocol.ok());
+    for (auto const &[name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"connection", "keep-alive"},
+             {"proxy-connection", "keep-alive"},
+             {"keep-alive", "timeout=5"},
+             {"transfer-encoding", "chunked"},
+             {"upgrade", "h2c"},
+             {"http2-settings", "AAMAAABk"},
+             {"te", "gzip"}
+         }) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
 
-    // "connection" is a forbidden hop-by-hop header in an HTTP/2 request.
-    const auto encoded = encode_hpack_headers(
-        {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/conn"}, {"connection", "keep-alive"}});
-    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
-    drive(protocol, io);
+        const auto encoded =
+            encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/conn"}, {name, value}});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1, encoded);
+        drive(protocol, io);
 
-    EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.request_count, 0);
-    EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_TRUE(protocol.ok()) << name;
+        EXPECT_EQ(io.request_count, 0) << name;
+        EXPECT_EQ(io.stream_error_count, 1) << name;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << name;
+    }
 }
 
 TEST(HTTP2ServerProtocol, InvalidContentLengthHeaderIsStreamError) {
@@ -3927,7 +4036,8 @@ open_limited_get(CappedServerProtocol &protocol, CappedHttp2FakeIO &io, uint32_t
     drive(protocol, io);
 }
 
-/// The stream's one answer is a @p status header block that ends it, followed by RST_STREAM(NO_ERROR).
+/// The stream's one answer is a @p status header block that ends it (RST_STREAM(NO_ERROR) follows while the
+/// request is still open, refuse_request()).
 void
 expect_refused_with(const qb::allocator::pipe<char> &output, uint32_t stream_id, std::string const &status) {
     const auto blocks = emitted_header_blocks(output, stream_id);
@@ -4023,6 +4133,36 @@ TEST(HTTP2ServerProtocol, AMalformedFieldOverTheLimitsStaysAStreamError) {
     EXPECT_EQ(io.request_count, 0);
     EXPECT_EQ(io.stream_error_count, 1) << "an uppercase name is malformed (RFC 9113 section 8.2.1)";
     EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered";
+
+    io.limits.max_header_name_length  = 64;
+    io.limits.max_header_value_length = 4;
+    open_limited_get(protocol, io, 3, "/", {{"host", "evil.test"}});
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 2) << "a host naming another authority is malformed, however long (Huly QB-1189)";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 3).empty()) << "a malformed request is not answered";
+
+    // The host that names :authority is a field like any other: over the value limit, the request is answered 431.
+    open_limited_get(protocol, io, 5, "/", {{"host", "example.test"}});
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 2) << "a well-formed host over the limit is no stream error";
+    expect_refused_with(io.output, 5, "431");
+
+    // A host naming another authority after a field over the value limit: the malformed field, never a 431.
+    open_limited_get(protocol, io, 7, "/", {{"x-v", "123456789"}, {"host", "evil.test"}});
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 3) << "the malformed host, after an over-limit field";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 7).empty()) << "a malformed request is not answered";
+
+    // A host naming another authority beside a :path over the target limit: the malformed field, never a 414.
+    io.limits.max_header_value_length = 64;
+    io.limits.max_url_length          = 8;
+    open_limited_get(protocol, io, 9, "/" + std::string(16, 'a'), {{"host", "evil.test"}});
+    EXPECT_EQ(io.request_count, 0);
+    EXPECT_EQ(io.stream_error_count, 4) << "the malformed host, before the 414";
+    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_TRUE(emitted_header_blocks(io.output, 9).empty()) << "a malformed request is not answered";
 }
 
 // The default limits are the HTTP/1.1 constants, on a server that never set its own (Huly QB-94): a field value of

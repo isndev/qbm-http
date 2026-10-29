@@ -179,6 +179,37 @@ All notable changes to the qbm-http module are documented here. The format is ba
   character; and, of the seventh review, a nameless cookie read as a name, a tab inside a name or a UTF-8 value
   dropped, any `$` taken for a legacy prefix, a quoted value trimmed inside its quotes or measured with them.
 
+- **An HTTP/2 request may carry a `host` field that names `:authority`, as RFC 9113 §8.3.1 lets an intermediary
+  retain one, and a response may carry a `host` field (Huly QB-1189).** `HeaderValidator::is_forbidden_header()`
+  counted `host` among the connection-specific fields -- RFC 9113 §8.2.2 names `connection`, `proxy-connection`,
+  `keep-alive`, `transfer-encoding` and `upgrade`, and `te` but for `trailers`, not `host` --: the server reset every
+  request stream that carried one with `RST_STREAM(PROTOCOL_ERROR)` -- measured on a TLS loopback server fed raw
+  HPACK blocks, `host: example.test` beside `:authority: example.test` included --, a response the application gave
+  a `Host` header was a stream error and never sent, and the client reset a response that carried one. `host` is off
+  the list, which keeps those five and the h2c upgrade's `http2-settings` (`te` is judged by its value, as before),
+  and the server checks a request's `host` as HTTP/3 does since QB-1177: one field, naming `:authority` as text
+  without regard to case (`example.test:443` does not name `example.test`, the normalization RFC 9113 §8.3.1 leaves
+  to an origin server), else the request is malformed (`RST_STREAM(PROTOCOL_ERROR)`, the connection kept) --
+  another authority or port, an empty value, a second field --, refused before a field over the request limits or a
+  `:path` over the target limit is answered, as a malformed regular field is; `header("Host")` is never a second
+  authority the client chose. `:authority` stays required: a `host` field does not stand in for it (RFC 9113 §8.3.1
+  has a client that generates the request, and an intermediary that forwards one, write `:authority` whenever the
+  target has an authority, and the HTTP/3 server requires it alike; RFC 7540 and RFC 9114 let a client send `Host`
+  alone). The server sends a response's `host` field, as HTTP/1.1 does (HTTP/3 drops every `host` field it would
+  send), and the client delivers it. The client never sends `host`: a request's `Host` header names `:authority`
+  when its URI has no host and is dropped otherwise. Push promises are unchanged. The check costs nothing
+  measurable: the new `qbm-http-bench-http2-server-request` (a browser-shaped GET with 14 fields, framed, decoded,
+  validated, dispatched and answered on a socket-less server, logging at WARN; 3 copies of each binary in a seeded
+  order over 10 rounds, macOS arm64) read every difference inside the spread of one binary's copies (up to 1.4 %):
+  after slower by 0.4 to 0.8 % in three sessions on QB-1177 (3320 to 3346, 3332 to 3346, 3329 to 3345 ns a
+  request), faster by 0.5 % with both sides built with 64-byte function and loop alignment (3379 to 3361; in that
+  session the alignment alone moved the before binary 1.5 %), faster by 0.3 % on QB-1186 (3382 to 3370). The loop
+  gains one length test per field; `is_forbidden_header()` lost three comparisons per name. Tests: the server fed
+  a `host` that names `:authority` in another case, with a port, as an IPv6 literal, and every refused shape, a
+  well-formed `host` over the value limit answered 431, a malformed one beside a field or a `:path` over the limits
+  a stream error; every connection-specific field refused in a request received, a response sent and a response
+  received; a response with `host` sent and delivered; the client's emitted header block.
+
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
   outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over

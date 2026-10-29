@@ -307,7 +307,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:472-497	cfed3799f7ec	enable_auto
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:125-193	76a53daa8eb6	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:501-545	b202e00a355c	on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/base.h:336-394	5c276c83dba5	/**
+llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/base.h:340-398	5c276c83dba5	/**
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/client.h:1276-1287	1daa7ae2426e	/// The highest stream identifier a client may open: identifiers are ...
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/client.h:1289-1306	f1be9f633021	/**
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:53-53	ae8950d5071e	is_hop_by_hop(const std::string &header_name) {

@@ -65,7 +65,6 @@ TEST(HTTP2HeaderValidator, AcceptsCompleteRequestPseudoHeaderSet) {
 
 TEST(HTTP2HeaderValidator, RejectsConnectionSpecificRequestHeaders) {
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("connection"));
-    EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("host"));
     EXPECT_TRUE(h2::HeaderValidator::is_forbidden_header("transfer-encoding"));
 }
 

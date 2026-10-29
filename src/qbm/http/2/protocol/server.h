@@ -1768,6 +1768,7 @@ private:
             // Validate pseudo-headers and convert to qb::http::Request components
             std::optional<std::string_view> method_sv, scheme_sv, path_sv, authority_sv;
             bool                            pseudo_headers_finished = false;
+            bool                            host_seen               = false;
 
             std::string temp_method_str; // Temporary for method conversion
 
@@ -1829,6 +1830,16 @@ private:
                     if (HeaderValidator::is_forbidden_header(name) || (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
                         this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header in request: " + name);
                         return false;
+                    }
+                    // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
+                    // (RFC 9113 §8.3.1) -- HTTP/3's check. It was refused as a connection-specific field (Huly QB-1189).
+                    if (name == "host") [[unlikely]] {
+                        if (host_seen || !authority_sv || !qb::http::utility::iequals(value, *authority_sv)) {
+                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                  "A host header field that is not one naming the :authority before it.");
+                            return false;
+                        }
+                        host_seen = true;
                     }
                     if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
                         || ++fields > limits.max_headers_count) [[unlikely]] {
