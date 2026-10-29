@@ -20,7 +20,7 @@ Six rules decide whether generated qbm-http code is correct; everything else is 
    the request hangs; functional middleware may call `next()` instead. A `cancel()` override
    must never call `ctx->complete()`. Capture `ctx` (a `shared_ptr`) into async callbacks,
    complete from the callback, and guard on `ctx->is_cancelled()`. A handler that streams its
-   body (`ctx->begin_stream()`) completes through `stream->end()`, never `complete()`.
+   body (`ctx->begin_stream()`) completes through `stream->end()`; `complete()` is ignored while its stream is open.
 4. **Handlers and middleware are shared across concurrent requests.** Never store per-request
    state on them — put it in the `Context` via `Slot<T>`. `ctx->session()` is weak-locked and
    may be `nullptr` after a disconnect. A routed context retains its compiled parameter names

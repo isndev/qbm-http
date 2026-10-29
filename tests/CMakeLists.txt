@@ -206,6 +206,12 @@ qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl li
 qhttp_test(system http1-extraction system/http1/http1-extraction.cpp REQUIRES live EXTRA_LABELS http1) # Huly QB-1182
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
 qhttp_test(system response-stream      system/routing/response-stream.cpp      REQUIRES live EXTRA_LABELS http1 routing) # Huly QB-86
+# The buffered body's bound (protocol_limits::MAX_BODY_SIZE, Huly QB-86) allocates ~200 MiB: the same source, built with
+# QBM_TEST_RESPONSE_STREAM_HUGE_BODY, is a binary of its own that runs that case alone, labelled `huge-body` like the
+# serializer limits' and the server factory's (`ctest -LE huge-body` drops it) -- a binary, not a hand-written re-run:
+# its ctest name stays a target name.
+qhttp_test(system response-stream-huge-body system/routing/response-stream.cpp REQUIRES live
+           DEFINES QBM_TEST_RESPONSE_STREAM_HUGE_BODY EXTRA_LABELS http1 routing huge-body)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cpp REQUIRES live

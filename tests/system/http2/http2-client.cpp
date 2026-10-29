@@ -3342,3 +3342,126 @@ TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
 }
 
 } // namespace http2_client_trailers_test
+
+// ===========================================================================
+// A response stream on HTTP/2 (Huly QB-86). The HTTP/2 session offers no streaming hooks yet, so begin_stream()
+// gives a BUFFERED stream with the interface of a streamed one -- the pieces gather and leave whole at end() -- and a
+// handler written for HTTP/1.1 runs unchanged. The stream owns the completion here too: a coroutine handler that hands
+// its stream to a timer chain and returns is not answered under it (it used to be, with its first piece alone and a
+// content-length of that piece). A buffered abort answers 500 with an empty body, without the Content-Length the
+// handler had declared (kept, the server reset the stream for a length mismatch instead).
+// ===========================================================================
+namespace http2_response_stream_test {
+
+class StreamH2Server;
+
+class StreamH2Session : public qb::http2::use<StreamH2Session>::session<StreamH2Server> {
+public:
+    explicit StreamH2Session(StreamH2Server &server)
+        : session(server) {}
+};
+
+using StreamCtx = qb::http::Context<StreamH2Session>;
+using H2Stream  = qb::http::ResponseStream<StreamH2Session>;
+
+static_assert(!qb::http::streaming_session<StreamH2Session>, "the HTTP/2 session is expected to buffer streams for now");
+
+inline std::atomic<int> g_h2_framing{-1};
+
+/// `n` pieces, one per event-loop turn (1 ms apart), then end().
+void
+h2_pieces(std::shared_ptr<H2Stream> stream, int i, int n) {
+    if (i == n) {
+        stream->end();
+        return;
+    }
+    (void) stream->write("piece-" + std::to_string(i) + ";");
+    qb::io::async::callback([stream = std::move(stream), i, n]() mutable { h2_pieces(std::move(stream), i + 1, n); }, 1ms);
+}
+
+class StreamH2Server : public qb::http2::use<StreamH2Server>::server<StreamH2Session> {
+public:
+    StreamH2Server() {
+        router().get("/stream/handoff", [](std::shared_ptr<StreamCtx> ctx) -> qb::io::async::task<void> {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Type", "text/plain");
+            auto stream  = ctx->begin_stream();
+            g_h2_framing = static_cast<int>(stream->framing());
+            (void) stream->write("piece-0;");
+            h2_pieces(std::move(stream), 1, 4);
+            co_return;
+        });
+        router().get("/stream/abort", [](std::shared_ptr<StreamCtx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Length", "64");
+            auto stream  = ctx->begin_stream();
+            g_h2_framing = static_cast<int>(stream->framing());
+            (void) stream->write("never whole");
+            stream->abort();
+        });
+        router().compile();
+    }
+};
+
+class Http2ResponseStreamTest : public ::testing::Test {
+protected:
+    std::uint16_t                                                 _port{0};
+    std::unique_ptr<qb::http::test::ServerThread<StreamH2Server>> _server;
+
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "Missing TLS test certificates (" << qb::http::test::ssl_cert_path() << ")";
+        qb::io::async::init();
+        g_h2_framing           = -1;
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        _server                = std::make_unique<qb::http::test::ServerThread<StreamH2Server>>([cert, key](StreamH2Server &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(_server->ready());
+        _port = _server->port();
+        ASSERT_NE(_port, 0);
+    }
+
+    void
+    TearDown() override {
+        _server.reset();
+    }
+
+    [[nodiscard]] qb::http::Response
+    get(std::string const &path) const {
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(_port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        std::optional<qb::http::Response> response;
+        qb::http::Request                 request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri(path);
+        EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
+        client->connect(nullptr);
+        EXPECT_TRUE(qb::http::test::ServerThread<StreamH2Server>::pump_until([&] { return response.has_value(); }));
+        client->disconnect();
+        return response.value_or(qb::http::Response{});
+    }
+};
+
+TEST_F(Http2ResponseStreamTest, AStreamIsBufferedWholeAndOwnsItsCompletion) {
+    const auto response = get("/stream/handoff");
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().template as<std::string>(), "piece-0;piece-1;piece-2;piece-3;")
+        << "the response left when the handler returned, not at end()";
+}
+
+TEST_F(Http2ResponseStreamTest, ABufferedAbortAnswers500WithoutTheDeclaredLength) {
+    const auto response = get("/stream/abort");
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_TRUE(response.body().empty()) << "not the server's 500: " << response.body().template as<std::string>();
+}
+
+} // namespace http2_response_stream_test

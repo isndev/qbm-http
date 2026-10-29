@@ -117,7 +117,7 @@ public:
                 LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Exception during process() - " << e.what());
             }
             // If middleware throws, it means it didn't call complete. We should signal error.
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status()                     = qb::http::status::INTERNAL_SERVER_ERROR;
                 const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR;
                 ctx->complete(error_result);
@@ -130,7 +130,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("MiddlewareTask [" << name() << "]: Unknown exception during process()");
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status()                     = qb::http::status::INTERNAL_SERVER_ERROR;
                 const qb::http::AsyncTaskResult error_result = qb::http::AsyncTaskResult::ERROR;
                 ctx->complete(error_result);
@@ -236,7 +236,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Exception during process() - " << e.what());
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Internal Server Error";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
@@ -250,7 +250,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("FunctionalMiddleware [" << _name << "]: Unknown exception during process()");
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Internal Server Error";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");

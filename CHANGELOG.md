@@ -53,25 +53,36 @@ All notable changes to the qbm-http module are documented here. The format is ba
   servers' cookie catches, each caught when planted.
 
 - **A response body streamed as it is produced, with backpressure, on HTTP/1.1 (Huly QB-86).**
-  `Context::begin_stream()` sends the head at once and returns a `qb::http::ResponseStream` the handler writes the
-  body through: `write(bytes)` returns at once with a verdict (`taken`, `wait`, `too_large`, `closed`),
-  `needs_drain()` says when the session holds `high_watermark()` bytes the socket has not taken (1 MiB by default;
-  `set_watermarks()` per stream, `stream_high_watermark()` per session), `co_await drain()` or `on_drain(fn)` waits
-  until the output falls to `low_watermark()`, and `end()` closes the message and completes the context. A
-  `Content-Length` the handler set is honoured and enforced -- a piece past it, or an `end()` short of it, closes the
-  connection rather than deliver a message the peer would misread; otherwise the response is chunked. The response
-  to HEAD sends its head alone. The producer owns the stream: one dropped before `end()` closes the connection, and
-  the peer leaving cancels it -- a parked `drain()` resumes with `false`, `write()` returns `closed`, the context is
-  cancelled -- as does the server being destroyed under it. A response that cannot be streamed -- a status without
-  a body, HTTP/1.0 without a length, a session without the hooks of the new `qb::http::streaming_session` concept,
-  which the HTTP/2 and HTTP/3 sessions do not offer yet -- gets a buffered stream with the same interface, sent
-  whole at `end()` through the ordinary completion, so a handler is written once. `PRE_RESPONSE_SEND` runs at
-  `begin_stream()` on the streaming path and is not run again at completion; a streamed body is still empty then,
-  so `CompressionMiddleware` leaves it uncompressed. `qbm-http-test-system-response-stream` covers each decision
-  over a raw loopback client that asserts the bytes of the wire: chunked and identity framing with keep-alive kept,
-  a length already drained before `end()`, HEAD, a synchronous handler, a client that reads nothing bounding the
-  server's output, a coroutine producer and a refused second `drain()`, the peer leaving, a dropped stream, a
-  pipelined request answered in order, HTTP/1.0 and 204 buffered, and a server torn down under a stalled producer.
+  `Context::begin_stream()` sends the head at once and returns a `qb::http::ResponseStream` the handler writes the body
+  through. `write(bytes)` returns at once with a verdict: `taken`; `wait` (the session's output is too full for the
+  piece -- nothing was written, and after a drain it fits); `too_large` (the piece cannot fit even into a drained
+  output, or, buffered, the body would pass `protocol_limits::MAX_BODY_SIZE`); `closed`. `needs_drain()` says when the
+  session holds `high_watermark()` bytes the socket has not taken (1 MiB by default; `set_watermarks()` per stream,
+  `stream_high_watermark()` per session, the high mark at most half the session's hard output cap, the low one under
+  it); `co_await drain()` or `on_drain(fn)` waits until the output falls to `low_watermark()`. The stream owns the
+  completion: `complete()` is ignored until `end()`, `abort()` or the stream's destruction completes the context, so a
+  handler -- a coroutine included -- may hand its stream to a producer and return, on every protocol, and a handler
+  that throws after handing it on leaves the answer to it. `begin_stream()` returns `nullptr` once the context is
+  finalised, cancelled or holding back a completion. The framing is decided from the head as the `PRE_RESPONSE_SEND`
+  hooks leave it: the hooks run first, seeing an empty body -- a body already in the response is the stream's first
+  piece, so `CompressionMiddleware` leaves a streamed body alone -- then a valid `Content-Length` is honoured and
+  enforced (a piece past it, or an `end()` short of it, closes the connection rather than deliver a message the peer
+  would misread), a `Transfer-Encoding` whose only coding is `chunked` is chunked as it stands, and otherwise
+  `Transfer-Encoding: chunked` is set. The response to HEAD is whole at its head: its exchange ends there and the next
+  request on the connection is served while the producer, whose pieces are counted and discarded, runs on. The producer
+  owns the stream: one dropped before `end()` is aborted -- the connection closes; buffered, a 500 without the failed
+  body's framing and coding headers -- and the peer leaving, an application `cancel()`, an extraction or the inactivity
+  timeout cancels it: a parked `drain()` resumes with `false`, `write()` returns `closed`, the context is cancelled,
+  and a server destroyed under a live stream releases it; a drain callback still registered when its stream dies is
+  released without running. A response that cannot be streamed -- a status without a body, HTTP/1.0 without a length, a
+  session without the hooks of the new `qb::http::streaming_session` concept, which the HTTP/2 and HTTP/3 sessions do
+  not offer yet -- gets a buffered stream with the same interface, sent whole at `end()` through the ordinary
+  completion, its hooks included. Observers read a streamed response at its end: the head's status, even when it was
+  cut short, and `Context::streamed_bytes()`, which `AccessLog` logs as its size.
+  `qbm-http-test-system-response-stream` (38 cases, the TLS ones over `ssl::DefaultSecureSession`) and
+  `qbm-http-test-system-response-stream-huge-body` hold every decision over a raw loopback client that asserts the
+  bytes of the wire; two HTTP/2 cases in `qbm-http-test-system-http2-client` hold the buffered fallback. The HTTPS
+  cases depend on qb's QB-1176.
 
 - **Client statistics snapshot cost instrument (Huly QB-248).** Two cells in each loopback bench,
   `qbm-http-bench-http2-client-loopback` and `qbm-http-bench-http3-client-loopback`

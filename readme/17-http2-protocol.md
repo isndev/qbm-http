@@ -240,7 +240,7 @@ The registry size captured at entry bounds actual removals, not scans. Further b
 Full-drain EOS means the framework output buffer is empty, not that the peer acknowledged the response. The existing partial-write cleanup timing remains: collection does not keep per-stream transport-byte acknowledgments. The bounded ID scratch is an implementation detail, not evidence of a measured performance gain or of allocation-free callbacks and destruction.
 
 The rate-limited idle-stream sweep remains in `pending_write`: no more often than `CLEANUP_INTERVAL`, it calls `cleanup_idle_streams(STREAM_IDLE_TIMEOUT, STREAM_INCOMPLETE_TIMEOUT)` to reset and remove expired native streams.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:125-180,501-545; qbm/http/src/qbm/http/routing/context.h:560-573 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:125-180,501-545; qbm/http/src/qbm/http/routing/context.h:567-580 -->
 
 Lifecycle controls exercise silent completion from POST, `REQUEST_COMPLETE` and member destruction, including the no-hook case; protocol clearing before another candidate; and multiple batches from valid stream waves that leave more than 50 retained contexts. The earlier extraction control preserves its one-POST behavior.
 <!-- src: qbm/http/tests/system/http2/http2-client.cpp:2670-2672,2674-2676,2678-2680,2682-2684,2686-2763,2770-2896,2440-2516 -->

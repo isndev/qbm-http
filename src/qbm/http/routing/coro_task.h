@@ -136,7 +136,7 @@ make_coro_task_runner(CoroFn handler, DefaultCoroOutcome default_outcome, const 
             } catch (const std::exception &e) {
                 LOG_HTTP_ERROR("Coro " << kind << " exception: method=" << ctx->request().method() << " path=" << ctx->request().uri().path()
                                        << " what=" << e.what());
-                if (!ctx->is_completed() && !ctx->is_cancelled()) {
+                if (!ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body()   = "Internal server error in coroutine handler.";
                     ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
@@ -145,7 +145,7 @@ make_coro_task_runner(CoroFn handler, DefaultCoroOutcome default_outcome, const 
             } catch (...) {
                 LOG_HTTP_ERROR("Coro " << kind << " unknown exception: method=" << ctx->request().method()
                                        << " path=" << ctx->request().uri().path());
-                if (!ctx->is_completed() && !ctx->is_cancelled()) {
+                if (!ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                     ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                     ctx->response().body()   = "Unknown internal server error in coroutine handler.";
                     ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");

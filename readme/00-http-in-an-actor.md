@@ -75,7 +75,7 @@ Three lines carry more than they look like they do:
   method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
   accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
   afterwards is still harmless if you have code that does.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:1157-1163 (bind then start), :1174-1189 (the bind-only opt-out) -->
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:1163-1169 (bind then start), :1180-1195 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -115,7 +115,7 @@ Read off it the four facts that matter:
 1. **A request occupies the session until it completes.** A second request arriving on the same connection while one is
    in flight is queued, not routed — up to 128 of them, after which the session is dropped with
    `DisconnectedReason::ByProtocolError`. HTTP/1.1 pipelining is *serialised*, not parallel.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:349-359 (queue behind the active response), :146 (_max_pipelined_requests default 128) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:347-357 (queue behind the active response), :146 (_max_pipelined_requests default 128) -->
 2. **The `Context` is a `shared_ptr` and it is the handle you keep.** The router builds it and hands it to your
    handler; the session holds one reference, your handler holds another. It outlives any suspension you make inside a
    handler, which is why the coroutine form below does not need the copy-everything-out discipline that the other two
@@ -124,11 +124,11 @@ Read off it the four facts that matter:
    synchronously from the protocol's `noexcept onMessage`, so an exception escaping your handler chain would cross a
    `noexcept` boundary and call `std::terminate`. It is contained: the session disconnects and the server keeps
    serving.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:276-296 (start_request contains the throw and disconnects) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:274-294 (start_request contains the throw and disconnects) -->
 4. **The response is written when the loop says so.** `complete()` serialises into the session's output pipe; the write
    watcher drains it over one or more turns, and `event::eos` fires when the last byte is gone. Only then does the
    `POST_RESPONSE_SEND` hook run, the context reset, and the keep-alive decision get taken.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:421-456 (eos: hook, then keep-alive -- or, after the last response, the close that follows its delivery) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:419-454 (eos: hook, then keep-alive -- or, after the last response, the close that follows its delivery) -->
 
 Which is the whole reason the next section exists: **while your handler is on the stack, none of that happens.** No
 other request on this connection is routed, no other session on this core is read, and no other actor on this core is
@@ -255,19 +255,23 @@ It is set in exactly the places the session knows the response can no longer be 
 | Trigger | What sets it |
 |:---|:---|
 | The peer closes the socket while a request is incomplete | `session::on(disconnected)`, on the `DisconnectedReason::ByUser` (`0`) path used by a TCP EOF |
-| The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)`, which every `extractSession()` of an HTTP/1.1 session runs, stops the session's watcher and calls `_context->cancel()` unless `suppress_response()` was called |
-| Your own code | `ctx->cancel()` |
+| The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)`, which every `extractSession()` of an HTTP/1.1 session runs, stops the session's watcher, cancels a live stream and calls `_context->cancel()` unless `suppress_response()` was called |
+| The connection ends under a streamed response, for any reason — the peer, the inactivity timeout, a local `disconnect()` | `session::on(disconnected)`: a live stream is cancelled, and the context with it, whatever the reason |
+| A streamed response is aborted — `stream->abort()`, a stream dropped before `end()`, a piece past a declared length, an `end()` short of it | `session::stream_abort()`: the context is cancelled, then the connection closed |
+| The head of a streamed response cannot be written | `Context::begin_stream()`: the session closed the connection, the context is cancelled |
+| Your own code | `ctx->cancel()`; under a streamed head, the connection closes too |
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:516-519 (disconnected: cancel only when ByUser and incomplete), :466 (extracted: the watcher stops), :468-471 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1115-1129 (the server runs it when a session class's own on() hides it) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1121-1135 (the server runs it when a session class's own on() hides it) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :806-814 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1532-1538 (begin_stream: a head the session cannot write cancels), :1401-1402 (cancel: a streamed head keeps its status) -->
 
-Note what is **not** in that table: an explicit local `disconnect()` and a session inactivity timeout. qb-io's default
-local reason, `disconnect_reason::user_initiated`, has integer value `1`; an explicit `disconnect(0)` is remapped to
-that same value because zero is qb-io's internal "no disconnect pending" sentinel. The qbm-http enum independently
-assigns value `1` to `DisconnectedReason::ByTimeout`, so both a local default/zero disconnect and the timeout handler
-miss the HTTP/1.1 session's reason-`0` cancellation branch. A long-running handler therefore cannot treat
-`is_cancelled()` as a general liveness signal: it is set for peer EOF and extraction, but not for either local teardown
-path.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:374-394 (timeout disconnects with ByTimeout) -->
+Note what is **not** in that table, outside a streamed response: an explicit local `disconnect()` and a session
+inactivity timeout. qb-io's default local reason, `disconnect_reason::user_initiated`, has integer value `1`; an
+explicit `disconnect(0)` is remapped to that same value because zero is qb-io's internal "no disconnect pending"
+sentinel. The qbm-http enum independently assigns value `1` to `DisconnectedReason::ByTimeout`, so both a local
+default/zero disconnect and the timeout handler miss the HTTP/1.1 session's reason-`0` cancellation branch. A
+long-running handler therefore cannot treat `is_cancelled()` as a general liveness signal: it is set for peer EOF and
+extraction, and for any end of a connection under a live stream, but otherwise not for either local teardown path.
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:372-392 (timeout disconnects with ByTimeout) -->
 
 ### `http_awaiter` — the client's awaiter is not cancellation-aware
 
@@ -292,7 +296,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1701-1705 (REQUEST: qb::duration timeout = zero), :1708-1711 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1707-1711 (REQUEST: qb::duration timeout = zero), :1714-1717 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.
@@ -392,7 +396,7 @@ finish.
 - **Leaving a client call's timeout at the default.** `qb::duration::zero()` means no deadline, and it holds the
   request's connection open for as long as the upstream wants.
 - **Treating `is_cancelled()` as liveness.** It is set on peer EOF and session extraction, but not on an explicit local
-  disconnect or an inactivity timeout.
+  disconnect or an inactivity timeout, unless a streamed response is live.
 - **Capturing `this` into a coroutine.** The `ctx` shared pointer is the safe handle; a raw pointer to the server
   actor is not.
 - **Blocking inside a handler for any other reason** — a synchronous file read, a third-party library, a lock. One

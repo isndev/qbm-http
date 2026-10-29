@@ -45,7 +45,7 @@ struct AccessLogRecord {
     int              major_version = 1;
     int              minor_version = 1;
     int              status        = 0; ///< the response's status code
-    std::uint64_t    bytes         = 0; ///< the response body's size, in bytes
+    std::uint64_t    bytes         = 0; ///< the response body's size, in bytes (a streamed one's: Context::streamed_bytes())
     std::string_view referer;           ///< the `Referer` request header, empty when absent
     std::string_view user_agent;        ///< the `User-Agent` request header, empty when absent
     qb::duration     duration{};        ///< `RequestEnd::duration`
@@ -125,7 +125,7 @@ public:
             record.major_version  = request.major_version;
             record.minor_version  = request.minor_version;
             record.status         = static_cast<int>(response.status());
-            record.bytes          = response.body().size();
+            record.bytes          = ctx.is_streaming() ? ctx.streamed_bytes() : response.body().size();
             record.referer        = request.header("Referer");
             record.user_agent     = request.header("User-Agent");
             record.duration       = end.duration;

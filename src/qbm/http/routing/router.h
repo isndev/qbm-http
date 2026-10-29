@@ -361,7 +361,7 @@ Router<SessionType>::Router()
         // It's responsible for sending the response via the session associated with the context.
         if (auto session_ptr = ctx.session()) {
             // Ensure session is still valid
-            if (!ctx.is_streaming()) // a streamed response ran them at its head, which is already on the wire (Huly QB-86)
+            if (!ctx.pre_response_send_ran()) // begin_stream() ran them at the head of a response it may stream (Huly QB-86)
                 ctx.execute_hook(qb::http::HookPoint::PRE_RESPONSE_SEND); // Allow final header mods
             if constexpr (requires(SessionType &session, Context<SessionType> &context) { session.send_response(context); }) {
                 session_ptr->send_response(ctx);

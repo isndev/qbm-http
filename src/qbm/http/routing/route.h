@@ -89,7 +89,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Exception in route handler - " << e.what());
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Internal server error in route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
@@ -104,7 +104,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("RouteLambdaTask [" << name() << "]: Unknown exception in route handler");
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Unknown internal server error in route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
@@ -174,7 +174,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Exception in custom route handler - " << e.what());
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Internal server error in custom route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");
@@ -189,7 +189,7 @@ public:
             } else {
                 LOG_HTTP_ERROR("CustomRouteAdapterTask [" << name() << "]: Unknown exception in custom route handler");
             }
-            if (ctx && !ctx->is_completed() && !ctx->is_cancelled()) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled() && !ctx->stream()) { // an open stream owns the answer (QB-86)
                 ctx->response().status() = qb::http::status::INTERNAL_SERVER_ERROR;
                 ctx->response().body()   = "Unknown internal server error in custom route handler.";
                 ctx->response().set_header("Content-Type", "text/plain; charset=utf-8");

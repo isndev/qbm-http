@@ -153,7 +153,6 @@ private:
     std::weak_ptr<ResponseStream<Derived>> _stream{};
     std::size_t                            _stream_high_watermark{qb::http::default_stream_high_watermark};
     bool                                   _stream_live{false}; ///< a streamed head is out and its end() is not: eos does not end the response
-    bool                                   _stream_suppress_body{false}; ///< the stream answers a HEAD request: its head alone
     /// The original HTTP/1.1 protocol. An in-place WebSocket upgrade participates through its cold drain hook;
     /// a transport extracted to another owner is no longer this server's.
     qb::io::async::IProtocol const *_http_protocol{nullptr};
@@ -174,8 +173,7 @@ private:
     cancel_live_stream() noexcept {
         if (!_stream_live)
             return;
-        _stream_live          = false;
-        _stream_suppress_body = false;
+        _stream_live = false;
         if (auto stream = _stream.lock())
             stream->cancel();
         _stream.reset();
@@ -683,20 +681,17 @@ public:
 
     // --- the streaming hooks of qb::http::ResponseStream (Huly QB-86; the streaming_session concept) ----------------
 
-    /// Whether this session can stream the response to `ctx` now. When the handler runs synchronously inside the
-    /// routing -- a middleware, a handler that does not suspend -- `_context` is not assigned yet (start_request()
-    /// stores it once route() returns): the context being routed for THIS session is adopted, and start_request()'s
-    /// own assignment then stores the same object.
+    /// Whether this session can stream the response to `ctx` now: it answers `ctx`, or `ctx` is the context being
+    /// routed for THIS session -- when the handler runs synchronously inside the routing (a middleware, a handler that
+    /// does not suspend), start_request() has not stored it yet; stream_head() adopts it. A query: nothing changes,
+    /// so a response that ends up buffered keeps the timing of any other.
     [[nodiscard]] bool
     stream_can_answer(ContextType &ctx) {
         if (_stream_live || _closing)
             return false;
         if (_context)
             return _context.get() == &ctx;
-        if (ctx.session().get() != static_cast<Derived *>(this))
-            return false;
-        _context = ctx.shared_from_this();
-        return true;
+        return ctx.session().get() == static_cast<Derived *>(this);
     }
 
     /// The request being answered is a HEAD: a streamed response sends its head alone.
@@ -705,20 +700,32 @@ public:
         return _active_request_method == qb::http::method::HEAD;
     }
 
-    /// Write the head of `ctx.response()` now -- the keep-alive and HEAD rules of any response applied -- and keep
-    /// the stream to notify. `false` when it could not be written: the connection is then closed.
+    /// Write the head of `ctx.response()` now -- the keep-alive and HEAD rules of any response applied -- adopting
+    /// `ctx` when it is the context being routed for this session, and keep the stream to notify. The answer to a
+    /// HEAD request is whole at its head: its exchange ends there, as a buffered HEAD's does once written, and the
+    /// next request is served when it is delivered; the stream is not kept. `false` when the head could not be
+    /// written -- the session can no longer answer `ctx` (a PRE_RESPONSE_SEND hook changed it after
+    /// stream_can_answer()), or the serializer refused it: the connection is then closed.
     [[nodiscard]] bool
     stream_head(ContextType &ctx, std::shared_ptr<ResponseStream<Derived>> const &stream) {
-        if (!_context || _context.get() != &ctx || _stream_live)
+        if (!stream_can_answer(ctx)) {
+            this->disconnect(DisconnectedReason::ServerError);
             return false;
+        }
+        if (!_context)
+            _context = ctx.shared_from_this(); // start_request()'s own assignment then stores the same object
         try {
             auto &response = ctx.response();
             prepare_response_for_active_request(response);
             *this << MessageHead{response}; // the status line and the header section: the body follows
             this->updateTimeout();
-            _stream_suppress_body = _active_request_method == qb::http::method::HEAD;
-            _stream               = stream;
-            _stream_live          = true;
+            if (_active_request_method == qb::http::method::HEAD) {
+                if (!_active_should_keep_alive)
+                    close_after_response();
+                return true;
+            }
+            _stream      = stream;
+            _stream_live = true;
             return true;
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 streamed response head threw: " << e.what());
@@ -729,17 +736,17 @@ public:
         return false;
     }
 
-    /// Append a piece of a streamed body. A quiet stream refreshes the inactivity timeout with each piece.
+    /// Append a piece of a streamed body. Each piece refreshes the inactivity timeout.
     void
     stream_write(std::string_view bytes) {
-        if (!_stream_live || _stream_suppress_body)
+        if (!_stream_live)
             return;
         *this << bytes;
         this->updateTimeout();
     }
     void
     stream_write(Chunk const &chunk) {
-        if (!_stream_live || _stream_suppress_body)
+        if (!_stream_live)
             return;
         *this << chunk;
         this->updateTimeout();
@@ -772,17 +779,17 @@ public:
     }
 
     /// The end of a streamed body: the last-chunk when chunked, then what follows any response's last byte. The
-    /// message may end with nothing left to write (a declared length already delivered, a HEAD): the eos that
-    /// completes a response comes only from a write that drains the output, so the write path is armed again --
-    /// it finds nothing to write and reports eos, as drain_ready_response() relies on.
+    /// message may end with nothing left to write (a declared length already delivered): the eos that completes a
+    /// response comes only from a write pass, so the write path is armed again -- with nothing queued it finds
+    /// nothing to send and reports eos, on every transport (qb-io's stream::write() hands TLS no empty write, Huly
+    /// QB-1176), the outcome http1_begin_drain()'s empty arm relies on too.
     void
     stream_end(bool chunked) {
         if (!_stream_live)
             return;
-        if (chunked && !_stream_suppress_body)
+        if (chunked)
             *this << Chunk{};
-        _stream_live          = false;
-        _stream_suppress_body = false;
+        _stream_live = false;
         _stream.reset();
         this->updateTimeout();
         // The server drains (Huly QB-167): decided at the head for a request answered then, re-read here for one
@@ -799,8 +806,7 @@ public:
     stream_abort() noexcept {
         if (!_stream_live)
             return;
-        _stream_live          = false;
-        _stream_suppress_body = false;
+        _stream_live = false;
         _stream.reset();
         if (_context && !_context->is_completed())
             _context->cancel("the streamed response was aborted");
