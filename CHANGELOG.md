@@ -168,15 +168,31 @@ All notable changes to the qbm-http module are documented here. The format is ba
   hooks -- and its context was neither cancelled nor released, against what the module's docs state. The detector is
   now befriended whole, so a probe on the concrete session -- or on a class deriving from it -- sees the handler; a
   session class that declares an `on()` of its own (the
+
+- **An HTTP/1.1 or HTTP/2 session extracted from its server runs its extraction handler: its watcher stops and the
+  contexts it was answering are cancelled (Huly QB-1182).** `extractSession()` -- a WebSocket upgrade, an ownership
+  transfer -- runs a session's `on(event::extracted)` only when io_handler's probe,
+  `qb::has_on<Session, event::extracted>`, sees it on the concrete session type, and the HTTP/1.1 session's handler was
+  private and befriended for the internal base only: the probe answered false for `DefaultSession`,
+  `ssl::DefaultSecureSession` and every user session, and no extraction ran the handler. The session kept watching the
+  socket it had handed over -- bytes the new owner's peer sent next were reported to it, it read its moved-out
+  transport, failed, and was torn down, running its disconnection hooks -- and its context was neither cancelled nor
+  released, against what the module's docs state. The detector is now befriended whole, so a probe on the concrete
+  session -- or on a class deriving from it -- sees the handler; a session class that declares an `on()` of its own (the
   `on(qb::http::event::disconnected &&)` the session forwards to it, say) hides the base's handler from the probe all
   the same, so the server's `extractSession()` runs it for that one, through the new `http1_extracted()` server hook.
-  A `static_assert` beside `DefaultSession`, `ssl::DefaultSecureSession` and the HTTP/2 `DefaultSession` (whose
-  public handler was already seen) keeps a regression from compiling. Checked and not affected: the events io<>
-  probes on the internal base (`pending_write`, `eos`, `disconnected`), the HTTP/2 session, the servers' accept and
-  disconnection gates, the WebSocket and HTTP/3 types (no handler behind a gate on a derived type).
-  `qbm-http-test-system-http1-extraction` drives both session shapes on one loop and asserts the behaviour -- the
-  context cancelled, the watcher stopped, the peer's next bytes reaching no handler of the stale session: red at
-  819add3 and 2d695d2 for both, red for the session with its own `on()` with the friend fix alone, green with both.
+  The HTTP/2 session's handler is public, and hidden all the same from a session class that declares an `on()` of its
+  own -- name hiding ignores access: such a session kept its watcher and the contexts of its live streams; the HTTP/2
+  server's `extractSession()` runs it for that one too, through `http2_extracted()`. A `static_assert` beside
+  `DefaultSession`, `ssl::DefaultSecureSession` and the HTTP/2 `DefaultSession` (whose public handler was already seen)
+  keeps a regression from compiling. Checked and not affected: the events io<> probes on the internal base
+  (`pending_write`, `eos`, `disconnected`), the servers' accept and disconnection gates, the WebSocket and HTTP/3 types
+  (no handler behind a gate on a derived type). `qbm-http-test-system-http1-extraction` drives both session shapes on
+  one loop and asserts the behaviour -- the context cancelled, the watcher stopped, the peer's next bytes reaching no
+  handler of the stale session: red at 819add3 and 2d695d2 for both, red for the session with its own `on()` with the
+  friend fix alone, green with both; `Http2Extraction` in `qbm-http-test-system-http2-client` extracts an HTTP/2 session
+  of that shape under a live stream: red at 12a8802 (the context not cancelled, the watcher still on), green with the
+  fallback.
 
 - **qbm-http and Node's http_parser linked in one program each run their own parser, and no `llhttp` archive is
   installed any more (Huly QB-1139).** The llhttp fork's `http_` prefix keeps it from colliding with a system

@@ -3465,3 +3465,122 @@ TEST_F(Http2ResponseStreamTest, ABufferedAbortAnswers500WithoutTheDeclaredLength
 }
 
 } // namespace http2_response_stream_test
+
+// ===========================================================================
+// An HTTP/2 session extracted from its server runs its extraction handler (Huly QB-1182). The handler is public on
+// the HTTP/2 session, but a session class that declares an on() of its own hides every on() of the base from
+// io_handler's probe on its type -- name hiding ignores access -- so extractSession() skipped it: the session kept its
+// watcher on the socket it gave away, and the contexts of its live streams were neither cancelled nor released. The
+// server's extractSession() now runs it for such a session, as the HTTP/1.1 server does. The case extracts a session
+// of that shape while a stream's context is live (its handler answers nothing) and asserts the behaviour.
+// ===========================================================================
+namespace http2_extraction_test {
+
+class ExtractH2Server;
+
+/// A user session with an on() of its own -- the base's on(event::extracted) is public, and hidden all the same.
+class HookedH2Session : public qb::http2::use<HookedH2Session>::session<ExtractH2Server> {
+public:
+    explicit HookedH2Session(ExtractH2Server &server)
+        : session(server) {}
+
+    void
+    on(qb::http::event::disconnected &&) {}
+
+    /// Whether the session's I/O watcher is still registered with the event loop (the io base's: the inactivity timer
+    /// has a watcher of its own).
+    [[nodiscard]] bool
+    watching() const noexcept {
+        return this->base_io_t::_async_event.is_active();
+    }
+};
+
+static_assert(!qb::has_on<HookedH2Session, qb::io::async::event::extracted>,
+              "the case needs a session whose own on() hides the base's extraction handler from the probe");
+
+using ExtractCtx = qb::http::Context<HookedH2Session>;
+
+/// What the server saw, published for the test's thread.
+struct Extraction {
+    std::atomic<bool> done{false};
+    std::atomic<bool> found{false};
+    std::atomic<bool> watching_before{false};
+    std::atomic<bool> live_before{false};
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> watching_after{true};
+
+    void
+    reset() {
+        done            = false;
+        found           = false;
+        watching_before = false;
+        live_before     = false;
+        cancelled       = false;
+        watching_after  = true;
+    }
+};
+inline Extraction g_extraction;
+
+class ExtractH2Server : public qb::http2::use<ExtractH2Server>::server<HookedH2Session> {
+public:
+    ExtractH2Server() {
+        // The stream's context stays live: the handler answers nothing. On a later turn the session is extracted, as
+        // a WebSocket upgrade or an ownership transfer extracts one, and the new owner closes what it was given.
+        router().get("/extract", [this](std::shared_ptr<ExtractCtx> ctx) {
+            qb::io::async::callback(
+                [this, ctx] {
+                    auto session = ctx->session();
+                    if (session) {
+                        g_extraction.watching_before = session->watching();
+                        g_extraction.live_before     = !ctx->is_completed() && !ctx->is_cancelled();
+                        auto [io, ok]                = extractSession(session->id());
+                        g_extraction.found           = ok;
+                        g_extraction.cancelled       = ctx->is_cancelled();
+                        g_extraction.watching_after  = session->watching();
+                        io.close();
+                    }
+                    g_extraction.done = true;
+                },
+                1ms);
+        });
+        router().compile();
+    }
+};
+
+TEST(Http2Extraction, ASessionDeclaringItsOwnOnCancelsItsStreamsContextsAndStopsWatching) {
+    ASSERT_TRUE(qb::http::test::certs_available()) << "Missing TLS test certificates (" << qb::http::test::ssl_cert_path() << ")";
+    qb::io::async::init();
+    g_extraction.reset();
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+
+    qb::http::test::ServerThread<ExtractH2Server> server([cert, key](ExtractH2Server &srv) -> bool {
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server.ready());
+    ASSERT_NE(server.port(), 0);
+
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.port()));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/extract");
+    ASSERT_TRUE(client->push_request(request, [](qb::http::Response) {}));
+    client->connect(nullptr);
+    ASSERT_TRUE(qb::http::test::ServerThread<ExtractH2Server>::pump_until([] { return g_extraction.done.load(); }))
+        << "the request never reached its handler";
+    client->disconnect();
+
+    ASSERT_TRUE(g_extraction.found.load()) << "the session was not extracted";
+    ASSERT_TRUE(g_extraction.watching_before.load()) << "the session did not watch its socket before: the case proves nothing";
+    ASSERT_TRUE(g_extraction.live_before.load()) << "the stream's context was not live before: the case proves nothing";
+    EXPECT_TRUE(g_extraction.cancelled.load()) << "the extraction did not cancel the context of the session's live stream";
+    EXPECT_FALSE(g_extraction.watching_after.load()) << "the session still watches a socket it gave away";
+}
+
+} // namespace http2_extraction_test

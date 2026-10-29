@@ -16,7 +16,7 @@ HTTP/2 is a binary, multiplexed protocol: many concurrent request/response excha
 ### ALPN selects the protocol
 
 There is no separate HTTP/2 port. The server listens for HTTPS and uses ALPN (Application-Layer Protocol Negotiation) during the TLS handshake to decide which protocol to speak. The server advertises `{"h2", "http/1.1"}`; when ALPN selects `h2`, the session switches to the HTTP/2 protocol handler, otherwise it falls back to HTTP/1.1 on the same connection. The persistent client advertises only `{"h2"}` and fails the connection if the peer does not negotiate `h2`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:418-434,918-920; qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/2/client.cpp:451,471,941-964 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:418-434,939-941; qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/2/client.cpp:451,471,941-964 -->
 
 ### Streams and multiplexing
 
@@ -97,10 +97,10 @@ Both directions follow one contract with HTTP/1.1 and HTTP/3 (Huly QB-1073): put
 
 **Draining the server (Huly QB-91).** `server.drain(deadline, on_drained)` stops an HTTP/2 server with the contract of the HTTP/1.1 server's drain: the listening socket closes, and `on_drained` runs once, on the server's loop, with `drain_outcome::drained` when no HTTP session is left or `drain_outcome::deadline`. Each connection shuts down in the two phases RFC 9113 §6.8 recommends. The notice -- a `GOAWAY` naming the largest stream id, 2³¹−1, with `NO_ERROR`, then a `PING` -- tells the client to open no more streams while every stream it already sent stays valid; the `PING`'s `ACK`, a round trip later, proves that whatever the client sent before seeing the notice has arrived, and the final `GOAWAY` names the last stream it opened. Streams up to that id are served; one above it is refused with `REFUSED_STREAM`, which tells the client it was never processed and may be retried elsewhere; the connection closes after its last stream (`ServerHttp2Protocol::begin_graceful_shutdown()` and `complete_graceful_shutdown()`). A client that never answers the `PING` is sent the final `GOAWAY` at the deadline, and the connection closes once that is delivered -- within qb-io's linger bound -- abandoning what is still open. A connection whose TLS handshake ends during the drain serves nothing: its one `GOAWAY` names stream 0. On the HTTP/1.1 fallback, a connection that has received nothing closes at once; one at work closes after its answer, as always.
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:330-385,418-434,754-849; qbm/http/src/qbm/http/2/protocol/server.h:265-311,1065-1070 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:330-385,418-434,765-870; qbm/http/src/qbm/http/2/protocol/server.h:265-311,1065-1070 -->
 
 A peer reset of an unfinished routed stream cancels its stock session context, including `RST_STREAM(NO_ERROR)`. The neutral code still produces no public `Http2StreamErrorEvent`; the protocol's optional internal lifecycle notification introduces no required callback for custom I/O handlers. The session removes registry ownership before cancellation, and a late completion cannot revive the cancelled context. This notifies routed work without forcibly cancelling external native I/O or coroutines.
-<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:849-870; qbm/http/src/qbm/http/2/http2.h:186-193,581-590 -->
+<!-- src: qbm/http/src/qbm/http/2/protocol/server.h:849-870; qbm/http/src/qbm/http/2/http2.h:186-193,592-601 -->
 <!-- src: qbm/http/src/qbm/http/2/protocol/server.h:363,398,513,811-875,891-957,949-956; qbm/http/src/qbm/http/2/http2.h:250; qbm/http/src/qbm/http/2/client.cpp:655-675,677-707,979-992 -->
 
 ## Running an HTTP/2 server
@@ -112,7 +112,7 @@ The server is the same shape as the HTTP/1.1 server (acceptor + sessions + route
 `qb::http2::make_server()` returns a `std::unique_ptr<qb::http2::Server<>>` using the built-in `DefaultSession`. Define routes on its `router()`, call `compile()`, then `listen` with your certificate and key, `start()`, and drive the qb-io reactor.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/http2.h:1009-1018 (Server), :1048-1052 (make_server), :878-884 (listen)
+// src: qbm/http/src/qbm/http/2/http2.h:1030-1039 (Server), :1069-1073 (make_server), :899-905 (listen)
 #include <qbm/http/http.h>          // umbrella; pulls <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
 #include <filesystem>
@@ -149,7 +149,7 @@ int main(int argc, char *argv[]) {
 ```
 
 `listen` does four things for you: it creates the server SSL context from your cert/key, sets the ALPN list to `{"h2", "http/1.1"}`, binds the listening socket, and arms the accept watcher. That last step is new in 3.0 — before it, `listen()` bound without starting and a separate `start()` was required, which is why older code carries one (still harmless). `listen_no_start()` is the opt-out when the server must finish wiring first. Routing is identical to HTTP/1.1 — groups, controllers, middleware, path parameters, and validation all work unchanged because the HTTP/2 session feeds the same `qb::http::Router`.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:878-884,598-600 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:899-905,609-611 -->
 
 ### Custom sessions with the CRTP `use<>` template
 
@@ -184,7 +184,7 @@ public:
 ```
 
 `qb::http2::use<Derived>` exposes three CRTP aliases — `session<ServerHandler>`, `io_handler<SessionType>`, and `server<SessionType>` — and `make_server<MySession>()` constructs the matching server. The `DefaultSession` / `Server<>` pair used by `make_server()` is exactly this template instantiated for you.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:959-969,983-986,1009-1018,1048-1052 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:980-990,1004-1007,1030-1039,1069-1073 -->
 
 ### Sending responses and resetting streams
 
@@ -358,7 +358,7 @@ The protocol enforces RFC 9113 validation you get for free: header names must be
 ## Pitfalls
 
 - **HTTP/2 needs `QB_HAS_SSL`.** Without it, none of `qb::http2::*` is compiled in and `<qbm/http/http.h>` does not declare it. There is no plaintext h2c. Build with OpenSSL and listen over `https://`.
-  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:878-884 -->
+  <!-- src: qbm/http/src/qbm/http/http.h:45-48; qbm/http/src/qbm/http/2/http2.h:899-905 -->
 - **The module is a compiled library, not header-only.** `src/qbm/http/2/http2.cpp` and `src/qbm/http/2/client.cpp` are real translation units in the qbm-http build. Integrate by `add_subdirectory(qb)` → `qb_load_modules("<path>/qbm")` → `target_link_libraries(app PRIVATE qbm::http)` and include `<qbm/http/http.h>`; do not `find_package` the headers alone.
   <!-- src: qbm/http/CMakeLists.txt:79-88,115-171 -->
 - **Never write a response with `stream_id == 0`.** Stream 0 is the HTTP/1.1 sentinel; `session::operator<<` discards such a response. Always carry `ctx->request().stream_id` through to the response (the framework does this for you when you use `ctx->complete()`).

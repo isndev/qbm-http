@@ -255,13 +255,13 @@ It is set in exactly the places the session knows the response can no longer be 
 | Trigger | What sets it |
 |:---|:---|
 | The peer closes the socket while a request is incomplete | `session::on(disconnected)`, on the `DisconnectedReason::ByUser` (`0`) path used by a TCP EOF |
-| The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)`, which every `extractSession()` of an HTTP/1.1 session runs, stops the session's watcher, cancels a live stream and calls `_context->cancel()` unless `suppress_response()` was called |
+| The session is handed to another handler — a WebSocket upgrade, an ownership transfer | `session::on(extracted)`, which every `extractSession()` of an HTTP/1.1 or HTTP/2 session runs, stops the session's watcher; the HTTP/1.1 session cancels a live stream and calls `_context->cancel()` unless `suppress_response()` was called, the HTTP/2 session cancels the context of every stream it holds |
 | The connection ends under a streamed response, for any reason — the peer, the inactivity timeout, a local `disconnect()` | `session::on(disconnected)`: a live stream is cancelled, and the context with it, whatever the reason |
 | A streamed response is aborted — `stream->abort()`, a stream dropped before `end()`, a piece past a declared length, an `end()` short of it | `session::stream_abort()`: the context is cancelled, then the connection closed |
 | The head of a streamed response cannot be written | `Context::begin_stream()`: the session closed the connection, the context is cancelled |
 | Your own code | `ctx->cancel()`; under a streamed head, the connection closes too |
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1121-1135 (the server runs it when a session class's own on() hides it) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1121-1135 (the server runs it when a session class's own on() hides it); qbm/http/src/qbm/http/2/http2.h:537-546 (HTTP/2 extracted: the watcher stops, every stream's context cancelled), :855-870 (the HTTP/2 server runs it when a session class's own on() hides it) -->
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :806-814 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1532-1538 (begin_stream: a head the session cannot write cancels), :1401-1402 (cancel: a streamed head keeps its status) -->
 
 Note what is **not** in that table, outside a streamed response: an explicit local `disconnect()` and a session

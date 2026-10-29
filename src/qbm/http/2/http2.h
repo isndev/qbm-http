@@ -546,6 +546,17 @@ public:
     }
 
     /**
+     * @brief Server hook (Huly QB-1182): the session is being extracted -- what its `on(event::extracted)` does: the
+     *        watcher stops, every stream's context is cancelled and released. The server's extractSession() calls it
+     *        when io_handler's probe cannot see that handler: a session class that declares an `on()` of its own
+     *        hides the base's overloads from a probe on its type, public ones included (name hiding ignores access).
+     */
+    void
+    http2_extracted() {
+        on(qb::io::async::event::extracted{});
+    }
+
+    /**
      * @brief Handle disconnection event
      * @param e Disconnection event
      */
@@ -842,6 +853,16 @@ public:
      */
     [[nodiscard]] std::pair<typename Session::transport_io_type, bool>
     extractSession(qb::uuid const &ident) {
+        // io_handler runs the session's on(event::extracted) itself when its probe sees it. A session class that
+        // declares an on() of its own hides that handler from the probe, public as it is (C++ name hiding ignores
+        // access): it is run from here then, before the transport leaves, as the HTTP/1.1 server does (Huly QB-1182).
+        if constexpr (!qb::has_on<Session, qb::io::async::event::extracted>) {
+            const auto it = this->sessions().find(ident);
+            if (it != this->sessions().end() && it->second) {
+                const auto session = it->second; // its handler cancels contexts whose hooks may change the sessions
+                session->http2_extracted();
+            }
+        }
         auto extracted = qb::io::async::io_handler<Derived, Session>::extractSession(ident);
         if (_drain.pending() && http_sessions_left() == 0)
             _drain.report(qb::http::drain_outcome::drained, "HTTP/2");
