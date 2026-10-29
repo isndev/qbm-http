@@ -394,10 +394,16 @@ protected:
     /// One request line on a connection of its own, with `Host: localhost`: the status line and the body.
     [[nodiscard]] std::pair<std::string, std::string>
     exchange(const std::string &method, const std::string &target) const {
+        return exchange_raw(method + " " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    }
+
+    /// @p request, its bytes as given, on a connection of its own: the status line and the body.
+    [[nodiscard]] std::pair<std::string, std::string>
+    exchange_raw(const std::string &request) const {
         qb::io::tcp::socket socket;
         if (socket.connect_v4("127.0.0.1", _port) != qb::io::SocketStatus::Done)
             return {"no connection", {}};
-        if (!write_all(socket, method + " " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+        if (!write_all(socket, request))
             return {"not sent", {}};
         const std::string wire = read_wire_response(socket);
         socket.disconnect();
@@ -571,8 +577,10 @@ TEST_F(RouterE2ETest, AnOriginFormDoubleSlashIsAPathNotAnAuthority) {
     EXPECT_EQ(exchange("GET", "///where/x"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=///where/x;host=;userinfo=;Host=localhost"}));
     EXPECT_EQ(exchange("GET", "//u@a/where/x").first, "HTTP/1.1 404 Not Found") << "its first segment is `u@a`: no route, no userinfo";
     EXPECT_EQ(exchange("GET", "/where/x"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host=localhost"}));
-    // The control: an absolute-form target is a URI, and the request's authority is its own (RFC 9112 §3.2.2).
-    EXPECT_EQ(exchange("GET", url("/where/x")), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=localhost"}));
+    // The control: an absolute-form target is a URI, and the request's authority is its own (RFC 9112 §3.2.2) -- the
+    // Host field's value too (QB-1186).
+    EXPECT_EQ(exchange("GET", url("/where/x")),
+              (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=localhost:" + std::to_string(_port)}));
 }
 
 // A target that is none of the four forms (RFC 9112 §3.2), one the URI parser refuses or one llhttp refuses itself
@@ -603,6 +611,70 @@ TEST_F(RouterE2ETest, ARefusedTargetIsAnsweredAfterThePipelinedRequestBeforeIt) 
     EXPECT_LT(first, refused) << wire;
     EXPECT_NE(wire.find("path=/where/first"), std::string::npos) << wire;
     EXPECT_EQ(wire.find("path=/where/third"), std::string::npos) << "a request after the refused target was served: " << wire;
+}
+
+// ---------------------------------------------------------------------------
+// The Host field names the authority once, and well (Huly QB-1186)
+// ---------------------------------------------------------------------------
+
+// An HTTP/1.1 request carries one Host field, `uri-host [ ":" port ]` (RFC 9112 §3.2); one without it, with two field
+// lines or with a value that is no host and port is answered 400. An origin-form target's authority IS that field
+// (QB-1177): with two, `header("Host")` read the first and a proxy before the server may route by the other.
+TEST_F(RouterE2ETest, AnHttp11RequestNamesItsHostInOneWellFormedField) {
+    using Wire     = std::pair<std::string, std::string>;
+    auto const get = [this](std::string const &version, std::string const &fields) {
+        return exchange_raw("GET /where/x " + version + "\r\n" + fields + "Connection: close\r\n\r\n");
+    };
+    for (std::string const fields :
+         {"", "Host: a\r\nHost: b\r\n", "Host: a\r\nhost: a\r\n", "Host: a b\r\n", "Host: u@a\r\n", "Host: a/b\r\n", "Host: a:99999\r\n",
+          "Host: a:b\r\n", "Host: :80\r\n", "Host: [127.0.0.1]\r\n"})
+        EXPECT_EQ(get("HTTP/1.1", fields).first, "HTTP/1.1 400 Bad Request") << fields;
+    EXPECT_EQ(get("HTTP/1.1", "Host: localhost:8080\r\n"),
+              (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host=localhost:8080"}));
+    EXPECT_EQ(get("HTTP/1.1", "Host: \t localhost:8080 \t \r\n"),
+              (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host=localhost:8080"}))
+        << "the whitespace around a field value is not part of it (RFC 9110 §5.5)";
+    EXPECT_EQ(get("HTTP/1.1", "hOsT: [::1]:8080\r\n"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host=[::1]:8080"}));
+    EXPECT_EQ(get("HTTP/1.1", "Host:\r\n"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=;userinfo=;Host="}))
+        << "an empty Host is the grammar's: a target URI with no authority (RFC 9112 §3.2)";
+    // HTTP/1.0 may send none; two, or a malformed one, are refused on any request.
+    EXPECT_EQ(get("HTTP/1.0", "").first, "HTTP/1.1 200 OK");
+    EXPECT_EQ(get("HTTP/1.0", "Host: a\r\nHost: b\r\n").first, "HTTP/1.1 400 Bad Request");
+    EXPECT_EQ(get("HTTP/1.0", "Host: a b\r\n").first, "HTTP/1.1 400 Bad Request");
+}
+
+// An absolute-form target names the authority and the Host field is ignored (RFC 9112 §3.2.2) -- but still required on
+// HTTP/1.1 and still checked: the request's Host field then reads the target's authority, so a reader of
+// `header("Host")` builds no link to the host the field named instead.
+TEST_F(RouterE2ETest, AnAbsoluteFormTargetsAuthorityIsTheHostFieldsValue) {
+    using Wire              = std::pair<std::string, std::string>;
+    std::string const local = "localhost:" + std::to_string(_port);
+    auto const        get   = [&](std::string const &fields) {
+        return exchange_raw("GET http://" + local + "/where/x HTTP/1.1\r\n" + fields + "Connection: close\r\n\r\n");
+    };
+    EXPECT_EQ(get("Host: evil.test\r\n"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=" + local}));
+    EXPECT_EQ(get("Host: " + local + "\r\n"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=" + local}));
+    for (std::string const fields : {"", "Host: a\r\nHost: b\r\n", "Host: a b\r\n"})
+        EXPECT_EQ(get(fields).first, "HTTP/1.1 400 Bad Request") << fields;
+}
+
+// Pipelined on one connection: a request without Host is refused as a target is -- the one before it answered, the
+// one after it never read.
+TEST_F(RouterE2ETest, ARequestWithoutHostIsAnsweredAfterThePipelinedRequestBeforeIt) {
+    qb::io::tcp::socket socket;
+    ASSERT_EQ(socket.connect_v4("127.0.0.1", _port), qb::io::SocketStatus::Done);
+    ASSERT_TRUE(write_all(socket, "GET /where/first HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                                  "GET /where/second HTTP/1.1\r\n\r\n"
+                                  "GET /where/third HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string wire = read_wire_response(socket);
+    socket.disconnect();
+    const auto first   = wire.find("HTTP/1.1 200 OK");
+    const auto refused = wire.find("HTTP/1.1 400 Bad Request");
+    ASSERT_NE(first, std::string::npos) << wire;
+    ASSERT_NE(refused, std::string::npos) << wire;
+    EXPECT_LT(first, refused) << wire;
+    EXPECT_EQ(wire.find("path=/where/second"), std::string::npos) << wire;
+    EXPECT_EQ(wire.find("path=/where/third"), std::string::npos) << "a request after the refused one was served: " << wire;
 }
 
 } // namespace

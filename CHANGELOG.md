@@ -131,7 +131,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `:authority` (RFC 9114 §4.3.1), which nghttp3 passes and `header("Host")` returned as a second authority the client
   chose. A malformed request is `RST_STREAM(PROTOCOL_ERROR)` on HTTP/2 and its stream refused with `H3_MESSAGE_ERROR`
   on HTTP/3; nghttp3 refuses several shapes itself, a connection error. An origin-form request's `uri().host()` is
-  empty: its authority is the `Host` field, which the server does not validate yet (QB-1186). `CsrfMiddleware` never
+  empty: its authority is the `Host` field, which the server checks (QB-1186, below). `CsrfMiddleware` never
   read an origin-form authority (QB-95). `uri().path()` is the target's own path on every protocol, `//` and empty
   segments included: a guard that tests a prefix (`uri().path().starts_with("/admin")`) does not see `//admin/x`,
   which the router serves as `/admin/x` -- guard the route group -- and a file path built by stripping one slash is
@@ -143,6 +143,40 @@ All notable changes to the qbm-http module are documented here. The format is ba
   and the one after it never read, `OPTIONS *` reaching the router), a target split over two reads, both readers'
   accepted and refused targets and fields, the authority grammar, HTTP/2 and HTTP/3 servers fed them -- each refusal
   on the layer that makes it --, the listing's links.
+
+- **The HTTP/1.1 server checks the `Host` field -- one, naming a host and an optional port, or the request is answered
+  400 --, an absolute-form target's authority is the field's value, and a field value ends at its last octet that is no
+  whitespace (Huly QB-1186).** The server read no `Host` field: an HTTP/1.1 request without one was served, two field
+  lines (`Host: a`, then `Host: b`) were served with `header("Host")` reading the first while a proxy before the server
+  may route by the other, and a value that is no authority -- `a b`, `u@a`, `a/b`, `a:99999`, `[127.0.0.1]` -- was
+  served (measured on the wire before this change); since QB-1177 that field alone is an origin-form request's authority
+  (RFC 9112 §3.3). The parser checks it once the header section has ended (RFC 9112 §3.2): an HTTP/1.1 request carries
+  one `Host` field -- an HTTP/1.0 request may carry none --, no request two field lines of it, and its value is empty (a
+  target URI with no authority) or an authority `qb::http::origin::is_request_authority()` accepts, the grammar of
+  `:authority` on HTTP/2 and HTTP/3; otherwise the session answers `400 Bad Request` and closes, after every request
+  received before it, as it answers a target that names no resource. An absolute-form target (§3.2.2), and CONNECT's
+  authority-form (§3.3), names the authority itself and the field is ignored: it is still required and checked, and it
+  then reads the target's authority as the client wrote it, so `GET http://site.test/ HTTP/1.1` with `Host: evil.test`
+  no longer hands `evil.test` to a handler that builds a link from `header("Host")` (an HTTP/1.0 request that sends no
+  `Host` has none: its URI names the authority). A field line's value excludes the whitespace around it (RFC 9112 §5):
+  llhttp drops the run before it and the parser kept the run after it, so `Host: a ` would have been refused and every
+  field -- a header section's and a trailer section's alike -- was read with its trailing spaces and tabs; they are
+  dropped, the whitespace inside a value kept. The request serializer writes no `Host` by itself: every client of the
+  module sets one, and a request written by hand through `pipe << request` needs one to reach a qbm-http server. The
+  check is on the path of every request, and the parser benchmark measures it: a first version cost the minimal request
+  10.9 % (A/B on the M4 Pro, three copies of each binary in a seeded random order, eight rounds); the authority grammar
+  now reads a 256-octet table in one pass -- 12.2 to 6.25 ns for `example.test`, which every caller of
+  `is_request_authority()` gains, HTTP/2's and HTTP/3's `:authority` and the redirect check included --, the parser
+  counts the `Host` lines where it stores them instead of looking the field up, and the trim tests the last octet first.
+  What remains: `BM_Http1Parse_WholeBuffer/corpus:0` 236.5 to 245.8 ns (+3.9 %), an eight-field request +2.0 %, inside
+  the gate's macOS threshold (5.64 %); the HTTP/1.1 request it measures costs microseconds end to end. Tests: the router
+  on the wire (each refused shape answered 400, an HTTP/1.0 request without `Host` served, an absolute-form target's
+  `Host` reading its authority, a pipelined request without `Host` refused after the one before it and the one after it
+  never read), the parser (each shape and its refusal status; the field a CONNECT, an absolute-form and an asterisk-form
+  target leave), the protocol (the 400 handed to the session; a value's end at each of the three places a field is
+  stored). The hand-written requests of the parser and framing tests carry a `Host` field, so each of their refusals is
+  still their own, and so does the parser benchmark's POST corpus (`corpus:2`, not gated), whose exact-message oracle
+  names the field: without it, the check would have refused the corpus and the preflight failed its three drivers.
 
 - **A request's `Cookie` header is read as a browser sends it: pairs split on `;` alone, a malformed pair dropped
   instead of the header, so a cookie another host plants can no longer replace, hide or wipe a prefixed one (Huly

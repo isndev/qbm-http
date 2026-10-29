@@ -61,8 +61,8 @@ struct RequestEnd {
  *          (the peer gone, `ctx.cancel()`): `ctx.response()` holds the status and headers of the head that left and
  *          an empty body, `ctx.streamed_bytes()` the body bytes the stream handed to the session, and a stream cut
  *          short keeps its head's status, with `ctx.is_cancelled()` set; the duration runs to that end. A request a
- *          session answers without routing it -- a request over a size limit or whose target names no resource,
- *          refused by the protocol -- reaches no observer.
+ *          session answers without routing it -- a request over a size limit, whose target names no resource or
+ *          Host no authority, refused by the protocol -- reaches no observer.
  *          An observer instance is shared by every request of its router: keep per-request state in the context.
  * @tparam SessionType The session type of the router.
  */

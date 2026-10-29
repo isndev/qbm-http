@@ -67,22 +67,24 @@ TEST_F(IncomingParserLimitsTest, OversizedUrlIsRejectedWhileParsing) {
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderNameIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "GET / HTTP/1.1\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
+    std::string               raw =
+        "GET / HTTP/1.1\r\nHost: example.test\r\n" + std::string(protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'H') + ": value\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, OversizedHeaderValueIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "GET / HTTP/1.1\r\nX-Test: " + std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') + "\r\n\r\n";
+    std::string               raw =
+        "GET / HTTP/1.1\r\nHost: example.test\r\nX-Test: " + std::string(protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'V') + "\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_USER);
 }
 
 TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "GET / HTTP/1.1\r\n";
-    for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT + 1; ++i) {
+    std::string               raw = "GET / HTTP/1.1\r\nHost: example.test\r\n"; // the Host field is one of the MAX_HEADERS_COUNT + 1
+    for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT; ++i) {
         raw += "X-Test-" + std::to_string(i) + ": value\r\n";
     }
     raw += "\r\n";
@@ -92,12 +94,14 @@ TEST_F(IncomingParserLimitsTest, TooManyHeadersAreRejectedWhileParsing) {
 
 TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAllocation) {
     qb::http::Parser<Request> at_limit;
-    std::string allowed = "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE) + "\r\n\r\n";
+    std::string               allowed =
+        "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE) + "\r\n\r\n";
     EXPECT_EQ(at_limit.parse(allowed.data(), allowed.size()), HPE_PAUSED);
     EXPECT_TRUE(at_limit.headers_completed());
 
     qb::http::Parser<Request> parser;
-    std::string raw = "POST /upload HTTP/1.1\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n";
+    std::string               raw =
+        "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: " + std::to_string(protocol_limits::MAX_BODY_SIZE + 1) + "\r\n\r\n";
 
     const auto result = parser.parse(raw.data(), raw.size());
     // llhttp maps qb's on_headers_complete refusal to this callback code and
@@ -113,7 +117,7 @@ TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAlloc
 TEST_F(IncomingParserLimitsTest, OversizedChunkIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
 
-    const std::string headers = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const std::string headers = "POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n";
     ASSERT_EQ(parser.parse(headers.data(), headers.size()), HPE_PAUSED);
     ASSERT_TRUE(parser.headers_completed());
 
@@ -145,7 +149,7 @@ TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero)
 
 TEST_F(IncomingParserLimitsTest, ChunkedTransferEncodingIsAcceptedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    std::string               raw = "POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     EXPECT_TRUE(parser.headers_completed());
@@ -153,7 +157,7 @@ TEST_F(IncomingParserLimitsTest, ChunkedTransferEncodingIsAcceptedWhileParsing) 
 
 TEST_F(IncomingParserLimitsTest, UnsupportedTransferEncodingIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "POST /upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    std::string               raw = "POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
 
     const auto err = parser.parse(raw.data(), raw.size());
     EXPECT_NE(err, HPE_OK);
@@ -163,6 +167,7 @@ TEST_F(IncomingParserLimitsTest, UnsupportedTransferEncodingIsRejectedWhileParsi
 TEST_F(IncomingParserLimitsTest, TransferEncodingWithContentLengthIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
     std::string               raw = "POST /upload HTTP/1.1\r\n"
+                                    "Host: example.test\r\n"
                                     "Transfer-Encoding: chunked\r\n"
                                     "Content-Length: 3\r\n\r\n";
 
@@ -196,7 +201,7 @@ TEST_F(IncomingParserLimitsTest, NoContentResponseIgnoresDeclaredContentLength) 
 TEST_F(IncomingParserLimitsTest, FragmentedHeaderFieldAndValueAreReassembledCorrectly) {
     qb::http::Parser<Request> parser;
 
-    const std::string chunk1 = "GET / HTTP/1.1\r\nX-Cus";
+    const std::string chunk1 = "GET / HTTP/1.1\r\nHost: example.test\r\nX-Cus";
     const std::string chunk2 = "tom-Hea";
     const std::string chunk3 = "der: value-";
     const std::string chunk4 = "part-1";
@@ -214,8 +219,8 @@ TEST_F(IncomingParserLimitsTest, FragmentedHeaderFieldAndValueAreReassembledCorr
 
 TEST_F(IncomingParserLimitsTest, IncrementalParsingDoesNotOvercountFragmentedHeaderFields) {
     qb::http::Parser<Request> parser;
-    std::string               raw = "GET / HTTP/1.1\r\n";
-    for (std::size_t i = 0; i < protocol_limits::MAX_HEADERS_COUNT; ++i) {
+    std::string               raw = "GET / HTTP/1.1\r\nHost: example.test\r\n"; // the Host field is one of the MAX_HEADERS_COUNT
+    for (std::size_t i = 1; i < protocol_limits::MAX_HEADERS_COUNT; ++i) {
         raw += "X-H-" + std::to_string(i) + ": v\r\n";
     }
     raw += "\r\n";
@@ -270,6 +275,58 @@ TEST_F(IncomingParserLimitsTest, FragmentedTargetIsReadByItsFormOnceItHasEnded) 
     }
 }
 
+// The Host field is checked once the header section has ended (RFC 9112 §3.2, Huly QB-1186): an HTTP/1.1 request
+// carries one, no request two field lines, and its value is empty or a host and an optional port -- otherwise the
+// refusal is 400. A target that names its authority itself (absolute-form, CONNECT's authority-form) overrides the
+// field, which then reads the target's authority as the client wrote it -- no port added, none dropped.
+TEST_F(IncomingParserLimitsTest, TheHostFieldIsCheckedOnceTheHeaderSectionEnds) {
+    auto const outcome = [](std::string const &raw) {
+        qb::http::Parser<Request> parser;
+        auto const                err = parser.parse(raw.data(), raw.size());
+        return std::pair<int, int>{err, parser.refusal_status()};
+    };
+    for (std::string const raw :
+         {"GET / HTTP/1.1\r\n\r\n", "GET / HTTP/1.1\r\nHost: a\r\nhost: a\r\n\r\n", "GET / HTTP/1.0\r\nHost: a\r\nHost: b\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: a b\r\n\r\n", "GET / HTTP/1.1\r\nHost: u@a\r\n\r\n", "GET / HTTP/1.1\r\nHost: a:65536\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: [fe80::1%25eth0]\r\n\r\n", "GET http://example.test/ HTTP/1.1\r\n\r\n",
+          "CONNECT example.test:443 HTTP/1.1\r\n\r\n", "OPTIONS * HTTP/1.1\r\n\r\n"})
+        EXPECT_EQ(outcome(raw), (std::pair<int, int>{HPE_CB_HEADERS_COMPLETE, HTTP_STATUS_BAD_REQUEST})) << raw;
+    for (std::string const raw :
+         {"GET / HTTP/1.0\r\n\r\n", "GET / HTTP/1.1\r\nHost:\r\n\r\n", "GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n",
+          "GET / HTTP/1.1\r\nHost: a:0\r\n\r\n", "GET / HTTP/1.1\r\nHost: xn--bcher-kva.example:65535\r\n\r\n"})
+        EXPECT_EQ(outcome(raw), (std::pair<int, int>{HPE_PAUSED, 0})) << raw;
+
+    auto const host_field = [](std::string const &raw) -> std::string {
+        qb::http::Parser<Request> parser;
+        if (parser.parse(raw.data(), raw.size()) != HPE_PAUSED)
+            return "refused";
+        return parser.get_parsed_message().header("Host");
+    };
+    EXPECT_EQ(host_field("GET /x HTTP/1.1\r\nHost: Example.Test:8080\r\n\r\n"), "Example.Test:8080") << "origin-form: the field, as sent";
+    EXPECT_EQ(host_field("GET http://example.test:8080/x HTTP/1.1\r\nHost: evil.test\r\n\r\n"), "example.test:8080");
+    EXPECT_EQ(host_field("GET https://example.test:443/x HTTP/1.1\r\nHost: evil.test\r\n\r\n"), "example.test:443");
+    EXPECT_EQ(host_field("GET ftp://example.test/x HTTP/1.1\r\nHost: evil.test\r\n\r\n"), "example.test")
+        << "not the default port the URI parser knows for the scheme";
+    EXPECT_EQ(host_field("GET http://example.test?q=1 HTTP/1.1\r\nHost: evil.test\r\n\r\n"), "example.test");
+    EXPECT_EQ(host_field("CONNECT [::1]:443 HTTP/1.1\r\nHost: evil.test\r\n\r\n"), "[::1]:443");
+    EXPECT_EQ(host_field("OPTIONS * HTTP/1.1\r\nHost: example.test\r\n\r\n"), "example.test") << "asterisk-form: the field";
+}
+
+// reset() starts the next request's Host count afresh: a parser that refused a malformed or a doubled Host field,
+// and one that accepted a request, judges the next request's field on its own.
+TEST_F(IncomingParserLimitsTest, AResetParserJudgesTheNextRequestsHostAlone) {
+    qb::http::Parser<Request> parser;
+    std::string const         next = "GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+    for (std::string const &first :
+         {std::string{"GET / HTTP/1.1\r\nHost: a b\r\n\r\n"}, std::string{"GET / HTTP/1.1\r\nHost: a\r\nHost: a\r\n\r\n"}, next}) {
+        (void) parser.parse(first.data(), first.size());
+        parser.reset();
+        EXPECT_EQ(parser.parse(next.data(), next.size()), HPE_PAUSED) << "after " << first;
+        EXPECT_EQ(parser.refusal_status(), 0) << "after " << first;
+        parser.reset();
+    }
+}
+
 TEST_F(IncomingParserLimitsTest, FragmentedUrlRespectsCumulativeLimit) {
     qb::http::Parser<Request> parser;
 
@@ -288,7 +345,7 @@ class IncomingParserHappyPathTest : public ::testing::Test {};
 
 TEST_F(IncomingParserHappyPathTest, ContentLengthBodyIsCapturedAndMessageCompletes) {
     qb::http::Parser<Request> parser;
-    const std::string         raw = "POST /x HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+    const std::string         raw = "POST /x HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\nhello";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     EXPECT_TRUE(parser.headers_completed());
@@ -310,6 +367,7 @@ TEST_F(IncomingParserHappyPathTest, ContentLengthBodyIsCapturedAndMessageComplet
 TEST_F(IncomingParserHappyPathTest, RepeatedHeaderFieldIsStoredAsMultipleValues) {
     qb::http::Parser<Request> parser;
     const std::string         raw = "GET / HTTP/1.1\r\n"
+                                    "Host: example.test\r\n"
                                     "X-Multi: alpha\r\n"
                                     "X-Multi: beta\r\n\r\n";
 
@@ -341,7 +399,7 @@ TEST_F(IncomingParserHappyPathTest, KeepAliveDefaultsTrueForHttp11) {
 
 TEST_F(IncomingParserHappyPathTest, ConnectionCloseDisablesKeepAliveOnHttp11) {
     qb::http::Parser<Request> parser;
-    const std::string         raw = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const std::string         raw = "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n";
 
     EXPECT_EQ(parser.parse(raw.data(), raw.size()), HPE_PAUSED);
     ASSERT_TRUE(parser.headers_completed());
@@ -373,6 +431,7 @@ TEST_F(IncomingParserHappyPathTest, ConnectionKeepAliveEnablesKeepAliveOnHttp10)
 TEST_F(IncomingParserHappyPathTest, UpgradeFlagIsSetForConnectionUpgrade) {
     qb::http::Parser<Request> parser;
     const std::string         raw = "GET / HTTP/1.1\r\n"
+                                    "Host: example.test\r\n"
                                     "Connection: Upgrade\r\n"
                                     "Upgrade: h2c\r\n\r\n";
 

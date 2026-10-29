@@ -30,7 +30,7 @@ The WebSocket subsystem is split across a few namespaces. You normally only touc
 | `WebSocket<T, Transport>` | `qb::http::ws` | CRTP client. `T` receives `connected` / `message` / `ping` / `pong` / `closed` events. |
 | `WebSocketSecure<T>` | `qb::http::ws` | `WebSocket<T, qb::io::transport::stcp>` — the TLS-backed client. |
 | `client`, `client_secure` (`Client<Transport>`) | `qb::http::ws` | Callback client: register lambdas instead of subclassing. |
-| `WebSocketRequest` | `qb::http` | A `Request` preloaded with the four upgrade headers. |
+| `WebSocketRequest` | `qb::http` | A `Request` preloaded with the four upgrade headers -- not `Host`: set it before writing one by hand, or a qbm-http server answers 400 (Huly QB-1186). |
 | `generateKey()` | `qb::http::ws` | A fresh base64 `Sec-WebSocket-Key` (16 random bytes). |
 
 A few mechanics worth knowing before you wire anything up:
