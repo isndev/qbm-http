@@ -92,7 +92,7 @@ The caller owns the returned raw `SSL_CTX`. Handing one to `listener::init(SSL_C
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds a `qb::io::ssl::Context` from the cert and key with ALPN `{"http/1.1"}` folded in, installs it on the `saccept` transport, and starts listening.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1132-1138 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1157-1163 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -132,7 +132,7 @@ int main(int argc, char *argv[]) {
 
 `listen` returns `false` if the certificate or key fails to load, so check the result. Under the hood it does exactly this for a secure transport:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1155-1159 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1180-1184 -->
 ```cpp
 using tpt = std::decay_t<decltype(this->transport())>;
 if constexpr (tpt::is_secure()) {
@@ -147,11 +147,11 @@ then publishes the new context through `reload_context`. A failed certificate lo
 the serving context in place. The `if constexpr (tpt::is_secure())` keeps this operation
 out of plaintext listeners, which only bind the socket.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1183-1186,1197-1201; qbm/http/src/qbm/http/detail/server_tls.cpp:11-36; qb/src/qb/io/tcp/ssl/context.h:178,253,255 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1208-1211,1222-1226; qbm/http/src/qbm/http/detail/server_tls.cpp:11-36; qb/src/qb/io/tcp/ssl/context.h:178,253,255 -->
 
 The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` and only listens.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1151,1160-1164 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1176,1185-1189 -->
 
 ### Tuning the context before listening
 
@@ -180,7 +180,7 @@ if (!server->listen(qb::io::uri("tcp://0.0.0.0:8443"), std::move(ctx))) { /* han
 
 Use `listen_no_start(uri, context)` to bind while deferring accepts until `start()`. Both overloads require an explicitly typed `Context`; the historical path overload `listen(uri,{})` remains unambiguous. These APIs are absent on plaintext servers and SSL-off builds.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1183,1207,1218; qbm/http/src/qbm/http/2/http2.h:918,937,948 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1208,1232,1243; qbm/http/src/qbm/http/2/http2.h:918,937,948 -->
 
 ### Rotating certificates and policy
 
@@ -188,7 +188,7 @@ Call `server->reload_certificates(new_cert, new_key)` on the server's owner thre
 
 This convenience method replaces the **entire configuration with `Context::server` defaults**: it does not preserve custom mTLS policy, cipher lists, callbacks, SNI selection, session caches or ticket configuration. To retain a custom policy, construct a complete fresh context and call `set_tls_context(std::move(context))`. The new context has independent session state; resumption across rotation is not guaranteed. File loading can be prepared off the event loop, but installation must happen on its owner thread.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1183,1197; qbm/http/src/qbm/http/2/http2.h:918,929 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1208,1222; qbm/http/src/qbm/http/2/http2.h:918,929 -->
 
 **Copies of `Context` share `SSL_CTX`; copying does not clone configuration.** The HTTP setter changes the supplied context's ALPN before installation. Supply an unpublished context, never a copy of one serving another listener or accepted sockets. After publication, treat it as immutable. Rotation swaps the listener's reference to a new context rather than modifying the old object. There is no cross-thread synchronization added by these methods.
 
@@ -243,7 +243,7 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically, ignoring ASCII case. A mixed-case HTTPS URI routes through the secure `async::HTTPS` session (`stcp` transport); HTTP routes through plaintext. Qb-io supplies the default port when a mixed-case URI omits one. Unsupported schemes are rejected before connecting, and a build without SSL support rejects HTTPS with 503 instead of using TCP. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1543-1570,1514-1517,1473-1474 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1568-1595,1539-1542,1498-1499 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -258,7 +258,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1550 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1575 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -305,7 +305,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server selects from `{"http/1.1"}`, an HTTP/2 server selects from `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). Both server `listen` forms and rotation pin the appropriate list through the shared server helper. Prepare any SNI-selected child with the same list before publication; for raw contexts without qb server-role state, use `qb::io::ssl::set_alpn_protos_server` explicitly.
 
-<!-- src: qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/1.1/http.h:1183-1186; qbm/http/src/qbm/http/2/http2.h:918-920 -->
+<!-- src: qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/1.1/http.h:1208-1211; qbm/http/src/qbm/http/2/http2.h:918-920 -->
 
 ## Peer verification and trust
 

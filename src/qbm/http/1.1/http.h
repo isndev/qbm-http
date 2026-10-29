@@ -125,10 +125,13 @@ public:
 private:
     friend qb::io::async::io<session>;
     friend class qb::io::async::io_handler<Handler, Derived>;
-    friend struct has_method_on<session, void, qb::io::async::event::pending_write>;
-    friend struct has_method_on<session, void, qb::io::async::event::eos>;
-    friend struct has_method_on<session, void, qb::io::async::event::extracted>;
-    friend struct has_method_on<session, void, qb::io::async::event::disconnected>;
+    // The detector is befriended whole (Huly QB-1182). io<> probes this base for pending_write, eos and disconnected,
+    // but io_handler::extractSession() probes the session it registered -- the concrete type deriving from this one --
+    // for extracted: befriended for `session` alone, that handler was invisible there, and no extraction of an
+    // HTTP/1.1 session ran it. Befriended whole, the detector sees every on() of this session from a probe on any
+    // type, a session registered as a class deriving from the concrete one included.
+    template <typename, typename, typename...>
+    friend struct ::has_method_on;
     friend Protocol;
     friend qb::io::async::with_timeout<session>;
 
@@ -562,6 +565,18 @@ public:
      */
     ~session() {
         cancel_live_stream();
+    }
+
+    /**
+     * @brief Server hook (Huly QB-1182): the session is being extracted -- what its `on(event::extracted)` does: the
+     *        watcher stops, the context being answered is cancelled (a no-op after `suppress_response()`) and
+     *        released, the queued requests are dropped. The server's extractSession() calls it when io_handler's
+     *        probe cannot see that handler: a session class that declares an `on()` of its own -- the
+     *        `on(qb::http::event::disconnected &&)` this session forwards to it, say -- hides the base's overloads.
+     */
+    void
+    http1_extracted() {
+        on(qb::io::async::event::extracted{});
     }
 
     /**
@@ -1098,6 +1113,16 @@ public:
      */
     [[nodiscard]] std::pair<typename Session::transport_io_type, bool>
     extractSession(qb::uuid const &ident) {
+        // io_handler runs the session's on(event::extracted) itself when its probe sees it. A session class that
+        // declares an on() of its own hides that handler from the probe (C++ name hiding): it is run from here
+        // then, before the transport leaves, so every HTTP/1.1 session is extracted the same way (Huly QB-1182).
+        if constexpr (!qb::has_on<Session, qb::io::async::event::extracted>) {
+            const auto it = this->sessions().find(ident);
+            if (it != this->sessions().end() && it->second) {
+                const auto session = it->second; // its handler may cancel a context whose hooks change the sessions
+                session->http1_extracted();
+            }
+        }
         auto extracted = qb::io::async::io_handler<Derived, Session>::extractSession(ident);
         if (_drain.pending() && http_sessions_left() == 0)
             _drain.report(qb::http::drain_outcome::drained, "HTTP/1.1");
@@ -1817,6 +1842,10 @@ public:
         : Base(server_handler) {}
 };
 
+// io_handler::extractSession() runs a session's extracted handler only when its probe sees it: a session that stopped
+// being seen would keep watching a socket it gave away and never cancel its context, silently (Huly QB-1182).
+static_assert(qb::has_on<DefaultSession, qb::io::async::event::extracted>, "the HTTP/1.1 session's extracted handler must be visible");
+
 /**
  * @brief Generic HTTP/1.1 application server.
  *
@@ -1883,6 +1912,9 @@ public:
     explicit DefaultSecureSession(Server<DefaultSecureSession> &server_handler)
         : Base(server_handler) {}
 };
+
+static_assert(qb::has_on<DefaultSecureSession, qb::io::async::event::extracted>,
+              "the HTTPS/1.1 session's extracted handler must be visible (Huly QB-1182)");
 
 /**
  * @brief Generic HTTP/1.1 application server.

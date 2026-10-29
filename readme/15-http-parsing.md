@@ -220,7 +220,7 @@ The parser is hardened against framing attacks. Its limits are a `qb::http::requ
 
 The body limit is checked twice: once against the declared `Content-Length` *before* any body buffer is reserved (so an oversized declaration is rejected before allocation), and again against the running total as body bytes arrive. Whatever the limit, the protocol hands the refused request to the session (`http1_refuse_request`), which answers it once every request received before it is answered, and drops what the client sends meanwhile. The limits are read from the server when a request begins (the session's `http_request_limits()` hook), so a new value applies to the next request. The HTTP/2 and HTTP/3 servers take the same `request_limits` and give the same answers (Huly QB-94).
 
-<!-- src: src/qbm/http/1.1/protocol/base.h:94-111,263-265,479-481,516-519,716-718,751-753; src/qbm/http/1.1/http.h:642-649,662-667,861-863 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:94-111,263-265,479-481,516-519,716-718,751-753; src/qbm/http/1.1/http.h:657-664,677-682,876-878 -->
 
 Two framing defenses go beyond size limits, both in `on_headers_complete`:
 

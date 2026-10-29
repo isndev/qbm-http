@@ -993,6 +993,9 @@ public:
         : Base(server_handler) {}
 };
 
+// io_handler::extractSession() runs a session's extracted handler only when its probe sees it (Huly QB-1182).
+static_assert(qb::has_on<DefaultSession, qb::io::async::event::extracted>, "the HTTP/2 session's extracted handler must be visible");
+
 /**
  * @brief A general-purpose HTTP/2 server class.
  *

@@ -112,7 +112,7 @@ The server is the same shape as the HTTP/1.1 server (acceptor + sessions + route
 `qb::http2::make_server()` returns a `std::unique_ptr<qb::http2::Server<>>` using the built-in `DefaultSession`. Define routes on its `router()`, call `compile()`, then `listen` with your certificate and key, `start()`, and drive the qb-io reactor.
 
 ```cpp
-// src: qbm/http/src/qbm/http/2/http2.h:1006-1015 (Server), :1045-1049 (make_server), :878-884 (listen)
+// src: qbm/http/src/qbm/http/2/http2.h:1009-1018 (Server), :1048-1052 (make_server), :878-884 (listen)
 #include <qbm/http/http.h>          // umbrella; pulls <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
 #include <filesystem>
@@ -184,7 +184,7 @@ public:
 ```
 
 `qb::http2::use<Derived>` exposes three CRTP aliases — `session<ServerHandler>`, `io_handler<SessionType>`, and `server<SessionType>` — and `make_server<MySession>()` constructs the matching server. The `DefaultSession` / `Server<>` pair used by `make_server()` is exactly this template instantiated for you.
-<!-- src: qbm/http/src/qbm/http/2/http2.h:959-969,983-986,1006-1015,1045-1049 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:959-969,983-986,1009-1018,1048-1052 -->
 
 ### Sending responses and resetting streams
 
