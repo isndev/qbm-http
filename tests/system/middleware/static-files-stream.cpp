@@ -24,7 +24,9 @@
  *     of its Content-Length; a session that drops what it is given (it is disconnecting) ends the request cancelled,
  *     not delivered, without the whole file read in one turn; an HTTP/1.0 request streams under its length;
  *     pipelined requests stay in order; a file being downloaded can be renamed away, replaced and its old name removed,
- *     on Windows too, the download reading the old bytes to its end;
+ *     on Windows too, the download reading the old bytes to its end; a download parked mid-file releases its
+ *     producer, its stream and its file (its descriptor, on Linux) when the peer leaves, the request is cancelled or
+ *     the stream is aborted;
  *   - PRE_RESPONSE_SEND hooks: one that drops the length streams chunked; one that leaves a head a stream cannot
  *     carry gets the body read whole, under the cap, and over it a 413 with the head of the historical one, a framing
  *     it added dropped; one that answers 304 leaves the file unread; one that ends the request gets no stream, and a
@@ -172,6 +174,12 @@ using Router = qb::http::Router<FileSession>;
 
 // The session of this suite streams: were it to fall back to buffering, the cases below would prove nothing.
 static_assert(qb::http::streaming_session<FileSession>);
+
+using FileStream = qb::http::ResponseStream<FileSession>;
+
+/// The stream of a streamed download, by its X-Probe header, held WEAKLY: its producer (the static files' streamer)
+/// owns it, and owns the open file. Expired, it says the producer, the stream and the file are all released.
+inline std::map<std::string, std::weak_ptr<FileStream>> g_streams; ///< under g_mutex
 
 // ------------------------------------------------------------------------------------------------ the raw client
 /// A raw non-blocking client (the same as the response-stream suite's): TCP, or TLS with the server's self-signed
@@ -366,6 +374,7 @@ protected:
         {
             std::lock_guard lock(g_mutex);
             g_records.clear();
+            g_streams.clear();
         }
         g_max_pending = 0;
         g_high_mark   = 0;
@@ -424,6 +433,65 @@ add_pre_send_hook(Router &router, std::function<void(qb::http::Context<FileSessi
         next();
     });
 }
+
+// ------------------------------------------------------------------------------------------------ what a download holds
+/// A middleware ahead of the static files that records the stream they began -- they run synchronously inside
+/// next(), so a streamed body's producer is parked by then -- then hands it to `then` (a cancel, an abort).
+inline void
+watch_stream(Router                                                                                                           &router,
+             std::function<void(std::shared_ptr<qb::http::Context<FileSession>> const &, std::shared_ptr<FileStream> const &)> then = {}) {
+    router.use([then = std::move(then)](std::shared_ptr<qb::http::Context<FileSession>> ctx, std::function<void()> next) {
+        next();
+        const auto stream = ctx->stream();
+        if (!stream)
+            return;
+        {
+            std::lock_guard lock(g_mutex);
+            g_streams[std::string(ctx->request().header("X-Probe"))] = stream;
+        }
+        if (then)
+            then(ctx, stream);
+    });
+}
+
+/// Whether the stream of `probe` was recorded (`seen`), and whether it is gone with its producer (`released`).
+inline bool
+stream_seen(std::string const &probe) {
+    std::lock_guard lock(g_mutex);
+    return g_streams.count(probe) != 0;
+}
+inline bool
+stream_released(std::string const &probe) {
+    std::lock_guard lock(g_mutex);
+    const auto      it = g_streams.find(probe);
+    return it != g_streams.end() && it->second.expired();
+}
+
+/// Starts a download of huge.bin behind a client that reads nothing, and returns once it is parked mid-file, its
+/// stream recorded and alive. Under ASSERT_NO_FATAL_FAILURE.
+inline void
+park_download(RawClient &c, std::uint16_t port, std::string const &probe) {
+    ASSERT_TRUE(c.connect(port, kClientRcv));
+    ASSERT_TRUE(c.send(request("/static/huge.bin", probe)));
+    ASSERT_TRUE(wait_for([] { return g_max_pending.load() >= kHighMark; })) << "the output never reached the mark";
+    ASSERT_TRUE(wait_for([&] { return stream_seen(probe); })) << "the download did not stream";
+    EXPECT_FALSE(stream_released(probe)) << "the producer must hold its stream while the download is parked";
+}
+
+#ifdef __linux__
+/// The descriptors of this process -- the server runs on one of its threads -- open on `file` (a canonical path).
+inline int
+open_descriptors_on(std::filesystem::path const &file) {
+    int             n = 0;
+    std::error_code ec;
+    for (auto const &entry : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code link_ec;
+        if (std::filesystem::read_symlink(entry.path(), link_ec) == file && !link_ec)
+            ++n;
+    }
+    return n;
+}
+#endif
 
 } // namespace static_files_stream_test
 
@@ -713,6 +781,99 @@ TEST_F(StaticFilesStreamTest, AFileBeingDownloadedCanBeRenamedAwayReplacedAndRem
     EXPECT_TRUE(next.response.body == fresh) << "the next request must get the file now at that name";
     std::error_code ec;
     EXPECT_FALSE(std::filesystem::exists(root / "huge.old", ec)) << "the old name outlived the download";
+}
+
+// ------------------------------------------------------------------------------------------------ what a download holds
+// A parked producer and its stream own each other -- the stream holds the drain callback that holds the producer,
+// which holds the stream and the open file -- until the stream runs or releases that callback. Every way a download
+// ends mid-body must break the cycle: the peer leaving, the application cancelling the request, the application
+// aborting the stream. A missed one leaks a descriptor and a piece per download, every other case green (Huly
+// QB-101). Each case first sees the stream -- and on Linux the descriptor -- alive while the download is parked, so
+// the release it then waits for (within the suite's bounded wait) is not the probe failing to see anything.
+
+TEST_F(StaticFilesStreamTest, APeerThatLeavesMidBodyReleasesTheProducerItsStreamAndTheFile) {
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto file   = std::filesystem::canonical(root / "huge.bin");
+    auto       server = serve(options(), [](Router &router) { watch_stream(router); });
+    ASSERT_TRUE(server->ready());
+    {
+        RawClient c;
+        ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "left"));
+#ifdef __linux__
+        EXPECT_EQ(open_descriptors_on(file), 1) << "the download in flight holds the file open";
+#endif
+        c.close();
+    }
+    ASSERT_TRUE(wait_for([] { return record_of("left").has_value(); })) << "the request never ended after its peer left";
+    EXPECT_TRUE(record_of("left")->cancelled);
+    EXPECT_TRUE(wait_for([] { return stream_released("left"); })) << "the producer and its stream outlived the peer";
+#ifdef __linux__
+    EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the peer";
+#endif
+}
+
+TEST_F(StaticFilesStreamTest, ACancelMidBodyReleasesTheProducerItsStreamAndTheFile) {
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto file   = std::filesystem::canonical(root / "huge.bin");
+    auto       server = serve(options(), [](Router &router) {
+        // The application cancels the request a little later, the producer parked: from a timer of the server's loop.
+        watch_stream(router, [](std::shared_ptr<qb::http::Context<FileSession>> const &ctx, std::shared_ptr<FileStream> const &) {
+            qb::io::async::callback(
+                [weak = std::weak_ptr<qb::http::Context<FileSession>>(ctx)] {
+                    if (auto c = weak.lock())
+                        c->cancel("the application ends the download");
+                },
+                50ms);
+        });
+    });
+    ASSERT_TRUE(server->ready());
+    RawClient c;
+    ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "cancelled"));
+#ifdef __linux__
+    EXPECT_EQ(open_descriptors_on(file), 1) << "the download in flight holds the file open";
+#endif
+    ASSERT_TRUE(wait_for([] { return record_of("cancelled").has_value(); })) << "the request was never cancelled";
+    EXPECT_TRUE(record_of("cancelled")->cancelled);
+    EXPECT_LT(record_of("cancelled")->streamed, kHuge);
+    EXPECT_TRUE(wait_for([] { return stream_released("cancelled"); })) << "the producer and its stream outlived the cancellation";
+#ifdef __linux__
+    EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the cancellation";
+#endif
+    c.read_until([] { return false; }, 5s);
+    EXPECT_TRUE(c.eof) << "a cancelled download closes its connection";
+}
+
+TEST_F(StaticFilesStreamTest, AnAbortMidBodyReleasesTheProducerItsStreamAndTheFile) {
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto file   = std::filesystem::canonical(root / "huge.bin");
+    auto       server = serve(options(), [](Router &router) {
+        // The application aborts the stream under the parked producer (a deadline of its own, say).
+        watch_stream(router, [](std::shared_ptr<qb::http::Context<FileSession>> const &, std::shared_ptr<FileStream> const &stream) {
+            qb::io::async::callback(
+                [weak = std::weak_ptr<FileStream>(stream)] {
+                    if (auto s = weak.lock())
+                        s->abort();
+                },
+                50ms);
+        });
+    });
+    ASSERT_TRUE(server->ready());
+    RawClient c;
+    ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "aborted"));
+#ifdef __linux__
+    EXPECT_EQ(open_descriptors_on(file), 1) << "the download in flight holds the file open";
+#endif
+    ASSERT_TRUE(wait_for([] { return record_of("aborted").has_value(); })) << "the aborted request never ended";
+    EXPECT_TRUE(record_of("aborted")->cancelled) << "an aborted stream cancels its request";
+    EXPECT_TRUE(wait_for([] { return stream_released("aborted"); })) << "the producer and its stream outlived the abort";
+#ifdef __linux__
+    EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the abort";
+#endif
+    c.read_until([] { return false; }, 5s);
+    EXPECT_TRUE(c.eof) << "an aborted download closes its connection";
 }
 
 TEST_F(StaticFilesStreamTest, AnHttp10RequestStreamsUnderItsLengthThenTheConnectionCloses) {
