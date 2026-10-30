@@ -1316,6 +1316,13 @@ private:
             if (parsed_method == qb::http::method::UNINITIALIZED) {
                 return false;
             }
+            // CONNECT names a tunnel by :authority alone (RFC 9114 §4.4), and this server opens none: one without
+            // :scheme and :path is refused above, nghttp3 refuses `CONNECT` with them -- but not `connect`, which the
+            // method table reads as CONNECT in any case and which reached the router as a CONNECT on an ordinary path
+            // (Huly QB-1177). HTTP/2 refuses both shapes alike; HTTP/1.1 routes an authority-form CONNECT.
+            if (parsed_method == qb::http::method::CONNECT) [[unlikely]] {
+                return false;
+            }
             // A `host` field names the authority too: one, and :authority's (RFC 9114 §4.3.1). Read otherwise,
             // `header("Host")` was a second authority the client chose. Without :authority, it is the request's
             // authority: one of the two, or no URI is composed, whatever the scheme (Huly QB-1195). The fields over

@@ -720,6 +720,38 @@ TEST(Http3ConnectionDirect, TheProxyAuthenticationFieldsCrossAHeaderSection) {
 }
 
 /**
+ * @test A CONNECT request never reaches the server (Huly QB-1177)
+ * @brief CONNECT names a tunnel by :authority alone (RFC 9114 section 4.4), and the server opens none. Without :scheme
+ *        and :path it is refused by this module, the stream alone; with them, nghttp3 refuses `CONNECT` itself, a
+ *        connection error -- but not `connect`, which the method table reads as CONNECT and which reached the router
+ *        as a CONNECT on an ordinary path. HTTP/2 refuses both shapes; HTTP/1.1 routes an authority-form CONNECT.
+ */
+TEST(Http3ConnectionDirect, ACONNECTRequestNeverReachesTheServer) {
+    {
+        Pair pair;
+        pair.server.read_stream(
+            0, h3_headers_frame(0, {{":method", "connect"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}}), true);
+        pair.server.read_stream(4, h3_headers_frame(4, {{":method", "CONNECT"}, {":authority", "example.test:443"}}), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        ASSERT_EQ(pair.server_owner.resets.size(), 2u) << "each stream refused";
+        for (auto const &[stream_id, code] : pair.server_owner.resets) {
+            EXPECT_EQ(code, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << stream_id;
+        }
+        EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
+        pair.server.read_stream(8, h3_headers_frame(8, request_fields("/next")), true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "the next stream is served";
+    }
+    { // nghttp3's own verdict: a connection error
+        Pair pair;
+        pair.server.read_stream(
+            0, h3_headers_frame(0, {{":method", "CONNECT"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}}), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        ASSERT_TRUE(pair.server_owner.close.has_value());
+        EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    }
+}
+
+/**
  * @test A field value with SP or HTAB at an end never reaches the server (Huly QB-1191)
  * @brief Such a value is malformed (RFC 9114 section 4.2, RFC 9110 section 5.5's field-content). nghttp3 (1.18.0) removes
  *        the field before this module sees it -- the request is served without it, which this pins, so that a nghttp3

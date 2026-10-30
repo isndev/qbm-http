@@ -2012,6 +2012,33 @@ TEST(HTTP2ServerProtocol, EachRequestPseudoHeaderComesOnceAndNotEmpty) {
     EXPECT_EQ(io.request_count, 1) << "the four, once each, not empty";
 }
 
+// CONNECT names a tunnel by :authority alone (RFC 9113 section 8.5), and the server opens none: a CONNECT carrying
+// :scheme and :path is malformed, and reached the router as a CONNECT on an ordinary path (Huly QB-1177), as did a
+// `connect` (the method table reads any case); one without them is refused as missing them. A stream error each, the
+// connection serving the next stream. HTTP/1.1 routes an authority-form CONNECT.
+TEST(HTTP2ServerProtocol, ACONNECTRequestIsStreamError) {
+    using Fields = std::vector<qb::protocol::hpack::HeaderField>;
+    const std::vector<std::pair<std::string, Fields>> shapes{
+        {"CONNECT with :scheme and :path", {{":method", "CONNECT"}, {":scheme", "https"}, {":authority", "example.test:443"}, {":path", "/"}}},
+        {"connect with :scheme and :path", {{":method", "connect"}, {":scheme", "https"}, {":authority", "example.test:443"}, {":path", "/"}}},
+        {"CONNECT, :authority alone", {{":method", "CONNECT"}, {":authority", "example.test:443"}}},
+    };
+    for (auto const &[label, fields] : shapes) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
+                   encode_hpack_headers(default_request_headers("/next")));
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok()) << label;
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR) << label;
+        ASSERT_EQ(io.request_count, 1) << label << ": only the next stream is routed";
+        EXPECT_EQ(io.last_request_stream_id, 3u) << label;
+    }
+}
+
 TEST(HTTP2ServerProtocol, DuplicateMethodPseudoHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

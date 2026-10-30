@@ -587,6 +587,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   number or that the body contradicts, refuse the stream. Tests: the heap the stream keeps (glibc builds without a
   sanitizer), and the verdicts at receipt.
 
+- **HTTP/2 and HTTP/3 refuse a CONNECT request, either shape (Huly QB-1177).** CONNECT names a tunnel by `:authority`
+  alone (RFC 9113 §8.5, RFC 9114 §4.4), and neither server opens one. A CONNECT carrying `:scheme` and `:path`, which
+  RFC 9113 §8.5 makes malformed, reached the HTTP/2 router as a CONNECT on an ordinary path, and so did a `connect` in
+  any case on HTTP/2 and HTTP/3 -- the method table reads methods without regard to case, and nghttp3 matches
+  `CONNECT` in capitals only. Both are now a stream error (`RST_STREAM(PROTOCOL_ERROR)`, `H3_MESSAGE_ERROR`), as a
+  CONNECT without `:scheme` and `:path` already was; nghttp3 still closes the connection for an uppercase `CONNECT`
+  carrying them. HTTP/1.1 is unchanged: it routes an authority-form CONNECT. Tests: each shape on HTTP/2, the next
+  stream served; on the direct HTTP/3 pair, `connect` and a CONNECT without `:scheme` and `:path` refused, the
+  connection serving on, and nghttp3's own verdict.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

@@ -1905,6 +1905,14 @@ private:
                 this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :method value");
                 return false;
             }
+            // CONNECT names a tunnel by :authority alone (RFC 9113 §8.5): a CONNECT carrying :scheme and :path is
+            // malformed, and one without them asks for a tunnel this server does not open -- refused above, as it
+            // misses them. Both are a stream error, as on HTTP/3; the malformed one reached the router as a CONNECT on
+            // an ordinary path (Huly QB-1177). HTTP/1.1 routes an authority-form CONNECT.
+            if (method_from_string_view == qb::http::method::CONNECT) [[unlikely]] {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "CONNECT with :scheme and :path is malformed (RFC 9113 §8.5)");
+                return false;
+            }
             stream.assembled_request.method() = method_from_string_view;
 
             // The URI the three fields name, its authority the request's: a :path that is no absolute path, a
