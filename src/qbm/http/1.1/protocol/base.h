@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <climits>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -170,6 +171,9 @@ namespace qb::http {
  * A Parser holds no pointer to itself, so its implicit copy and move are complete at
  * every phase (request line, header block, body): the copy continues the parse into its
  * own message and leaves the source alone.
+ *
+ * Every callback llhttp calls is noexcept, and one that fails to allocate refuses the message --
+ * 503 (refuse_for_exception()) -- so no exception unwinds through llhttp's C frames.
  */
 template <typename MessageType>
 struct Parser : public http_t {
@@ -192,12 +196,30 @@ private:
     }
 
     /// Fails the message for a size limit, a target that names no resource, a Host field that names no authority or
-    /// the version HTTP/0.9, and records the status it answers (refusal_status()): the server's session answers it, then closes, instead of
-    /// closing on silence (Huly QB-168, QB-1186).
+    /// the version HTTP/0.9, and records the status it answers (refusal_status()): the server's session answers it,
+    /// then closes, instead of closing on silence (Huly QB-168, QB-1186).
     static int
     refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
         self_of(parser)->_refusal_status = status;
         return fail_with_reason(parser, reason);
+    }
+
+    /// Refuses the message for the exception a callback caught. llhttp is C and calls every callback from its own
+    /// frames, which no exception may unwind: each callback is noexcept, and each that allocates -- the target, a field
+    /// line, the Host value it rewrites, a chunk, a trailer field -- ends in a handler that calls this. The exception
+    /// used to unwind through llhttp up to the protocol's noexcept getMessageSize(), which terminated (review r1 N2,
+    /// Huly QB-1186). An allocation failure is 503: the server cannot take the request now, which a client may send
+    /// again (RFC 9110 §15.6.4), not a request it judged; any other exception 500, a condition it did not expect
+    /// (§15.6.1). The session answers it as any refusal, and closes the connection if it cannot build the answer.
+    static int
+    refuse_for_exception(http_t *parser) noexcept {
+        try {
+            throw;
+        } catch (std::bad_alloc const &) {
+            return refuse_with_status(parser, "HTTP parser could not allocate", HTTP_STATUS_SERVICE_UNAVAILABLE);
+        } catch (...) {
+            return refuse_with_status(parser, "HTTP parser callback threw", HTTP_STATUS_INTERNAL_SERVER_ERROR);
+        }
     }
 
     /// Ends @p value at its last octet that is no whitespace: the OWS around a field line value is not part of it (RFC
@@ -244,7 +266,7 @@ private:
      * @return Always returns 0 (success)
      */
     static int
-    default_http_data_cb(http_t *, const char *, size_t) {
+    default_http_data_cb(http_t *, const char *, size_t) noexcept {
         return 0;
     }
 
@@ -258,7 +280,7 @@ private:
      * @return Always returns 0 (success)
      */
     static int
-    default_http_cb(http_t *) {
+    default_http_cb(http_t *) noexcept {
         return 0;
     }
 
@@ -274,7 +296,7 @@ private:
      * for response messages, this callback does nothing.
      */
     static int
-    on_url(http_t *parser, const char *at, size_t length) {
+    on_url(http_t *parser, const char *at, size_t length) noexcept try {
         if constexpr (MessageType::type == HTTP_REQUEST) {
             auto      *self          = self_of(parser);
             const auto next_url_size = self->_url_bytes_seen + length;
@@ -293,6 +315,8 @@ private:
             (void) length;
         }
         return 0;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -311,7 +335,7 @@ private:
      * place: a uri built apart and moved in cost 830 instructions a request.
      */
     static int
-    on_url_complete(http_t *parser) {
+    on_url_complete(http_t *parser) noexcept try {
         if constexpr (MessageType::type == HTTP_REQUEST) {
             auto *self = self_of(parser);
             if (!qb::http::origin::request_target_uri(self->msg.uri(), self->_url_buffer, parser->method == HTTP_CONNECT,
@@ -319,6 +343,8 @@ private:
                 return refuse_with_status(parser, "HTTP request target names no resource", HTTP_STATUS_BAD_REQUEST);
         }
         return 0;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /// Counts and checks a request's Host field line as the header section stores it, so that check_host_field() looks
@@ -385,7 +411,7 @@ private:
      * messages, this callback does nothing.
      */
     static int
-    on_status(http_t *parser, const char *, size_t) {
+    on_status(http_t *parser, const char *, size_t) noexcept {
         if constexpr (MessageType::type == HTTP_RESPONSE) {
             auto &msg    = self_of(parser)->msg;
             msg.status() = static_cast<http_status>(parser->status_code);
@@ -437,8 +463,10 @@ private:
      * @return 0, or the refusal of the message
      */
     static int
-    on_value_end(http_t *parser) {
+    on_value_end(http_t *parser) noexcept try {
         return store_trailer_field(parser);
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -453,7 +481,7 @@ private:
      * Header field names are case-insensitive as per HTTP specification.
      */
     static int
-    on_header_field(http_t *parser, const char *at, size_t length) {
+    on_header_field(http_t *parser, const char *at, size_t length) noexcept try {
         auto *self = self_of(parser);
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
             if (self->_last_header_value.size() > self->_limits.max_header_value_length) {
@@ -479,6 +507,8 @@ private:
         }
         self->_last_header_token = HeaderToken::FIELD;
         return 0;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -493,7 +523,7 @@ private:
      * Multiple values for the same header are stored as a vector.
      */
     static int
-    on_header_value(http_t *parser, const char *at, size_t length) {
+    on_header_value(http_t *parser, const char *at, size_t length) noexcept try {
         auto *self = self_of(parser);
         if (self->_last_header_token != HeaderToken::VALUE) {
             self->_last_header_value.clear();
@@ -504,6 +534,8 @@ private:
         }
         self->_last_header_token = HeaderToken::VALUE;
         return 0;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -528,7 +560,7 @@ private:
      * and a message nobody asks never parses it.
      */
     static int
-    on_headers_complete(http_t *parser) {
+    on_headers_complete(http_t *parser) noexcept try {
         auto *self = self_of(parser);
         auto &msg  = self->msg;
         if (self->_last_header_token == HeaderToken::VALUE && !self->_last_header_key.empty()) {
@@ -599,6 +631,8 @@ private:
         msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
         self->_headers_completed = true;
         return HPE_PAUSED;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -614,7 +648,7 @@ private:
      * chunked transfer encoding.
      */
     static int
-    on_body(http_t *parser, const char *at, size_t length) {
+    on_body(http_t *parser, const char *at, size_t length) noexcept try {
         auto *self = self_of(parser);
         if (length > self->_limits.max_chunk_size) {
             return refuse_with_status(parser, "HTTP chunk exceeds configured chunk size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
@@ -627,6 +661,8 @@ private:
         std::copy_n(at, length, chunked.allocate_back(length));
         self->_body_bytes_seen = next_total;
         return 0;
+    } catch (...) {
+        return refuse_for_exception(parser);
     }
 
     /**
@@ -643,7 +679,7 @@ private:
      * re-written here, so a message without a Content-Type does not gain an empty one.
      */
     static int
-    on_message_complete(http_t *parser) {
+    on_message_complete(http_t *parser) noexcept {
         auto p              = self_of(parser);
         p->msg.body().raw() = std::move(p->_chunked);
         return 1;

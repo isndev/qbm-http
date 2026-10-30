@@ -266,6 +266,10 @@ if(QBM_HTTP_HAS_HTTP3)
     qhttp_test(system http3-interop    system/http3/http3-interop.cpp  REQUIRES quic ssl live EXTRA_LABELS http3 interop)
 endif()
 
+# HTTP/1.1 allocation failures (Huly QB-1186): the binary replaces the global operator new to fail one allocation
+# of a parse at a time, so it shares its binary with no other test.
+qhttp_test(unit http1-parse-alloc-failure unit/http1/http1-parse-alloc-failure.cpp EXTRA_LABELS http1)
+
 # SSL resources are copied by qb_setup_test_resources() (qb/CMakeLists.txt); tests find them in CWD.
 qb_status_message("Configured qbm-http tests (tiered backbone: unit/system + 16 split-pending monoliths)")
 

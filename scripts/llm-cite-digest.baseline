@@ -18,13 +18,13 @@ llm/qbm-http.llm.api.md	1.1/http.h:1238-1238	967107c41a70	listen(qb::io::uri uri
 llm/qbm-http.llm.api.md	1.1/http.h:1249-1249	26cc9c388317	listen_no_start(qb::io::uri uri, TLSContext &&context) {
 llm/qbm-http.llm.api.md	1.1/http.h:1899-1899	c16a4a6db7e1	static_assert(streaming_session<DefaultSession>, "the HTTP/1.1 sessio...
 llm/qbm-http.llm.api.md	1.1/http.h:1975-1975	b6c085494c15	static_assert(streaming_session<DefaultSecureSession>, "the HTTPS/1.1...
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:174-174	3a733ae45e2e	template <typename MessageType>
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:826-826	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:834-834	b4e777a3315d	request_limits() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:842-842	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:850-850	c4437ea56b4b	max_body_size() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:864-864	50c9983a8354	refusal_status() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:98-98	1cea27b7e6a5	struct request_limits {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:178-178	3a733ae45e2e	template <typename MessageType>
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:862-862	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:870-870	b4e777a3315d	request_limits() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:878-878	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:886-886	c4437ea56b4b	max_body_size() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:900-900	50c9983a8354	refusal_status() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:99-99	1cea27b7e6a5	struct request_limits {
 llm/qbm-http.llm.api.md	1.1/protocol/server.h:103-103	59ebf4c707b5	dispatching_size() const noexcept {
 llm/qbm-http.llm.api.md	2/http2.h:939-939	e6164c1688f6	set_tls_context(qb::io::ssl::Context context) {
 llm/qbm-http.llm.api.md	2/http2.h:950-950	4baf7f11b3a0	reload_certificates(std::filesystem::path cert_file, std::filesystem:...

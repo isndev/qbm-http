@@ -173,6 +173,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `OriginTest.EveryProtocolReadsTheSameRequestPath` reads `/a?b<byte>c` for every byte through the HTTP/1.1 parser and
   `request_uri()`: the two agree on all 256 bytes, where they differed on the 128 from 0x80 up.
 
+- **An allocation that fails while the HTTP/1.1 parser stores a message refuses it -- a request is answered `503
+  Service Unavailable` -- instead of unwinding through llhttp and terminating the server (Huly QB-1186).** llhttp is C
+  and calls the parser's callbacks from its own frames. Storing the target, a field line, a chunk, a trailer field or
+  the `Host` value an absolute-form target rewrites (QB-1186's check) allocates, and a `std::bad_alloc` there unwound
+  through llhttp -- undefined behaviour -- up to the protocol's `noexcept` `getMessageSize()`, which terminated. Every
+  callback llhttp calls is `noexcept` now, and the ones that allocate end in a handler that refuses the message: `503`
+  for an allocation failure -- the server cannot take the request now, and a client may send it again (RFC 9110
+  §15.6.4) -- and `500` for any other exception, which none of them throws today. The session answers it as it
+  answers a request over a limit, with `Connection: close`, and closes the connection if it cannot build the answer; a
+  client reading a response closes the connection. Reading the target goes through `qb::io::uri`'s readers, `noexcept`
+  as every parse of a uri is: an allocation failure there still terminates, inside qb's code. Test:
+  `qbm-http-test-unit-http1-parse-alloc-failure` replaces the global `operator new` and makes each allocation of a
+  request's parse and of a response's fail in turn, piece by piece (32 and 28 failures, at least one in every piece
+  but the request's end of target and the response's status line): on the base the first failure of each of the nine
+  pieces unwinds through llhttp, and the server's `getMessageSize()` terminates; now each refuses the message, the
+  server's with 503. The handlers cost the
+  whole-buffer parse nothing -- callgrind on g++ 14 -O3, instructions per parse of `qbm-http-bench-http1-parser`:
+  `WholeBuffer` 4 250 -> 4 250, 18 447 -> 18 407 and 5 666 -> 5 664 for the three corpora, `Fragmented` 4 901 -> 4 900,
+  18 857 -> 18 821 and level -- and the byte-at-a-time parses one or two instructions a callback call, 9 181 -> 9 198,
+  46 140 -> 46 249 and 13 011 -> 13 049 (+0.19 to +0.29 %): g++ keeps the data pointer of `on_url` and
+  `on_header_field` on the stack across the new exception edges.
+
 - **An HTTP/0.9 request is answered `505 HTTP Version Not Supported` instead of being dispatched with no version and no
   `Host` (Huly QB-1186).** llhttp reads a request line with no version -- `GET /admin` then CRLF -- as HTTP/0.9, and
   the field lines after it as a header section; the parser took it for a request older than HTTP/1.1, which needs no
