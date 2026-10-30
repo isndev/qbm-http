@@ -3614,7 +3614,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (2/protocol/server.h:1238-1243).
+// with INTERNAL_ERROR (2/protocol/server.h:1240-1245).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3642,7 +3642,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1220-1225).
+// (2/protocol/server.h:1222-1227).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3662,7 +3662,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:1194-1197).
+// (2/protocol/server.h:1196-1199).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3682,7 +3682,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:1188-1193).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:1190-1195).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3705,7 +3705,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:985-990).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:987-992).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3724,7 +3724,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:992-1010).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:994-1012).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3957,7 +3957,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1114-1124 else arm).
+// (no stream context to store into; 2/protocol/server.h:1116-1126 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3976,7 +3976,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1021-1033);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1023-1035);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -4482,6 +4482,243 @@ TEST(HTTP2ServerProtocol, AMalformedFieldOverTheLimitsStaysAStreamError) {
     EXPECT_EQ(io.stream_error_count, 4) << "the malformed host, before the 414";
     EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
     EXPECT_TRUE(emitted_header_blocks(io.output, 9).empty()) << "a malformed request is not answered";
+}
+
+namespace {
+
+/// Request limits of one kind tightened, the others left as they are: the name, the value, the field count, the target,
+/// the body.
+struct TightLimits {
+    std::size_t name = 0, value = 0, count = 0, url = 0, body = 0;
+
+    void
+    apply(qb::http::request_limits &limits) const {
+        if (name)
+            limits.max_header_name_length = name;
+        if (value)
+            limits.max_header_value_length = value;
+        if (count)
+            limits.max_headers_count = count;
+        if (url)
+            limits.max_url_length = url;
+        if (body)
+            limits.max_body_size = body;
+    }
+};
+
+/// A malformed request shape beside a limit: its limits, its :path, its regular fields, whether its HEADERS end the stream.
+struct MalformedBesideALimit {
+    std::string                                   label;
+    TightLimits                                   limits;
+    std::string                                   path;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+    bool                                          end_stream   = true;
+    bool                                          continuation = false; ///< the block split over HEADERS and CONTINUATION
+};
+
+} // namespace
+
+// A HEADERS block that ends the stream ends the request with no body: a `content-length` that declares one makes it
+// malformed (RFC 9113 section 8.1.1), beside every limit, in both orders, and when the `content-length` field is itself
+// the one over a limit -- a stream error, never a 431 or a 414 (Huly QB-1197: the length was judged after those
+// answers, and a `content-length` over the limits was skipped unread). So is a `content-length` that is no number, or
+// that contradicts another, over the limits. A `content-length: 0` beside a limit, and a `content-length: 5` whose body
+// may still come, are well-formed: answered 431.
+TEST(HTTP2ServerProtocol, AContentLengthBesideTheLimitsIsJudgedFirst) {
+    const std::string                        over_value(9, 'v'); // over a value limit of 8
+    const std::string                        over_name(17, 'n'); // over a name limit of 16
+    const std::string                        long_path(16, 'p'); // "/" + 16 over a target limit of 8
+    const std::vector<MalformedBesideALimit> shapes{
+        {"value, before", {.value = 8}, "/", {{"content-length", "5"}, {"x-v", over_value}}},
+        {"value, after", {.value = 8}, "/", {{"x-v", over_value}, {"content-length", "5"}}},
+        {"name, before", {.name = 16}, "/", {{"content-length", "5"}, {over_name, "1"}}},
+        {"name, after", {.name = 16}, "/", {{over_name, "1"}, {"content-length", "5"}}},
+        {"count, before", {.count = 2}, "/", {{"content-length", "5"}, {"x-a", "1"}, {"x-b", "2"}}},
+        {"count, the content-length past it", {.count = 2}, "/", {{"x-a", "1"}, {"x-b", "2"}, {"content-length", "5"}}},
+        {"target", {.url = 8}, "/" + long_path, {{"content-length", "5"}}},
+        {"the content-length over the value limit", {.value = 4}, "/", {{"content-length", "00005"}}},
+        {"the content-length over the name limit", {.name = 8}, "/", {{"content-length", "5"}}},
+        {"no number, past the count", {.count = 2}, "/", {{"x-a", "1"}, {"x-b", "2"}, {"content-length", "abc"}}, false},
+        {"two lengths, the second past the count", {.count = 2}, "/", {{"content-length", "5"}, {"x-a", "1"}, {"content-length", "6"}}, false},
+        {"value, over CONTINUATION", {.value = 8}, "/", {{"x-v", over_value}, {"content-length", "5"}}, true, true},
+        {"target, over CONTINUATION", {.url = 8}, "/" + long_path, {{"content-length", "5"}}, true, true},
+        {"a length over the body limit (a control: malformed first already)", {.body = 16}, "/", {{"content-length", "64"}}},
+    };
+    for (const auto &shape : shapes) {
+        SCOPED_TRACE(shape.label);
+        CappedHttp2FakeIO    io;
+        CappedServerProtocol protocol(io);
+        shape.limits.apply(io.limits);
+        do_handshake(protocol, io);
+        std::vector<qb::protocol::hpack::HeaderField> headers{
+            {":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", shape.path}
+        };
+        headers.insert(headers.end(), shape.fields.begin(), shape.fields.end());
+        const auto    block = encode_hpack_headers(headers);
+        const uint8_t end   = shape.end_stream ? qb::protocol::http2::FLAG_END_STREAM : 0;
+        if (shape.continuation) {
+            // END_STREAM on the HEADERS frame, END_HEADERS on the CONTINUATION that completes the block (RFC 9113 6.10).
+            const auto half = block.size() / 2;
+            push_frame(io, FrameType::HEADERS, end, 1, std::vector<uint8_t>(block.begin(), block.begin() + half));
+            push_frame(io, FrameType::CONTINUATION, qb::protocol::http2::FLAG_END_HEADERS, 1,
+                       std::vector<uint8_t>(block.begin() + half, block.end()));
+        } else {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | end, 1, block);
+        }
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok()) << "a stream error, not the connection";
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1) << "a malformed request is a stream error";
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR) << "the reset on the wire";
+        EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered";
+    }
+
+    // Well-formed beside the limits: answered -- a `content-length` over a limit itself included, kept and judged.
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_header_value_length = 8;
+    do_handshake(protocol, io);
+    open_limited_get(protocol, io, 1, "/", {{"content-length", "0"}, {"x-v", over_value}});
+    expect_refused_with(io.output, 1, "431");
+    open_limited_get(protocol, io, 3, "/", {{"content-length", "000000000"}});
+    expect_refused_with(io.output, 3, "431");
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 5,
+               encode_hpack_headers(
+                   {{":method", "POST"},
+                    {":scheme", "https"},
+                    {":authority", "example.test"},
+                    {":path", "/upload"},
+                    {"content-length", "000000005"}}));
+    drive(protocol, io);
+    expect_refused_with(io.output, 5, "431");
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 7,
+               encode_hpack_headers(
+                   {{":method", "POST"},
+                    {":scheme", "https"},
+                    {":authority", "example.test"},
+                    {":path", "/upload"},
+                    {"content-length", "5"},
+                    {"x-v", over_value}}));
+    drive(protocol, io);
+    expect_refused_with(io.output, 7, "431");
+    EXPECT_EQ(io.stream_error_count, 0) << "an answered refusal is not a stream error";
+    EXPECT_EQ(io.request_count, 0);
+}
+
+// A trailer section's field that a trailer section must not carry (qb::http::detail::is_forbidden_trailer_field) is a
+// malformed request beside every limit -- the field itself over the value or the name limit, or past the count --,
+// judged before the limits as on HTTP/3 since Huly QB-1197; so is a trailer section that ends a body its
+// `content-length` contradicts. HTTP/2 judged both first already: these pin the order.
+TEST(HTTP2ServerProtocol, AForbiddenTrailerFieldBesideTheLimitsIsAStreamError) {
+    for (const std::string name : {"host", "te", "proxy-authorization", "proxy-authenticate", "trailer", "content-length", "http2-settings"}) {
+        const std::vector<std::pair<TightLimits, std::vector<qb::protocol::hpack::HeaderField>>> shapes{
+            {{.value = 4}, {{name, "trailers"}}},
+            {{.name = 1}, {{name, "1"}}},
+            {{.count = 2}, {{"x-a", "1"}, {"x-b", "2"}, {name, "1"}}},
+            {{.value = 4}, {{"x-v", "12345"}, {name, "1"}}},
+        };
+        for (std::size_t i = 0; i < shapes.size(); ++i) {
+            SCOPED_TRACE(name + " shape " + std::to_string(i));
+            CappedHttp2FakeIO    io;
+            CappedServerProtocol protocol(io);
+            shapes[i].first.apply(io.limits);
+            do_handshake(protocol, io);
+            open_capped_post(protocol, io, 1, std::nullopt);
+            push_frame(io, FrameType::DATA, 0, 1, {'a', 'b', 'c'});
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                       encode_hpack_headers(shapes[i].second));
+            drive(protocol, io);
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(io.request_count, 0);
+            EXPECT_EQ(io.stream_error_count, 1);
+            EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+            EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR);
+            EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered";
+        }
+    }
+    // content-length: 5, three bytes of body, then a trailer section over each limit.
+    for (const auto &[tight, trailers] : std::vector<std::pair<TightLimits, std::vector<qb::protocol::hpack::HeaderField>>>{
+             {{.value = 4}, {{"x-v", "12345"}}},
+             {{.name = 15}, {{"x-abcdefghijklmn", "1"}}}, // content-length's own name is within it
+             {{.count = 2}, {{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}},
+         }) {
+        SCOPED_TRACE(trailers.back().name);
+        CappedHttp2FakeIO    io;
+        CappedServerProtocol protocol(io);
+        tight.apply(io.limits);
+        do_handshake(protocol, io);
+        open_capped_post(protocol, io, 1, std::size_t{5});
+        push_frame(io, FrameType::DATA, 0, 1, {'a', 'b', 'c'});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(trailers));
+        drive(protocol, io);
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR);
+        EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered";
+    }
+    // The control: a trailer section over the count after a body its content-length declares is answered 431.
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_headers_count = 2;
+    do_handshake(protocol, io);
+    open_capped_post(protocol, io, 1, std::size_t{3});
+    push_frame(io, FrameType::DATA, 0, 1, {'a', 'b', 'c'});
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers({{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}));
+    drive(protocol, io);
+    EXPECT_EQ(io.stream_error_count, 0);
+    expect_refused_with(io.output, 1, "431");
+}
+
+// A body past its declared content-length is malformed (RFC 9113 section 8.1.1) whatever the body limit: a DATA frame
+// that passes both is a stream error, never a 413 -- it was answered 413, the limit checked first (Huly QB-1197). A body
+// past the limit with no declared length is answered 413.
+TEST(HTTP2ServerProtocol, ABodyPastItsContentLengthIsMalformedBesideTheBodyLimit) {
+    for (const std::vector<std::size_t> &frames :
+         {std::vector<std::size_t>{17}, std::vector<std::size_t>{5, 12}, std::vector<std::size_t>{6}}) {
+        SCOPED_TRACE(frames.size() == 1 ? std::to_string(frames.front()) : "5 then 12");
+        CappedHttp2FakeIO    io;
+        CappedServerProtocol protocol(io);
+        io.limits.max_body_size = 16;
+        do_handshake(protocol, io);
+        open_capped_post(protocol, io, 1, std::size_t{5});
+        for (const auto n : frames)
+            push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(n, 'x'));
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR);
+        EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "a malformed request is not answered 413";
+    }
+    CappedHttp2FakeIO    io;
+    CappedServerProtocol protocol(io);
+    io.limits.max_body_size = 16;
+    do_handshake(protocol, io);
+    open_capped_post(protocol, io, 1, std::nullopt);
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(17, 'x'));
+    drive(protocol, io);
+    expect_refused_413(io.output, 1);
+
+    // A reset overrun gives its connection credit back, as the 413 does: three overruns of 12000 bytes pass half the
+    // connection window, and a connection WINDOW_UPDATE follows -- the next upload is not starved.
+    CappedHttp2FakeIO    flow;
+    CappedServerProtocol server(flow);
+    flow.limits.max_body_size = 16;
+    do_handshake(server, flow);
+    const std::size_t before = flow.output.size();
+    for (uint32_t sid : {1u, 3u, 5u}) {
+        open_capped_post(server, flow, sid, std::size_t{1});
+        push_frame(flow, FrameType::DATA, 0, sid, std::vector<uint8_t>(12000, 'x'));
+        drive(server, flow);
+        EXPECT_EQ(last_rst_stream_error(flow.output, sid), ErrorCode::PROTOCOL_ERROR) << sid;
+    }
+    bool connection_update = false;
+    for (const auto &f : parse_emitted_frames(flow.output)) {
+        connection_update = connection_update || (f.type == FrameType::WINDOW_UPDATE && f.stream_id == 0 && f.payload_offset > before);
+    }
+    EXPECT_TRUE(connection_update) << "the connection window was left to run dry";
 }
 
 // The `host` field that names the authority of a request without :authority is a field like any other: over the

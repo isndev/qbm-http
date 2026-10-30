@@ -84,7 +84,9 @@ namespace qb::http {
  * @details A value type: a server keeps one (`set_request_limits` / `request_limits()` on the HTTP/1.1, HTTP/2,
  *          HTTP/3 and dual-stack servers) and reads it as each request arrives, so a change applies to the
  *          requests that follow, never to one half read. 0 means no limit of that kind. A request over a limit is
- *          answered, never dropped: `414 URI Too Long` for the target, `431 Request Header Fields Too Large` for a
+ *          answered, never dropped, once it is known well-formed -- a malformed request stays the error it is,
+ *          whatever limit it also passes (Huly QB-1195, QB-1197): `414 URI Too Long` for the target, `431 Request
+ *          Header Fields Too Large` for a
  *          field name, a field value or the number of regular fields of a section (the header section, the
  *          trailer section), `413 Content Too Large` for the body or -- HTTP/1.1 only -- a chunk. HTTP/1.1 then
  *          closes the connection after that answer, HTTP/2 resets the stream with NO_ERROR, HTTP/3 sends

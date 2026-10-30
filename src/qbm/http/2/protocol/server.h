@@ -396,6 +396,13 @@ public:
         _control_reply_count = 0;
 
         auto &body_pipe = stream.assembled_request.body().raw();
+        // A body past its declared content-length is malformed (RFC 9113 §8.1.1) whatever the body limit: judged first,
+        // before the frame is appended. It was answered 413 when the overrun passed the limit too (Huly QB-1197).
+        if (stream.expected_content_length && body_pipe.size() + data_event.payload.data_payload.size() > *stream.expected_content_length) {
+            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
+            this->conditionally_send_connection_window_update(); // its connection credit comes back, as on the 413 path
+            return;
+        }
         if (body_pipe.size() + data_event.payload.data_payload.size() > max_request_body_size()) [[unlikely]] {
             // Answered, not reset: 413 on the stream, then NO_ERROR (refuse_request, Huly QB-168), before the
             // frame is appended. Its bytes are dropped with the rest; its connection credit comes back as a
@@ -405,11 +412,6 @@ public:
             return;
         }
         body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
-
-        if (stream.expected_content_length && body_pipe.size() > *stream.expected_content_length) {
-            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
-            return;
-        }
 
         if (header.flags & FLAG_END_STREAM) {
             stream.end_stream_received = true;
@@ -1847,11 +1849,8 @@ private:
                         }
                         host_sv = value;
                     }
-                    if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
-                        || ++fields > limits.max_headers_count) [[unlikely]] {
-                        fields_over_limits = true; // answered 431 once the block is known well-formed
-                        continue;
-                    }
+                    // `content-length` too is judged before the limits, over them or not: a malformed or conflicting
+                    // value is a malformed request, and the body it declares is judged below (Huly QB-1197).
                     if (name == "content-length") {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
@@ -1863,6 +1862,11 @@ private:
                             return false;
                         }
                         stream.expected_content_length = *parsed; // judged against the body cap once the block is valid
+                    }
+                    if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
+                        || ++fields > limits.max_headers_count) [[unlikely]] {
+                        fields_over_limits = true; // answered 431 once the block is known well-formed
+                        continue;
                     }
                     stream.assembled_request.add_header(name, value);
                 }
@@ -1902,6 +1906,15 @@ private:
             }
             stream.assembled_request.uri() = std::move(*uri);
 
+            // A block that ends the stream ends the request with no body: a `content-length` that declares one makes it
+            // malformed (RFC 9113 §8.1.1), whatever the limits -- this check came after the answers below, and such a
+            // request beside a field or a :path over them was answered 431 or 414 (Huly QB-1197).
+            if (stream.end_stream_received && stream.expected_content_length
+                && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                return false;
+            }
+
             // Over the limits, the request is answered once it is known well-formed -- its method and its URI
             // included, as HTTP/3 answers it: a malformed :scheme, :path, :authority or `host` stays a stream error (QB-1195).
             if (path_sv.value().size() > limits.max_url_length) [[unlikely]] {
@@ -1915,10 +1928,6 @@ private:
             }
 
             if (stream.end_stream_received) { // end_stream_received would have been set by on(HeadersFrame) if END_STREAM was on the header
-                if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
-                    return false;
-                }
                 this->dispatch_complete_request(stream.id, stream);
             } else if (stream.expected_content_length && *stream.expected_content_length > max_request_body_size()) [[unlikely]] {
                 // A declared body over the cap is answered before a byte of it is read, like HTTP/1.1's
