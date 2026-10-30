@@ -232,6 +232,7 @@ qhttp_test(system acceptor-disconnect system/server/acceptor-disconnect.cpp REQU
 qhttp_test(system server-drain system/server/server-drain.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system server-drain-h2 system/server/server-drain-h2.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system middleware-pipeline-system system/middleware/middleware-pipeline-system.cpp REQUIRES live EXTRA_LABELS middleware)
+qhttp_test(system static-files-stream system/middleware/static-files-stream.cpp REQUIRES live EXTRA_LABELS http1 middleware) # Huly QB-101
 qhttp_test(system middleware-auth-jwt-system system/middleware/middleware-auth-jwt-system.cpp REQUIRES ssl live EXTRA_LABELS middleware ssl)
 qhttp_test(system coro-client-http1    system/coro/coro-client-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)
 qhttp_test(system coro-server-http1    system/coro/coro-server-http1.cpp     REQUIRES live EXTRA_LABELS http1 coro)

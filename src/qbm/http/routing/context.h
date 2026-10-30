@@ -314,6 +314,34 @@ private:
     }
 
     /**
+     * @brief (Private) The answer of a cancelled context whose stream was begun but whose head never left (Huly QB-101):
+     *        a PRE_RESPONSE_SEND hook cancelled it inside `begin_stream()` -- `cancel()` or `complete(CANCELLED)` -- or
+     *        the stream was buffered. It answers `503`, with no body and none of the representation headers of the head
+     *        the stream would have sent -- its type, framing, coding, range, language, location, disposition, validators
+     *        and caching policy describe a body this answer does not carry: a length kept with no body leaves the peer
+     *        waiting for bytes that never come, a validator lets a cache refresh a stored error with the resource's.
+     *        Applied at the first cancellation of a stream whose answer was not decided yet (a buffered stream that
+     *        ended keeps the answer it decided), before any finalisation is held back.
+     */
+    void
+    answer_unsent_stream_cancelled_internal() noexcept {
+        _response.status() = qb::http::status::SERVICE_UNAVAILABLE;
+        _response.body().clear();
+        _response.remove_header("Content-Type");
+        _response.remove_header("Content-Length");
+        _response.remove_header("Transfer-Encoding");
+        _response.remove_header("Content-Encoding");
+        _response.remove_header("Content-Range");
+        _response.remove_header("Content-Language");
+        _response.remove_header("Content-Location");
+        _response.remove_header("Content-Disposition");
+        _response.remove_header("ETag");
+        _response.remove_header("Last-Modified");
+        _response.remove_header("Cache-Control");
+        _response.remove_header("Expires");
+    }
+
+    /**
      * @brief (Private) Finalizes the processing of the request context.
      * Ensures `POST_HANDLER_EXECUTION` hooks run and calls `_on_finalized_callback`.
      * Guards against multiple invocations.
@@ -1313,6 +1341,11 @@ public:
 
                 case AsyncTaskResult::CANCELLED:
                     _lc.is_cancelled = true;
+                    // At the first cancellation, not at the finalisation a middleware's deferral scope may hold back,
+                    // nor again at a later one: what the middleware writes after next() on the cancelled request stays
+                    // its own (Huly QB-101).
+                    if (_stream_begun && !_streamed && !is_finalised_internal() && !_finalization_pending) [[unlikely]]
+                        answer_unsent_stream_cancelled_internal();
                     finalize_processing_internal();
                     break;
 
@@ -1360,7 +1393,13 @@ public:
      * @brief Cancels the current request processing.
      *
      * This method is used to manually cancel the request processing. It sets the context's cancellation flag,
-     * records the cancellation reason, and attempts to cancel the currently executing task.
+     * records the cancellation reason, and attempts to cancel the currently executing task. The answer is `503
+     * Service Unavailable`, unless a streamed head already left with its own status (Huly QB-86). A context whose stream
+     * was begun but whose head never left -- buffered, or cancelled by a `PRE_RESPONSE_SEND` hook inside
+     * `begin_stream()` -- answers its 503 with no body and without the head's representation headers (type, framing,
+     * coding, range, validators, caching...), through this call or `complete(AsyncTaskResult::CANCELLED)` alike, once,
+     * unless its answer was already decided (a buffered stream that ended): what a middleware writes after it on the
+     * cancelled request is kept (Huly QB-101).
      *
      * @param reason The reason for cancellation. Defaults to "Cancelled by application".
      */

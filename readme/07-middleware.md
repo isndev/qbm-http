@@ -135,7 +135,7 @@ enum class AsyncTaskResult {
 - **`ERROR`** — an unrecoverable failure. The router abandons the normal chain and runs the configured error task chain (see [Error handling](./13-error-handling.md)). You generally do not throw and call this yourself unless you want a specific status; an uncaught exception is converted to `ERROR` for you by `MiddlewareTask`.
 - **`CANCELLED`** — propagates a cancellation. Prefer `ctx->cancel(reason)`, which sets the cancellation flag and finalizes; do not call `complete(CANCELLED)` from a `cancel()` override.
 
-The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/src/qbm/http/routing/context.h:1281-1293 (complete(): is_finalised_internal / is_cancelled early-out) -->
+The `Context` enforces single-completion: once finalized or cancelled, further `complete()` calls (other than `CANCELLED`) are ignored, so a stray second call cannot corrupt the chain. <!-- src: qbm/http/src/qbm/http/routing/context.h:1309-1321 (complete(): is_finalised_internal / is_cancelled early-out) -->
 
 This is what "short-circuit" means in practice — a middleware that calls `complete(COMPLETE)` ends the chain:
 
@@ -185,7 +185,7 @@ router.use(
 
 #### Post-`next()` mutation: synchronous only
 
-For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, qbm/http/src/qbm/http/routing/context.h:483-531 -->
+For a **synchronous** downstream chain, code *after* `next()` still runs before the response is sent, so you can post-process `ctx->response()`. `FunctionalMiddleware::process` opens a `ScopedFinalizationDeferral` (via `ctx->defer_finalization_scope()`) so terminal completion is held back until the lambda returns. <!-- src: qbm/http/src/qbm/http/routing/middleware.h:214-215, qbm/http/src/qbm/http/routing/context.h:511-559 -->
 
 ```cpp
 router.use(
@@ -200,7 +200,7 @@ router.use(
 
 This deferral only spans **synchronous** downstream work. If anything downstream is asynchronous (a `qb::io::async::callback`, an actor round-trip, a DB query), the lambda returns before that work finishes and the deferral has already closed — code after `next()` would run too early. For mutations that must happen at final send time regardless of downstream timing, register a **`HookPoint::PRE_RESPONSE_SEND`** lifecycle hook instead. <!-- src: qbm/http/src/qbm/http/routing/types.h:38-46 -->
 
-A **streamed** downstream response is out of reach as well, synchronous or not: its head leaves at `ctx->begin_stream()`, inside the downstream chain, so code after `next()` edits a head already on the wire and a body that stays empty (`ctx->is_streaming()` says so, `qbm/http/src/qbm/http/routing/context.h:1557`). A `PRE_RESPONSE_SEND` hook still reaches it: `begin_stream()` runs those hooks before the head leaves.
+A **streamed** downstream response is out of reach as well, synchronous or not: its head leaves at `ctx->begin_stream()`, inside the downstream chain, so code after `next()` edits a head already on the wire and a body that stays empty (`ctx->is_streaming()` says so, `qbm/http/src/qbm/http/routing/context.h:1596`). A `PRE_RESPONSE_SEND` hook still reaches it: `begin_stream()` runs those hooks before the head leaves.
 
 ### Synchronous versus asynchronous middleware
 
@@ -266,7 +266,7 @@ There is one more asymmetry worth knowing: a router-level lifecycle hook is the 
 You do not need a hand-rolled `if` inside a middleware to run one branch per request. `qb::http::conditional_middleware<Session>(predicate, if_middleware[, else_middleware])` wraps a predicate over the context and dispatches to one of two child middlewares; when the predicate is false and there is no else branch, the chain simply continues. The predicate is `std::function<bool(const std::shared_ptr<Context<Session>>&)>`. <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:51, 153-160 -->
 
 If the selected child remains pending, `ctx->cancel()` notifies that child once, including a leaf selected through nested conditionals. The target belongs to this context, not to the shared conditional instance. A predicate that completes or cancels the context does not then start its old child; a child that completes synchronously and subsequently throws does not overwrite the newer task's outcome. The child still implements the existing no-argument `cancel()` notification, so shared user middleware must define its own operation-cancellation semantics.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1368-1407; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1407-1446; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
 
 ```cpp
 #include <qbm/http/http.h>

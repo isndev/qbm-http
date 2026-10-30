@@ -262,7 +262,7 @@ It is set in exactly the places the session knows the response can no longer be 
 | Your own code | `ctx->cancel()`; under a streamed head, the connection closes too |
 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1121-1135 (the server runs it when a session class's own on() hides it); qbm/http/src/qbm/http/2/http2.h:537-546 (HTTP/2 extracted: the watcher stops, every stream's context cancelled), :855-870 (the HTTP/2 server runs it when a session class's own on() hides it) -->
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :806-814 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1532-1538 (begin_stream: a head the session cannot write cancels), :1401-1402 (cancel: a streamed head keeps its status) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :806-814 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1571-1577 (begin_stream: a head the session cannot write cancels), :1440-1441 (cancel: a streamed head keeps its status) -->
 
 Note what is **not** in that table, outside a streamed response: an explicit local `disconnect()` and a session
 inactivity timeout. qb-io's default local reason, `disconnect_reason::user_initiated`, has integer value `1`; an

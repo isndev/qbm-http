@@ -47,6 +47,8 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -62,6 +64,7 @@
 #include <qbm/http/2/http2.h>
 #include <qbm/http/http.h> // qb::http::run_sync / GET — drives the HTTP/1.1-over-ALPN fallback path.
 #include <qbm/http/middleware/csrf.h>
+#include <qbm/http/middleware/static_files.h>
 
 #include <qb/io/tcp/listener.h>
 #include <qb/io/tcp/ssl/listener.h>
@@ -3391,6 +3394,16 @@ public:
             h2_pieces(std::move(stream), 1, 4);
             co_return;
         });
+        router().get("/stream/cancel", [](std::shared_ptr<StreamCtx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Length", "64");
+            ctx->response().set_header("Content-Encoding", "gzip");
+            ctx->response().set_header("Content-Type", "application/json");
+            auto stream  = ctx->begin_stream();
+            g_h2_framing = static_cast<int>(stream->framing());
+            (void) stream->write("never whole");
+            ctx->cancel("cancelled before the end");
+        });
         router().get("/stream/abort", [](std::shared_ptr<StreamCtx> ctx) {
             ctx->response().status() = qb::http::status::OK;
             ctx->response().set_header("Content-Length", "64");
@@ -3457,6 +3470,16 @@ TEST_F(Http2ResponseStreamTest, AStreamIsBufferedWholeAndOwnsItsCompletion) {
         << "the response left when the handler returned, not at end()";
 }
 
+TEST_F(Http2ResponseStreamTest, ACancelledBufferedStreamAnswers503WithoutItsBodyLengthOrCoding) {
+    const auto response = get("/stream/cancel");
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_TRUE(response.body().empty()) << response.body().template as<std::string>();
+    EXPECT_TRUE(response.header("Content-Encoding").empty()) << "the coding of a body the 503 does not carry (Huly QB-101)";
+    EXPECT_TRUE(response.header("Content-Type").empty()) << response.header("Content-Type");
+    EXPECT_NE(response.header("Content-Length"), "64");
+}
+
 TEST_F(Http2ResponseStreamTest, ABufferedAbortAnswers500WithoutTheDeclaredLength) {
     const auto response = get("/stream/abort");
     EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
@@ -3465,6 +3488,92 @@ TEST_F(Http2ResponseStreamTest, ABufferedAbortAnswers500WithoutTheDeclaredLength
 }
 
 } // namespace http2_response_stream_test
+
+// ===========================================================================
+// Static files over HTTP/2 keep the buffered path (Huly QB-101). The HTTP/2 session offers no streaming hooks, so a
+// body over StaticFilesOptions::stream_threshold is read whole, as every body was, and max_file_size still bounds it;
+// HTTP/1.1 streams the same body (system/middleware/static-files-stream.cpp).
+// ===========================================================================
+namespace http2_static_files_test {
+
+class StaticH2Server;
+
+class StaticH2Session : public qb::http2::use<StaticH2Session>::session<StaticH2Server> {
+public:
+    explicit StaticH2Session(StaticH2Server &server)
+        : session(server) {}
+};
+
+class StaticH2Server : public qb::http2::use<StaticH2Server>::server<StaticH2Session> {};
+
+static_assert(!qb::http::streaming_session<StaticH2Session>, "the HTTP/2 session is expected to buffer streams for now");
+
+/// A temporary directory removed with its scope, an early failure included.
+struct TempRoot {
+    std::filesystem::path path;
+    explicit TempRoot(std::string const &prefix)
+        : path(std::filesystem::temp_directory_path()
+               / (prefix + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
+        std::filesystem::create_directories(path);
+    }
+    ~TempRoot() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdIsReadWholeAndTheCapStillBoundsIt) {
+    ASSERT_TRUE(qb::http::test::certs_available()) << "Missing TLS test certificates (" << qb::http::test::ssl_cert_path() << ")";
+    qb::io::async::init();
+    const TempRoot temp("qbm-h2-static-");
+    const auto    &root = temp.path;
+    ASSERT_TRUE(std::filesystem::is_directory(root));
+    std::string whole(std::size_t{512} * 1024, '\0');
+    for (std::size_t i = 0; i < whole.size(); ++i)
+        whole[i] = static_cast<char>((i * 131 + i / 251) & 0xff);
+    {
+        std::ofstream(root / "whole.bin", std::ios::binary).write(whole.data(), static_cast<std::streamsize>(whole.size()));
+        std::ofstream(root / "over.bin", std::ios::binary) << std::string(std::size_t{2} * 1024 * 1024, 'o');
+    }
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+    const auto        opts =
+        qb::http::StaticFilesOptions(root).with_stream_threshold(std::size_t{64} * 1024).with_max_file_size(std::size_t{1024} * 1024);
+    auto server = std::make_unique<qb::http::test::ServerThread<StaticH2Server>>([cert, key, opts](StaticH2Server &srv) -> bool {
+        srv.router().use(qb::http::static_files_middleware<StaticH2Session>(opts));
+        srv.router().compile();
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(server->ready());
+    const auto port = server->port();
+
+    const auto get = [port](std::string const &path) {
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        std::optional<qb::http::Response> response;
+        qb::http::Request                 request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri(path);
+        EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
+        client->connect(nullptr);
+        EXPECT_TRUE(qb::http::test::ServerThread<StaticH2Server>::pump_until([&] { return response.has_value(); }, 10s));
+        client->disconnect();
+        return response.value_or(qb::http::Response{});
+    };
+    const auto served = get("/whole.bin");
+    EXPECT_EQ(served.status(), qb::http::status::OK);
+    EXPECT_TRUE(served.body().template as<std::string>() == whole) << "the body read whole differs from the file's";
+    EXPECT_EQ(get("/over.bin").status(), qb::http::status::PAYLOAD_TOO_LARGE) << "a body read whole stays bounded by max_file_size";
+
+    server.reset();
+}
+
+} // namespace http2_static_files_test
 
 // ===========================================================================
 // An HTTP/2 session extracted from its server runs its extraction handler (Huly QB-1182). The handler is public on

@@ -299,7 +299,8 @@ Configuration is `qb::http::StaticFilesOptions`, constructed with the root direc
 | Last-Modified | `with_last_modified(bool)` | `true` |
 | Range requests | `with_range_requests(bool)` | `true` |
 | Directory listing | `with_directory_listing(bool)` | `false` |
-| Max file size | `with_max_file_size(std::size_t)` | `64` MiB; `0` disables the cap. Over-size requests get `413` |
+| Max file size | `with_max_file_size(std::size_t)` | `64` MiB; `0` disables the cap. A body read whole over it gets `413`; a streamed body is not bounded by it |
+| Stream threshold | `with_stream_threshold(std::size_t)` | `1` MiB (`default_stream_high_watermark`): a larger body streams where the session can (HTTP/1.1); `0` streams every non-empty body, `SIZE_MAX` none |
 | Reject symlinks | `with_reject_symlinks(bool)` | `false` (links escaping the root are rejected regardless) |
 
 The freshness lifetime is **not** a duration type: `with_cache_control` takes a literal `Cache-Control` header *string* (`"public, max-age=3600"`), so the `max-age` token is whatever you write into that string. Directory listing defaults to off for safety, and the middleware normalizes paths to reject directory traversal.
@@ -308,7 +309,7 @@ For GET and HEAD, a present `If-None-Match` takes precedence over `If-Modified-S
 
 A filesystem root (`/`, `C:\`) is a valid root: its canonical form already ends with the separator, and the containment check accepts what lies below it, while a sibling that merely shares an ordinary root's string prefix (`www` and `www_old`) stays refused. The directory listing writes the request path into each link escaped for the HTML attribute (`&` becomes `&amp;`, percent-encodings are left as they are) and led by one slash however many the path begins with -- a link that begins with `//` names another host (Huly QB-1177) -- and each entry name percent-encoded. <!-- src: qbm/http/src/qbm/http/middleware/static_files.cpp:153-170, qbm/http/src/qbm/http/middleware/static_files.cpp:321-337 -->
 
-A request path may hold `[`, `]` and `|` as a browser sends them (Huly QB-1187): the path is percent-decoded whole before it names a file, so `/[1].txt` and `/%5B1%5D.txt` name one file (on Windows, which names no file with a `|`, every spelling of one is answered alike), and the prefix to strip is compared with `%5B`, `%5D` and `%7C` decoded on both sides, so a prefix written with either spelling strips both. <!-- src: qbm/http/src/qbm/http/middleware/static_files.h:351-352,373-375 -->
+A request path may hold `[`, `]` and `|` as a browser sends them (Huly QB-1187): the path is percent-decoded whole before it names a file, so `/[1].txt` and `/%5B1%5D.txt` name one file (on Windows, which names no file with a `|`, every spelling of one is answered alike), and the prefix to strip is compared with `%5B`, `%5D` and `%7C` decoded on both sides, so a prefix written with either spelling strips both. <!-- src: qbm/http/src/qbm/http/middleware/static_files.h:467-468,489-491 -->
 
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
@@ -326,9 +327,22 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:873 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:1089 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
+
+### Large files stream on HTTP/1.1
+
+A body of more than `stream_threshold` bytes -- the whole file, or the range asked for -- is not read into the response where the session can stream it (Huly QB-101). The middleware begins a stream on the context ([`begin_stream()`](./16-advanced-topics.md#streaming-a-body-as-it-is-produced-begin_stream)) and feeds it from the open file (`internal::StaticFileStreamer`) in pieces of at most 64 KiB (and at most half the high watermark), reading the next piece only while the connection's output is under the stream's high watermark. A download therefore holds less than the watermark and a piece in the connection's output (a few bytes more per piece when a hook has made the body chunked), and one piece of its own (1 MiB and twice 64 KiB by default), whatever the file's size: N concurrent downloads of one large file cost N times that, not N times the file. It also holds the file open until its last byte is read: one descriptor per download in flight, and on Windows a file being downloaded cannot be deleted or replaced until then. <!-- src: qbm/http/src/qbm/http/middleware/static_files.h:966,357 -->
+
+The answer is the one a buffered response gives: the same status and headers -- `Content-Length`, `Content-Range`, `ETag`, `Last-Modified`, `Accept-Ranges`, `Cache-Control` -- and the same bytes. Conditional requests, `Range` and `If-Range`, `416` and `HEAD` answer as before for a file under `max_file_size`; a `HEAD`, a `304` and a `416` never stream. What changes:
+
+- **`max_file_size` bounds a body read whole**, the only kind it protects memory from. A streamed body is served whatever its size, and a `HEAD` or a `Range` of a file over the cap gets the answer its `GET` would: `200`, `206` or `416`, not `413` -- unless a `PRE_RESPONSE_SEND` hook makes the `GET`'s head unstreamable, which reads it whole and refuses it, while the `HEAD` is answered at its head. A threshold above the cap still refuses, over the cap, what it reads whole. On HTTP/2 and HTTP/3, which read every body whole, a file over the cap is refused as before, even for a small range. <!-- src: qbm/http/src/qbm/http/middleware/static_files.h:797-798 -->
+- **The `PRE_RESPONSE_SEND` hooks see the head and an empty body**, as for any stream: `CompressionMiddleware` leaves a streamed body uncompressed, and a hook that writes a body of its own does not replace the file. Raise the threshold to keep compressing larger text assets, or to keep such hooks. A hook that leaves a head a stream cannot carry gets the body read whole after all, under `max_file_size`; one that answers a status without a body leaves the file unread, and its answer carries none of the file's length, type and range.
+- **A file that fails or shrinks under the read** after the head has left can no longer be answered: the connection closes, short of the declared length, rather than deliver a short body. A peer that leaves mid-body cancels the request, and the file is closed with the stream.
+- **A `PRE_RESPONSE_SEND` hook that cancels the request** now runs before the head leaves, inside `begin_stream()`: the answer is a 503 with no body and none of the file's representation headers (type, length, range, validators, caching). Middleware that writes its own answer after `next()` keeps it. For a body read whole the hooks run once the request is complete, where a cancellation changes nothing and the file is served.
+
+The HTTP/2 and HTTP/3 sessions offer no streaming hooks yet: there every body is read whole, under `max_file_size`, as before. Neither path uses `sendfile()`: the bytes go through the session's output buffer, as every response's do -- `sendfile()` would bypass it, cannot serve TLS, and is not offered by qb-io's transports -- and the stream bounds that buffer on every transport, TLS included.
 
 ETags derived from file size and modification time are **weak**, prefixed with `W/`.
 The opaque value uses a compact, distinct encoding of the same full-width size and
@@ -503,7 +517,7 @@ Four more middleware ship for flow control and instrumentation. They take callab
 <!-- src: qbm/http/src/qbm/http/middleware/conditional.h:154, qbm/http/src/qbm/http/middleware/transform.h:128, qbm/http/src/qbm/http/middleware/logging.h:229, qbm/http/src/qbm/http/middleware/error_handling.h:217 -->
 
 Conditional selection is per context. Cancellation of a pending conditional request reaches its selected child, including a nested leaf, without re-evaluating the predicate or changing another context's selection. Completing or cancelling in the predicate prevents the old child from starting. See [Middleware](./07-middleware.md#conditional-middleware) for the cancellation boundary of a shared child instance.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1368-1407 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1407-1446 -->
 
 The access log (`AccessLog`) and the request metrics (`RequestMetrics`) live in `<qbm/http/middleware/access_log.h>` and `<qbm/http/middleware/metrics.h>` and are listed in `all.h`, but they are router observers, installed with `router.add_observer(...)`, not middleware: see [observability](./22-observability.md).
 

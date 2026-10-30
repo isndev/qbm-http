@@ -150,7 +150,10 @@ concept streaming_session =
  *    CONNECTION instead, since the message cannot be completed -- and completes the context.
  * 4. The peer may go away at any time: the session cancels the stream, a parked `drain()` resumes with `false`, the
  *    next `write()` returns `closed`, and the context is cancelled; the producer's only duty is to stop. A
- *    `ctx->cancel()` does the same from the application's side, and closes the connection under a streamed head.
+ *    `ctx->cancel()` does the same from the application's side, and closes the connection under a streamed head; a
+ *    buffered stream, or one a `PRE_RESPONSE_SEND` hook cancels inside `begin_stream()`, answers 503 with no body and
+ *    without the representation headers its head declared -- type, framing, coding, range, validators, caching
+ *    (Huly QB-101).
  *
  * Framing (`framing()`) is decided by `begin_stream()` from the head as the `PRE_RESPONSE_SEND` hooks leave it: a
  * valid `Content-Length` is honoured and enforced; a `Transfer-Encoding` whose only coding is `chunked`, or none at

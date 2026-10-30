@@ -1419,6 +1419,46 @@ TEST_F(StaticFilesMiddlewareTest, RangeRequestAgainstOversizeFileYields413) {
     EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
 }
 
+// --- Streaming (Huly QB-101) -------------------------------------------------
+// The mock session offers no streaming hooks, as HTTP/2 and HTTP/3 do not: every body is read whole, whatever
+// stream_threshold says, and max_file_size bounds it as before. The streamed path runs over a real HTTP/1.1 session in
+// system/middleware/static-files-stream.cpp.
+
+TEST_F(StaticFilesMiddlewareTest, StreamThresholdDefaultsToTheStreamHighWatermark) {
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    EXPECT_EQ(options.stream_threshold, qb::http::default_stream_high_watermark);
+    EXPECT_EQ(&options.with_stream_threshold(5), &options);
+    EXPECT_EQ(options.stream_threshold, 5u);
+}
+
+TEST_F(StaticFilesMiddlewareTest, ASessionThatCannotStreamReadsABodyOverTheThresholdWhole) {
+    static_assert(!qb::http::streaming_session<MockMiddlewareSession>);
+    std::string content(4096, '\0');
+    for (std::size_t i = 0; i < content.size(); ++i)
+        content[i] = static_cast<char>('a' + (i * 7 + i / 26) % 26);
+    create_test_file(_test_root_dir / "over.bin", content);
+    qb::http::StaticFilesOptions options(_test_root_dir);
+    options.with_stream_threshold(16).with_max_file_size(0);
+
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/over.bin"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
+    EXPECT_EQ(_session->_response.header("Content-Length"), "4096");
+    EXPECT_EQ(_session->_response.body().as<std::string>(), content);
+
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/over.bin", {{"Range", "bytes=100-1099"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PARTIAL_CONTENT);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), content.substr(100, 1000));
+
+    // Read whole, so still bounded: the file, the range of it, and the HEAD that mirrors the GET.
+    options.with_max_file_size(1024);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/over.bin"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::GET, "/over.bin", {{"Range", "bytes=0-99"}}));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+    configure_router_and_run(make_mw(options), create_request(qb::http::method::HEAD, "/over.bin"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::PAYLOAD_TOO_LARGE);
+}
+
 // --- Constructor guards ----------------------------------------------------
 
 TEST_F(StaticFilesMiddlewareTest, ConstructorRejectsEmptyRootDirectory) {

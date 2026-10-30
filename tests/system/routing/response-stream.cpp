@@ -37,7 +37,8 @@
  *     a stream its producer dropped mid-body included;
  *   - a pipelined request is answered after the streamed one, in order;
  *   - buffered: HTTP/1.0 without a length and a 204, whole, with their hooks run at completion; a buffered `abort()`
- *     answers 500 without the failed body's headers, and leaves a cancelled answer alone; a buffered body stops at
+ *     answers 500 without the failed body's headers, and leaves a cancelled answer alone; a cancelled buffered stream
+ *     answers 503 without its pieces and without the framing and coding its head declared (Huly QB-101); a buffered body stops at
  *     `protocol_limits::MAX_BODY_SIZE` (a target of its own, labelled huge-body);
  *   - PRE_RESPONSE_SEND runs once (at the head of a stream), POST_RESPONSE_SEND once (after its last byte).
  *
@@ -793,6 +794,38 @@ public:
             (void) stream->write("gathered");
             ctx->cancel("cancelled before the end");
             stream->abort();
+        });
+
+        // A buffered stream that ended, then a complete(CANCELLED): the answer already decided -- the 200 the peer
+        // receives -- is the one the hooks and the observers read, not a 503 (Huly QB-101).
+        router().get("/end-then-cancelled", [](std::shared_ptr<Ctx> ctx) {
+            ctx->add_lifecycle_hook([](Ctx &c, qb::http::HookPoint point) {
+                if (point == qb::http::HookPoint::POST_RESPONSE_SEND)
+                    g_seen.post_send_status = static_cast<int>(c.response().status());
+            });
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            record(ctx, stream);
+            (void) stream->write("whole");
+            stream->end();
+            ctx->complete(qb::http::AsyncTaskResult::CANCELLED);
+        });
+
+        // A buffered stream (two framings) whose context is cancelled: its 503 drops the framing and coding the head
+        // declared with the pieces (Huly QB-101) -- a length kept with a Transfer-Encoding is refused by the serializer.
+        router().get("/cancel-two-framings", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Content-Length", "64");
+            ctx->response().set_header("Transfer-Encoding", "chunked");
+            ctx->response().set_header("Content-Encoding", "gzip");
+            ctx->response().set_header("Content-Language", "fr");
+            ctx->response().set_header("Content-Location", "/somewhere");
+            ctx->response().set_header("Content-Disposition", "attachment");
+            ctx->response().set_header("Expires", "Thu, 01 Jan 2099 00:00:00 GMT");
+            auto stream = ctx->begin_stream();
+            record(ctx, stream);
+            (void) stream->write("gathered");
+            ctx->cancel("cancelled before the end");
         });
 
         // A buffered body stops at the protocol's bound (review m2). HTTP/1.0: buffered from the start.
@@ -1642,12 +1675,46 @@ TEST_F(ResponseStreamTest, ABufferedAbortAnswers500WithoutTheFailedBodysHeaders)
     EXPECT_TRUE(r.header_is("x-kept", "yes")) << r.head;
 }
 
+TEST_F(ResponseStreamTest, ACancelledBufferedStreamAnswers503WithoutTheFramingItsHeadDeclared) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/cancel-two-framings")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::buffered)) << "two framings: buffered";
+    EXPECT_EQ(r.status, 503) << r.head;
+    EXPECT_FALSE(r.chunked) << r.head;
+    EXPECT_TRUE(r.header_is("content-length", "0")) << r.head;
+    EXPECT_EQ(r.header_count("content-encoding"), 0) << r.head;
+    for (const char *name : {"content-language", "content-location", "content-disposition", "expires"})
+        EXPECT_EQ(r.header_count(name), 0) << name << " describes a body the 503 does not carry: " << r.head;
+    EXPECT_TRUE(r.body.empty());
+    c.buffer.erase(0, r.consumed);
+    ASSERT_TRUE(c.send(get("/plain")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << "the connection must serve on";
+    EXPECT_EQ(parse_response(c.buffer).body, "plain-body");
+}
+
+TEST_F(ResponseStreamTest, ACancellationAfterABufferedStreamEndedLeavesTheAnswerAlone) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/end-then-cancelled", "HTTP/1.0")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(r.status, 200) << r.head;
+    EXPECT_EQ(r.body, "whole");
+    EXPECT_TRUE(wait_for([] { return g_seen.post_send_status.load() != 0; }));
+    EXPECT_EQ(g_seen.post_send_status.load(), 200) << "the late cancellation rewrote the response that had been sent";
+}
+
 TEST_F(ResponseStreamTest, ABufferedAbortAfterACancellationLeavesTheAnswerSentAlone) {
     RawClient c;
     ASSERT_TRUE(c.connect(port));
     ASSERT_TRUE(c.send(get("/cancel-then-abort", "HTTP/1.0")));
     ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
     EXPECT_EQ(parse_response(c.buffer).status, 503);
+    EXPECT_TRUE(parse_response(c.buffer).body.empty()) << "a cancelled stream's 503 carries none of the pieces it gathered (Huly QB-101)";
     EXPECT_TRUE(wait_for([] { return g_seen.post_send_status.load() != 0; }));
     EXPECT_EQ(g_seen.post_send_status.load(), 503) << "the abort rewrote the response that had been sent";
 }
