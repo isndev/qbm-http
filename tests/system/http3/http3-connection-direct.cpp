@@ -644,6 +644,42 @@ TEST(Http3ConnectionDirect, ATeFieldOtherThanTrailersIsNeverSubmitted) {
 }
 
 /**
+ * @test The proxy authentication fields cross a header section both ways (Huly QB-1197)
+ * @brief RFC 9114 section 4.2 does not count `proxy-authorization` and `proxy-authenticate` among the
+ *        connection-specific fields, and HTTP/2 serves them: a request carrying one was refused with H3_MESSAGE_ERROR
+ *        on receipt and before submission, a response carrying the other was never submitted. A request sent by the
+ *        client and one built on the wire are served with the field; the 407 that answers them is delivered with its
+ *        challenge; the connection serves on.
+ */
+TEST(Http3ConnectionDirect, TheProxyAuthenticationFieldsCrossAHeaderSection) {
+    Pair pair;
+
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/proxied")};
+    request.set_header("Proxy-Authorization", "Basic dXNlcjpwYXNz");
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().header("proxy-authorization"), "Basic dXNlcjpwYXNz");
+
+    qb::http::Response response;
+    response.status() = qb::http::status::PROXY_AUTHENTICATION_REQUIRED;
+    response.set_header("Proxy-Authenticate", "Basic realm=\"proxy\"");
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_EQ(pair.client_owner.responses.front().status(), qb::http::status::PROXY_AUTHENTICATION_REQUIRED);
+    EXPECT_EQ(pair.client_owner.responses.front().header("proxy-authenticate"), "Basic realm=\"proxy\"");
+
+    auto fields = request_fields("/raw");
+    fields.emplace_back("proxy-authorization", "Basic x");
+    pair.server.read_stream(4, h3_headers_frame(4, fields), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 2u) << "a request built on the wire is served";
+    EXPECT_EQ(pair.server_owner.requests.back().header("proxy-authorization"), "Basic x");
+    EXPECT_TRUE(pair.server_owner.resets.empty());
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+/**
  * @test submit_response rejects a forbidden response header
  * @brief transfer-encoding is forbidden in HTTP/3; make_response_headers returns nullopt so
  *        submit_response returns false (server side) and the client never receives a response.
@@ -1858,12 +1894,13 @@ TEST(Http3ConnectionDirect, AContentLengthATrailerSectionContradictsIsJudgedBefo
     EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
-// A field over the limits is judged before it is dropped (Huly QB-1197): in the header section, a field this module
-// refuses beyond nghttp3 (the proxy authentication fields, detail::is_forbidden_h3_header); in a trailer section, a
-// field a trailer section must not carry (detail::is_forbidden_h3_trailer: `host`, `te`, the proxy authentication
-// fields, `trailer`, `http2-settings`) -- over the value or the name limit, or past the count. Each refuses the stream
-// as it does within the limits; it was dropped unread and the request answered 431. (nghttp3 refuses the
-// connection-specific fields first, and removes a trailer section's `content-length` before this module sees it.)
+// A field over the limits is judged before it is dropped (Huly QB-1197): in a trailer section, a field a trailer section
+// must not carry (detail::is_forbidden_h3_trailer: `host`, `te`, the proxy authentication fields, `trailer`,
+// `http2-settings`) -- over the value or the name limit, or past the count -- refuses the stream as it does within the
+// limits; it was dropped unread and the request answered 431. A header section may carry the proxy authentication
+// fields: over the limits there, the request is answered 431 (they were refused, as connection-specific fields).
+// (nghttp3 refuses the connection-specific fields first, and removes a trailer section's `content-length` before this
+// module sees it.)
 TEST(Http3ConnectionDirect, AForbiddenFieldBesideTheLimitsRefusesTheStream) {
     using Fields    = std::vector<std::pair<std::string, std::string>>;
     auto shapes_for = [](std::string const &name, std::string const &value) {
@@ -1880,7 +1917,9 @@ TEST(Http3ConnectionDirect, AForbiddenFieldBesideTheLimitsRefusesTheStream) {
             auto        fields = request_fields();
             fields.insert(fields.end(), extra.begin(), extra.end());
             pair.server.read_stream(0, h3_headers_frame(0, fields), true);
-            expect_refused_unanswered(pair);
+            EXPECT_TRUE(pair.server_owner.requests.empty());
+            EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431";
+            EXPECT_FALSE(reset(pair.server_owner, 0));
             EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
         }
     }
@@ -2005,9 +2044,9 @@ TEST(Http3ConnectionDirect, AFieldSectionPastTheAdvertisedSizeIsAnswered431) {
 }
 
 // The section bound is a limit like the others (Huly QB-1196): a malformed request past it stays malformed, its stream
-// refused, never answered 431 -- a field this module refuses, a `host` naming another authority than :authority, a
-// `content-length` an ended stream contradicts -- and a well-formed `host` past it that stands for :authority is a
-// field over the limits like any other, answered 431. The validation-beside-the-limits class of Huly QB-1195.
+// refused, never answered 431 -- a `host` naming another authority than :authority, a `content-length` an ended stream
+// contradicts -- and a well-formed `host` past it that stands for :authority is a field over the limits like any
+// other, answered 431. The validation-beside-the-limits class of Huly QB-1195.
 TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
     constexpr std::uint64_t advertised = 64 * 1024;
     using Fields                       = std::vector<std::pair<std::string, std::string>>;
@@ -2018,7 +2057,6 @@ TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
     };
     const Fields no_authority{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
     for (auto const &[label, fields] : std::vector<std::pair<std::string, Fields>>{
-             {"proxy-authorization past it", past({{"proxy-authorization", "Basic x"}})},
              {"host naming another authority past it", past({{"host", "evil.test"}})},
              {"host that is no authority, past it, without :authority", past({{"host", "example.test:99999"}}, no_authority)},
              {"content-length past it, the stream ended", past({{"content-length", "5"}})},
@@ -2029,8 +2067,10 @@ TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
         expect_refused_unanswered(pair);
     }
     // Well-formed past it, answered: a host that stands for :authority, a content-length the ended stream does not
-    // contradict -- both kept to be judged.
-    for (auto const &fields : {past({{"host", "example.test"}}, no_authority), past({{"content-length", "0"}})}) {
+    // contradict -- both kept to be judged --, and `proxy-authorization`, which a header section may carry (it was
+    // refused as a connection-specific field, Huly QB-1197).
+    for (auto const &fields :
+         {past({{"host", "example.test"}}, no_authority), past({{"content-length", "0"}}), past({{"proxy-authorization", "Basic x"}})}) {
         LimitedPair pair{qb::http::request_limits{}};
         pair.server.read_stream(0, h3_headers_frame(0, fields), true);
         expect_answered_raw(pair, 0);

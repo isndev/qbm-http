@@ -203,9 +203,14 @@ TEST(Http3ProtocolValidationTest, IsForbiddenH3HeaderMatchesConnectionFields) {
     EXPECT_TRUE(h3detail::is_forbidden_h3_header("transfer-encoding"));
     EXPECT_TRUE(h3detail::is_forbidden_h3_header("upgrade"));
     EXPECT_TRUE(h3detail::is_forbidden_h3_header("proxy-connection"));
-    EXPECT_TRUE(h3detail::is_forbidden_h3_header("proxy-authenticate"));
-    EXPECT_TRUE(h3detail::is_forbidden_h3_header("proxy-authorization"));
     EXPECT_FALSE(h3detail::is_forbidden_h3_header("content-type"));
+    // The proxy authentication fields are no connection-specific fields (RFC 9114 section 4.2): a header section
+    // carries them, as HTTP/2's does; a trailer section does not (Huly QB-1197).
+    EXPECT_FALSE(h3detail::is_forbidden_h3_header("proxy-authenticate"));
+    EXPECT_FALSE(h3detail::is_forbidden_h3_header("proxy-authorization"));
+    EXPECT_FALSE(h3detail::is_forbidden_h3_header("Proxy-Authorization"));
+    EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("proxy-authenticate"));
+    EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("proxy-authorization"));
 }
 
 // Empty, a pseudo-header, or a field of the one trailer list HTTP/1.1, HTTP/2 and HTTP/3 share

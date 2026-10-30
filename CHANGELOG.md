@@ -500,6 +500,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   it; each malformed shape past it refused, each well-formed one answered; a response, its trailer section and an
   interim section past it; three 103s and a 200 delivering the 200's fields alone.
 
+- **An HTTP/3 header section may carry `proxy-authorization` and `proxy-authenticate`, as an HTTP/2 one does (Huly
+  QB-1197).** `detail::is_forbidden_h3_header()` counted them among the connection-specific fields, which RFC 9114
+  §4.2 does not, and nghttp3 lets them through: a request carrying `proxy-authorization` had its stream refused with
+  `H3_MESSAGE_ERROR` (over the request limits too, where it is now answered `431`), the client refused to submit it,
+  and the server a `407` carrying `proxy-authenticate`. HTTP/2 served all three. A trailer section still may not carry
+  them (`is_forbidden_trailer_field`). Tests: a request through the client and one built on the wire served with the
+  field, the `407` delivered with its challenge, the connection kept; over each request limit, answered `431`.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

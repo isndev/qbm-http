@@ -96,15 +96,16 @@ lower_header_name(std::string_view value) {
 /**
  * @brief Test whether a header is a connection-specific field banned in HTTP/3.
  * @param name Header name (case-insensitive).
- * @return @c true if @p name is one of the hop-by-hop / connection-management
- *         fields prohibited by RFC 9114 section 4.2 (e.g. @c connection,
- *         @c transfer-encoding, @c upgrade).
+ * @return @c true if @p name is one of the connection-specific fields RFC 9114 section 4.2 names: @c connection,
+ *         @c keep-alive, @c proxy-connection, @c transfer-encoding, @c upgrade. The proxy authentication fields are
+ *         none of them -- a header section carries them, as HTTP/2's does (RFC 9113 §8.2.2); a trailer section does
+ *         not (is_forbidden_h3_trailer). They were on this list: a request carrying @c proxy-authorization was refused
+ *         with H3_MESSAGE_ERROR, and served over HTTP/2 (Huly QB-1197).
  */
 inline bool
 is_forbidden_h3_header(std::string_view name) {
     const auto lower = lower_header_name(name);
-    return lower == "connection" || lower == "keep-alive" || lower == "proxy-connection" || lower == "proxy-authenticate"
-           || lower == "proxy-authorization" || lower == "transfer-encoding" || lower == "upgrade";
+    return lower == "connection" || lower == "keep-alive" || lower == "proxy-connection" || lower == "transfer-encoding" || lower == "upgrade";
 }
 
 /**
@@ -966,9 +967,9 @@ private:
                     return 0;
                 }
                 // A field over the limits is judged before it is dropped, by the rules that need no other field: a
-                // connection-specific field of the header section (nghttp3 leaves the proxy authentication fields to
-                // this module), a field of the trailer section a trailer section must not carry, refuse the stream as
-                // they do within the limits. They were dropped unread and the request answered 431 (Huly QB-1197).
+                // connection-specific field of the header section (nghttp3 refuses them first), a field of the trailer
+                // section a trailer section must not carry, refuse the stream as they do within the limits. They were
+                // dropped unread and the request answered 431 (Huly QB-1197).
                 if (st.main_headers_seen ? detail::is_forbidden_h3_trailer(header_name) : detail::is_forbidden_h3_header(header_name)) {
                     me->refuse_stream(static_cast<std::uint64_t>(stream_id), st);
                     return 0;
