@@ -1193,6 +1193,56 @@ TEST(Http1ProtocolFraming, AnHttp09RequestIsRefusedWith505) {
     }
 }
 
+// So is a request line of HTTP/2.0, the one other version llhttp reads: HTTP/2 is no text protocol, and the server
+// read the request as HTTP/1.1 -- dispatched with its Host, or refused 400 for having none, its body read as HTTP/1.1
+// frames it. Refused with 505 before the Host rule and before a body byte (review r1 follow-up).
+TEST(Http1ProtocolFraming, ARequestLineOfHttp20IsRefusedWith505) {
+    for (const char *head :
+         {"GET / HTTP/2.0\r\nHost: h\r\n\r\n", "GET /admin HTTP/2.0\r\n\r\n", "POST /x HTTP/2.0\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, head);
+        EXPECT_EQ(step(proto, io), 0u) << head;
+        EXPECT_EQ(io.request_count, 0) << head;
+        EXPECT_EQ(io.refusals, std::vector<int>{505}) << head;
+        EXPECT_TRUE(proto.ok()) << head << ": the io answers before the connection ends";
+    }
+}
+
+// The two ways an HTTP/2 client meets a server over cleartext, neither of which qbm-http speaks -- its HTTP/2 is TLS
+// and ALPN only -- keep their HTTP/1.1 answers. The prior-knowledge connection preface (RFC 9113 §3.3) names the target
+// `*` for the method PRI: refused 400 as a target that names no resource, before its version is read, and the frames
+// after it are dropped with the connection. An `Upgrade: h2c` request (RFC 7540 §3.2) is an HTTP/1.1 request: served as
+// one, the upgrade left to the application, and the connection keeps reading HTTP/1.1.
+TEST(Http1ProtocolFraming, AnHttp2ClientOverCleartextKeepsItsHttp11Answers) {
+    {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, std::string_view{"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00", 33});
+        EXPECT_EQ(step(proto, io), 0u);
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(io.refusals, std::vector<int>{400});
+        EXPECT_TRUE(proto.ok()) << "the io answers before the connection ends";
+        EXPECT_EQ(io.input.size(), 0u) << "the frames after the preface are dropped";
+    }
+    RefusingServerFakeIO                             io;
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    feed(io, "GET /x HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n"
+             "GET /y HTTP/1.1\r\nHost: h\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.last_request->uri().path(), "/x");
+    EXPECT_EQ(io.last_request->major_version, 1);
+    EXPECT_EQ(io.last_request->minor_version, 1);
+    EXPECT_TRUE(io.last_request->upgrade);
+    EXPECT_EQ(io.last_request->header("Upgrade"), "h2c");
+    EXPECT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.request_count, 2);
+    EXPECT_EQ(io.last_request->uri().path(), "/y");
+    EXPECT_TRUE(io.refusals.empty());
+    EXPECT_TRUE(proto.ok());
+}
+
 // A field line's value excludes the whitespace around it (RFC 9112 §5): llhttp drops the run before it, the parser
 // the run after it -- a field followed by another, the last field of the header section, a trailer field alike.
 TEST(Http1ProtocolFraming, AFieldValueEndsAtItsLastOctetThatIsNoWhitespace) {

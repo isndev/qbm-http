@@ -195,18 +195,27 @@ All notable changes to the qbm-http module are documented here. The format is ba
   46 140 -> 46 249 and 13 011 -> 13 049 (+0.19 to +0.29 %): g++ keeps the data pointer of `on_url` and
   `on_header_field` on the stack across the new exception edges.
 
-- **An HTTP/0.9 request is answered `505 HTTP Version Not Supported` instead of being dispatched with no version and no
-  `Host` (Huly QB-1186).** llhttp reads a request line with no version -- `GET /admin` then CRLF -- as HTTP/0.9, and
-  the field lines after it as a header section; the parser took it for a request older than HTTP/1.1, which needs no
-  `Host`, so `GET /` or `GET /admin` followed by a field line or none, then an empty line, reached its route with no
-  version and no authority (3.3.0 dispatched it too: it checked no `Host` at all). The parser refuses a request whose
-  major version is 0 -- that form, and `HTTP/0.9` written out -- once its header section has ended, with the status
-  RFC 9110 §15.6.6 gives a major version the server does not support; the session answers it with
-  `Connection: close` and closes, as it answers a target that names no resource. A client that sends the request line
-  alone and waits, as an HTTP/0.9 client does, gets nothing until it ends a header section or the server's timeout
-  closes the connection. No client of the module writes HTTP/0.9: a `Request` is HTTP/1.1 unless its `major_version`
-  is set, and no test or example sends a request line without a version. Test:
-  `Http1ProtocolFraming.AnHttp09RequestIsRefusedWith505`, three requests that are each dispatched on the base.
+- **An HTTP/1.1 server answers `505 HTTP Version Not Supported` to a request whose major version is not 1 -- HTTP/0.9
+  and HTTP/2.0, the two others llhttp reads -- instead of serving it as HTTP/1.x (Huly QB-1186).** llhttp reads a
+  request line with no version -- `GET /admin` then CRLF -- as HTTP/0.9, and the field lines after it as a header
+  section; the parser took it for a request older than HTTP/1.1, which needs no `Host`, so `GET /` or `GET /admin`
+  followed by a field line or none, then an empty line, reached its route with no version and no authority. It reads
+  `HTTP/2.0` on a request line too, and the server served `GET / HTTP/2.0` carrying a `Host` as an HTTP/1.1 request,
+  its body read with HTTP/1.1 framing (one with no `Host` was answered 400); 3.3.0 dispatched all of them, as it
+  checked no `Host`. The parser refuses a request whose major version is not 1 once its header section has ended,
+  before the `Host` rule and before a body byte, with the status RFC 9110 §15.6.6 gives a major version the server
+  does not support; the session answers it with `Connection: close` and closes, as it answers a target that names no
+  resource. A client that sends the request line alone and waits, as an HTTP/0.9 client does, gets nothing until it
+  ends a header section or the server's timeout closes the connection. qbm-http speaks HTTP/2 over TLS with ALPN only,
+  and the two cleartext openings of an HTTP/2 client keep their answers: the prior-knowledge preface (`PRI *
+  HTTP/2.0`, RFC 9113 §3.3) is still answered 400, its target `*` refused before its version is read, and an `Upgrade:
+  h2c` request is an HTTP/1.1 request, served as one. A `Request` is HTTP/1.1 unless its `major_version` is set -- but
+  one received over HTTP/2 or HTTP/3 carries 2 or 3, which the HTTP/1.1 serializer writes on its request line: set it
+  back to 1.1 before forwarding such a request to an HTTP/1.1 server. No test or example sends another version. Tests:
+  `Http1ProtocolFraming.AnHttp09RequestIsRefusedWith505` and
+  `Http1ProtocolFraming.ARequestLineOfHttp20IsRefusedWith505`, whose requests are each dispatched on their base (the
+  HTTP/2.0 one with no `Host` refused 400), and
+  `Http1ProtocolFraming.AnHttp2ClientOverCleartextKeepsItsHttp11Answers`, green before and after.
 
 - **A request's URI is the target the client sent: an HTTP/1.1 `//host/path` is a path, a target that is none of the
   four forms is answered 400, and an HTTP/2 or HTTP/3 `:path` or `host` field names no other authority (Huly

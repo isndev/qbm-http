@@ -196,7 +196,7 @@ private:
     }
 
     /// Fails the message for a size limit, a target that names no resource, a Host field that names no authority or
-    /// the version HTTP/0.9, and records the status it answers (refusal_status()): the server's session answers it,
+    /// a major version other than 1, and records the status it answers (refusal_status()): the server's session answers it,
     /// then closes, instead of closing on silence (Huly QB-168, QB-1186).
     static int
     refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
@@ -546,7 +546,7 @@ private:
      * Called when all headers have been parsed.
      * Finalizes header processing and prepares for body parsing.
      * This callback:
-     * 1. Sets the HTTP version, and refuses an HTTP/0.9 request: 505
+     * 1. Sets the HTTP version, and refuses a request whose major version is not 1: 505
      * 2. Checks a request's Host field (check_host_field()) and reserves memory for the body based on
      *    Content-Length if available
      * 3. Sets the upgrade flag if applicable
@@ -578,11 +578,11 @@ private:
         msg.major_version        = parser->http_major;
         msg.minor_version        = parser->http_minor;
         if constexpr (MessageType::type == HTTP_REQUEST) {
-            // HTTP/0.9 -- a request line with no version, which llhttp reads with the field lines after it, or the
-            // version written out -- is a major version the server does not support: 505 (RFC 9110 §15.6.6). The Host
-            // rule exempts a version below 1.1, and such a request was dispatched with neither (review r1 N3).
-            if (parser->http_major == 0) [[unlikely]]
-                return refuse_with_status(parser, "HTTP/0.9 request", HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED);
+            // A major version other than 1 is one the server does not support: 505 (RFC 9110 §15.6.6). llhttp reads two,
+            // HTTP/0.9 -- a request line with no version, read with the field lines after it, or 0.9 written out -- and
+            // HTTP/2.0, which is no text protocol; both were served as HTTP/1.x (review r1 N3 and its follow-up).
+            if (parser->http_major != 1) [[unlikely]]
+                return refuse_with_status(parser, "HTTP request version is not 1.x", HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED);
         }
         if (msg.has_header("Transfer-Encoding")) {
             if (msg.has_header("Content-Length")) {
@@ -892,7 +892,7 @@ public:
      *
      * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
      * 431 or 413; on a target origin::request_target_uri() refuses: 400 (on_url_complete()); on a Host field
-     * that names no authority: 400 (check_host_field()); or on an HTTP/0.9 request: 505 (on_headers_complete()). 0 for any
+     * that names no authority: 400 (check_host_field()); or on a major version other than 1: 505 (on_headers_complete()). 0 for any
      * other failure, which the protocol's fail_message() answers only for a request line llhttp refuses
      * at its target (400) -- any other malformed message is not answered. reset() clears it.
      */
