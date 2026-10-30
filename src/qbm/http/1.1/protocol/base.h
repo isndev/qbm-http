@@ -299,16 +299,16 @@ private:
      * QB-1177); an absolute-form one as a URI with an authority and no userinfo; the authority-form of a
      * CONNECT request as a host and a port; the asterisk-form of an OPTIONS request as `*`. Any other
      * target names no resource and is answered 400 (one with a byte the URI parser refuses reached the
-     * route of the empty path, a fragment the route of its path, a GET `*` a 404).
+     * route of the empty path, a fragment the route of its path, a GET `*` a 404). The target is read into
+     * the request's own uri, in place: a uri built apart and moved in cost 830 instructions a request.
      */
     static int
     on_url_complete(http_t *parser) {
         if constexpr (MessageType::type == HTTP_REQUEST) {
             auto *self = self_of(parser);
-            auto  uri = qb::http::origin::request_target_uri(self->_url_buffer, parser->method == HTTP_CONNECT, parser->method == HTTP_OPTIONS);
-            if (!uri)
+            if (!qb::http::origin::request_target_uri(self->msg.uri(), self->_url_buffer, parser->method == HTTP_CONNECT,
+                                                      parser->method == HTTP_OPTIONS))
                 return refuse_with_status(parser, "HTTP request target names no resource", HTTP_STATUS_BAD_REQUEST);
-            self->msg.uri() = std::move(*uri);
         }
         return 0;
     }

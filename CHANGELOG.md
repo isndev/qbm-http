@@ -110,12 +110,23 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `/transfer`. `///x` came out as `/x`, `//u@a/x` gained a userinfo, a CONNECT `example.com:443` was the scheme
   `example.com` and the path `443`, and a target with a byte the parser refuses -- `/a|b`, `/a{b}`, sent raw -- was
   dispatched with an empty path, to the route of `/`. `qb::http::origin::request_target_uri()` reads the target by
-  its form now (RFC 9112 §3.2), once it has ended (llhttp's `on_url_complete`, instead of on each piece of it):
-  origin-form with `qb::io::uri::origin_form()` -- `//a/b` is the path `//a/b` with an empty host, routed by its
-  segments (`/a/b`), the authority being the `Host` field; absolute-form as a URI whose authority has a host and no
-  userinfo (`http://victim.test@evil.test/x` and `http:///x` are refused); the authority-form of CONNECT, and only
-  of it, with `qb::io::uri::authority_form()`, the host and the port (`[::1]:443` included, so a CONNECT is routed at
-  the path `/`); the asterisk-form of OPTIONS, and only of it, as `*`. Anything else -- a fragment, `*` for another
+  its form now (RFC 9112 §3.2), once it has ended (llhttp's `on_url_complete`, instead of on each piece of it), into
+  the request's own uri: origin-form with `qb::io::uri::read_origin_form()` -- `//a/b` is the path `//a/b` with an
+  empty host, routed by its segments (`/a/b`), the authority being the `Host` field; absolute-form as a URI whose
+  authority has a host and no userinfo (`http://victim.test@evil.test/x` and `http:///x` are refused); the
+  authority-form of CONNECT, and only of it, with `qb::io::uri::read_authority_form()`, the host and the port
+  (`[::1]:443` included, so a CONNECT is routed at the path `/`); the asterisk-form of OPTIONS, and only of it, as
+  `*`. In place, because the first form of this change read every target into a uri built apart and moved into the
+  request -- two moves of its strings and its query map, 830 instructions a request on g++ 14, 54 ns of a 263 ns parse
+  of a two-line GET (`qbm-http-bench-http1-parser`, `BM_Http1Parse_WholeBuffer/corpus:0` against the previous release's
+  parser with the same bench code on both sides, 3 physical copies a side in a seeded order, +20 % with a 1.2 % A/A
+  band; the uri's parse itself was 6 instructions cheaper). Read in place, the same request executes 767 fewer
+  instructions (5 126 -> 4 359; 4 076 before the train, the rest QB-1186's check) and the cell reads 265 / 329 / 272
+  ns -- the previous release, the first form, this one (ratios 1.238 and 1.026 [1.022, 1.033]; the same host and
+  protocol, 4 sides, 48 launches); `Fragmented/corpus:0` is level with the previous release again (314 -> 313 ns, 0.997
+  [0.970, 1.044]), the 9-line GET +1.9 %, and the byte-at-a-time parses keep the gain of one parse per target (0.86 on
+  the 7-byte target, 0.70 on the 28-byte one). The HTTP/2 and HTTP/3 readers (`origin::request_uri`) are unchanged: on
+  x86 the h2 request already executes 1 326 fewer instructions than before this change. Anything else -- a fragment, `*` for another
   method (`GET *` was a 404), a byte the parser refuses, a target llhttp refuses itself such as `?x`, which closed the
   connection on silence -- names no resource: the server answers `400 Bad Request` and closes, as it answers a target
   over the URL limit 414, and the percent-encoded spelling (`/a%7Cb`) is served (QB-1187 weighs the bytes browsers

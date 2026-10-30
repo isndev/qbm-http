@@ -664,34 +664,44 @@ TEST(OriginTest, IsRequestAuthorityClassesEveryOctetAsTheUriParserDoes) {
     }
 }
 
-// The URI of an HTTP/1.1 request, by its target's form (RFC 9112 §3.2, Huly QB-1177).
+// The URI of an HTTP/1.1 request, by its target's form (RFC 9112 §3.2, Huly QB-1177), read into the request's own uri:
+// the one uri below is filled target after target, as a server's parser fills its message's.
 TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
     using qb::http::origin::request_target_uri;
-    // origin-form: a path, every byte of it; no scheme, no host -- the authority is Host's.
-    auto const origin = request_target_uri("//evil.test/x?q=1", false, false);
-    ASSERT_TRUE(origin.has_value());
-    EXPECT_TRUE(origin->host().empty());
-    EXPECT_EQ(origin->path(), "//evil.test/x");
-    EXPECT_EQ(origin->query("q"), "1");
+    qb::io::uri uri{std::string{"https://user@previous.test:9/old?stale=1#f"}}; // what the request held before
+    ASSERT_TRUE(uri.is_valid());
+    // origin-form: a path, every byte of it; no scheme, no host -- the authority is Host's. Nothing of the previous
+    // reading survives: not the scheme, the userinfo, the host, the port, the query map nor the fragment.
+    ASSERT_TRUE(request_target_uri(uri, "//evil.test/x?q=1", false, false));
+    EXPECT_TRUE(uri.is_valid());
+    EXPECT_TRUE(uri.scheme().empty());
+    EXPECT_TRUE(uri.user_info().empty());
+    EXPECT_TRUE(uri.host().empty());
+    EXPECT_TRUE(uri.port().empty());
+    EXPECT_EQ(uri.path(), "//evil.test/x");
+    EXPECT_EQ(uri.query("q"), "1");
+    EXPECT_TRUE(uri.query("stale").empty());
+    EXPECT_TRUE(uri.fragment().empty());
+    EXPECT_EQ(uri.af(), AF_INET);
     // absolute-form: a URI, its authority the request's.
-    auto const absolute = request_target_uri("http://victim.test:8080/x", false, false);
-    ASSERT_TRUE(absolute.has_value());
-    EXPECT_EQ(absolute->host(), "victim.test");
-    EXPECT_EQ(absolute->port(), "8080");
-    EXPECT_EQ(absolute->path(), "/x");
+    ASSERT_TRUE(request_target_uri(uri, "http://victim.test:8080/x", false, false));
+    EXPECT_EQ(uri.host(), "victim.test");
+    EXPECT_EQ(uri.port(), "8080");
+    EXPECT_EQ(uri.path(), "/x");
+    EXPECT_TRUE(uri.query("q").empty());
     // authority-form, CONNECT's: the host and the port. Read as a reference, `example.com:443` was a scheme.
-    auto const connect = request_target_uri("example.com:443", true, false);
-    ASSERT_TRUE(connect.has_value());
-    EXPECT_TRUE(connect->scheme().empty());
-    EXPECT_EQ(connect->host(), "example.com");
-    EXPECT_EQ(connect->port(), "443");
-    auto const connect_v6 = request_target_uri("[::1]:443", true, false);
-    ASSERT_TRUE(connect_v6.has_value());
-    EXPECT_EQ(connect_v6->host(), "::1");
+    ASSERT_TRUE(request_target_uri(uri, "example.com:443", true, false));
+    EXPECT_TRUE(uri.scheme().empty());
+    EXPECT_EQ(uri.host(), "example.com");
+    EXPECT_EQ(uri.port(), "443");
+    ASSERT_TRUE(request_target_uri(uri, "[::1]:443", true, false));
+    EXPECT_EQ(uri.host(), "::1");
     // asterisk-form, OPTIONS's: `*`.
-    auto const asterisk = request_target_uri("*", false, true);
-    ASSERT_TRUE(asterisk.has_value());
-    EXPECT_EQ(asterisk->path(), "*");
+    ASSERT_TRUE(request_target_uri(uri, "*", false, true));
+    EXPECT_EQ(uri.path(), "*");
+    EXPECT_TRUE(uri.host().empty());
+    // a refused target leaves no URI worth reading: the server answers 400 and never routes it
+    EXPECT_FALSE(request_target_uri(uri, "/x#f", false, false));
 
     struct Refused {
         std::string_view target;
@@ -718,7 +728,8 @@ TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
           Refused{"[zz::1]:443", true, false},
           Refused{"[1.2.3.4]:443", true, false},
           Refused{"http://[127.0.0.1]/x", false, false}}) {
-        EXPECT_FALSE(request_target_uri(c.target, c.connect, c.options).has_value())
+        qb::io::uri refused;
+        EXPECT_FALSE(request_target_uri(refused, c.target, c.connect, c.options))
             << '"' << c.target << "\" connect=" << c.connect << " options=" << c.options;
     }
 }

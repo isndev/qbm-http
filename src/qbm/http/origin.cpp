@@ -251,28 +251,29 @@ request_uri(std::string_view scheme, std::string_view authority, std::string_vie
     return uri;
 }
 
-std::optional<qb::io::uri>
-request_target_uri(std::string_view target, bool connect_request, bool options_request) {
+bool
+request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_request, bool options_request) {
     if (target.empty() || target.find('#') != std::string_view::npos)
-        return std::nullopt; // no target form holds a fragment (RFC 9112 §3.2)
-    std::optional<qb::io::uri> uri;
-    if (connect_request) {
-        if (is_request_authority(target))
-            uri = qb::io::uri::authority_form(std::string{target});
-    } else if (target.front() == '/') {
-        uri = qb::io::uri::origin_form(std::string{target});
-    } else if (target == "*") {
-        if (options_request)
-            uri = qb::io::uri(std::string{"*"});
-    } else if (auto const separator = target.find("://"); separator != std::string_view::npos) {
+        return false; // no target form holds a fragment (RFC 9112 §3.2)
+    if (connect_request)
+        return is_request_authority(target) && uri.read_authority_form(target);
+    if (target.front() == '/')
+        return uri.read_origin_form(target);
+    if (target == "*") {
+        if (!options_request)
+            return false;
+        uri = std::string{"*"};
+        return uri.is_valid();
+    }
+    if (auto const separator = target.find("://"); separator != std::string_view::npos) {
         auto const rest      = target.substr(separator + 3);
         auto const authority = rest.substr(0, rest.find_first_of("/?"));
-        if (qb::io::uri::is_valid_scheme(target.substr(0, separator)) && is_request_authority(authority))
-            uri.emplace(std::string{target}); // is_request_authority() holds a host: `http:///x` has none
+        if (!qb::io::uri::is_valid_scheme(target.substr(0, separator)) || !is_request_authority(authority))
+            return false; // is_request_authority() holds a host: `http:///x` has none
+        uri = std::string{target};
+        return uri.is_valid();
     }
-    if (uri && !uri->is_valid())
-        uri.reset();
-    return uri;
+    return false;
 }
 
 } // namespace qb::http::origin
