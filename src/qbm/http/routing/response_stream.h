@@ -118,8 +118,13 @@ concept streaming_session =
  * hands out the only strong reference, the context and the session keep weak ones. A producer that drops its
  * handle without `end()` ends the message the only correct way left -- it is aborted: on the wire the connection is
  * closed, so a peer never waits for bytes that will not come and a pipelined request never queues behind a dead
- * stream; buffered, the context answers 500. Nothing cycles: producer -> stream (shared); stream -> context and
- * session (weak); context -> stream (weak); session -> context (shared, until the response is delivered).
+ * stream; buffered, the context answers 500. The stream holds nothing strongly: producer -> stream (shared); stream ->
+ * context and session (weak); context -> stream (weak); session -> context (shared, until the response is delivered).
+ * A producer that waits through `on_drain()` with a callback that owns it -- the static files' streamer does -- makes a
+ * cycle, stream -> callback -> producer -> stream, which the stream breaks on every way out: the callback is run, or
+ * released without running, at a drain, an `end()`, an `abort()`, a cancellation (the peer leaving, the context's, an
+ * extraction, the inactivity timeout) and the session's destruction (Huly QB-101). A producer that keeps itself alive
+ * any other way while it waits leaks itself and all it holds.
  *
  * THE STREAM OWNS THE COMPLETION: from `begin_stream()` until the stream ends, a `complete()` on its context is
  * ignored -- the coroutine adapters' automatic completion and a handler's own call alike -- and only `end()`,

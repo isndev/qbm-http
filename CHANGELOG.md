@@ -81,7 +81,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   not offer yet -- gets a buffered stream with the same interface, sent whole at `end()` through the ordinary
   completion, its hooks included. Observers read a streamed response at its end: the head's status, even when it was
   cut short, and `Context::streamed_bytes()`, which `AccessLog` logs as its size.
-  `qbm-http-test-system-response-stream` (38 cases, the TLS ones over `ssl::DefaultSecureSession`) and
+  `qbm-http-test-system-response-stream` (42 cases, the two TLS ones over `ssl::DefaultSecureSession`) and
   `qbm-http-test-system-response-stream-huge-body` hold every decision over a raw loopback client that asserts the
   bytes of the wire; two HTTP/2 cases in `qbm-http-test-system-http2-client` hold the buffered fallback. The HTTPS
   cases depend on qb's QB-1176.
@@ -103,6 +103,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   not consumed, one request short, the read disarmed after the preflights) are refused.
 
 ### Changed
+
+- **Upgrade note: under `CompressionMiddleware`, a static file larger than `StaticFilesOptions::stream_threshold` is
+  no longer compressed on HTTP/1.1 (Huly QB-101).** The static files stream such a body (next entry), and a streamed
+  body reaches the `PRE_RESPONSE_SEND` hooks empty, so the compression hook leaves it alone. With the default
+  threshold, 1 MiB, a text asset over 1 MiB -- a bundled script, a stylesheet, a JSON, CSV or SVG file -- that 3.3
+  sent compressed to an HTTP/1.1 client is sent as it is on disk, its `Content-Length` the file's and no
+  `Content-Encoding`. HTTP/2 and HTTP/3, which read every body whole, still compress it, and so does HTTP/1.1 below
+  the threshold. To keep compressing such assets on HTTP/1.1, raise the threshold above the largest of them
+  (`with_stream_threshold()`; `SIZE_MAX` streams nothing): each of their downloads then holds the whole file in
+  memory again, as in 3.3, under `max_file_size`.
 
 - **`StaticFilesMiddleware` streams a body over `StaticFilesOptions::stream_threshold` on HTTP/1.1: a download holds
   the stream's high watermark and two 64 KiB pieces, not the file, so N concurrent downloads no longer cost N copies
@@ -138,10 +148,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   session's output buffer, cannot serve TLS, and qb-io's transports do not offer it. The whole-read path's seek and
   read failures answer their 500 without the length and range they no longer describe (the serializer refused the
   pair, and the connection dropped with no answer). Small files take the path they always took: an A/B against the base (three byte-identical copies a side, seeded order, a drained host) puts loopback GETs of a 16 B to 1 MiB file and the middleware benchmark's GET, HEAD, range and `304` cells within 2 % of the base, inside the spread between identical copies, and serves a 4 MiB file, now streamed, 20 % faster. Proven by
-  `qbm-http-test-system-static-files-stream` (21 cases over a raw loopback client, one over TLS: every byte, the
+  `qbm-http-test-system-static-files-stream` (26 cases over a raw loopback client, one over TLS: every byte, the
   output bound under a client that does not read, the differential against a buffered server, the cap, a peer that
   leaves, a file that shrinks, a session that drops what it is given, HTTP/1.0, pipelining, chunked framing, every
-  hook case, compression), a case each in `qbm-http-test-system-http2-client` and
+  hook case, compression, a file renamed away and replaced under a download, and a parked download's producer,
+  stream and file released after the peer leaves, a cancel and an abort), a case each in `qbm-http-test-system-http2-client` and
   `qbm-http-test-system-http3-loopback` (the buffered path, the cap still enforced) and two in
   `qbm-http-test-unit-middleware-static-files`; 11 of the first 13 fail on the base. 44 mutants on the final code: 38 caught, 6 equivalent or unreachable, each explained in the commit.
 
@@ -258,7 +269,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   handler had declared with an empty or partial body: on HTTP/1.1 the client waited for bytes that never came and read
   the next answer as them, or the serializer refused the pair and dropped the connection; on HTTP/2 the response was
   malformed. Its 503 now drops `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Content-Encoding`,
-  `Content-Range`, `ETag`, `Last-Modified` and `Cache-Control` with the body, at the first cancellation: what a
+  `Content-Range`, `Content-Language`, `Content-Location`, `Content-Disposition`, `ETag`, `Last-Modified`,
+  `Cache-Control` and `Expires` with the body, at the first cancellation: what a
   middleware writes after `next()` on the cancelled request is kept, and an answer already decided (a buffered stream
   that ended) is left alone. `qbm-http-test-system-response-stream`, `qbm-http-test-system-http2-client` and
   `qbm-http-test-system-static-files-stream` hold each header, the body, the order against a middleware's own answer

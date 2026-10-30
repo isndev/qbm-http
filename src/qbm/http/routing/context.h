@@ -157,7 +157,7 @@ private:
     /// When the router received the request; read only for an observed context.
     qb::mono_time _observed_since{};
     /// The incremental body of this response, once the handler began one (Huly QB-86). The handler owns the stream;
-    /// the context keeps a weak reference, so nothing cycles.
+    /// the context keeps a weak reference, so the two make no cycle (a producer may: ResponseStream says how it is broken).
     std::weak_ptr<ResponseStream<SessionType>> _stream;
     std::size_t _streamed_bytes   = 0;     ///< the body bytes a streamed response handed to its session (streamed_bytes())
     bool        _stream_begun     = false; ///< begin_stream() ran or is running: a hook it runs gets nullptr, not a second stream
