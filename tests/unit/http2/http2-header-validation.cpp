@@ -200,6 +200,20 @@ TEST(HTTP2HeaderValidator, HeaderValueFormatRejectsControlBytes) {
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value(std::string_view{"bad\0path", 8}));
 }
 
+// A field value neither starts nor ends with SP or HTAB (RFC 9113 section 8.2.1; Huly QB-1191): whitespace inside it
+// is part of it, an empty value is a value.
+TEST(HTTP2HeaderValidator, HeaderValueFormatRejectsWhitespaceAtEitherEnd) {
+    for (const char *value : {" a", "a ", "\ta", "a\t", " ", "\t", " a ", "\t\t"}) {
+        EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value(value)) << "[" << value << "]";
+        EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("x-test", value)) << "[" << value << "]";
+        EXPECT_FALSE(h2::HeaderValidator::is_sent_request_field("x-test", value)) << "[" << value << "]";
+    }
+    for (const char *value : {"a b", "a\tb", "a \t b", "", "a"}) {
+        EXPECT_TRUE(h2::HeaderValidator::is_valid_header_value(value)) << "[" << value << "]";
+        EXPECT_TRUE(h2::HeaderValidator::is_valid_header_field("x-test", value)) << "[" << value << "]";
+    }
+}
+
 TEST(HTTP2HeaderValidator, RejectsUppercaseHeaderName) {
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_field("Content-Type", "text/plain"));
 }

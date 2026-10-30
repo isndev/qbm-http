@@ -36,6 +36,14 @@
 
 namespace h3detail = qb::protocol::http3::detail;
 
+namespace {
+/// How many fields named @p name a field block carries.
+std::size_t
+field_count(h3detail::header_block const &block, std::string_view name) {
+    return static_cast<std::size_t>(std::count_if(block.storage.begin(), block.storage.end(), [&](auto const &f) { return f.first == name; }));
+}
+} // namespace
+
 // ---------------------------------------------------------------------------
 // header_block ordering + required request pseudo-headers
 // ---------------------------------------------------------------------------
@@ -199,6 +207,37 @@ TEST(Http3ProtocolValidationTest, IsValidIncomingHeaderFieldAllowsPseudoHeaders)
     EXPECT_FALSE(h3detail::is_valid_incoming_header_field(":Path", "/")); // uppercase after colon
 }
 
+// A field value neither starts nor ends with SP or HTAB: RFC 9114 section 4.2 holds it to RFC 9110 section 5.5's
+// field-content (Huly QB-1191: such a value was sent). Whitespace inside it is part of it; an empty value is one.
+TEST(Http3ProtocolValidationTest, AFieldValueWithWhitespaceAtAnEndIsInvalid) {
+    for (const char *value : {" a", "a ", "\ta", "a\t", " ", "\t", " a "}) {
+        EXPECT_FALSE(h3detail::is_valid_header_field("x-test", value)) << "[" << value << "]";
+        EXPECT_FALSE(h3detail::is_valid_incoming_header_field("x-test", value)) << "[" << value << "]";
+    }
+    for (const char *value : {"a b", "a\tb", "a \t b", "", "a"}) {
+        EXPECT_TRUE(h3detail::is_valid_header_field("x-test", value)) << "[" << value << "]";
+        EXPECT_TRUE(h3detail::is_valid_incoming_header_field("x-test", value)) << "[" << value << "]";
+    }
+    // A request leaves without it, as an HTTP/2 request does; a response, or a trailer section, is refused.
+    qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+    req.set_header("x-edge", " a");
+    req.set_header("x-kept", "1");
+    const auto block = h3detail::make_request_headers(req);
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(field_count(*block, "x-edge"), 0u);
+    EXPECT_EQ(field_count(*block, "x-kept"), 1u);
+    qb::http::Response res;
+    res.status() = qb::http::status::OK;
+    res.set_header("x-edge", "a\t");
+    EXPECT_FALSE(h3detail::make_response_headers(res).has_value());
+    qb::http::Response trailed;
+    trailed.status() = qb::http::status::OK;
+    trailed.trailers().set_header("x-sum", " abc");
+    const auto plan = h3detail::plan_trailers(trailed);
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_FALSE(h3detail::make_trailer_block(*plan).has_value());
+}
+
 TEST(Http3ProtocolValidationTest, IsForbiddenH3HeaderMatchesConnectionFields) {
     EXPECT_TRUE(h3detail::is_forbidden_h3_header("connection"));
     EXPECT_TRUE(h3detail::is_forbidden_h3_header("Connection")); // case-insensitive
@@ -357,14 +396,6 @@ TEST(Http3ProtocolValidationTest, MakeRequestHeadersSynthesizesContentLengthForB
     }
     EXPECT_TRUE(found_content_length);
 }
-
-namespace {
-/// How many fields named @p name a field block carries.
-std::size_t
-field_count(h3detail::header_block const &block, std::string_view name) {
-    return static_cast<std::size_t>(std::count_if(block.storage.begin(), block.storage.end(), [&](auto const &f) { return f.first == name; }));
-}
-} // namespace
 
 // A request's content-length is the body's, as the HTTP/2 client writes it (Huly QB-1191): a declared one is left out --
 // it was sent, and a request whose body contradicted it was refused, which HTTP/2 sent with the body's length.

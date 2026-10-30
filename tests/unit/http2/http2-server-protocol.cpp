@@ -2302,6 +2302,84 @@ TEST(HTTP2ServerProtocol, ForbiddenConnectionHeaderInRequestIsStreamError) {
     }
 }
 
+// A field value that starts or ends with SP or HTAB makes the message malformed (RFC 9113 section 8.2.1), in a header
+// section and in a trailer section: a stream error, the connection kept and its next stream served. It was accepted
+// (Huly QB-1191), and nghttp2 resets such a stream. Whitespace inside a value is part of it.
+TEST(HTTP2ServerProtocol, AFieldValueWithWhitespaceAtAnEndIsStreamError) {
+    for (const char *value : {" a", "a ", "\ta", "a\t", " ", "\t", " a "}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+
+        auto fields = default_request_headers("/edge");
+        fields.emplace_back("x-edge", value);
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
+                   encode_hpack_headers(default_request_headers("/next")));
+        drive(protocol, io);
+
+        EXPECT_TRUE(protocol.ok()) << "[" << value << "]";
+        EXPECT_EQ(io.stream_error_count, 1) << "[" << value << "]";
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR) << "[" << value << "]";
+        ASSERT_EQ(io.request_count, 1) << "[" << value << "]: the next stream is served";
+        EXPECT_EQ(io.last_request_stream_id, 3u);
+    }
+    { // in a trailer section
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        open_post_stream_open(protocol, io, 1, "/upload");
+        push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>{'a', 'b', 'c'});
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers({{"x-sum", "abc "}}));
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR);
+    }
+    { // inside a value: part of it
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        auto fields = default_request_headers("/inner");
+        fields.emplace_back("x-inner", "a \t b");
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
+        ASSERT_EQ(io.request_count, 1);
+        EXPECT_EQ(io.last_request->header("x-inner"), "a \t b");
+        EXPECT_EQ(io.stream_error_count, 0);
+    }
+}
+
+// A response field value with SP or HTAB at an end is never sent: the response is refused, as a response carrying any
+// field HTTP/2 cannot carry is (RFC 9113 section 8.2.1; Huly QB-1191: it was sent), in its header section and its
+// trailer section alike.
+TEST(HTTP2ServerProtocol, SendResponseWithWhitespaceAtTheEndOfAValueIsStreamError) {
+    for (const bool trailer : {false, true}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        auto           headers = make_headers_frame(1, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM,
+                                                    default_request_headers("/edge"));
+        protocol.on(std::move(headers));
+        ASSERT_EQ(io.request_count, 1);
+
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        if (trailer) {
+            response.body() = "abc";
+            response.trailers().set_header("x-sum", "abc\t");
+        } else {
+            response.set_header("x-edge", " a");
+        }
+        EXPECT_FALSE(protocol.send_response(1, response)) << (trailer ? "trailer" : "header");
+        EXPECT_EQ(io.stream_error_count, 1) << (trailer ? "trailer" : "header");
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "nothing was sent";
+    }
+}
+
 TEST(HTTP2ServerProtocol, InvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

@@ -1033,6 +1033,45 @@ TEST(HTTP2ClientProtocol, ResponseTrailerFieldThatFramesOrRoutesIsRefused) {
     }
 }
 
+// A response field value with SP or HTAB at an end makes the response malformed (RFC 9113 section 8.2.1), which a
+// client must not accept (section 8.1.1): its stream is reset, in a header section and in a trailer section, the
+// connection kept. It was delivered (Huly QB-1191). Whitespace inside a value is part of it.
+TEST(HTTP2ClientProtocol, AResponseFieldValueWithWhitespaceAtAnEndIsRefused) {
+    for (const bool trailer : {false, true}) {
+        for (const char *value : {" a", "a\t"}) {
+            Http2ClientFakeIO                          io;
+            h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+
+            qb::http::Request req;
+            req.method() = qb::http::method::GET;
+            req.uri()    = qb::io::uri("https://example.test/edge");
+            ASSERT_TRUE(protocol.send_request(std::move(req), 21));
+
+            if (trailer) {
+                protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"trailer", "x-sum"}}));
+                protocol.on(make_data_frame(1, 0, "body"));
+                protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{"x-sum", value}}));
+            } else {
+                protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "200"}, {"x-edge", value}}));
+            }
+
+            EXPECT_TRUE(protocol.ok()) << value << ": a stream error, not a connection one";
+            EXPECT_EQ(io.response_count, 0) << value << ": the response must not be delivered";
+            EXPECT_EQ(io.stream_error_count, 1) << value;
+            EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR) << value;
+        }
+    }
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    qb::http::Request                          req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/inner");
+    ASSERT_TRUE(protocol.send_request(std::move(req), 21));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "200"}, {"x-inner", "a \t b"}}));
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.last_response->header("x-inner"), "a \t b");
+}
+
 // ===========================================================================
 // A trailer section the response did not announce completes it: the `trailer`
 // header is a SHOULD (RFC 9110 §6.6.2), and RFC 9113 §8.1 lets one HEADERS
@@ -2068,6 +2107,9 @@ TEST(HTTP2ClientProtocol, ARequestSendsOnlyTheFieldsTheServerAccepts) {
         {"Content-Length", "99"},
         {":protocol", "websocket"},
         {"x-bad", "a\rb"},
+        // A value with SP or HTAB at an end (RFC 9113 section 8.2.1; Huly QB-1191: it was sent).
+        {"x-edge", " a"},
+        {"x-edge", "a\t"},
     };
     for (const auto &[name, value] : left_out) {
         Http2ClientFakeIO                          client_io;

@@ -272,16 +272,27 @@ is_header_name_char(unsigned char c) noexcept {
 }
 
 /**
+ * @brief Whether a field value starts or ends with SP or HTAB, which no field value does: RFC 9114 §4.2 holds a value
+ *        to RFC 9110 §5.5's field-content, whose first and last octets are visible ones, and RFC 9113 §8.2.1 says so
+ *        of HTTP/2's (Huly QB-1191: such a value was sent).
+ */
+inline bool
+has_edge_whitespace(std::string_view value) noexcept {
+    return !value.empty() && (value.front() == ' ' || value.front() == '\t' || value.back() == ' ' || value.back() == '\t');
+}
+
+/**
  * @brief Validate an outgoing (regular) header field's name and value.
  * @param name  Field name; must be a non-empty lowercase token within length limits.
  * @param value Field value; must be within limits and free of NUL/CR/LF and
- *              other control characters (TAB allowed).
+ *              other control characters (TAB allowed), and neither start nor end with SP or TAB
+ *              (has_edge_whitespace).
  * @return @c true if the field is safe to emit on the wire.
  */
 inline bool
 is_valid_header_field(std::string_view name, std::string_view value) noexcept {
     if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH || has_edge_whitespace(value)) {
         return false;
     }
 
@@ -307,14 +318,16 @@ is_valid_header_field(std::string_view name, std::string_view value) noexcept {
  * @brief Validate an incoming header field's name and value.
  * @param name  Field name; may be a pseudo-header (leading ':') but the part
  *              after any leading colon must be a non-empty lowercase token.
- * @param value Field value; same control-character rules as outgoing fields.
+ * @param value Field value; same control-character and edge-whitespace rules as outgoing fields. nghttp3 (1.18.0
+ *              read) removes a regular field whose value breaks them before this module sees it, the message
+ *              delivered without it; this check holds whatever nghttp3 delivers.
  * @return @c true if the received field is well-formed. Its lengths are the caller's: the connection judges
  *         them against the request limits (a server's `request_limits()`, Huly QB-94), which a breach answers
  *         rather than resets.
  */
 inline bool
 is_valid_incoming_header_field(std::string_view name, std::string_view value) noexcept {
-    if (name.empty()) {
+    if (name.empty() || has_edge_whitespace(value)) {
         return false;
     }
 

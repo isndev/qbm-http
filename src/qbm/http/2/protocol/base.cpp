@@ -180,6 +180,12 @@ HeaderValidator::is_valid_header_field(std::string_view name, std::string_view v
 
 bool
 HeaderValidator::is_valid_header_value(std::string_view value) noexcept {
+    // A field value neither starts nor ends with SP or HTAB (RFC 9113 §8.2.1): the OWS around a field line value is
+    // not part of it in HTTP/1.1 (RFC 9112 §5), so such a value is no HTTP/1.1 field either. It was accepted on
+    // receipt and sent (Huly QB-1191); nghttp2 resets the stream that carries one.
+    if (!value.empty() && (value.front() == ' ' || value.front() == '\t' || value.back() == ' ' || value.back() == '\t')) [[unlikely]] {
+        return false;
+    }
     for (unsigned char c : value) {
         if (c == 0x00 || c == 0x0D || c == 0x0A) {
             return false;

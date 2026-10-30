@@ -523,6 +523,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
   and the loopback client, the request served without it; the body's length over a contradicting declared one and one
   with whitespace around it; a field past the bounds refused.
 
+- **A field value that starts or ends with SP or HTAB is malformed on HTTP/2 and never sent on HTTP/2 or HTTP/3
+  (Huly QB-1191).** RFC 9113 §8.2.1 makes such a value malformed, and RFC 9114 §4.2 holds an HTTP/3 one to RFC 9110
+  §5.5's field-content, whose first and last octets are visible; nghttp2 resets the stream that carries one. The
+  HTTP/2 server accepted it in a request's header or trailer section, the HTTP/2 client in a response's, and both
+  clients and both servers sent it. `HeaderValidator::is_valid_header_value()` and HTTP/3's
+  `detail::is_valid_header_field()` / `is_valid_incoming_header_field()` now refuse it: received over HTTP/2, the
+  stream is reset `PROTOCOL_ERROR`, the connection kept; sent, a request leaves without the field (the rule both
+  clients follow) and a response is refused -- one rule for every field neither protocol can carry. Received over
+  HTTP/3, nghttp3 (1.18.0) removes such a field before this module sees it, the message delivered without it; the
+  module's own check holds for a nghttp3 that delivers one. HTTP/1.1 is unchanged: the parser reads a field value
+  without the OWS around it (RFC 9112 §5). Whitespace inside a value is part of it. Tests: every edge shape on the
+  HTTP/2 server's header and trailer sections, the next stream served; the HTTP/2 client's request and the response
+  it receives; each server's response and trailer section refused; the HTTP/3 field block, and a raw HTTP/3 request
+  served without the field.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

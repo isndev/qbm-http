@@ -702,6 +702,38 @@ TEST(Http3ConnectionDirect, TheProxyAuthenticationFieldsCrossAHeaderSection) {
 }
 
 /**
+ * @test A field value with SP or HTAB at an end never reaches the server (Huly QB-1191)
+ * @brief Such a value is malformed (RFC 9114 section 4.2, RFC 9110 section 5.5's field-content). nghttp3 (1.18.0) removes
+ *        the field before this module sees it -- the request is served without it, which this pins, so that a nghttp3
+ *        that delivers it shows here: this module would then refuse the stream (is_valid_incoming_header_field). A
+ *        response carrying one is never submitted, and the connection serves on.
+ */
+TEST(Http3ConnectionDirect, AFieldValueWithWhitespaceAtAnEndNeverReachesTheServer) {
+    Pair pair;
+
+    auto fields = request_fields("/edge");
+    fields.emplace_back("x-edge", "a ");
+    fields.emplace_back("x-tab", "\ta");
+    fields.emplace_back("x-kept", "a \t b");
+    pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "nghttp3 removes the field, and the request is served";
+    auto const &served = pair.server_owner.requests.front();
+    EXPECT_FALSE(served.has_header("x-edge"));
+    EXPECT_FALSE(served.has_header("x-tab"));
+    EXPECT_EQ(served.header("x-kept"), "a \t b") << "whitespace inside a value is part of it";
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("x-edge", " a");
+    EXPECT_FALSE(pair.server.submit_response(0, response));
+    response.set_header("x-edge", "a");
+    EXPECT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    EXPECT_TRUE(pair.server_owner.resets.empty());
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+/**
  * @test submit_response rejects a forbidden response header
  * @brief transfer-encoding is forbidden in HTTP/3; make_response_headers returns nullopt so
  *        submit_response returns false (server side) and the client never receives a response.

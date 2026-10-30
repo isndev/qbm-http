@@ -311,7 +311,7 @@ public:
      * Rules enforced:
      * - header name must be non-empty and lowercase
      * - name and value must not contain NUL/CR/LF
-     * - value may contain TAB but no other CTL bytes
+     * - value may contain TAB but no other CTL bytes, and neither starts nor ends with SP or TAB
      * - name must be a valid token character sequence
      */
     [[nodiscard]] static bool is_valid_header_field(std::string_view name, std::string_view value) noexcept;
@@ -319,9 +319,10 @@ public:
     /**
      * @brief Validate an HTTP/2 header value according to RFC 9113.
      * @details Rejects NUL/CR/LF and any other control byte except TAB (0x09),
-     *          as well as DEL (0x7F).
+     *          as well as DEL (0x7F), and a value that starts or ends with SP or TAB (RFC 9113 §8.2.1;
+     *          Huly QB-1191: accepted on receipt and sent).
      * @param value Raw header field value
-     * @return true when the value contains no forbidden bytes
+     * @return true when the value contains no forbidden bytes and no whitespace at either end
      */
     [[nodiscard]] static bool is_valid_header_value(std::string_view value) noexcept;
 
