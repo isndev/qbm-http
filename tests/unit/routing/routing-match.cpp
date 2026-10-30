@@ -396,8 +396,9 @@ TEST_F(RoutingMatchTest, ARawOctetAndItsPercentEncodingNameOneRoute) {
         session->reset();
         router.route(session, request_as_received(c.method, c.target));
         EXPECT_EQ(session->_response.status(), c.status) << c.target;
-        if (c.status == OK)
+        if (c.status == OK) {
             EXPECT_EQ(session->_response.body().template as<std::string>(), c.body) << c.target;
+        }
     }
 }
 
