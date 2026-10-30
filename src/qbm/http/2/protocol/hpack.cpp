@@ -178,14 +178,14 @@ Decoder::decode_string_literal(const uint8_t *&current_pos, const uint8_t *end_p
 }
 
 bool
-Decoder::get_dynamic_table_entry(uint64_t index, std::string &name, std::string &value) const {
+Decoder::get_dynamic_table_entry(uint64_t index, std::string_view &name, std::string_view &value) const {
     // index != 0 guards the STATIC_TABLE[index - 1] access below: index 0 is invalid in
     // HPACK (callers reject it), but without this an index of 0 would compute
     // STATIC_TABLE[(size_t)-1] — a wild OOB read. Defense-in-depth against a future caller.
     if (index != 0 && index <= STATIC_TABLE.size()) {
         const auto &entry = STATIC_TABLE[index - 1];
-        name              = std::string(entry.first);
-        value             = std::string(entry.second);
+        name              = entry.first;
+        value             = entry.second;
         _stats.static_table_hits++;
         return true;
     } else {
@@ -202,11 +202,11 @@ Decoder::get_dynamic_table_entry(uint64_t index, std::string &name, std::string 
 }
 
 bool
-Decoder::get_name_from_index(uint64_t index, std::string &name) const {
+Decoder::get_name_from_index(uint64_t index, std::string_view &name) const {
     // index != 0 guards STATIC_TABLE[index - 1] against a (size_t)-1 OOB read (see
     // get_dynamic_table_entry). Defense-in-depth; current callers already reject index 0.
     if (index != 0 && index <= STATIC_TABLE.size()) {
-        name = std::string(STATIC_TABLE[index - 1].first);
+        name = STATIC_TABLE[index - 1].first;
         _stats.static_table_hits++;
         return true;
     } else {
@@ -222,6 +222,19 @@ Decoder::get_name_from_index(uint64_t index, std::string &name) const {
 
 bool
 Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete) {
+    return decode_block(encoded_block, out_headers, out_is_possibly_incomplete, nullptr);
+}
+
+bool
+Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete,
+                bool &out_over_list_size) {
+    out_over_list_size = false;
+    return decode_block(encoded_block, out_headers, out_is_possibly_incomplete, &out_over_list_size);
+}
+
+bool
+Decoder::decode_block(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete,
+                      bool *out_over_list_size) {
     const uint8_t *current_pos                 = encoded_block.data();
     const uint8_t *end_pos                     = encoded_block.data() + encoded_block.size();
     out_is_possibly_incomplete                 = false;
@@ -230,6 +243,29 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
 
     _stats.bytes_decoded += encoded_block.size();
     bool dynamic_table_size_updates_allowed = true;
+
+    // The header-list bound (RFC 9113 §6.5.2: names, values and 32 octets a field). Past it, a caller that asked to
+    // discard has the rest of the block decoded -- the dynamic table kept in step with the peer's encoder, which
+    // indexed those fields whatever the receiver does with them (RFC 9113 §10.5.1) -- and dropped, up to
+    // HPACK_DISCARDED_LIST_FACTOR times the bound; another caller has the block refused, as every caller had (Huly
+    // QB-1196: the HTTP/2 server closed the connection for a list its peer was never told it would refuse).
+    const std::size_t bound   = _max_header_list_size_from_settings;
+    const std::size_t ceiling = bound > SIZE_MAX / HPACK_DISCARDED_LIST_FACTOR ? SIZE_MAX : bound * HPACK_DISCARDED_LIST_FACTOR;
+    bool              refused = false;
+    // Counts a field of `size` octets: whether it is kept. A field past the bound is dropped; `refused` says the block
+    // fails instead.
+    const auto admit = [&](std::size_t size) noexcept -> bool {
+        current_header_list_size_check += size;
+        if (bound == 0 || current_header_list_size_check <= bound) [[likely]] {
+            return true;
+        }
+        if (!out_over_list_size || current_header_list_size_check > ceiling) {
+            refused = true;
+        } else {
+            *out_over_list_size = true;
+        }
+        return false;
+    };
 
     while (current_pos < end_pos) {
         uint8_t first_byte = *current_pos;
@@ -246,12 +282,17 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
                 return false;
             }
 
-            std::string name, value;
+            // Read in place: a field dropped past the bound costs no copy, so a reference to a large entry repeated
+            // across the block amplifies nothing.
+            std::string_view name, value;
             if (!get_dynamic_table_entry(index, name, value)) {
                 return false;
             }
-            out_headers.emplace_back(std::move(name), std::move(value));
-            current_header_list_size_check += out_headers.back().hpack_size();
+            if (admit(name.size() + value.size() + HPACK_ENTRY_OVERHEAD)) {
+                out_headers.emplace_back(std::string(name), std::string(value));
+            } else if (refused) {
+                return false;
+            }
 
         } else if (first_byte >> 6 == 0b01) { // Literal Header Field with Incremental Indexing (01xxxxxx)
             dynamic_table_size_updates_allowed = false;
@@ -270,9 +311,11 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
                 }
                 name = std::move(decoded_name.value());
             } else {
-                if (!get_name_from_index(index, name)) {
+                std::string_view indexed_name;
+                if (!get_name_from_index(index, indexed_name)) {
                     return false;
                 }
+                name.assign(indexed_name); // the table entry it names may be evicted by this one
             }
 
             auto [decoded_value, value_consumed_len] = decode_string_literal(current_pos, end_pos, out_is_possibly_incomplete, _stats);
@@ -282,11 +325,17 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
             }
             value = std::move(decoded_value.value());
 
-            current_header_list_size_check += name.length() + value.length() + HPACK_ENTRY_OVERHEAD;
-            out_headers.emplace_back(name, value);
-            add_to_dynamic_table(std::move(name), std::move(value));
+            if (admit(name.length() + value.length() + HPACK_ENTRY_OVERHEAD)) {
+                out_headers.emplace_back(name, value);
+            } else if (refused) {
+                return false;
+            }
+            add_to_dynamic_table(std::move(name), std::move(value)); // kept or dropped, the peer's encoder indexed it
 
-        } else if (first_byte >> 4 == 0b0000) { // Literal Header Field without Indexing (0000xxxx)
+        } else if (first_byte >> 4 == 0b0000 || first_byte >> 4 == 0b0001) {
+            // Literal Header Field without Indexing (0000xxxx) or never Indexed (0001xxxx): one layout, the second
+            // marking the field sensitive.
+            const bool never_indexed           = first_byte >> 4 == 0b0001;
             dynamic_table_size_updates_allowed = false;
             auto [index, index_len]            = decode_integer(current_pos, end_pos, 4);
             if (index_len < 0) {
@@ -294,15 +343,16 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
                 return false;
             }
 
-            std::string name, value;
+            std::string      literal_name;
+            std::string_view indexed_name;
             if (index == 0) {
                 auto [decoded_name, name_consumed_len] = decode_string_literal(current_pos, end_pos, out_is_possibly_incomplete, _stats);
                 if (!decoded_name) {
                     return false;
                 }
-                name = std::move(decoded_name.value());
+                literal_name = std::move(decoded_name.value());
             } else {
-                if (!get_name_from_index(index, name)) {
+                if (!get_name_from_index(index, indexed_name)) {
                     return false;
                 }
             }
@@ -311,42 +361,14 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
                 out_is_possibly_incomplete = true;
                 return false;
             }
-            value = std::move(decoded_value.value());
 
-            current_header_list_size_check += name.length() + value.length() + HPACK_ENTRY_OVERHEAD;
-            out_headers.emplace_back(std::move(name), std::move(value));
-
-        } else if (first_byte >> 4 == 0b0001) { // Literal Header Field never Indexed (0001xxxx)
-            dynamic_table_size_updates_allowed = false;
-            auto [index, index_len]            = decode_integer(current_pos, end_pos, 4);
-            if (index_len < 0) {
-                out_is_possibly_incomplete = true;
+            const std::size_t name_length = index == 0 ? literal_name.length() : indexed_name.length();
+            if (admit(name_length + decoded_value->length() + HPACK_ENTRY_OVERHEAD)) {
+                out_headers.emplace_back(index == 0 ? std::move(literal_name) : std::string(indexed_name), std::move(decoded_value.value()),
+                                         never_indexed);
+            } else if (refused) {
                 return false;
             }
-
-            std::string name, value;
-            if (index == 0) {
-                auto [decoded_name, name_consumed_len] = decode_string_literal(current_pos, end_pos, out_is_possibly_incomplete, _stats);
-                if (!decoded_name) {
-                    return false;
-                }
-                name = std::move(decoded_name.value());
-            } else {
-                if (!get_name_from_index(index, name)) {
-                    return false;
-                }
-            }
-            auto [decoded_value, value_consumed_len] = decode_string_literal(current_pos, end_pos, out_is_possibly_incomplete, _stats);
-            if (!decoded_value) {
-                out_is_possibly_incomplete = true;
-                return false;
-            }
-            value = std::move(decoded_value.value());
-
-            current_header_list_size_check += name.length() + value.length() + HPACK_ENTRY_OVERHEAD;
-            HeaderField field(std::move(name), std::move(value));
-            field.sensitive = true; // Mark as sensitive
-            out_headers.push_back(std::move(field));
 
         } else if (first_byte >> 5 == 0b001) { // Dynamic Table Size Update (001xxxxx)
             if (!dynamic_table_size_updates_allowed) {
@@ -364,10 +386,6 @@ Decoder::decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderFie
             _stats.dynamic_table_evictions += _dynamic_table.set_max_byte_size(static_cast<std::size_t>(new_max_size));
         } else {
             return false; // Unknown instruction
-        }
-
-        if (_max_header_list_size_from_settings > 0 && current_header_list_size_check > _max_header_list_size_from_settings) {
-            return false;
         }
     }
 

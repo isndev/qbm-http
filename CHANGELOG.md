@@ -538,6 +538,23 @@ All notable changes to the qbm-http module are documented here. The format is ba
   it receives; each server's response and trailer section refused; the HTTP/3 field block, and a raw HTTP/3 request
   served without the field.
 
+- **The HTTP/2 server advertises the header-list bound it enforces, and a request past it is answered `431` on its
+  stream instead of closing the connection (Huly QB-1196).** The server's HPACK decoder stops at 1 MiB of decoded list
+  (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`, RFC 9113 §6.5.2's count) but the server advertised the
+  unlimited default for `SETTINGS_MAX_HEADER_LIST_SIZE`, and a list past the bound failed the decode: `GOAWAY
+  (COMPRESSION_ERROR)`, every stream multiplexed on the connection with it -- HTTP/3's twin of QB-1196. Measured on the
+  base: a list of 1 MiB + 1 octet of Huffman-coded fields within the encoded block cap, and a 4 KiB dynamic-table entry
+  referenced 300 times from 4.3 KB of block (1.2 MiB of list), each closed the connection. The server now advertises 1
+  MiB, and `hpack::Decoder` gains a `decode()` overload that decodes such a block to its end -- the dynamic table kept
+  in step with the client's encoder, as RFC 9113 §10.5.1 asks -- drops the fields past the bound without copying them,
+  and reports it; the request is answered `431` once the fields kept say it is well-formed, its stream alone. A block
+  whose list passes 16 times the bound (`hpack::HPACK_DISCARDED_LIST_FACTOR`) still closes the connection: decoding a
+  1 MiB block of literals that index a large table name to its end would copy up to ~2 GiB. A refused HEADERS block
+  (a closed or reset stream, over the concurrency cap) is decoded the same way. The client is unchanged. Tests: the
+  advertised value; a list of exactly 1 MiB served, one octet more answered `431` and the next stream served with a
+  field the refused block indexed past the bound; the amplification shape answered `431`, its table entries in step;
+  20 MiB of references closing the connection.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -3695,7 +3696,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (2/protocol/server.h:1240-1245).
+// with INTERNAL_ERROR (2/protocol/server.h:1242-1247).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3723,7 +3724,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1222-1227).
+// (2/protocol/server.h:1224-1229).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3743,7 +3744,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:1196-1199).
+// (2/protocol/server.h:1198-1201).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3763,7 +3764,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:1190-1195).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:1192-1197).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3786,7 +3787,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:987-992).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:989-994).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3805,7 +3806,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:994-1012).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:996-1014).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3998,7 +3999,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:349-358).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:351-360).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4021,7 +4022,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:349-353).
+// (qbm/http/src/qbm/http/2/protocol/server.h:351-355).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4038,7 +4039,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1116-1126 else arm).
+// (no stream context to store into; 2/protocol/server.h:1118-1128 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4057,7 +4058,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1023-1035);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1025-1037);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -5103,4 +5104,236 @@ TEST(HTTP2ServerProtocol, AShutdownNoticeBeforeThePrefaceSendsTheSettingsOnce) {
     }
     EXPECT_EQ(settings, 1u);
     EXPECT_TRUE(protocol.ok());
+}
+
+// ===========================================================================
+// The header-list bound (Huly QB-1196, the HTTP/2 twin of HTTP/3's field-section bound): the server advertises the
+// SETTINGS_MAX_HEADER_LIST_SIZE its decoder enforces, and a list past it is decoded to the end of its block -- the
+// HPACK dynamic table kept in step with the client's encoder -- its fields past the bound dropped and its stream
+// answered 431, the connection serving on. It advertised no bound (the unlimited default) and closed the connection
+// with COMPRESSION_ERROR past 1 MiB, every multiplexed stream with it. The request limits are lifted in these tests
+// so that the list bound alone is judged: under the default limits a list past 1 MiB already breaks a field limit.
+// ===========================================================================
+
+namespace {
+
+constexpr std::size_t header_list_bound = qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE;
+
+/// A server whose request limits are lifted: no field, count or target limit.
+struct UnlimitedHttp2FakeIO : CappedHttp2FakeIO {
+    UnlimitedHttp2FakeIO() {
+        limits.max_header_name_length  = 0;
+        limits.max_header_value_length = 0;
+        limits.max_headers_count       = 0;
+        limits.max_url_length          = 0;
+    }
+};
+using UnlimitedServerProtocol = qb::protocol::http2::ServerHttp2Protocol<UnlimitedHttp2FakeIO>;
+
+/// Pushes a header block on @p stream_id: a HEADERS frame, then CONTINUATION frames, each within the default
+/// SETTINGS_MAX_FRAME_SIZE.
+void
+push_header_block(UnlimitedHttp2FakeIO &io, uint32_t stream_id, const std::vector<uint8_t> &block, bool end_stream) {
+    constexpr std::size_t frame_size = qb::protocol::http2::DEFAULT_SETTINGS_MAX_FRAME_SIZE;
+    std::size_t           offset     = 0;
+    bool                  first      = true;
+    do {
+        const std::size_t    length = std::min(frame_size, block.size() - offset);
+        std::vector<uint8_t> piece(block.begin() + static_cast<std::ptrdiff_t>(offset),
+                                   block.begin() + static_cast<std::ptrdiff_t>(offset + length));
+        offset += length;
+        uint8_t flags = offset == block.size() ? qb::protocol::http2::FLAG_END_HEADERS : 0;
+        if (first && end_stream)
+            flags |= qb::protocol::http2::FLAG_END_STREAM;
+        push_frame(io, first ? FrameType::HEADERS : FrameType::CONTINUATION, flags, stream_id, piece);
+        first = false;
+    } while (offset < block.size());
+}
+
+/// The fields of a GET to @p path whose list is exactly @p total octets as RFC 9113 section 6.5.2 counts it: the
+/// pseudo-headers, fields of 8000 octets of `a`, and a last field that makes up the rest.
+std::vector<qb::protocol::hpack::HeaderField>
+list_of_size(std::size_t total, const std::string &path) {
+    auto        fields = default_request_headers(path);
+    std::size_t size   = 0;
+    for (const auto &f : fields)
+        size += f.hpack_size();
+    for (int i = 0; total - size > 8000 + 2 * 64; ++i) {
+        fields.emplace_back("x-f" + std::to_string(i), std::string(8000, 'a'));
+        size += fields.back().hpack_size();
+    }
+    fields.emplace_back("x-pad", std::string(total - size - (5 + qb::protocol::hpack::HPACK_ENTRY_OVERHEAD), 'a'));
+    return fields;
+}
+
+/// The header blocks the server sent, by stream, decoded in order with one decoder (they share its HPACK state).
+std::map<uint32_t, std::vector<EmittedHeaderBlock>>
+emitted_header_blocks_by_stream(const qb::allocator::pipe<char> &output) {
+    qb::protocol::hpack::Decoder                        decoder;
+    std::map<uint32_t, std::vector<EmittedHeaderBlock>> blocks;
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (f.type != FrameType::HEADERS) {
+            continue;
+        }
+        EmittedHeaderBlock block;
+        block.flags     = f.flags;
+        bool incomplete = false;
+        EXPECT_TRUE(decoder.decode(emitted_payload(output, f), block.fields, incomplete));
+        blocks[f.stream_id].push_back(std::move(block));
+    }
+    return blocks;
+}
+
+/// The stream's one answer is a 431 header block that ends it; a reset that follows it is RST_STREAM(NO_ERROR).
+void
+expect_answered_431(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    const auto blocks = emitted_header_blocks_by_stream(output);
+    const auto it     = blocks.find(stream_id);
+    ASSERT_NE(it, blocks.end()) << "stream " << stream_id << " is answered";
+    ASSERT_EQ(it->second.size(), 1u);
+    EXPECT_EQ(it->second.front().value(":status"), "431");
+    EXPECT_NE(it->second.front().flags & qb::protocol::http2::FLAG_END_STREAM, 0) << "the answer is the whole response";
+    if (const auto rst = last_rst_stream_error(output, stream_id)) {
+        EXPECT_EQ(*rst, ErrorCode::NO_ERROR);
+    }
+}
+
+/// An HPACK integer (RFC 7541 section 5.1) after @p prefix_bits, in an @p n -bit prefix.
+void
+append_hpack_integer(std::vector<uint8_t> &block, uint8_t prefix_bits, uint8_t n, std::size_t value) {
+    const std::size_t max_prefix = (std::size_t{1} << n) - 1;
+    if (value < max_prefix) {
+        block.push_back(static_cast<uint8_t>(prefix_bits | value));
+        return;
+    }
+    block.push_back(static_cast<uint8_t>(prefix_bits | max_prefix));
+    value -= max_prefix;
+    while (value >= 128) {
+        block.push_back(static_cast<uint8_t>((value % 128) | 0x80));
+        value /= 128;
+    }
+    block.push_back(static_cast<uint8_t>(value));
+}
+
+/// A literal field with incremental indexing and a new name (RFC 7541 section 6.2.1), its strings raw.
+void
+append_indexed_literal(std::vector<uint8_t> &block, const std::string &name, const std::string &value) {
+    block.push_back(0x40);
+    append_hpack_integer(block, 0x00, 7, name.size());
+    block.insert(block.end(), name.begin(), name.end());
+    append_hpack_integer(block, 0x00, 7, value.size());
+    block.insert(block.end(), value.begin(), value.end());
+}
+
+/// The pseudo-headers of a GET to `/` on example.test, from the static table: no dynamic entry added.
+std::vector<uint8_t>
+static_get_pseudo_headers() {
+    std::vector<uint8_t> block{0x82, 0x87, 0x84}; // :method GET, :scheme https, :path /
+    const std::string    authority = "example.test";
+    block.push_back(0x01); // literal without indexing, the name of static entry 1 (:authority)
+    append_hpack_integer(block, 0x00, 7, authority.size());
+    block.insert(block.end(), authority.begin(), authority.end());
+    return block;
+}
+
+} // namespace
+
+TEST(HTTP2ServerProtocol, TheServerAdvertisesTheHeaderListBoundItEnforces) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    std::optional<uint32_t> advertised;
+    for (const auto &frame : parse_emitted_frames(io.output)) {
+        if (frame.type != FrameType::SETTINGS || (frame.flags & qb::protocol::http2::FLAG_ACK) != 0) {
+            continue;
+        }
+        const auto payload = emitted_payload(io.output, frame);
+        for (std::size_t i = 0; i + 6 <= payload.size(); i += 6) {
+            const auto id = static_cast<uint16_t>((payload[i] << 8) | payload[i + 1]);
+            if (id == static_cast<uint16_t>(Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE)) {
+                advertised = qb::protocol::http2::extract_uint32_be(payload.data() + i + 2);
+            }
+        }
+    }
+    ASSERT_TRUE(advertised.has_value()) << "SETTINGS_MAX_HEADER_LIST_SIZE is advertised";
+    EXPECT_EQ(*advertised, header_list_bound);
+}
+
+// Exactly at the bound the request is served; a byte past it, answered 431 on its stream, the connection serving the
+// next stream -- whose block references an entry the refused block indexed past the bound: the table stayed in step.
+TEST(HTTP2ServerProtocol, AHeaderListPastTheBoundIsAnswered431OnItsStream) {
+    UnlimitedHttp2FakeIO         io;
+    UnlimitedServerProtocol      protocol(io);
+    qb::protocol::hpack::Encoder encoder; // the client's: one compression context for the connection
+    do_handshake(protocol, io);
+
+    const auto block_of = [&](const std::vector<qb::protocol::hpack::HeaderField> &fields) {
+        std::vector<uint8_t> block;
+        EXPECT_TRUE(encoder.encode(fields, block));
+        EXPECT_LE(block.size(), qb::http2::protocol_limits::MAX_HEADER_BLOCK_SIZE) << "within the encoded block cap";
+        return block;
+    };
+
+    push_header_block(io, 1, block_of(list_of_size(header_list_bound, "/at")), true);
+    drive(protocol, io);
+    ASSERT_EQ(io.request_count, 1) << "a list of exactly the bound is served";
+    EXPECT_EQ(io.last_request->uri().path(), "/at");
+
+    auto past = list_of_size(header_list_bound + 1, "/past");
+    past.emplace_back("x-late", "indexed past the bound"); // indexed by the encoder, after the bound
+    push_header_block(io, 3, block_of(past), true);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok()) << "the stream is refused, not the connection";
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.stream_error_count, 0) << "a NO_ERROR reset is not a stream error";
+    EXPECT_EQ(io.request_count, 1) << "the request past the bound is never routed";
+    expect_answered_431(io.output, 3);
+
+    auto next = default_request_headers("/next");
+    next.emplace_back("x-late", "indexed past the bound"); // the encoder references its table entry
+    push_header_block(io, 5, block_of(next), true);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    ASSERT_EQ(io.request_count, 2) << "the next stream is served";
+    EXPECT_EQ(io.last_request_stream_id, 5u);
+    EXPECT_EQ(io.last_request->header("x-late"), "indexed past the bound") << "the dynamic table is the client's";
+}
+
+// The amplification shape: one 4 KiB entry indexed, then referenced 300 times in one octet each -- a list of 1.2 MiB
+// from 4.3 KB of block. Answered 431 on its stream; the field the block indexes after the bound reaches the table.
+// Past 16 times the bound the block is the decompression bomb the bound exists for: the connection closes.
+TEST(HTTP2ServerProtocol, ADynamicTableEntryReferencedPastTheBoundIsAnswered431) {
+    UnlimitedHttp2FakeIO    io;
+    UnlimitedServerProtocol protocol(io);
+    do_handshake(protocol, io);
+
+    auto block = static_get_pseudo_headers();
+    append_indexed_literal(block, "x-big", std::string(4000, 'v')); // dynamic index 62: 4037 octets of the table
+    block.insert(block.end(), 300, 0xBE);                           // 300 references to it
+    append_indexed_literal(block, "x-after", "1");                  // indexed past the bound: x-big becomes 63
+    ASSERT_LT(block.size(), 4500u);
+    push_header_block(io, 1, block, true);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok()) << "the stream is refused, not the connection";
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.request_count, 0);
+    expect_answered_431(io.output, 1);
+
+    auto next = static_get_pseudo_headers();
+    next.push_back(0xBE); // x-after: 1
+    next.push_back(0xBF); // x-big
+    push_header_block(io, 3, next, true);
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok());
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.last_request->header("x-after"), "1") << "the entry indexed past the bound is in the table";
+    EXPECT_EQ(io.last_request->header("x-big").size(), 4000u);
+
+    // 5000 references: a list of 20 MiB, past 16 times the bound.
+    auto bomb = static_get_pseudo_headers();
+    bomb.insert(bomb.end(), 5000, 0xBF);
+    push_header_block(io, 5, bomb, true);
+    drive(protocol, io);
+    EXPECT_FALSE(protocol.ok()) << "a block that expands 16 times past the bound closes the connection";
+    EXPECT_EQ(io.request_count, 1);
 }

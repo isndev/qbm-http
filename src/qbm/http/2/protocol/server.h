@@ -232,7 +232,9 @@ public:
         // can expand a ≤1 MB encoded block into ~4 GiB of decoded HeaderFields via
         // repeated single-byte indexed references to a large dynamic-table entry (an
         // HPACK decompression bomb). The per-header enforcement in Decoder::decode is
-        // already correct — it just needs a sane limit.
+        // already correct — it just needs a sane limit. The bound is advertised
+        // (initialize_our_settings_map), and a list past it is decoded and discarded and
+        // its request answered 431, up to HPACK_DISCARDED_LIST_FACTOR times it (Huly QB-1196).
         _hpack_decoder.set_max_header_list_size(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
         if (it_table_size != _our_settings.end()) {
@@ -1626,7 +1628,10 @@ private:
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS] = 50; // Max streams we allow client to open (reduced from 100)
         _our_settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE]    = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE;
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE]         = DEFAULT_SETTINGS_MAX_FRAME_SIZE;
-        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE]   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
+        // The bound the decoder enforces (set in reset()), advertised: the default, unlimited, told clients a list of
+        // any size was read, and one past 1 MiB closed the connection (Huly QB-1196). Past it a request is answered 431.
+        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE] =
+            static_cast<uint32_t>(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
     }
 
     /**
@@ -1717,7 +1722,8 @@ private:
         }
         std::vector<qb::protocol::hpack::HeaderField> dropped;
         bool                                          incomplete = false;
-        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete) && !incomplete;
+        bool                                          over_list  = false; // dropped all the same
+        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete, over_list) && !incomplete;
         this->clear_header_assembly_state();
         if (!decoded) {
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
@@ -1742,13 +1748,18 @@ private:
         // ")");
         qb::http::Headers current_headers_decoded; // Decoded headers for this block
         bool              possibly_incomplete_hpack = false;
+        bool              over_header_list_size     = false;
 
         // A block that does not decode leaves the decoder's dynamic table wherever the failure
         // stopped it -- possibly after entries the fields ahead of it added -- so the connection's
         // compression context is no longer the client's: a connection error of type
         // COMPRESSION_ERROR (RFC 9113 §4.3, Huly QB-533), never a stream reset that would let
-        // decoding go on. A field that decodes but is invalid stays a stream error below.
-        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack)
+        // decoding go on. A field that decodes but is invalid stays a stream error below. A list
+        // past the bound SETTINGS_MAX_HEADER_LIST_SIZE advertises is decoded to its end and its
+        // fields past the bound dropped: the request is answered 431 below, once the fields kept
+        // say it is well-formed, its stream alone -- the connection was closed (Huly QB-1196).
+        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack,
+                                   over_header_list_size)
             || possibly_incomplete_hpack) {
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
             return false;
@@ -1769,7 +1780,7 @@ private:
         // malformed one staying the stream error it is.
         const qb::http::request_limits limits             = request_limits_in_force();
         std::size_t                    fields             = 0;
-        bool                           fields_over_limits = false;
+        bool                           fields_over_limits = over_header_list_size;
 
         if (!is_trailers_block) { // Main headers (request)
             stream.headers_received_main = true;

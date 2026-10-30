@@ -30,9 +30,9 @@ llm/qbm-http.llm.api.md	2/http2.h:939-939	e6164c1688f6	set_tls_context(qb::io::s
 llm/qbm-http.llm.api.md	2/http2.h:950-950	4baf7f11b3a0	reload_certificates(std::filesystem::path cert_file, std::filesystem:...
 llm/qbm-http.llm.api.md	2/http2.h:958-958	967107c41a70	listen(qb::io::uri uri, TLSContext &&context) {
 llm/qbm-http.llm.api.md	2/http2.h:969-969	26cc9c388317	listen_no_start(qb::io::uri uri, TLSContext &&context) {
-llm/qbm-http.llm.api.md	2/protocol/server.h:270-270	1827793736d0	begin_graceful_shutdown() noexcept {
-llm/qbm-http.llm.api.md	2/protocol/server.h:296-296	208e315cabee	complete_graceful_shutdown() noexcept {
-llm/qbm-http.llm.api.md	2/protocol/server.h:314-314	bbe2da6f471b	graceful_shutdown_notice_pending() const noexcept {
+llm/qbm-http.llm.api.md	2/protocol/server.h:272-272	1827793736d0	begin_graceful_shutdown() noexcept {
+llm/qbm-http.llm.api.md	2/protocol/server.h:298-298	208e315cabee	complete_graceful_shutdown() noexcept {
+llm/qbm-http.llm.api.md	2/protocol/server.h:316-316	bbe2da6f471b	graceful_shutdown_notice_pending() const noexcept {
 llm/qbm-http.llm.api.md	access_log.h:160-160	0b9d49616e2d	access_log(typename AccessLog<SessionType>::Sink sink, AccessLogForma...
 llm/qbm-http.llm.api.md	access_log.h:40-40	921c4206c479	struct AccessLogRecord {
 llm/qbm-http.llm.api.md	access_log.h:58-58	563eb141bc35	using AccessLogFormatter = std::function<void(AccessLogRecord const &...
@@ -331,7 +331,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/client.h:1276-1287	1daa7ae2426e	
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/client.h:1289-1306	f1be9f633021	/**
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:53-53	ae8950d5071e	is_hop_by_hop(const std::string &header_name) {
 llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:78-78	f77072de4b7f	class ServerHttp2Protocol : public Http2Protocol<IO_Handler, ServerHt...
-llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:856-877	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
+llm/qbm-http.llm.api.md	src/qbm/http/2/protocol/server.h:858-879	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:101-114	45b714835123	++_connect_epoch;
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:119-171	df2ba8d86127	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:20-36	7102845211c2	namespace {
@@ -475,7 +475,7 @@ llm/qbm-http.llm.md	src/qbm/http/2/http2.h:939-939	e6164c1688f6	set_tls_context(
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:950-950	4baf7f11b3a0	reload_certificates(std::filesystem::path cert_file, std::filesystem:...
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:958-958	967107c41a70	listen(qb::io::uri uri, TLSContext &&context) {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:969-969	26cc9c388317	listen_no_start(qb::io::uri uri, TLSContext &&context) {
-llm/qbm-http.llm.md	src/qbm/http/2/protocol/server.h:856-877	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
+llm/qbm-http.llm.md	src/qbm/http/2/protocol/server.h:858-879	2d277ef17046	// Notify application if request wasn't dispatched or response wasn't...
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:101-114	45b714835123	++_connect_epoch;
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:119-171	df2ba8d86127	Client::disconnect() {
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:20-36	7102845211c2	namespace {

@@ -262,6 +262,15 @@ static constexpr uint32_t HPACK_DEFAULT_MAX_HEADER_LIST_SIZE = 0xFFFFFFFF;
 static constexpr std::size_t HPACK_ENTRY_OVERHEAD = 32;
 
 /**
+ * @brief How far past the header-list bound Decoder::decode() still decodes a block it discards: 16 times the
+ *        bound. Past it the block fails, and the connection with it. A list that long is the decompression bomb the
+ *        bound exists for -- a field naming a large dynamic-table entry, with incremental indexing, copies that name
+ *        into the table from two octets of the block -- and decoding a 1 MiB block of them to its end would copy up
+ *        to ~2 GiB (Huly QB-1196).
+ */
+static constexpr std::size_t HPACK_DISCARDED_LIST_FACTOR = 16;
+
+/**
  * @brief Single entry of the HPACK dynamic table.
  *
  * Shared by both the encoder and decoder. `size` is cached to avoid
@@ -698,19 +707,23 @@ private:
     /**
      * @brief Get entry from static or dynamic table by index
      * @param index 1-based index
-     * @param name Output name
-     * @param value Output value
+     * @param name Output name: a view of the table entry, valid until the table next changes
+     * @param value Output value: a view of the table entry, valid until the table next changes
      * @return true if found
      */
-    [[nodiscard]] bool get_dynamic_table_entry(uint64_t index, std::string &name, std::string &value) const;
+    [[nodiscard]] bool get_dynamic_table_entry(uint64_t index, std::string_view &name, std::string_view &value) const;
 
     /**
      * @brief Get name from static or dynamic table by index
      * @param index 1-based index
-     * @param name Output name
+     * @param name Output name: a view of the table entry, valid until the table next changes
      * @return true if found
      */
-    [[nodiscard]] bool get_name_from_index(uint64_t index, std::string &name) const;
+    [[nodiscard]] bool get_name_from_index(uint64_t index, std::string_view &name) const;
+
+    /// decode(), past the header-list bound refusing the block (@p out_over_list_size null) or discarding its fields.
+    bool decode_block(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete,
+                      bool *out_over_list_size);
 
 public:
     Decoder() = default;
@@ -729,9 +742,29 @@ public:
      * @param out_is_possibly_incomplete  Set to true when decoding failed
      *                                    because the block appears truncated
      *                                    (as opposed to malformed).
-     * @return true on a fully decoded block, false on any decode error.
+     * @return true on a fully decoded block, false on any decode error -- a list past set_max_header_list_size()
+     *         included.
      */
     bool decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete);
+
+    /**
+     * @brief Decode a header block, discarding the fields past the header-list bound instead of failing (Huly
+     *        QB-1196).
+     *
+     * A list past set_max_header_list_size() is decoded to the end of the block -- the dynamic table kept in step
+     * with the peer's encoder, which indexed those fields (RFC 9113 §10.5.1: a field block is processed to keep
+     * the connection's state consistent) -- and the fields past the bound are dropped: @p out_headers holds those
+     * before it. A field dropped is never copied, so a large table entry referenced again and again amplifies
+     * nothing. The block still fails past HPACK_DISCARDED_LIST_FACTOR times the bound.
+     *
+     * @param encoded_block               The HPACK-encoded header block.
+     * @param out_headers                 Cleared then filled with the decoded fields within the bound.
+     * @param out_is_possibly_incomplete  As decode().
+     * @param out_over_list_size          Set to whether the list passed the bound.
+     * @return true on a block decoded to its end, false on a decode error or a list past the factor.
+     */
+    bool decode(const std::vector<uint8_t> &encoded_block, std::vector<HeaderField> &out_headers, bool &out_is_possibly_incomplete,
+                bool &out_over_list_size);
 
     void
     set_max_dynamic_table_size(uint32_t max_size) {
