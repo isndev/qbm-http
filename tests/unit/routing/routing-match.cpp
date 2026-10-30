@@ -24,8 +24,10 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "../../shared/mock_session.h"
+#include <qb/io/uri.h>
 #include <qbm/http/http.h>
 
 using qb::http::test::create_request;
@@ -318,6 +320,109 @@ TEST_F(RoutingMatchTest, ParameterRouteWinsOverWildcardOnSamePrefix) {
     // Does not fit the parameter shape -> wildcard catches it.
     router.route(session, create_request(qb::http::method::GET, "/api/v1/status/all"));
     EXPECT_EQ(session->_response.body().template as<std::string>(), "wildcard: v1/status/all");
+}
+
+// --------------------------------------------------------------------------
+// `[`, `]` and `|`, which a browser sends as they are: the octet and its percent-encoding name one route (Huly
+// QB-1187)
+// --------------------------------------------------------------------------
+
+/// A request whose target was read as the server reads one (qb::io::uri::origin_form()): `create_request()` reads a
+/// URI reference, which refuses `[`, `]` and `|` in a path.
+qb::http::Request
+request_as_received(qb::http::method method, std::string const &target) {
+    qb::http::Request req;
+    req.method() = method;
+    req.uri()    = qb::io::uri::origin_form(target);
+    EXPECT_TRUE(req.uri().is_valid()) << target;
+    req.major_version = 1;
+    req.minor_version = 1;
+    return req;
+}
+
+TEST_F(RoutingMatchTest, ARawOctetAndItsPercentEncodingNameOneRoute) {
+    const auto answer = [](std::string tag, std::string param = {}) {
+        return [tag = std::move(tag), param = std::move(param)](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = param.empty() ? std::string{tag} : tag + "=" + ctx->path_param(param);
+            ctx->complete();
+        };
+    };
+    router.get("/raw/a|b[c]", answer("raw"));
+    router.get("/encoded/%5Bx%5D%7c", answer("encoded"));
+    router.get("/param/:v", answer("param", "v"));
+    router.get("/wild/*rest", answer("wild", "rest"));
+    router.post("/post-only/a|b", answer("post"));
+    router.get("/named/:v%7C", answer("named", "v%7C"));
+    router.compile();
+
+    struct Case {
+        qb::http::method method;
+        std::string      target;
+        qb::http::status status;
+        std::string      body;
+    };
+    const auto GET  = qb::http::method::GET;
+    const auto OK   = qb::http::status::OK;
+    const auto NONE = qb::http::status::NOT_FOUND;
+    for (auto const &c : std::vector<Case>{
+             // a route registered with the octets: reached by them, by their encodings in either case, by a mix
+             {GET, "/raw/a|b[c]", OK, "raw"},
+             {GET, "/raw/a%7Cb%5Bc%5D", OK, "raw"},
+             {GET, "/raw/a%7cb%5bc%5d", OK, "raw"},
+             {GET, "/raw/a|b%5Bc]", OK, "raw"},
+             // a route registered with the encodings: reached by the octets as well
+             {GET, "/encoded/[x]|", OK, "encoded"},
+             {GET, "/encoded/%5Bx%5D%7C", OK, "encoded"},
+             {GET, "/encoded/[x%5D%7c", OK, "encoded"},
+             // a parameter is the decoded segment, one decoding: `%257C` is `%7C`, never `|`
+             {GET, "/param/a|b", OK, "param=a|b"},
+             {GET, "/param/a%7Cb", OK, "param=a|b"},
+             {GET, "/param/a%257Cb", OK, "param=a%7Cb"},
+             {GET, "/param/%5B%2F%5D", OK, "param=[/]"},
+             {GET, "/wild/x/a%7Cb/[y]", OK, "wild=x/a|b/[y]"},
+             // `%25` is a percent sign: `%257C` names no `|`, `%%7C` a stray `%` and then one
+             {GET, "/raw/a%257Cb%5Bc%5D", NONE, ""},
+             {GET, "/raw/a%%7Cb[c]", NONE, ""},
+             // an encoded `/` is no separator, whatever octet it stands beside
+             {GET, "/raw%2Fa|b[c]", NONE, ""},
+             // the method a path allows is found by either spelling
+             {GET, "/post-only/a|b", qb::http::status::METHOD_NOT_ALLOWED, ""},
+             {GET, "/post-only/a%7Cb", qb::http::status::METHOD_NOT_ALLOWED, ""},
+             {qb::http::method::POST, "/post-only/a%7cb", OK, "post"},
+             // a capture's name is kept as written: only a static segment is matched in either spelling
+             {GET, "/named/x|y", OK, "named=x|y"}
+         }) {
+        session->reset();
+        router.route(session, request_as_received(c.method, c.target));
+        EXPECT_EQ(session->_response.status(), c.status) << c.target;
+        if (c.status == OK)
+            EXPECT_EQ(session->_response.body().template as<std::string>(), c.body) << c.target;
+    }
+}
+
+// A route's pattern names it with the octets, whichever spelling registered it, its captures as written: the label a
+// metric or an access log reads in ctx->route_pattern() (Huly QB-1187).
+TEST_F(RoutingMatchTest, ARoutePatternNamesTheOctetsWhicheverSpellingRegisteredIt) {
+    const auto pattern = [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = std::string{ctx->route_pattern()};
+        ctx->complete();
+    };
+    router.get("/encoded/%5Bx%5D%7c/:v%7C", pattern);
+    router.get("/raw/a|b", pattern);
+    router.compile();
+    for (auto const &[target, expected] : std::vector<std::pair<std::string, std::string>>{
+             {"/encoded/[x]|/1", "/encoded/[x]|/:v%7C"},
+             {"/encoded/%5Bx%5D%7C/1", "/encoded/[x]|/:v%7C"},
+             {"/raw/a%7Cb", "/raw/a|b"},
+             {"/raw/a|b", "/raw/a|b"}
+         }) {
+        session->reset();
+        router.route(session, request_as_received(qb::http::method::GET, target));
+        EXPECT_EQ(session->_response.status(), qb::http::status::OK) << target;
+        EXPECT_EQ(session->_response.body().template as<std::string>(), expected) << target;
+    }
 }
 
 } // namespace

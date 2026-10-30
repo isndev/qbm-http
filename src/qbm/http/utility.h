@@ -147,6 +147,21 @@ hex_value(char c) noexcept {
 [[nodiscard]] std::string decode_path_component(std::string_view input);
 
 /**
+ * @brief The spelling of a request path the router and the static files compare: @p path with the percent-encodings
+ *        of `[`, `]` and `|` decoded (Huly QB-1187).
+ *
+ * Those three are the octets a request path may hold as themselves beyond RFC 3986 (qb::io::is_request_path_character()),
+ * which a browser sends unencoded: `/a|b` and `/a%7Cb` name one resource. Every other byte and escape is kept, `%2F`
+ * included, so the path splits into the same segments; an escape is recognised as decode_path_component() recognises
+ * one, left to right, so decoding the result gives what decoding @p path gives (`%257C` stays: `%25` is a percent sign).
+ *
+ * @param path The path as the request target holds it.
+ * @param out  Replaced by the spelling when @p path holds such an escape, untouched otherwise.
+ * @return Whether @p path holds such an escape: when it does not, @p path is the spelling.
+ */
+[[nodiscard]] bool decode_raw_path_octets(std::string_view path, std::string &out);
+
+/**
  * @brief Branchless ASCII case-folding: returns `c` with the 0x20 bit set iff `c`
  *        is an upper-case ASCII letter.
  * HTTP grammar is ASCII-only (RFC 7230 §3); this avoids the locale dependency

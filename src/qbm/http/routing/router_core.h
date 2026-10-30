@@ -419,11 +419,13 @@ public:
         if (matched_info_opt && matched_info_opt->route_tasks) {
             PathParameters decoded_params = std::move(matched_info_opt->path_parameters);
             // Decode URI-encoded path parameters in place.
-            // `RadixTree::match()` stores raw (non-decoded) segments in `PathParameters`;
-            // we decode them here once so middleware / handlers see %20 -> space, etc.
+            // `RadixTree::match()` stores the segments in `PathParameters` with only `%5B`, `%5D` and
+            // `%7C` decoded (Huly QB-1187); we decode them here once so middleware / handlers see
+            // %20 -> space, etc.
             // Path components keep '+' literal; only query/form decoding maps '+' to space.
             // NOTE: Decoding only happens when a parameterised route matches – static
-            // routes never allocate decoded strings.
+            // routes never allocate decoded strings (but for RadixTree::match()'s copy of a
+            // path holding `%5B`, `%5D` or `%7C`, Huly QB-1187).
             if (!decoded_params.empty()) {
                 decode_path_parameters(decoded_params);
             }

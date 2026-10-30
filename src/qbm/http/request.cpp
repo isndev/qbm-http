@@ -148,8 +148,9 @@ header_value_is_valid(const std::string &value) noexcept {
 // RFC 9112 §3.2: the request-target is the request line's middle token, so a byte that ends or
 // breaks that line -- SP, HTAB, CR, LF, NUL, any other control, DEL -- cannot travel raw; its
 // percent-encoded form can, and so can every other byte. qb::io::uri is a generic URI parser: it
-// admits only path characters in the path, but keeps the query's raw bytes, so the query is the HTTP/1
-// serializer's check (Huly QB-494).
+// admits only path characters in the path -- and `[`, `]`, `|` in a target a server read (Huly
+// QB-1187), none of which breaks the line --, but keeps the query's raw bytes, so the query is the
+// HTTP/1 serializer's check (Huly QB-494).
 [[nodiscard]] bool
 raw_query_is_valid(std::string_view query) noexcept {
     // On the serializer's path, so wide steps and no byte loop past the first word: the last step re-reads

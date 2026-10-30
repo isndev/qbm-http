@@ -93,7 +93,7 @@ router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
 
 A standalone `PathParameters` copy still borrows its key names. Keep the original context alive, or copy the names into owned strings before retaining them beyond that context. Retaining a context does not retain the router's global error handlers or keep a destroyed session available for sending.
 
-<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:132-143,621-630,637-659; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,443-453 -->
+<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:132-143,621-630,637-659; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,445-455 -->
 
 ### Query parameters and body binding
 
@@ -310,7 +310,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,334,575,789-813; qbm/http/src/qbm/http/routing/router_core.h:379-386,485; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:125-180,501-532 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,334,575,789-813; qbm/http/src/qbm/http/routing/router_core.h:379-386,487; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:125-180,501-532 -->
 
 ## Lifecycle in order
 
@@ -331,7 +331,7 @@ When a route is not matched, or a task returns `ERROR`, the same machinery runs 
 
 A `PRE_HANDLER_EXECUTION` hook that completes or cancels the context owns that outcome; the router does not restart the normal chain afterward. An asynchronous error chain selected by the hook remains in flight. Calling `complete(CONTINUE)` at this hook point is terminal for the normal route, as before; use the hook as an observer when you intend the route chain to run normally.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:92-111, 244-334, 552-575; qbm/http/src/qbm/http/routing/router_core.h:323-360, 485; qbm/http/src/qbm/http/routing/router.h:361-377 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:92-111, 244-334, 552-575; qbm/http/src/qbm/http/routing/router_core.h:323-360, 487; qbm/http/src/qbm/http/routing/router.h:361-377 -->
 
 ### Introspection (advanced)
 

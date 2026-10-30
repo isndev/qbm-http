@@ -199,7 +199,8 @@ is_request_authority(std::string_view const text) noexcept {
  * - `scheme://authority` followed by the path. The URI's authority is `:authority` (or the `host` field
  *   that stands for it, Huly QB-1195), never one a `:path` or a userinfo part chose: composed onto
  *   `victim.test`, the `:path` `@evil.test/x` named the host `evil.test`. A `:path` `//a/b` stays the
- *   path it is.
+ *   path it is. The text is read by qb::io::uri::absolute_form(), as an HTTP/1.1 absolute-form target is:
+ *   the path may hold `[`, `]` and `|`, which a browser sends unencoded (Huly QB-1187).
  * - The asterisk-form of an OPTIONS request is the URI `*`, without an authority, as HTTP/1.1's is:
  *   the request names no resource of the authority, which `:authority` or `host` gave.
  *
@@ -211,8 +212,8 @@ is_request_authority(std::string_view const text) noexcept {
  * @param options_request Whether the request's method is OPTIONS.
  * @return The URI, or std::nullopt when the fields are malformed: an invalid scheme, an authority
  *         is_request_authority() refuses, a path that neither begins with '/' nor is the `*` of an
- *         OPTIONS request or that holds a `#`, a space or a control byte, or a text the URI parser
- *         refuses. A malformed request is a stream error
+ *         OPTIONS request or that holds a `#`, a space or a control byte, or a text
+ *         qb::io::uri::absolute_form() refuses. A malformed request is a stream error
  *         (RFC 9113 §8.1.1, RFC 9114 §4.1.2).
  */
 [[nodiscard]] std::optional<qb::io::uri> request_uri(std::string_view scheme, std::string_view authority, std::string_view path,
@@ -224,11 +225,15 @@ is_request_authority(std::string_view const text) noexcept {
  *
  * - origin-form (`/path?query`): qb::io::uri::origin_form(). `//a/b` is the path `//a/b`, never the
  *   host `a`; the request's authority is its `Host` field.
- * - absolute-form (`scheme://authority/path?query`): a URI, whose authority is the request's (RFC 9112
- *   §3.2.2) and must be one is_request_authority() accepts -- no userinfo, a host.
+ * - absolute-form (`scheme://authority/path?query`): qb::io::uri::absolute_form(), whose authority is the
+ *   request's (RFC 9112 §3.2.2) and must be one is_request_authority() accepts -- no userinfo, a host.
  * - authority-form, the target of a CONNECT request and of no other: qb::io::uri::authority_form(),
  *   the host and the port.
  * - asterisk-form, the target of an OPTIONS request and of no other: the URI `*`.
+ *
+ * The path of an origin-form or an absolute-form target may hold `[`, `]` and `|` besides what RFC 3986
+ * allows (qb::io::is_request_path_character()): a browser sends them unencoded (Huly QB-1187). The
+ * router and the static files take each for its percent-encoding.
  *
  * The target is read INTO @p uri -- the request's own, which the server parses request after request --
  * through qb::io::uri's in-place readers, never through a uri built apart and moved in: the two moves of
@@ -240,7 +245,8 @@ is_request_authority(std::string_view const text) noexcept {
  * @param connect_request Whether the request's method is CONNECT.
  * @param options_request Whether the request's method is OPTIONS.
  * @return Whether the target names a resource; false for a target that is none of those forms -- a fragment,
- *         a `*` for another method, a text the URI parser refuses: the server answers 400 (RFC 9112 §3.2).
+ *         a `*` for another method, a path byte a request path may not hold (`/a^b`, `/a\b`): the server
+ *         answers 400 (RFC 9112 §3.2).
  */
 [[nodiscard]] bool request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_request, bool options_request);
 

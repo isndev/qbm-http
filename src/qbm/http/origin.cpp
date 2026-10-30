@@ -191,7 +191,8 @@ request_uri(std::string_view scheme, std::string_view authority, std::string_vie
     std::string text;
     text.reserve(scheme.size() + 3 + authority.size() + path.size());
     text.append(scheme).append("://").append(authority).append(path);
-    qb::io::uri uri(std::move(text));
+    // Read as an HTTP/1.1 absolute-form target is: the path holds `[`, `]` and `|` too (Huly QB-1187).
+    auto uri = qb::io::uri::absolute_form(std::move(text));
     if (!uri.is_valid() || uri.host().empty())
         return std::nullopt;
     return uri;
@@ -215,9 +216,8 @@ request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_reque
         auto const rest      = target.substr(separator + 3);
         auto const authority = rest.substr(0, rest.find_first_of("/?"));
         if (!qb::io::uri::is_valid_scheme(target.substr(0, separator)) || !is_request_authority(authority))
-            return false; // is_request_authority() holds a host: `http:///x` has none
-        uri = std::string{target};
-        return uri.is_valid();
+            return false;                      // is_request_authority() holds a host: `http:///x` has none
+        return uri.read_absolute_form(target); // the path may hold `[`, `]` and `|` (Huly QB-1187)
     }
     return false;
 }

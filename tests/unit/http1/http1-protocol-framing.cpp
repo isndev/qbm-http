@@ -1101,11 +1101,11 @@ TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody
     EXPECT_EQ(io.input.size(), 0u) << "what followed the refused header section is dropped";
 }
 
-// A request target that names no resource is answered 400 (Huly QB-1177): one the reader refuses (`/a|b`, `*` for
+// A request target that names no resource is answered 400 (Huly QB-1177): one the reader refuses (`/a^b`, `*` for
 // GET) and one llhttp refuses itself (`?x`, HPE_INVALID_URL). Only those: a request malformed elsewhere -- its version,
 // its framing -- is still not answered, and the protocol ends.
 TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingElseIs) {
-    for (const char *target : {"/a|b", "*", "?x"}) {
+    for (const char *target : {"/a^b", "*", "?x"}) {
         RefusingServerFakeIO                             io;
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
         feed(io, std::string("GET ") + target + " HTTP/1.1\r\nHost: h\r\n\r\n");
@@ -1123,6 +1123,35 @@ TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingE
         (void) step(proto, io);
         EXPECT_TRUE(io.refusals.empty()) << malformed;
         EXPECT_FALSE(proto.ok()) << malformed;
+    }
+}
+
+// For each byte, `GET /a<byte>b` is dispatched, with the path as it was sent, exactly when the byte may stand in a
+// request path -- RFC 3986's path bytes and `[`, `]`, `|`, which a browser sends unencoded (Huly QB-1187) -- or begins
+// the query. Any other byte is refused with 400, by the target reader or by llhttp, except two: a space, which ends
+// the target and leaves `b` where the version belongs, and LF, which ends the line -- the request is malformed and
+// never read.
+TEST(Http1ProtocolFraming, ARequestPathIsDispatchedExactlyWhenItsBytesMayStandInOne) {
+    constexpr std::string_view path_bytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@%/[]|";
+    for (int c = 0; c < 256; ++c) {
+        std::string const                                path     = std::string{"/a"} + static_cast<char>(c) + "b";
+        bool const                                       accepted = path_bytes.find(static_cast<char>(c)) != std::string_view::npos || c == '?';
+        bool const                                       ends_line = c == ' ' || c == '\n';
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, "GET " + path + " HTTP/1.1\r\nHost: h\r\n\r\n");
+        (void) step(proto, io);
+        EXPECT_EQ(io.request_count, accepted ? 1 : 0) << "byte " << c;
+        if (accepted) {
+            ASSERT_TRUE(io.last_request.has_value()) << "byte " << c;
+            EXPECT_EQ(io.last_request->uri().path(), c == '?' ? std::string{"/a"} : path) << "byte " << c;
+            EXPECT_TRUE(io.refusals.empty()) << "byte " << c;
+        } else if (ends_line) {
+            EXPECT_TRUE(io.refusals.empty()) << "byte " << c;
+            EXPECT_FALSE(proto.ok()) << "byte " << c;
+        } else {
+            EXPECT_EQ(io.refusals, std::vector<int>{400}) << "byte " << c;
+        }
     }
 }
 

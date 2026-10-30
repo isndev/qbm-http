@@ -15,6 +15,8 @@
  */
 #include "./utility.h"
 
+#include <qb/io/uri.h>
+
 namespace qb::http {
 namespace utility {
 
@@ -35,6 +37,33 @@ decode_path_component(std::string_view input) {
         }
     }
     return result;
+}
+
+bool
+decode_raw_path_octets(std::string_view path, std::string &out) {
+    bool        decoded = false;
+    std::size_t copied  = 0; // the bytes of path before it are in out
+    for (auto i = path.find('%'); i != std::string_view::npos; i = path.find('%', i)) {
+        if (i + 2 < path.size() && is_hex_digit(static_cast<unsigned char>(path[i + 1]))
+            && is_hex_digit(static_cast<unsigned char>(path[i + 2]))) {
+            const int octet = (hex_value(path[i + 1]) << 4) | hex_value(path[i + 2]);
+            if (qb::io::is_request_path_character(octet) && !qb::io::is_path_character(octet)) {
+                if (!decoded) {
+                    out.clear();
+                    out.reserve(path.size());
+                    decoded = true;
+                }
+                out.append(path.substr(copied, i - copied)).push_back(static_cast<char>(octet));
+                copied = i + 3;
+            }
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    if (decoded)
+        out.append(path.substr(copied));
+    return decoded;
 }
 
 std::vector<std::string>

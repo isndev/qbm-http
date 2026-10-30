@@ -920,7 +920,8 @@ TEST(Http3ConnectionDirect, AnUnknownRequestMethodRefusesTheStreamNotTheConnecti
 /**
  * @test The request's URI is the one :scheme, :authority and :path name, its authority :authority's
  * @brief A `//evil.test/x` :path stays a path under `example.test`, an OPTIONS `*` is the URI `*`, a `host` field
- *        naming :authority is accepted (Huly QB-1177).
+ *        naming :authority is accepted (Huly QB-1177). `[`, `]` and `|`, which a browser sends as they are, stay in
+ *        the path as they were sent (Huly QB-1187).
  */
 TEST(Http3ConnectionDirect, TheTargetPseudoHeadersNameTheRequestUri) {
     {
@@ -932,6 +933,16 @@ TEST(Http3ConnectionDirect, TheTargetPseudoHeadersNameTheRequestUri) {
         EXPECT_EQ(uri.host(), "example.test");
         EXPECT_TRUE(uri.user_info().empty());
         EXPECT_EQ(uri.path(), "//evil.test/x");
+    }
+    {
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, request_fields("/a|b/[c]?k=[v]|w")), true);
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+        auto const &uri = pair.server_owner.requests.front().uri();
+        EXPECT_EQ(uri.host(), "example.test");
+        EXPECT_EQ(uri.path(), "/a|b/[c]");
+        EXPECT_EQ(uri.query("k"), "[v]|w");
     }
     {
         // The asterisk-form of an OPTIONS request: the URI `*`. Composed by hand, it was the host `example.test*`.
@@ -1001,8 +1012,8 @@ TEST(Http3ConnectionDirect, AMalformedTargetPseudoHeaderNeverReachesTheServer) {
     // What nghttp3 lets through, qbm-http refuses on the stream: a path byte the URI parser refuses, an :authority that
     // is no authority, a `host` field that names another authority (RFC 9114 §4.3.1).
     for (Fields const &fields :
-         {with(":path", "/a|b"), with(":authority", "a:b:c"), with(":authority", "example.test:99999"), with(":authority", "evil]"),
-          with_host({"evil.test"})}) {
+         {with(":path", "/a^b"), with(":path", "/a\\b"), with(":path", "/a{b}"), with(":authority", "a:b:c"),
+          with(":authority", "example.test:99999"), with(":authority", "evil]"), with_host({"evil.test"})}) {
         SCOPED_TRACE(trace_of(fields));
         Pair       pair;
         const auto states = pair.server.stream_state_count();
@@ -1612,7 +1623,7 @@ TEST(Http3ConnectionDirect, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldL
     for (auto const &fields : std::vector<std::vector<std::pair<std::string, std::string>>>{
              {{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", "example.test:99999"}},
              {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}, {"host", "evil.example.test"}},
-             {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|b"}, {"x-v", "1234567890123"}}
+             {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a^b"}, {"x-v", "1234567890123"}}
          }) {
         std::string trace;
         for (auto const &[name, value] : fields)

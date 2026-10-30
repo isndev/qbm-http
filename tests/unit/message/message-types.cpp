@@ -559,7 +559,10 @@ TEST(OriginTest, RequestUriIsWhatThePseudoHeadersName) {
          {Named{"https", "victim.test", "//evil.test/x", "victim.test", "443", "//evil.test/x", ""},
           Named{"https", "victim.test:8443", "/a/b?c=d", "victim.test", "8443", "/a/b", "c=d"},
           Named{"http", "[2001:db8::1]:8080", "/", "2001:db8::1", "8080", "/", ""},
-          Named{"https", "victim.test", "/a@b:c", "victim.test", "443", "/a@b:c", ""}}) {
+          Named{"https", "victim.test", "/a@b:c", "victim.test", "443", "/a@b:c", ""},
+          // the octets a browser sends as they are (Huly QB-1187): kept, never decoded nor encoded
+          Named{"https", "victim.test", "/a|b", "victim.test", "443", "/a|b", ""},
+          Named{"https", "victim.test", "/[x]/y]?k=[v]|w", "victim.test", "443", "/[x]/y]", "k=[v]|w"}}) {
         auto const uri = request_uri(c.scheme, c.authority, c.path, false);
         ASSERT_TRUE(uri.has_value()) << c.authority << c.path;
         EXPECT_TRUE(uri->is_valid());
@@ -593,7 +596,13 @@ TEST(OriginTest, RequestUriIsWhatThePseudoHeadersName) {
           Malformed{"https", "", "/x", false},
           Malformed{"ht/tps", "victim.test", "/x", false},
           Malformed{"", "victim.test", "/x", false},
-          Malformed{"https", "victim.test", "/a|b", false},
+          Malformed{"https", "victim.test", "/a^b", false},
+          Malformed{"https", "victim.test", "/a\\b", false},
+          Malformed{"https", "victim.test", "/a{b}", false},
+          Malformed{"https", "victim.test", "/a\"b", false},
+          Malformed{"https", "victim.test", "/a<b>", false},
+          Malformed{"https", "victim.test", "/a`b", false},
+          Malformed{"https", "victim.test", "/caf\xc3\xa9", false},
           Malformed{"https", "victim test", "/x", false},
           Malformed{"https", "", "*", true},
           Malformed{"https", ":443", "/x", false},
@@ -689,6 +698,13 @@ TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
     EXPECT_EQ(uri.port(), "8080");
     EXPECT_EQ(uri.path(), "/x");
     EXPECT_TRUE(uri.query("q").empty());
+    // `[`, `]` and `|`, which a browser sends as they are, in the path of either form (Huly QB-1187).
+    ASSERT_TRUE(request_target_uri(uri, "/a|b/[c]?k=[v]|w", false, false));
+    EXPECT_EQ(uri.path(), "/a|b/[c]");
+    EXPECT_EQ(uri.query("k"), "[v]|w");
+    ASSERT_TRUE(request_target_uri(uri, "http://victim.test/a|b/[c]", false, false));
+    EXPECT_EQ(uri.host(), "victim.test");
+    EXPECT_EQ(uri.path(), "/a|b/[c]");
     // authority-form, CONNECT's: the host and the port. Read as a reference, `example.com:443` was a scheme.
     ASSERT_TRUE(request_target_uri(uri, "example.com:443", true, false));
     EXPECT_TRUE(uri.scheme().empty());
@@ -710,7 +726,11 @@ TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
     for (auto const &c :
          {Refused{"", false, false},
           Refused{"/x#f", false, false},
-          Refused{"/a|b", false, false},
+          Refused{"/a^b", false, false},
+          Refused{"/a\\b", false, false},
+          Refused{"/a{b}", false, false},
+          Refused{"http://victim.test/a^b", false, false},
+          Refused{"http://victim.test/a\\b", false, false},
           Refused{"*", false, false},
           Refused{"*x", false, true},
           Refused{"*//evil.test/x", false, true},
@@ -731,6 +751,30 @@ TEST(OriginTest, RequestTargetUriReadsEachTargetForm) {
         qb::io::uri refused;
         EXPECT_FALSE(request_target_uri(refused, c.target, c.connect, c.options))
             << '"' << c.target << "\" connect=" << c.connect << " options=" << c.options;
+    }
+}
+
+// One grammar for every protocol's request path (Huly QB-1187): for each byte, the HTTP/1.1 origin-form and
+// absolute-form readers and the HTTP/2 and HTTP/3 one accept `/a<byte>b` together or refuse it together -- accept it
+// when the byte is one of RFC 3986's path bytes or `[`, `]`, `|`, which a browser sends unencoded, or begins the
+// query. The set is written out: a test that asked qb::io::is_request_path_character() would follow its mutations.
+TEST(OriginTest, EveryProtocolReadsTheSameRequestPath) {
+    using qb::http::origin::request_target_uri;
+    using qb::http::origin::request_uri;
+    constexpr std::string_view path_bytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@%/[]|";
+    qb::io::uri                uri; // one uri, read target after target, as the HTTP/1.1 parser reads them
+    for (int c = 0; c < 256; ++c) {
+        std::string const path     = std::string{"/a"} + static_cast<char>(c) + "b";
+        bool const        accepted = path_bytes.find(static_cast<char>(c)) != std::string_view::npos || c == '?';
+        EXPECT_EQ(request_target_uri(uri, path, false, false), accepted) << "origin-form, byte " << c;
+        if (accepted && c != '?') {
+            EXPECT_EQ(uri.path(), path) << "byte " << c;
+        }
+        EXPECT_EQ(request_target_uri(uri, "http://victim.test" + path, false, false), accepted) << "absolute-form, byte " << c;
+        EXPECT_EQ(request_uri("https", "victim.test", path, false).has_value(), accepted) << ":path, byte " << c;
+        if (accepted && c != '?') {
+            EXPECT_EQ(request_uri("https", "victim.test", path, false)->path(), path) << "byte " << c;
+        }
     }
 }
 

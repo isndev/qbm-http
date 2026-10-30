@@ -108,7 +108,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `//evil.test/transfer` -- an absolute path whose first segment is empty (RFC 9112 §3.2.1) -- names the host
   `evil.test`: `request.uri().host()` was the one the client chose, whatever `Host` said, and the route served was
   `/transfer`. `///x` came out as `/x`, `//u@a/x` gained a userinfo, a CONNECT `example.com:443` was the scheme
-  `example.com` and the path `443`, and a target with a byte the parser refuses -- `/a|b`, `/a{b}`, sent raw -- was
+  `example.com` and the path `443`, and a target with a byte the parser refuses -- `/a{b}`, `/a^b`, sent raw -- was
   dispatched with an empty path, to the route of `/`. `qb::http::origin::request_target_uri()` reads the target by
   its form now (RFC 9112 §3.2), once it has ended (llhttp's `on_url_complete`, instead of on each piece of it), into
   the request's own uri: origin-form with `qb::io::uri::read_origin_form()` -- `//a/b` is the path `//a/b` with an
@@ -129,9 +129,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   x86 the h2 request already executes 1 326 fewer instructions than before this change. Anything else -- a fragment, `*` for another
   method (`GET *` was a 404), a byte the parser refuses, a target llhttp refuses itself such as `?x`, which closed the
   connection on silence -- names no resource: the server answers `400 Bad Request` and closes, as it answers a target
-  over the URL limit 414, and the percent-encoded spelling (`/a%7Cb`) is served (QB-1187 weighs the bytes browsers
-  send raw). The HTTP/2 and HTTP/3 servers composed `:scheme://:authority` followed by `:path` by hand: on HTTP/2 a
-  `:path` `@evil.test/x` made `evil.test` the host, and on both `OPTIONS *` the host `example.test*`.
+  over the URL limit 414, and the percent-encoded spelling (`/a%7Bb`) is served (`[`, `]` and `|`, which browsers send
+  raw, are path bytes since QB-1187). The HTTP/2 and HTTP/3 servers composed `:scheme://:authority` followed by
+  `:path` by hand: on HTTP/2 a `:path` `@evil.test/x` made `evil.test` the host, and on both `OPTIONS *` the host
+  `example.test*`.
   `qb::http::origin::request_uri()` composes it for both: `:path` is an absolute path, with no fragment, space or
   control byte, or the `*` of an OPTIONS request (its URI is `*`, without an authority, as HTTP/1.1's); `:scheme` a
   scheme; `:authority` one `is_request_authority()` accepts -- an IP literal that is an IPv6 address, or a reg-name or
@@ -375,6 +376,42 @@ All notable changes to the qbm-http module are documented here. The format is ba
   KiB served, a byte more answered `431` (through the client); a `:path` alone past it; a trailer section at and past
   it; each malformed shape past it refused, each well-formed one answered; a response, its trailer section and an
   interim section past it; three 103s and a 200 delivering the 200's fields alone.
+
+- **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
+  the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
+  WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),
+  so a browser follows `/search/a|b` or `/doc/[1]` as it is -- measured on macOS with a capture server, one `<img>` per
+  printable octet: WebKit (Safari 26.6.2) and Node 24's `fetch` send all three raw, Chrome 156 `[` and `]` (it encodes
+  `|`); `^`, which the standard percent-encodes since whatwg/url#846 (2025), none; curl 8.7.1 sends every octet as
+  typed. Since QB-1177 such a request was answered 400 on HTTP/1.1 (3.3.0 dispatched it to the route of `/`, QB-1177's
+  measurement) and refused as malformed on HTTP/2 and HTTP/3. Every protocol now reads the path with
+  `qb::io::is_request_path_character()` -- RFC 3986's path bytes and these three -- through `qb::io::uri::origin_form()`
+  and the new `qb::io::uri::absolute_form()`: `qb::http::origin::request_target_uri()` reads an HTTP/1.1 absolute-form
+  target with it, and `qb::http::origin::request_uri()` the text it composes from `:scheme`, `:authority` and `:path`;
+  llhttp passes the three. No other octet is accepted: `\`, which a browser turns into `/` and Windows takes for a
+  separator, `^`, a space, a control, `"`, `<`, `>`, `` ` ``, `{`, `}` and a byte past 0x7F are still refused --
+  answered 400 on HTTP/1.1, where a space or LF ends the request line and the connection closes unanswered, a stream
+  error on HTTP/2 and HTTP/3 --, and a URI a client builds is still read as an RFC 3986 reference
+  (`qb::io::uri("http://h/a|b")` stays invalid). `qb::http::utility::decode_raw_path_octets()` gives the spelling the
+  router and the static files compare: `%5B`, `%5D` and `%7C`, in either case of hex digit, decoded, every other byte
+  and escape kept (`%2F` stays inside its segment, `%257C` is `%7C` once decoded, never `|`). The router reads a request
+  path and each static segment of a route pattern so -- `/a|b` and `/a%7Cb` reach the route registered as either, the
+  405 answer included, a capture's name is kept as written, `route_pattern()` reports the decoded spelling --, and the
+  static files compare the prefix to strip so on both sides (the rest of a path was already decoded whole before it
+  named a file). `uri().path()` keeps what the client sent. The per-request cost, A/B against `2b2a55a` and qb
+  `a904abf6`, each side linked to its own libraries (3 copies of each binary, a seeded order, 8 rounds, a quiet host
+  under the shared marker, macOS arm64): `BM_Http1Parse_WholeBuffer` corpus 0, 1 and 2 253.5 to 248.4 ns (-2.0 %, the
+  gated cell), 1019.5 to 1012.0 and 335.5 to 335.3; `BM_Http2Server_BrowserGet` 3387.8 to 3415.4 (+0.8 %), with a `host`
+  field 3512.9 to 3507.2 (-0.2 %); `BM_Route_*/routes:16` over two sessions, a static hit +0.4 % and +0.1 %, a parameter
+  hit +0.7 % and +0.9 %, a 404 +3.5 % and +2.3 % (1103 to 1142 ns) -- one memchr of the path in `match()`, and again in
+  `allowed_methods()` on a miss, which a component bench of the same router does not tell from noise (-2.7 % on a 404,
+  +0.4 % on a hit). qb reads a target's path from a table now: `request_target_uri("/health")` 24.8 to 22.0 ns,
+  `request_uri()` 211.7 to 202.4. Tests: for each of the 256 bytes, the HTTP/1.1 origin-form and absolute-form readers
+  and the HTTP/2-HTTP/3 one accept a path together or refuse it together, against a written-out set, and the HTTP/1.1
+  protocol dispatches it with its path as sent or answers 400 (a space and LF end the line); the three raw on each
+  server, over TCP through the router, and fragmented across two reads; the router (static, encoded pattern, parameter,
+  wildcard, 405, `%25`, `%2F`, capture names) and the static files (each spelling of `[x].txt` and `a|b.txt`, a prefix
+  written with either spelling); every escape of the decoder, in both cases of hex digit.
 
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`

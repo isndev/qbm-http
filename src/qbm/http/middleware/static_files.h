@@ -246,7 +246,9 @@ trim_optional_whitespace(std::string_view value) noexcept {
  * @param base_path                  Canonical base directory (assumed already
  *                                   canonicalised by the middleware).
  * @param original_relative_path_sv  The (still percent-encoded) request URI
- *                                   path to resolve against @p base_path.
+ *                                   path to resolve against @p base_path --
+ *                                   `%5B`, `%5D` and `%7C` already decoded
+ *                                   when a prefix was stripped (Huly QB-1187).
  * @return The fully-resolved, in-base path, or an empty path if the input is
  *         unsafe or escapes the base directory.
  */
@@ -345,6 +347,9 @@ public:
             throw std::runtime_error("Failed to get canonical path for root_directory: " + _options.root_directory.string() + " - "
                                      + ec.message());
         }
+        // The prefix is compared with `[`, `]` and `|` as themselves, as the request path is (Huly QB-1187).
+        if (std::string decoded; utility::decode_raw_path_octets(_options.path_prefix_to_strip, decoded))
+            _options.path_prefix_to_strip = std::move(decoded);
     }
 
     void
@@ -362,9 +367,12 @@ public:
         bool is_head_request = request_method == qb::http::method::HEAD;
 
         std::string_view effective_request_path_sv = request_path_sv;
+        std::string      decoded_request_path; // `[`, `]` and `|` as themselves, as the prefix holds them (Huly QB-1187)
 
         if (!_options.path_prefix_to_strip.empty()) {
-            if (internal::path_prefix_matches(request_path_sv, _options.path_prefix_to_strip)) {
+            if (utility::decode_raw_path_octets(request_path_sv, decoded_request_path))
+                effective_request_path_sv = decoded_request_path;
+            if (internal::path_prefix_matches(effective_request_path_sv, _options.path_prefix_to_strip)) {
                 effective_request_path_sv.remove_prefix(_options.path_prefix_to_strip.length());
             } else {
                 ctx->complete(AsyncTaskResult::CONTINUE); // Let other handlers try

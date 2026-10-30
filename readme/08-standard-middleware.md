@@ -293,7 +293,7 @@ Configuration is `qb::http::StaticFilesOptions`, constructed with the root direc
 | Index file name | `with_index_file_name(std::string)` | `"index.html"` |
 | Default MIME type | `with_default_mime_type(std::string)` | `"application/octet-stream"` |
 | Extra MIME types | `add_mime_type(ext, type)` | seeded with common types |
-| Strip path prefix | `with_path_prefix_to_strip(std::string)` | none |
+| Strip path prefix | `with_path_prefix_to_strip(std::string)` — compared with `%5B`, `%5D`, `%7C` decoded on both sides (Huly QB-1187) | none |
 | Cache-Control | `with_cache_control(bool, std::string)` | on, `"public, max-age=3600"` |
 | ETags | `with_etags(bool)` | `true` |
 | Last-Modified | `with_last_modified(bool)` | `true` |
@@ -307,6 +307,8 @@ The freshness lifetime is **not** a duration type: `with_cache_control` takes a 
 For GET and HEAD, a present `If-None-Match` takes precedence over `If-Modified-Since`; a differing ETag serves the representation even when the supplied date is newer. A directory's configured index file is checked against the canonical root and the `reject_symlinks` option before serving it. Its `Content-Type` follows the configured index filename, including when that filename is a symlink to a file with another extension.
 
 A filesystem root (`/`, `C:\`) is a valid root: its canonical form already ends with the separator, and the containment check accepts what lies below it, while a sibling that merely shares an ordinary root's string prefix (`www` and `www_old`) stays refused. The directory listing writes the request path into each link escaped for the HTML attribute (`&` becomes `&amp;`, percent-encodings are left as they are) and led by one slash however many the path begins with -- a link that begins with `//` names another host (Huly QB-1177) -- and each entry name percent-encoded. <!-- src: qbm/http/src/qbm/http/middleware/static_files.cpp:153-170, qbm/http/src/qbm/http/middleware/static_files.cpp:321-337 -->
+
+A request path may hold `[`, `]` and `|` as a browser sends them (Huly QB-1187): the path is percent-decoded whole before it names a file, so `/[1].txt` and `/%5B1%5D.txt` name one file (on Windows, which names no file with a `|`, every spelling of one is answered alike), and the prefix to strip is compared with `%5B`, `%5D` and `%7C` decoded on both sides, so a prefix written with either spelling strips both. <!-- src: qbm/http/src/qbm/http/middleware/static_files.h:351-352,373-375 -->
 
 `root_directory` is a `std::filesystem::path`, and a **relative** root is resolved through `qb::io::sys::resolve_resource` when the middleware is constructed: it is looked up against the current working directory first (historical behaviour), then against the executable's own directory, before being canonicalised. A binary shipped next to its asset directory therefore serves them from **any** working directory — no `cd`, no environment setup. An **absolute** root is used unchanged. The root must exist and be a directory at construction time, or the constructor throws.
 
@@ -324,7 +326,7 @@ opts.with_serve_index_file(true)
 
 router.use(qb::http::static_files_middleware<MySession>(opts));
 ```
-<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:865 -->
+<!-- src: qbm/http/src/qbm/http/middleware/static_files.h:873 -->
 
 `static_files_middleware<S>(StaticFilesOptions)` is the only factory; there is no default-constructed form because the root directory is required.
 

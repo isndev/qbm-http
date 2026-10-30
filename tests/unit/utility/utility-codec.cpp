@@ -177,3 +177,56 @@ TEST(UtilityCodec, EncodeThenDecodeIsIdentityOverMixedString) {
     // Every reserved char is now percent-escaped; decoding recovers the source.
     EXPECT_EQ(utility::decode_path_component(encoded), original);
 }
+
+//////////////////////////////////////////////////
+// decode_raw_path_octets (Huly QB-1187)
+//////////////////////////////////////////////////
+
+// Of the 256 escapes, in either case of hex digit, exactly those of `[`, `]` and `|` -- the octets a request path holds
+// as themselves beyond RFC 3986 -- are decoded, wherever they stand; any other is kept as it was written.
+TEST(UtilityDecodeRawPathOctets, DecodesTheEscapesOfTheOctetsABrowserSendsRawAndNoOther) {
+    static constexpr char hex_upper[] = "0123456789ABCDEF";
+    static constexpr char hex_lower[] = "0123456789abcdef";
+    for (int c = 0; c < 256; ++c) {
+        const bool raw_in_a_request = c == '[' || c == ']' || c == '|';
+        for (const char *hex : {hex_upper, hex_lower}) {
+            const std::string escape{'%', hex[c >> 4], hex[c & 0xF]};
+            for (std::string const &path : {escape, "/a" + escape + "b", "/" + escape + escape}) {
+                std::string out     = "untouched";
+                const bool  decoded = utility::decode_raw_path_octets(path, out);
+                EXPECT_EQ(decoded, raw_in_a_request) << path;
+                if (decoded) {
+                    std::string expected = path;
+                    for (auto at = expected.find(escape); at != std::string::npos; at = expected.find(escape, at + 1))
+                        expected.replace(at, 3, 1, static_cast<char>(c));
+                    EXPECT_EQ(out, expected) << path;
+                } else {
+                    EXPECT_EQ(out, "untouched") << path;
+                }
+            }
+        }
+    }
+}
+
+// An escape is read as decode_path_component() reads one, left to right: `%25` is a percent sign, so `%257C` holds no
+// `%7C`; a `%` without two hex digits after it is a byte, and the escape after it is read. Decoding the result gives
+// what decoding the path gives, and the result splits on the same `/` -- `%2F` is kept.
+TEST(UtilityDecodeRawPathOctets, ReadsEachEscapeAsThePathDecoderDoes) {
+    struct Case {
+        std::string_view path;
+        bool             decoded;
+        std::string_view out;
+    };
+    for (auto const &c :
+         {Case{"/plain/path", false, ""}, Case{"", false, ""}, Case{"%", false, ""}, Case{"%7", false, ""}, Case{"/a%257Cb", false, ""},
+          Case{"/a%2F%7Cb", true, "/a%2F|b"}, Case{"/a%%7Cb", true, "/a%|b"}, Case{"/a%7%7C", true, "/a%7|"}, Case{"%7C", true, "|"},
+          Case{"/%5B%5d%7c/[x]|", true, "/[]|/[x]|"}, Case{"/a%7Cb%41%2f", true, "/a|b%41%2f"}, Case{"/a%7C%", true, "/a|%"},
+          Case{"/%7Z%7C", true, "/%7Z|"}}) {
+        std::string out;
+        EXPECT_EQ(utility::decode_raw_path_octets(c.path, out), c.decoded) << c.path;
+        if (c.decoded) {
+            EXPECT_EQ(out, c.out) << c.path;
+            EXPECT_EQ(utility::decode_path_component(out), utility::decode_path_component(c.path)) << c.path;
+        }
+    }
+}

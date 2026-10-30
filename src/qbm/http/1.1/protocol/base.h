@@ -304,10 +304,11 @@ private:
      * reads it: an origin-form target (`/path?query`) by qb::io::uri::origin_form(), so `//a/b` is the
      * path `//a/b` and the authority is the Host field's, never the `a` a URI reference names (Huly
      * QB-1177); an absolute-form one as a URI with an authority and no userinfo; the authority-form of a
-     * CONNECT request as a host and a port; the asterisk-form of an OPTIONS request as `*`. Any other
-     * target names no resource and is answered 400 (one with a byte the URI parser refuses reached the
-     * route of the empty path, a fragment the route of its path, a GET `*` a 404). The target is read into
-     * the request's own uri, in place: a uri built apart and moved in cost 830 instructions a request.
+     * CONNECT request as a host and a port; the asterisk-form of an OPTIONS request as `*`. A path may hold
+     * `[`, `]` and `|`, which a browser sends unencoded (QB-1187). Any other target names no resource and
+     * is answered 400 (one with a byte the URI parser refuses reached the route of the empty path, a
+     * fragment the route of its path, a GET `*` a 404). The target is read into the request's own uri, in
+     * place: a uri built apart and moved in cost 830 instructions a request.
      */
     static int
     on_url_complete(http_t *parser) {
