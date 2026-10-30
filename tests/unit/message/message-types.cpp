@@ -763,7 +763,7 @@ TEST(OriginTest, EveryProtocolReadsTheSameRequestPath) {
     using qb::http::origin::request_target_uri;
     using qb::http::origin::request_uri;
     constexpr std::string_view path_bytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@%/[]|";
-    qb::io::uri                uri; // one uri, read target after target, as the HTTP/1.1 parser reads them
+    qb::io::uri                uri; // one uri, read target after target: no reading may keep anything of the one before
     for (int c = 0; c < 256; ++c) {
         std::string const path     = std::string{"/a"} + static_cast<char>(c) + "b";
         bool const        accepted = path_bytes.find(static_cast<char>(c)) != std::string_view::npos || c == '?';

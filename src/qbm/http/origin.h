@@ -235,9 +235,9 @@ is_request_authority(std::string_view const text) noexcept {
  * allows (qb::io::is_request_path_character()): a browser sends them unencoded (Huly QB-1187). The
  * router and the static files take each for its percent-encoding.
  *
- * The target is read INTO @p uri -- the request's own, which the server parses request after request --
- * through qb::io::uri's in-place readers, never through a uri built apart and moved in: the two moves of
- * its strings and its query map were 830 instructions a request, 54 ns of a 263 ns parse on g++ 14.
+ * The target is read INTO @p uri -- the request's own -- through qb::io::uri's in-place readers, never through
+ * a uri built apart and moved in, whose two moves of strings and query map were 830 instructions a request, 54 ns
+ * of a 263 ns parse on g++ 14. That is the whole saving: the parser rebuilds its request for every message.
  *
  * @param uri             The uri to fill: the request's. When the target names no resource it holds no URI
  *                        worth reading (what it held before, or an invalid reading of the target).
