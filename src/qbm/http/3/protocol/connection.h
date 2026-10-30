@@ -54,6 +54,7 @@
 #include <qb/utility/branch_hints.h> // QB_NOINLINE
 
 #include "../../1.1/protocol/base.h"
+#include "../../2/protocol/base.h" // HeaderValidator::is_sent_request_field: a request's fields leave as HTTP/2's (Huly QB-1191)
 #include "../../headers.h"
 #include "../../logger.h"
 #include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
@@ -376,34 +377,69 @@ request_target(qb::io::uri const &uri) {
  * @param trailers The message's trailer section (qb::http::detail::plan_outgoing_trailers), or
  *               nullptr when it has none: the fields it takes are skipped, and its announcement is
  *               added (Huly QB-1073).
- * @return @c false (leaving @p block partially populated) if a forbidden field
- *         -- a @c te other than @c trailers, a response's @c te --, an invalid field, or the field-count
- *         limit is encountered; @c true on success. @c host is dropped (folded into @c :authority).
+ * @return @c false (leaving @p block partially populated) when the field-count limit is passed, a field name or
+ *         value passes @c MAX_HEADER_NAME_LENGTH or @c MAX_HEADER_VALUE_LENGTH, or a response carries a forbidden
+ *         field -- a connection-specific one, a @c te -- or an invalid field (its @c host is dropped); @c true on
+ *         success. A request's fields leave as the HTTP/2 client's do: those
+ *         qb::protocol::http2::HeaderValidator::is_sent_request_field() keeps, less the fields its @c connection
+ *         header names (qb::protocol::http2::connection_nominated_fields()); a field either rule leaves out is
+ *         dropped, @c host (folded into @c :authority) and @c content-length (make_request_headers writes it from
+ *         the body) among them.
  */
 template <typename Message>
 bool
 add_regular_headers(header_block &block, Message const &msg, std::size_t &fields, qb::http::detail::outgoing_trailers const *trailers) {
-    for (auto const &[name, values] : msg.headers()) {
-        const auto lower = lower_header_name(name);
-        if (lower.empty() || lower.front() == ':' || is_forbidden_h3_header(lower)) {
-            return false;
+    if constexpr (std::is_same_v<Message, qb::http::Request>) {
+        // A request leaves with the rules the servers apply on receipt, the HTTP/2 client's (Huly QB-1191): a field
+        // they would refuse is dropped, as an intermediary translating an HTTP/1.1 message removes the
+        // connection-specific fields and those its `connection` field nominates (RFC 9114 §4.2, RFC 9113 §8.2.2).
+        // HTTP/3 refused the whole request instead -- `connection: keep-alive` copied from an HTTP/1.1 message, a
+        // `te: gzip` --, which HTTP/2 served (Huly QB-1191). A name is lowercase already: the headers map stores it
+        // folded, and an uppercase one fails the rule. The field bounds stay a refusal: a peer's nghttp3 takes a field
+        // past its own (a value of 64 KiB) for a connection error, every stream with it.
+        const auto nominated = qb::protocol::http2::connection_nominated_fields(msg);
+        for (auto const &[name, values] : msg.headers()) {
+            if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) [[unlikely]] {
+                continue;
+            }
+            if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), name) != trailers->moved.end()) {
+                continue; // in the trailer section
+            }
+            for (auto const &value : values) {
+                if (!qb::protocol::http2::HeaderValidator::is_sent_request_field(name, value)) [[unlikely]] {
+                    continue;
+                }
+                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
+                    || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                    return false;
+                }
+                block.add(name, value);
+            }
         }
-        if (lower == "host") {
-            continue;
-        }
-        if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), lower) != trailers->moved.end()) {
-            continue; // in the trailer section
-        }
-        // `te` is a connection-specific field a request may carry as `trailers` alone (RFC 9114 §4.2): a peer's
-        // nghttp3 takes any other value for a malformed message and closes the connection, and a response carries
-        // none. It was sent as it was (Huly QB-1191).
-        const bool te = lower == "te";
-        for (auto const &value : values) {
-            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)
-                || (te && !(std::is_same_v<Message, qb::http::Request> && qb::http::utility::iequals(value, "trailers")))) {
+    } else {
+        for (auto const &[name, values] : msg.headers()) {
+            const auto lower = lower_header_name(name);
+            if (lower.empty() || lower.front() == ':' || is_forbidden_h3_header(lower)) {
                 return false;
             }
-            block.add(lower, value);
+            if (lower == "host") {
+                continue;
+            }
+            if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), lower) != trailers->moved.end()) {
+                continue; // in the trailer section
+            }
+            // `te` is a connection-specific field a request may carry as `trailers` alone (RFC 9114 §4.2) and a
+            // response never: a peer's nghttp3 takes it for a malformed message and closes the connection. It was
+            // sent as it was (Huly QB-1191).
+            if (lower == "te") {
+                return false;
+            }
+            for (auto const &value : values) {
+                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
+                    return false;
+                }
+                block.add(lower, value);
+            }
         }
     }
     if (trailers && !trailers->announcement.empty()) {
@@ -456,10 +492,11 @@ plan_trailers(Message const &msg) {
  * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
  *        announcement added.
  * @return The field block, or @c std::nullopt if the target exceeds
- *         @c MAX_URL_LENGTH, the declared @c content-length disagrees with the
- *         body size, regular-header assembly fails, or @c trailers() carries a field
- *         a trailer section must not. A @c content-length is synthesized when the
- *         body is non-empty and none was supplied. @c :authority is
+ *         @c MAX_URL_LENGTH, the field count passes @c MAX_HEADERS_COUNT, or @c trailers() carries a field
+ *         a trailer section must not. The regular fields are those add_regular_headers() keeps -- the HTTP/2
+ *         client's rule, a field it leaves out dropped (Huly QB-1191) -- and the @c content-length is the body's,
+ *         written when the body is non-empty, as the HTTP/2 client writes it: a declared one is left out (it was
+ *         sent, and a request whose body contradicted it refused). @c :authority is
  *         qb::http::origin::authority, the authority every protocol writes (Huly QB-1064).
  */
 inline std::optional<header_block>
@@ -473,10 +510,6 @@ make_request_headers(qb::http::Request const &request, std::optional<qb::http::d
     if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH) {
         return std::nullopt;
     }
-    const auto declared_length = declared_content_length(request);
-    if (!declared_length.ok || (declared_length.value && *declared_length.value != request.body().size())) {
-        return std::nullopt;
-    }
     block.add(":method", std::string(request.method()));
     block.add(":scheme", request.uri().scheme().empty() ? "https" : std::string(request.uri().scheme()));
     block.add(":authority", qb::http::origin::authority(request.uri()));
@@ -484,7 +517,7 @@ make_request_headers(qb::http::Request const &request, std::optional<qb::http::d
     if (!add_regular_headers(block, request, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;
     }
-    if (!request.body().empty() && !request.has_header("content-length")) {
+    if (!request.body().empty()) {
         if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT) {
             return std::nullopt;
         }

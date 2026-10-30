@@ -585,61 +585,83 @@ TEST(Http3ConnectionDirect, AForbiddenTrailerFieldRefusesTheSubmissionBeforeAnyt
 // =============================================================================
 
 /**
- * @test submit_request rejects a content-length that disagrees with the body
- * @brief make_request_headers fails when the declared content-length != body size, so submit_request
- *        returns false before anything is sent — the server never sees a request.
+ * @test A request's content-length is its body's (Huly QB-1191)
+ * @brief The declared content-length is left out and the body's written, as the HTTP/2 client does: a request whose
+ *        body contradicted its declared length was refused before anything was sent, and HTTP/2 sent it. The server
+ *        receives the body and the length that frames it.
  */
-TEST(Http3ConnectionDirect, SubmitRequestRejectsContentLengthBodyMismatch) {
+TEST(Http3ConnectionDirect, ARequestSendsTheContentLengthOfItsBody) {
     Pair pair;
 
     qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/x")};
     request.body() = "12345";
     request.set_header("content-length", "99");
 
-    EXPECT_FALSE(pair.client.submit_request(0, request));
+    ASSERT_TRUE(pair.client.submit_request(0, request));
     pair.settle();
-    EXPECT_TRUE(pair.server_owner.requests.empty());
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().header("content-length"), "5");
+    EXPECT_EQ(pair.server_owner.requests.front().body().template as<std::string>(), "12345");
+    EXPECT_TRUE(pair.server_owner.resets.empty());
+    EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
 /**
- * @test submit_request rejects a forbidden hop-by-hop header
- * @brief A `connection` header is forbidden in HTTP/3 (RFC 9114 4.2); make_request_headers returns
- *        nullopt so submit_request returns false and emits nothing.
+ * @test A request leaves without the fields the server refuses (Huly QB-1191)
+ * @brief A connection-specific field (RFC 9114 section 4.2) and the fields its `connection` header names are left out,
+ *        as the HTTP/2 client leaves them out and as an intermediary translating an HTTP/1.1 message removes them: a
+ *        request carrying `Connection: keep-alive` was refused whole before anything was sent, and HTTP/2 served it.
+ *        The request is served with the other fields.
  */
-TEST(Http3ConnectionDirect, SubmitRequestRejectsForbiddenHeader) {
+TEST(Http3ConnectionDirect, ARequestLeavesWithoutTheFieldsTheServerRefuses) {
     Pair pair;
 
     qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/x")};
-    request.set_header("connection", "keep-alive");
+    request.set_header("Connection", "keep-alive, X-Hop");
+    request.set_header("Keep-Alive", "timeout=5");
+    request.set_header("Transfer-Encoding", "chunked");
+    request.set_header("X-Hop", "1");
+    request.set_header("X-Kept", "2");
 
-    EXPECT_FALSE(pair.client.submit_request(0, request));
+    ASSERT_TRUE(pair.client.submit_request(0, request));
     pair.settle();
-    EXPECT_TRUE(pair.server_owner.requests.empty());
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    auto const &served = pair.server_owner.requests.front();
+    EXPECT_EQ(served.uri().path(), "/x");
+    for (const char *name : {"connection", "keep-alive", "transfer-encoding", "x-hop"}) {
+        EXPECT_FALSE(served.has_header(name)) << name;
+    }
+    EXPECT_EQ(served.header("x-kept"), "2");
+    EXPECT_TRUE(pair.server_owner.resets.empty());
+    EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
 /**
- * @test A `te` field other than `trailers` is never submitted (Huly QB-1191)
+ * @test A `te` field other than `trailers` never leaves (Huly QB-1191)
  * @brief RFC 9114 section 4.2: a request carries `te` as `trailers` alone. `te: gzip` was submitted, and the peer's
- *        nghttp3 took it for a malformed message -- a connection error, every stream with it. It is refused before
- *        anything is queued; `te: trailers` crosses, and the connection serves the next request.
+ *        nghttp3 took it for a malformed message -- a connection error, every stream with it; then it refused the
+ *        request whole. It is left out, as the HTTP/2 client leaves it out, and the request is served; `te: trailers`
+ *        crosses, and the connection serves the next request.
  */
 TEST(Http3ConnectionDirect, ATeFieldOtherThanTrailersIsNeverSubmitted) {
     Pair pair;
 
     qb::http::Request gzip{qb::http::method::GET, qb::io::uri("https://example.test/gzip")};
     gzip.set_header("TE", "gzip");
-    EXPECT_FALSE(pair.client.submit_request(0, gzip));
+    ASSERT_TRUE(pair.client.submit_request(0, gzip));
     pair.settle();
-    EXPECT_TRUE(pair.server_owner.requests.empty());
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "/gzip");
+    EXPECT_FALSE(pair.server_owner.requests.front().has_header("te"));
     EXPECT_FALSE(pair.server_owner.close.has_value()) << "the peer closed the connection with " << pair.server_owner.close->first;
 
     qb::http::Request trailers{qb::http::method::GET, qb::io::uri("https://example.test/trailers")};
     trailers.set_header("TE", "trailers");
     ASSERT_TRUE(pair.client.submit_request(4, trailers));
     pair.settle();
-    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
-    EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "/trailers");
-    EXPECT_EQ(pair.server_owner.requests.front().header("te"), "trailers");
+    ASSERT_EQ(pair.server_owner.requests.size(), 2u);
+    EXPECT_EQ(pair.server_owner.requests.back().uri().path(), "/trailers");
+    EXPECT_EQ(pair.server_owner.requests.back().header("te"), "trailers");
     EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 

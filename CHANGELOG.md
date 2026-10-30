@@ -508,6 +508,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
   them (`is_forbidden_trailer_field`). Tests: a request through the client and one built on the wire served with the
   field, the `407` delivered with its challenge, the connection kept; over each request limit, answered `431`.
 
+- **An HTTP/3 request leaves with the fields an HTTP/2 one leaves with: a field the server would refuse is dropped,
+  not the request (Huly QB-1191).** The HTTP/2 client builds a request's fields with
+  `HeaderValidator::is_sent_request_field()` less the fields its `connection` header names, and drops what fails; the
+  HTTP/3 client refused the whole request instead -- failed locally with `503` -- for a `connection: keep-alive` or a
+  `te: gzip` copied from an HTTP/1.1 message, a field HTTP/3 cannot carry (a CR in a value, a pseudo-header name), a
+  field its `connection` header names was sent, and a declared `content-length` was sent as it was, a request whose
+  body contradicted it refused. `submit_request()` (`detail::make_request_headers()`) now applies the HTTP/2 client's
+  rule (RFC 9114 §4.2, RFC 9113 §8.2.2) and writes the body's `content-length`, a declared one left out, as the HTTP/2
+  client does; a field past `MAX_HEADER_NAME_LENGTH` or `MAX_HEADER_VALUE_LENGTH`, or more than `MAX_HEADERS_COUNT`,
+  still refuses the request (a peer's nghttp3 takes a field past its own bound for a connection error). Responses are
+  unchanged: a connection-specific field, a `te` or an invalid field refuses one on both protocols. Tests: each
+  left-out field and each field a `connection` header names, through the field block, the direct client/server pair
+  and the loopback client, the request served without it; the body's length over a contradicting declared one and one
+  with whitespace around it; a field past the bounds refused.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

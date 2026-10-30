@@ -1652,50 +1652,16 @@ TEST_F(Http3LoopbackTest, ClientRejectsResponseBodyOverLimit) {
     server->close();
 }
 
-TEST_F(Http3LoopbackTest, ServerRejectsRequestContentLengthMismatch) {
-    const auto port   = next_port();
-    auto       server = qb::http3::make_server();
-    server->router().post("/length", [](auto ctx) {
-        ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = "accepted";
-        ctx->complete();
-    });
-    server->router().compile();
-
-    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
-
-    auto client = qb::http3::make_client(https_origin(port));
-    client->set_verify_peer(false);
-
-    qb::http::Request request{qb::http::method::POST, qb::io::uri("/length")};
-    request.set_header("content-length", "1");
-    request.body() = "abc";
-
-    std::atomic<bool>  done{false};
-    qb::http::Response response;
-    ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
-        response = std::move(res);
-        done     = true;
-    }));
-
-    pump([&] { return done.load(); });
-
-    ASSERT_TRUE(done.load());
-    // The client validates the outgoing content-length/body mismatch before the
-    // request ever reaches the server, surfacing as a local 503 SERVICE_UNAVAILABLE.
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE); // (was EXPECT_NE OK)
-
-    client->disconnect();
-    server->close();
-}
-
-TEST_F(Http3LoopbackTest, ClientRejectsOutgoingRequestContentLengthMismatchBeforeRouter) {
+// A request's content-length is its body's, as the HTTP/2 client writes it (Huly QB-1191): a declared one the body
+// contradicts is left out -- the request was failed with 503 before it left, and HTTP/2 sent it.
+TEST_F(Http3LoopbackTest, ClientSendsTheContentLengthOfTheBody) {
     const auto       port   = next_port();
     auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().post("/length", [&server_requests](auto ctx) {
         ++server_requests;
-        ctx->response().body() = "unexpected";
+        // What the server read: the content-length field, then the body it framed.
+        ctx->response().body() = std::string(ctx->request().header("content-length")) + ":" + ctx->request().body().template as<std::string>();
         ctx->complete();
     });
     server->router().compile();
@@ -1711,21 +1677,24 @@ TEST_F(Http3LoopbackTest, ClientRejectsOutgoingRequestContentLengthMismatchBefor
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_EQ(server_requests.load(), 0);
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(server_requests.load(), 1);
+    EXPECT_EQ(response.body().as<std::string>(), "3:abc");
 
     client->disconnect();
     server->close();
 }
 
-TEST_F(Http3LoopbackTest, ClientRejectsOutgoingRequestContentLengthWithOWSBeforeRouter) {
+// A declared content-length with whitespace around the number is left out like any declared one, and the body's
+// written (Huly QB-1191: the request was failed with 503 before it left).
+TEST_F(Http3LoopbackTest, ClientWritesTheBodysContentLengthOverOneWithOWS) {
     const auto       port   = next_port();
     auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().post("/length-ows", [&server_requests](auto ctx) {
         ++server_requests;
         ctx->response().status() = qb::http::status::OK;
-        ctx->response().body()   = ctx->request().body().template as<std::string>();
+        ctx->response().body() = std::string(ctx->request().header("content-length")) + ":" + ctx->request().body().template as<std::string>();
         ctx->complete();
     });
     server->router().compile();
@@ -1741,8 +1710,9 @@ TEST_F(Http3LoopbackTest, ClientRejectsOutgoingRequestContentLengthWithOWSBefore
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_EQ(server_requests.load(), 0);
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(server_requests.load(), 1);
+    EXPECT_EQ(response.body().as<std::string>(), "3:abc");
 
     client->disconnect();
     server->close();
@@ -1842,13 +1812,16 @@ TEST_F(Http3LoopbackTest, ClientRejectsOversizedOutgoingHeader) {
     server->close();
 }
 
-TEST_F(Http3LoopbackTest, ClientRejectsInvalidOutgoingHeaderField) {
+// A field HTTP/3 cannot carry never leaves the client: it is left out and the request served, as the HTTP/2 client
+// leaves it out (Huly QB-1191; the request was failed with 503). Nothing of it reaches the server.
+TEST_F(Http3LoopbackTest, ClientLeavesOutAnInvalidOutgoingHeaderField) {
     const auto       port   = next_port();
     auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/guarded-invalid", [&server_requests](auto ctx) {
         ++server_requests;
-        ctx->response().body() = "unexpected";
+        // What reached the server of the field: nothing, whichever name the injection aimed at.
+        ctx->response().body() = std::string(ctx->request().header("x-injected")) + "|" + std::string(ctx->request().header("injected"));
         ctx->complete();
     });
     server->router().compile();
@@ -1863,8 +1836,9 @@ TEST_F(Http3LoopbackTest, ClientRejectsInvalidOutgoingHeaderField) {
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_EQ(server_requests.load(), 0);
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(server_requests.load(), 1);
+    EXPECT_EQ(response.body().as<std::string>(), "|");
 
     client->disconnect();
     server->close();
@@ -2776,13 +2750,15 @@ TEST_F(Http3LoopbackTest, ClientRejectsForbiddenOutgoingRequestTrailer) {
     server->close();
 }
 
-TEST_F(Http3LoopbackTest, ClientRejectsForbiddenOutgoingRequestHeader) {
+// A connection-specific field never leaves the client: it is left out and the request served, as the HTTP/2 client
+// leaves it out (RFC 9114 section 4.2; Huly QB-1191: the request was failed with 503 before it left).
+TEST_F(Http3LoopbackTest, ClientLeavesOutAConnectionSpecificRequestField) {
     const auto       port   = next_port();
     auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
     server->router().get("/forbidden-header", [&server_requests](auto ctx) {
         ++server_requests;
-        ctx->response().body() = "unexpected";
+        ctx->response().body() = std::string(ctx->request().header("connection"));
         ctx->complete();
     });
     server->router().compile();
@@ -2797,8 +2773,9 @@ TEST_F(Http3LoopbackTest, ClientRejectsForbiddenOutgoingRequestHeader) {
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_EQ(server_requests.load(), 0);
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(server_requests.load(), 1);
+    EXPECT_EQ(response.body().as<std::string>(), "") << "the field never reached the server";
 
     client->disconnect();
     server->close();
