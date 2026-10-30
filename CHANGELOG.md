@@ -195,6 +195,26 @@ All notable changes to the qbm-http module are documented here. The format is ba
   46 140 -> 46 249 and 13 011 -> 13 049 (+0.19 to +0.29 %): g++ keeps the data pointer of `on_url` and
   `on_header_field` on the stack across the new exception edges.
 
+- **The HTTP/1.1 client and server write the version of their connection: a request or a response received over HTTP/2
+  or HTTP/3 and forwarded goes out as `HTTP/1.1`, not `HTTP/2.0` or `HTTP/3.0` (Huly QB-1186).** The request and
+  response serializers wrote the message's `major_version`.`minor_version` on the request line and the status line,
+  and a message received over HTTP/2 or HTTP/3 carries 2.0 or 3.0: a request forwarded through the HTTP/1.1 client
+  went out as `GET /x HTTP/2.0`, which a qbm-http server answers 505 (above) and which closed the connection under the
+  requests queued behind it (502 `Connection lost`), and a response from an HTTP/3 upstream that a handler forwarded
+  went out as `HTTP/3.0 200 OK`, which no HTTP/1.1 client parses (the module's own failed with 502 `Connection
+  closed`). One rule now writes both lines, `qb::http::detail::http1_version()`: `HTTP/1.0` for a message whose
+  version is 1.0, set on purpose, and `HTTP/1.1` for any other -- 2.0, 3.0, 0.9 alike; the message keeps its own
+  version, which a handler still reads. Every HTTP/1.x writer goes through those two serializers: the persistent and
+  the one-shot client and the redirects they follow, the WebSocket client's upgrade request, the server sessions'
+  responses and refusals, a `MessageHead`. The HTTP/2 and HTTP/3 writers send no version. The line costs less too, one
+  token where two numbers were formatted: callgrind on g++ 14 -O3, `qbm-http-bench-http1-serialize`, 85 to 137 fewer
+  instructions a message in every cell -- a 0-byte fixed-length response 1 589 -> 1 489, a request with no query 989
+  -> 898. Tests: `Http1Serialization.AMessageHeadCarriesTheVersionOfItsConnection` (every version, request and
+  response, whole and `MessageHead`: 12 failures on the base),
+  `Http1ClientTest.AForwardedRequestGoesOutInTheVersionOfTheConnection` (2.0 and 3.0 answered 505 and 502 on the base,
+  served as 1.1 now; 1.0 stays 1.0) and `Http1ClientTest.AForwardedResponseGoesOutInTheVersionOfTheConnection`
+  (`HTTP/3.0 200 OK` and `HTTP/2.0 200 OK` on the wire on the base, the client 502; `HTTP/1.1` now, 1.0 kept).
+
 - **An HTTP/1.1 server answers `505 HTTP Version Not Supported` to a request whose major version is not 1 -- HTTP/0.9
   and HTTP/2.0, the two others llhttp reads -- instead of serving it as HTTP/1.x (Huly QB-1186).** llhttp reads a
   request line with no version -- `GET /admin` then CRLF -- as HTTP/0.9, and the field lines after it as a header
@@ -209,9 +229,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ends a header section or the server's timeout closes the connection. qbm-http speaks HTTP/2 over TLS with ALPN only,
   and the two cleartext openings of an HTTP/2 client keep their answers: the prior-knowledge preface (`PRI *
   HTTP/2.0`, RFC 9113 §3.3) is still answered 400, its target `*` refused before its version is read, and an `Upgrade:
-  h2c` request is an HTTP/1.1 request, served as one. A `Request` is HTTP/1.1 unless its `major_version` is set -- but
-  one received over HTTP/2 or HTTP/3 carries 2 or 3, which the HTTP/1.1 serializer writes on its request line: set it
-  back to 1.1 before forwarding such a request to an HTTP/1.1 server. No test or example sends another version. Tests:
+  h2c` request is an HTTP/1.1 request, served as one. A request received over HTTP/2 or HTTP/3 carries 2.0 or 3.0, and
+  forwarded through the HTTP/1.1 client it goes out in the version of the connection, `HTTP/1.1` (below): nothing to
+  set before forwarding it. No test or example sends another version. Tests:
   `Http1ProtocolFraming.AnHttp09RequestIsRefusedWith505` and
   `Http1ProtocolFraming.ARequestLineOfHttp20IsRefusedWith505`, whose requests are each dispatched on their base (the
   HTTP/2.0 one with no `Host` refused 400), and

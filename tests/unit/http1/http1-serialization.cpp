@@ -18,9 +18,11 @@
  * @ingroup Http
  */
 #include <gtest/gtest.h>
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <qb/system/allocator/pipe.h>
@@ -870,4 +872,36 @@ TEST(Http1Serialization, ATrailerFieldThatCannotTravelRefusesTheMessage) {
     invalid.set_header("Transfer-Encoding", "chunked");
     invalid.trailers().set_header("X-Bad", "a\r\nInjected: 1");
     EXPECT_TRUE(refused(invalid)) << "a CR LF in a trailer value";
+}
+
+// An HTTP/1.x message head carries the version its connection speaks (RFC 9112 §2.3): HTTP/1.0 for a message set to
+// 1.0 on purpose, HTTP/1.1 for any other -- a message received over HTTP/2 or HTTP/3 (2.0, 3.0) and forwarded, or one
+// whose version is no HTTP/1.x at all. The request line and the status line wrote `HTTP/2.0` and `HTTP/3.0`, which a
+// qbm-http server answers 505 and no HTTP/1.1 client parses. The whole message and its MessageHead alike.
+TEST(Http1Serialization, AMessageHeadCarriesTheVersionOfItsConnection) {
+    struct Case {
+        std::uint16_t    major, minor;
+        std::string_view sent;
+    };
+    const auto wire = [](auto const &message) {
+        qb::allocator::pipe<char> out;
+        out << message;
+        return std::string(out.begin(), out.size());
+    };
+    for (auto const &c :
+         {Case{1, 1, "HTTP/1.1"}, Case{1, 0, "HTTP/1.0"}, Case{2, 0, "HTTP/1.1"}, Case{3, 0, "HTTP/1.1"}, Case{0, 9, "HTTP/1.1"}}) {
+        qb::http::Request request{qb::http::method::GET, {"http://example.test/x"}};
+        request.major_version          = c.major;
+        request.minor_version          = c.minor;
+        const std::string request_line = "GET /x " + std::string{c.sent} + "\r\n";
+        EXPECT_TRUE(wire(request).starts_with(request_line)) << c.major << "." << c.minor << ": " << wire(request);
+        EXPECT_TRUE(wire(qb::http::MessageHead{request}).starts_with(request_line)) << c.major << "." << c.minor;
+
+        qb::http::Response response;
+        response.major_version        = c.major;
+        response.minor_version        = c.minor;
+        const std::string status_line = std::string{c.sent} + " 200 OK\r\n";
+        EXPECT_TRUE(wire(response).starts_with(status_line)) << c.major << "." << c.minor << ": " << wire(response);
+        EXPECT_TRUE(wire(qb::http::MessageHead{response}).starts_with(status_line)) << c.major << "." << c.minor;
+    }
 }

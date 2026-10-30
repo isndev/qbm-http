@@ -384,7 +384,7 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
     // the header loop's `operator<<`s into this function (+3 % a message).
     const bool trailed = transfer.chunked && !head_only && qb::http::detail::writes_trailer_section(r, "qb::http::Request serialization");
 
-    // HTTP Request Line: METHOD PATH[?query] HTTP/VERSION.
+    // HTTP Request Line: METHOD PATH[?query] HTTP/1.x -- the connection's version (detail::http1_version()).
     // URI fragments are client-side identifiers and are never sent in an HTTP request-target.
     // An empty path is sent as "/" (RFC 9112 §3.2.1: the client MUST send "/" as the path of an
     // origin-form whose URI has none) -- a default URI, or one naming only an authority (Huly QB-1066).
@@ -405,7 +405,7 @@ serialize_request(pipe<char> &out, const qb::http::Request &r, const bool head_o
             std::memcpy(cursor, r.uri().encoded_queries().data(), query_size);
         }
     }
-    out << qb::http::sep << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::endl;
+    out << qb::http::sep << qb::http::detail::http1_version(r) << qb::http::endl;
 
     if (trailed) [[unlikely]] {
         qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length);

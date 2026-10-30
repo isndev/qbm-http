@@ -327,4 +327,20 @@ struct MessageHead {
 /** @brief `MessageHead{msg}` deduces the message type. */
 template <typename Message>
 MessageHead(const Message &) -> MessageHead<Message>;
+
+namespace detail {
+/**
+ * @brief The HTTP-version an HTTP/1.x request line or status line carries for @p message (RFC 9112 §2.3): `HTTP/1.0`
+ *        for a message whose version is 1.0, set on purpose, and `HTTP/1.1` for any other.
+ * @details The connection speaks HTTP/1.1, whatever version the message carries: one received over HTTP/2 or HTTP/3
+ *          carries 2.0 or 3.0, and forwarded -- a request through the HTTP/1.1 client, a response answered by an
+ *          HTTP/1.1 server -- it went out as `HTTP/2.0` or `HTTP/3.0`, a request a qbm-http server answers 505, a status
+ *          line no HTTP/1.1 client parses. The one rule of both serializers (request.cpp, response.cpp); the message's
+ *          own version is left as it is.
+ */
+[[nodiscard]] inline std::string_view
+http1_version(internal::MessageBase const &message) noexcept {
+    return message.major_version == 1 && message.minor_version == 0 ? std::string_view{"HTTP/1.0"} : std::string_view{"HTTP/1.1"};
+}
+} // namespace detail
 } // namespace qb::http

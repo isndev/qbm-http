@@ -188,6 +188,24 @@ public:
             ctx->complete();
         });
 
+        // The version a request arrived in, as the parser read it.
+        router().get("/version", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(ctx->request().major_version) + "." + std::to_string(ctx->request().minor_version);
+            ctx->complete();
+        });
+
+        // A response whose version came from elsewhere, as one an HTTP/2 or HTTP/3 upstream returned and a handler forwards.
+        router().get("/response-version/:major/:minor", [this](auto ctx) {
+            ++request_count;
+            ctx->response().status()      = qb::http::status::OK;
+            ctx->response().major_version = static_cast<std::uint16_t>(std::stoul(ctx->path_param("major")));
+            ctx->response().minor_version = static_cast<std::uint16_t>(std::stoul(ctx->path_param("minor")));
+            ctx->response().body()        = "forwarded-" + ctx->path_param("major") + "." + ctx->path_param("minor");
+            ctx->complete();
+        });
+
         router().get("/hold/:id", [this](auto ctx) {
             ++request_count;
             auto id = ctx->path_param("id");
@@ -920,6 +938,55 @@ TEST(Http1ClientTest, Http10ClosesByDefaultButKeepAliveCanPersist) {
         EXPECT_NE(second.find("11"), std::string::npos);
         EXPECT_TRUE(socket.closes_within(std::chrono::seconds(2)));
     }
+}
+
+// A request received over HTTP/2 or HTTP/3 carries that version (2.0, 3.0). Forwarded through the HTTP/1.1 client it
+// goes out in the version of the connection, HTTP/1.1, and is served; it went out as `HTTP/2.0` or `HTTP/3.0`, which a
+// qbm-http server answers 505. A request set to 1.0 on purpose stays 1.0.
+TEST(Http1ClientTest, AForwardedRequestGoesOutInTheVersionOfTheConnection) {
+    LoopbackHttp1Server             server;
+    auto                            client = qb::http1::make_client(server.url("/"));
+    std::vector<qb::http::Response> responses;
+    for (auto const &[major, minor] : {std::pair<std::uint16_t, std::uint16_t>{2, 0}, {3, 0}, {1, 0}}) {
+        auto req          = request(qb::http::method::GET, "/version");
+        req.major_version = major;
+        req.minor_version = minor;
+        ASSERT_TRUE(client->push_request(std::move(req), [&](auto response) { responses.push_back(std::move(response)); }));
+    }
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return responses.size() == 3; }));
+    ASSERT_EQ(responses.size(), 3u);
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(responses[i].status(), qb::http::status::OK) << "request " << i;
+        EXPECT_EQ(responses[i].body().as<std::string>(), i < 2 ? "1.1" : "1.0") << "request " << i;
+    }
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// The server's side: a Response whose version came from elsewhere -- an HTTP/3 or HTTP/2 upstream's, which a handler
+// forwards -- goes out in HTTP/1.1, where its status line read `HTTP/3.0 200 OK`, which no HTTP/1.1 client parses; one
+// set to 1.0 on purpose stays 1.0.
+TEST(Http1ClientTest, AForwardedResponseGoesOutInTheVersionOfTheConnection) {
+    LoopbackHttp1Server server;
+    raw_socket          socket{server.port};
+    for (auto const &[path, status_line] :
+         {std::pair<std::string, std::string>{"/response-version/3/0", "HTTP/1.1 200 OK\r\n"},
+          {"/response-version/2/0", "HTTP/1.1 200 OK\r\n"},
+          {"/response-version/1/0", "HTTP/1.0 200 OK\r\n"}}) {
+        socket.send_all("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        const auto marker   = "forwarded-" + path.substr(std::string{"/response-version/"}.size(), 1) + "." + path.back();
+        const auto response = socket.read_until(marker);
+        EXPECT_TRUE(response.starts_with(status_line)) << path << ": " << response.substr(0, response.find('\r'));
+    }
+    auto                              client = qb::http1::make_client(server.url("/"));
+    std::optional<qb::http::Response> reply;
+    ASSERT_TRUE(
+        client->push_request(request(qb::http::method::GET, "/response-version/3/0"), [&](auto response) { reply = std::move(response); }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return reply.has_value(); }));
+    EXPECT_EQ(reply->status(), qb::http::status::OK) << "the HTTP/1.1 client reads the answer";
+    EXPECT_EQ(reply->body().as<std::string>(), "forwarded-3.0");
+    client->disconnect();
+    drain_client_callbacks();
 }
 
 TEST(Http1ClientTest, BackToBackHttp11RequestsAreAnsweredInRequestOrder) {

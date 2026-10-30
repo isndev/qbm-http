@@ -296,9 +296,9 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
     const bool trailed =
         transfer.chunked && !content_suppressed && qb::http::detail::writes_trailer_section(r, "qb::http::Response serialization");
 
-    // HTTP Status Line
-    out << "HTTP/" << r.major_version << "." << r.minor_version << qb::http::sep << r.status().code() << qb::http::sep << r.status().str()
-        << qb::http::endl;
+    // HTTP Status Line, in the version of the connection: detail::http1_version() writes HTTP/1.0 for a response set
+    // to 1.0 and HTTP/1.1 for any other, one received over HTTP/2 or HTTP/3 and forwarded included.
+    out << qb::http::detail::http1_version(r) << qb::http::sep << r.status().code() << qb::http::sep << r.status().str() << qb::http::endl;
 
     if (trailed) [[unlikely]] {
         qb::http::detail::write_trailed_chunked_message(out, r, r.body().raw(), length);
