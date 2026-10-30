@@ -706,6 +706,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   JSON serialization error propagates instead of terminating keeps its death test in `body-codec`, whose binary
   logs nothing. Test only.
 
+### Removed
+
+- **`qb::protocol::http2::HeaderValidator::validate_request_pseudo_headers()` (Huly QB-1195).** No source called it --
+  the HTTP/2 server checks a request's pseudo-headers in its own pass over the decoded fields -- and it accepted what
+  the server refuses: any `host` field, compared with nothing and read as no authority. It was in no documented API
+  (`llm/qbm-http.llm.api.md`); keeping it would have meant a second rule to hold in step, and calling it from the server
+  a second pass over every request's fields. Its cases -- each pseudo-header once and not empty, an unknown one -- are
+  now asserted on the server itself. `validate_response_pseudo_headers()`, which the client calls, stays.
+
 ## [3.3.0] - 2026-10-26
 
 ### Added

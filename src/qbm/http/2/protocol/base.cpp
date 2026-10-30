@@ -235,65 +235,6 @@ HeaderValidator::parse_content_length(std::string_view value) noexcept {
 }
 
 SettingsHelper::ValidationResult
-HeaderValidator::validate_request_pseudo_headers(const std::vector<qb::protocol::hpack::HeaderField> &headers) {
-    bool        has_method = false, has_path = false, has_scheme = false, has_authority = false;
-    std::size_t hosts = 0, empty_hosts = 0; // without :authority, one `host` field names the authority (Huly QB-1195)
-
-    for (const auto &header : headers) {
-        if (!is_pseudo_header(header.name)) {
-            if (header.name == "host") {
-                ++hosts;
-                empty_hosts += header.value.empty();
-            }
-            continue;
-        }
-
-        if (header.name == ":method") {
-            if (has_method) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header");
-            }
-            has_method = true;
-            if (header.value.empty()) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Empty :method value");
-            }
-        } else if (header.name == ":path") {
-            if (has_path) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header");
-            }
-            has_path = true;
-            if (header.value.empty()) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Empty :path value");
-            }
-        } else if (header.name == ":scheme") {
-            if (has_scheme) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header");
-            }
-            has_scheme = true;
-            if (header.value.empty()) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Empty :scheme value");
-            }
-        } else if (header.name == ":authority") {
-            if (has_authority) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header");
-            }
-            has_authority = true;
-            if (header.value.empty()) {
-                return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Empty :authority value");
-            }
-        } else {
-            return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR, "Unknown pseudo-header: " + std::string(header.name));
-        }
-    }
-
-    if (!has_method || !has_path || !has_scheme || (!has_authority && (hosts != 1 || empty_hosts != 0))) {
-        return SettingsHelper::ValidationResult::invalid(ErrorCode::PROTOCOL_ERROR,
-                                                         "Missing required pseudo-headers (:method, :path, :scheme), or no authority");
-    }
-
-    return SettingsHelper::ValidationResult::valid();
-}
-
-SettingsHelper::ValidationResult
 HeaderValidator::validate_response_pseudo_headers(const std::vector<qb::protocol::hpack::HeaderField> &headers) {
     bool has_status = false;
 

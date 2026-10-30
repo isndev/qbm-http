@@ -1966,6 +1966,52 @@ open_post_stream_with_clen(ServerProtocol &protocol, Http2FakeIO &io, uint32_t s
 // Each crafts a header block that process_complete_header_block must reject.
 // ---------------------------------------------------------------------------
 
+// Each request pseudo-header comes once and is not empty, an unknown one is malformed: the server's own rule, a stream
+// error each, the connection kept. HeaderValidator::validate_request_pseudo_headers(), which no source called, held
+// these cases apart from the server -- and accepted what the server refuses (Huly QB-1195); they are the server's here.
+TEST(HTTP2ServerProtocol, EachRequestPseudoHeaderComesOnceAndNotEmpty) {
+    using Fields    = std::vector<qb::protocol::hpack::HeaderField>;
+    const auto with = [](const char *name, const char *value) {
+        Fields fields = default_request_headers("/p");
+        for (auto &f : fields) {
+            if (f.name == name) {
+                f.value = value;
+                return fields;
+            }
+        }
+        fields.insert(fields.begin() + 4, qb::protocol::hpack::HeaderField{name, value});
+        return fields;
+    };
+    const auto twice = [](const char *name, const char *value) {
+        Fields fields = default_request_headers("/p");
+        fields.insert(fields.begin() + 4, qb::protocol::hpack::HeaderField{name, value});
+        return fields;
+    };
+    const std::vector<std::pair<std::string, Fields>> malformed{
+        {"two :method", twice(":method", "POST")},    {"two :path", twice(":path", "/a")},          {"two :scheme", twice(":scheme", "http")},
+        {"two :authority", twice(":authority", "y")}, {"empty :method", with(":method", "")},       {"empty :path", with(":path", "")},
+        {"empty :scheme", with(":scheme", "")},       {"empty :authority", with(":authority", "")}, {"unknown :bogus", with(":bogus", "v")},
+    };
+    for (auto const &[label, fields] : malformed) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+                   encode_hpack_headers(fields));
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok()) << label;
+        EXPECT_EQ(io.request_count, 0) << label;
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::PROTOCOL_ERROR) << label;
+    }
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers(default_request_headers("/p")));
+    drive(protocol, io);
+    EXPECT_EQ(io.request_count, 1) << "the four, once each, not empty";
+}
+
 TEST(HTTP2ServerProtocol, DuplicateMethodPseudoHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

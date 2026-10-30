@@ -504,8 +504,8 @@ TEST(HTTP2FrameLayerHeaderValidator, ParseContentLengthInvalid) {
 
 // ---------------------------------------------------------------------------
 // HeaderValidator::is_valid_header_field — name/value character rules (base.cpp)
-// The validate_request_pseudo_headers / validate_response_pseudo_headers wire
-// paths are exercised through the server/client protocols, but the lowest-level
+// The request and response pseudo-header rules are exercised through the server/client
+// protocols, but the lowest-level
 // per-character name/value checks have rejection branches reachable only with a
 // direct call carrying out-of-range octets.
 // ---------------------------------------------------------------------------
@@ -555,57 +555,6 @@ TEST(HTTP2FrameLayerHeaderValidator, IsValidHeaderValueDirect) {
     EXPECT_TRUE(h2::HeaderValidator::is_valid_header_value("")); // empty value is valid
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value("x\ny"));
     EXPECT_FALSE(h2::HeaderValidator::is_valid_header_value(std::string("x\x7F", 2)));
-}
-
-// ---------------------------------------------------------------------------
-// HeaderValidator::validate_request_pseudo_headers (base.cpp)
-// All duplicate / empty / unknown / missing branches via direct calls.
-// ---------------------------------------------------------------------------
-
-TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersValid) {
-    std::vector<qb::protocol::hpack::HeaderField> ok{
-        {":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {"accept", "*/*"}
-    };
-    EXPECT_TRUE(h2::HeaderValidator::validate_request_pseudo_headers(ok).is_valid);
-}
-
-TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersDuplicateBranches) {
-    using h2::HeaderValidator;
-    auto dup = [](const char *n, const char *v) {
-        return std::vector<qb::protocol::hpack::HeaderField>{
-            {":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {n, v}
-        };
-    };
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":method", "POST")).is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":path", "/a")).is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":scheme", "http")).is_valid);
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(dup(":authority", "y")).is_valid);
-}
-
-TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersEmptyValueBranches) {
-    using h2::HeaderValidator;
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers({{":method", ""}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}})
-                     .is_valid);
-    EXPECT_FALSE(
-        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", ""}, {":scheme", "https"}, {":authority", "x"}})
-            .is_valid);
-    EXPECT_FALSE(
-        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", ""}, {":authority", "x"}}).is_valid);
-    EXPECT_FALSE(
-        HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", ""}})
-            .is_valid);
-}
-
-TEST(HTTP2FrameLayerHeaderValidator, RequestPseudoHeadersUnknownAndMissing) {
-    using h2::HeaderValidator;
-    // Unknown pseudo-header.
-    EXPECT_FALSE(HeaderValidator::validate_request_pseudo_headers(
-                     {{":method", "GET"}, {":path", "/"}, {":scheme", "https"}, {":authority", "x"}, {":bogus", "v"}})
-                     .is_valid);
-    // Missing a mandatory one (no :authority).
-    const auto missing = HeaderValidator::validate_request_pseudo_headers({{":method", "GET"}, {":path", "/"}, {":scheme", "https"}});
-    EXPECT_FALSE(missing.is_valid);
-    EXPECT_EQ(missing.error_code, h2::ErrorCode::PROTOCOL_ERROR);
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +845,7 @@ TEST(HTTP2FramerDrive, InvalidPrefaceBytesAreProtocolError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- zero-payload frame dispatch (2/protocol/base.h:1193-1272) ------------------------
+// --- zero-payload frame dispatch (2/protocol/base.h:1184-1263) ------------------------
 
 TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
     Http2FakeIO      io;
