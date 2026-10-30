@@ -392,6 +392,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the bound separates "not written yet" from "never taken", which stays a named failure. Test only; nothing
   changes on the capped-handoff path, which still drops the connection.
 
+- **`router-error-handling` no longer hangs under TSan on macOS: its invalid-JSON case asserts the 500 in its own
+  process instead of a death test (7 hangs in 2,000 runs before, 0 after; Huly QB-1193).** The death test forked
+  while qb's log writer -- a thread qb starts before `main()` -- formatted the lines the binary's earlier routed
+  requests had queued, and TSan's fork handler deadlocks against libSystem's there: it takes its slot locks, then
+  `libSystem_atfork_prepare` waits for a lock the writer took while formatting a timestamp (the locale lock
+  `strftime` and `snprintf` take, or an Objective-C runtime lock in the first `gmtime()`), while the writer waits for
+  a slot lock. Sampled in every hang: the parent alone, blocked inside `fork()`. 2,000 lines queued before the fork
+  hung 13 runs in 200, the same lines drained first none. The assertions are the old child's; the guarantee that a
+  JSON serialization error propagates instead of terminating keeps its death test in `body-codec`, whose binary
+  logs nothing. Test only.
+
 ## [3.3.0] - 2026-10-26
 
 ### Added

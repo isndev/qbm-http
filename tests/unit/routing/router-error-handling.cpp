@@ -23,7 +23,6 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <string>
@@ -314,22 +313,27 @@ TEST_F(RouterErrorHandlingTest, ExceptionInHandlerTriggersErrorChain) {
     EXPECT_EQ(_session->_last_error_handler_name, "ExceptionHandlerInChain");
 }
 
+// Asserted in this process, not in a death test (Huly QB-1193). A death test forks, and the tests that run before this
+// one route requests, each of which queues lines for qb's log writer, a thread qb starts before main(). Under TSan on
+// macOS a fork while that writer formats a line can deadlock the parent inside fork(): TSan's fork handler takes its
+// slot locks, then libSystem_atfork_prepare waits for a lock the writer took while formatting the line's timestamp --
+// the locale lock strftime and snprintf both take (localeconv_l), or an Objective-C runtime lock in the first
+// gmtime() -- and the writer waits for a slot lock to record taking or releasing it. The test hung until ctest's
+// timeout: 7 runs in 2,000 under load. The guarantee that a JSON serialization error propagates rather than
+// terminating keeps its death test where no line is queued at the fork: body-codec's
+// InvalidUtf8RvalueJsonPropagatesInsteadOfTerminating. A regression here aborts this binary instead of failing one
+// expectation.
 TEST_F(RouterErrorHandlingTest, InvalidJsonResponseReachesDefault500InsteadOfTerminating) {
-    GTEST_FLAG_SET(death_test_style, "threadsafe");
-    EXPECT_EXIT(
-        {
-            _router->get("/invalid-json", [](std::shared_ptr<qb::http::Context<MockErrorSession>> ctx) {
-                qb::json invalid = {{"a", "valid"}, {"z", std::string(1, static_cast<char>(0xff))}};
-                ctx->json(std::move(invalid));
-            });
-            _router->compile();
-            make_request(qb::http::method::GET, "/invalid-json");
-            const auto body    = _session->_response.body().as<std::string>();
-            const bool handled = _session->_finalized && _session->_response.status() == qb::http::status::INTERNAL_SERVER_ERROR
-                                 && body.find("\"a\":\"valid\"") == std::string::npos;
-            std::_Exit(handled ? 0 : 2);
-        },
-        ::testing::ExitedWithCode(0), "");
+    _router->get("/invalid-json", [](std::shared_ptr<qb::http::Context<MockErrorSession>> ctx) {
+        qb::json invalid = {{"a", "valid"}, {"z", std::string(1, static_cast<char>(0xff))}};
+        ctx->json(std::move(invalid));
+    });
+    _router->compile();
+    make_request(qb::http::method::GET, "/invalid-json");
+    EXPECT_TRUE(_session->_finalized);
+    EXPECT_EQ(_session->_response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
+    EXPECT_EQ(_session->_response.body().as<std::string>().find("\"a\":\"valid\""), std::string::npos)
+        << "the prefix serialized before the error must not reach the response";
 }
 
 // NEW (spec §2): an error chain with MULTIPLE successful handlers — each runs, in
