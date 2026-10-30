@@ -1851,7 +1851,7 @@ private:
                     }
                     // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
                     // (RFC 9113 §8.3.1) -- HTTP/3's check (Huly QB-1189) -- or, without :authority, the request's
-                    // authority (RFC 9114 §4.3.1, Huly QB-1195).
+                    // authority: §8.3.1 sets Host aside only when :authority is present (Huly QB-1195).
                     if (name == "host") [[unlikely]] {
                         if (host_sv || (authority_sv && !qb::http::utility::iequals(value, *authority_sv))) {
                             this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
@@ -1891,8 +1891,9 @@ private:
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
                 return false;
             }
-            // The request's authority: :authority, else its `host` field -- one of the two (RFC 9114 §4.3.1, Huly
-            // QB-1195). No URI is composed without one, whatever the scheme; an empty one is no authority, below.
+            // The request's authority: :authority, else its `host` field, which RFC 9113 §8.3.1 sets aside only when
+            // :authority is present -- one of the two, as HTTP/3 asks (RFC 9114 §4.3.1; Huly QB-1195). No URI is
+            // composed without one, whatever the scheme; an empty one is no authority, below.
             const auto request_authority = authority_sv ? authority_sv : host_sv;
             if (!request_authority) {
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :authority and host header field.");

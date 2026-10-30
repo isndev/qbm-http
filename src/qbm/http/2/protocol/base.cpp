@@ -113,7 +113,8 @@ bool
 HeaderValidator::is_forbidden_header(std::string_view name) {
     // The connection-specific fields RFC 9113 §8.2.2 names and the h2c upgrade's http2-settings. "te" is judged by
     // its value, by the callers; "host" by the server: one field, naming :authority (RFC 9113 §8.3.1, Huly QB-1189)
-    // or, without it, the request's authority (RFC 9114 §4.3.1, Huly QB-1195).
+    // or, without it, the request's authority -- §8.3.1 sets Host aside only when :authority is present (Huly
+    // QB-1195).
     static constexpr std::array<std::string_view, 6> forbidden = {"connection",        "upgrade",          "http2-settings",
                                                                   "transfer-encoding", "proxy-connection", "keep-alive"};
 
