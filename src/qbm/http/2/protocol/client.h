@@ -1694,45 +1694,15 @@ private:
         }
         out_hf_vector.emplace_back(":path", path);
 
-        // Add regular headers
-        for (const auto &header : http_request.headers()) {
-            const std::string &name = header.first;
-            for (const auto &value : header.second) {
-                // Skip connection-specific headers
-                std::string name_lower = name;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                               [](char c) { return qb::http::utility::ascii_to_lower(c); });
-
-                static const std::array<std::string_view, 8> forbidden_headers = {
-                    "connection", "proxy-connection", "keep-alive", "transfer-encoding", "upgrade", "host", "te", "content-length"
-                };
-
-                bool skip = false;
-                for (const auto &forbidden : forbidden_headers) {
-                    if (name_lower == forbidden) {
-                        if (name_lower == "te" && HeaderValidator::is_valid_request_te_value(value)) {
-                            // TE: trailers is allowed
-                        } else if (name_lower == "host") {
-                            // Host header is converted to :authority
-                            skip = true;
-                        } else {
-                            skip = true;
-                        }
-                        break;
-                    }
-                }
-
-                if (!skip) {
-                    if (HeaderValidator::is_valid_header_field(name_lower, value)) {
-                        out_hf_vector.emplace_back(name_lower, value);
-                    }
-                }
-
-                // A trailer announcement: the stream ends with a trailer section
-                if (name_lower == "trailer") {
-                    stream_context.client_will_send_trailers = true;
-                }
-            }
+        // The regular fields, as the server's rules accept them on receipt: a connection-specific field --
+        // `http2-settings` was missing from this loop's own list -- or one the `connection` header names, a `te` other
+        // than `trailers`, `host` (folded into :authority) and `content-length` (written below) are left out
+        // (append_sent_request_fields, shared with PUSH_PROMISE, Huly QB-1191). A name is lowercase already: the
+        // headers map stores it folded.
+        append_sent_request_fields(http_request, out_hf_vector);
+        // A trailer announcement: the stream ends with a trailer section
+        if (const auto trailer = http_request.headers().find("trailer"); trailer != http_request.headers().end() && !trailer->second.empty()) {
+            stream_context.client_will_send_trailers = true;
         }
 
         // The fields the `trailer` header announces leave in the trailer section

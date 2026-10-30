@@ -365,6 +365,34 @@ TEST(Http3ProtocolValidationTest, MakeRequestHeadersRejectsForbiddenHeader) {
     EXPECT_FALSE(h3detail::make_request_headers(req).has_value());
 }
 
+// `te` is a connection-specific field a request carries as `trailers` alone, in any case, and a response never (RFC
+// 9114 section 4.2, Huly QB-1191): any other value used to be sent, and the peer's nghttp3 closed the connection.
+TEST(Http3ProtocolValidationTest, ATeFieldIsSentAsTrailersInARequestOnly) {
+    for (const char *value : {"trailers", "Trailers"}) {
+        qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/")};
+        req.set_header("TE", value);
+        const auto block = h3detail::make_request_headers(req);
+        ASSERT_TRUE(block.has_value()) << value;
+        const auto te = std::find_if(block->storage.begin(), block->storage.end(), [](const auto &f) { return f.first == "te"; });
+        ASSERT_NE(te, block->storage.end()) << value;
+        EXPECT_EQ(te->second, value);
+    }
+    for (const char *value : {"gzip", "trailers, gzip", "trailers, trailers", ""}) {
+        qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/")};
+        req.set_header("te", value);
+        EXPECT_FALSE(h3detail::make_request_headers(req).has_value()) << "te: " << value;
+    }
+    qb::http::Request two{qb::http::method::GET, qb::io::uri("https://example.test/")};
+    two.add_header("te", "trailers");
+    two.add_header("te", "gzip");
+    EXPECT_FALSE(h3detail::make_request_headers(two).has_value()) << "every value of the field is judged";
+
+    qb::http::Response res;
+    res.status() = qb::http::status::OK;
+    res.set_header("te", "trailers");
+    EXPECT_FALSE(h3detail::make_response_headers(res).has_value()) << "a response carries no te";
+}
+
 TEST(Http3ProtocolValidationTest, MakeResponseHeadersPutsStatusFirst) {
     qb::http::Response res;
     res.status() = qb::http::status::OK;

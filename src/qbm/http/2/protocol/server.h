@@ -101,6 +101,8 @@ private:
     uint32_t _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS; ///< Max concurrent streams from client
     uint64_t _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;   ///< Max header list size client accepts
     bool     _peer_allows_push            = true;                                    ///< Whether client allows server push
+    /// The largest stream the server has reserved with a PUSH_PROMISE: a promised stream exceeds it (RFC 9113 §5.1.1).
+    uint32_t _last_promised_stream_id = 0;
 
     // Our Settings
     qb::unordered_map<Http2SettingIdentifier, uint32_t> _our_settings;                  ///< Server's HTTP/2 settings
@@ -118,6 +120,8 @@ private:
     static constexpr std::array<uint8_t, 8> SHUTDOWN_PING_DATA{'q', 'b', '-', 'd', 'r', 'a', 'i', 'n'};
     /// The largest stream id, which the notice's GOAWAY names: every stream the client opens is still served.
     static constexpr uint32_t SHUTDOWN_NOTICE_LAST_STREAM_ID = 0x7FFFFFFFu;
+    /// The largest stream id there is (31 bits, RFC 9113 §5.1.1): a promised stream's id is at most this.
+    static constexpr uint32_t MAX_STREAM_ID = 0x7FFFFFFFu;
 
     qb::protocol::hpack::Decoder _hpack_decoder; ///< HPACK decoder (F35 &mdash; owned by value)
     qb::protocol::hpack::Encoder _hpack_encoder; ///< HPACK encoder (F35 &mdash; owned by value)
@@ -219,6 +223,7 @@ public:
         _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS;
         _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
         _peer_allows_push            = true;
+        _last_promised_stream_id     = 0;
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -1303,13 +1308,20 @@ public:
      *
      * @param associated_stream_id Stream ID of the client request triggering this push
      * @param promised_stream_id Stream ID for the promised response (must be even)
-     * @param promised_request_pseudo_headers Request headers for the promised resource
-     * @return true if PUSH_PROMISE sent successfully, false on error
+     * @param promised_request The promised request: a GET or a HEAD without content or trailer section (RFC 9113 §8.4),
+     *        its URI the scheme, authority and path promised; its fields are sent as a client's request sends them
+     *        (append_sent_request_fields, Huly QB-1191).
+     * @return std::nullopt once the PUSH_PROMISE is sent, else why it was not: INVALID_PROMISED_STREAM for a promised
+     *         stream id that is zero, odd, past 2^31-1 or not above every stream already promised (RFC 9113 §5.1.1),
+     *         INVALID_ASSOCIATED_STREAM for one the client did not open or that is not open (§8.4), CONNECTION_INACTIVE
+     *         once a GOAWAY was received (§6.8) or sent, the shutdown notice included
      */
     [[nodiscard]] std::optional<PushPromiseFailureReason>
-    send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request_pseudo_headers) {
+    send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request) {
         LOG_HTTP_DEBUG_PA(associated_stream_id, "Server: Attempting to send PUSH_PROMISE for promised_stream_id " << promised_stream_id);
-        if (!this->ok() || !_connection_active) {
+        // A GOAWAY received forbids a new stream (RFC 9113 §6.8); once one is sent -- the notice included -- this server
+        // starts no push either, a policy of its own. Both were open to a push (Huly QB-1191).
+        if (!this->ok() || !_connection_active || _graceful_shutdown_initiated || _shutdown_phase != shutdown_phase::none) {
             LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE. Protocol not OK or connection inactive.");
             return PushPromiseFailureReason::CONNECTION_INACTIVE;
         }
@@ -1319,7 +1331,8 @@ public:
                                  << promised_stream_id);
             return PushPromiseFailureReason::PEER_PUSH_DISABLED;
         }
-        if (promised_stream_id == 0 || (promised_stream_id & 1u) != 0u) {
+        if (promised_stream_id == 0 || (promised_stream_id & 1u) != 0u || promised_stream_id > MAX_STREAM_ID
+            || promised_stream_id <= _last_promised_stream_id) {
             LOG_HTTP_WARN_PA(associated_stream_id, "Server: Invalid promised stream id " << promised_stream_id << " for PUSH_PROMISE.");
             return PushPromiseFailureReason::INVALID_PROMISED_STREAM;
         }
@@ -1330,7 +1343,8 @@ public:
             return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
         }
 
-        auto it_assoc_stream = _server_streams.find(associated_stream_id);
+        // A PUSH_PROMISE goes on a stream the client opened (RFC 9113 §8.4): a pushed stream was accepted (Huly QB-1191).
+        auto it_assoc_stream = (associated_stream_id & 1u) != 0u ? _server_streams.find(associated_stream_id) : _server_streams.end();
         if (it_assoc_stream == _server_streams.end()) {
             // QB_LOG_WARN_PA(this->getName(), "Server: PUSH_PROMISE for non-existent associated stream " << associated_stream_id);
             return PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM;
@@ -1342,58 +1356,49 @@ public:
             return PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM;
         }
 
+        // The promised request, judged before anything is reserved. It is safe and cacheable -- a GET or a HEAD -- and
+        // has no content and no trailer section (RFC 9113 §8.4): a client treats any other as a stream error of type
+        // PROTOCOL_ERROR (Huly QB-1191; any method was promised, a body silently dropped).
+        const auto &promised_uri    = promised_request.uri();
+        const auto  promised_method = promised_request.method();
+        // The authority every protocol writes for a URI (qb::http::origin::authority, Huly QB-1064).
+        std::string promised_authority = qb::http::origin::authority(promised_uri);
+        std::string promised_path      = promised_uri.path().empty() ? std::string{"/"} : std::string(promised_uri.path());
+        if (!promised_uri.encoded_queries().empty()) {
+            promised_path.push_back('?');
+            promised_path += promised_uri.encoded_queries();
+        }
+        if ((promised_method != qb::http::method::GET && promised_method != qb::http::method::HEAD) || promised_uri.scheme().empty()
+            || promised_authority.empty() || !promised_request.body().empty() || promised_request.has_trailers()
+            || promised_request.has_header("trailer")) {
+            return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
+        }
+
+        // :method, :scheme, :authority and :path, then the promised request's fields under the rules a client's request
+        // is sent by (append_sent_request_fields): no connection-specific field (RFC 9113 §8.2.2), nor one its
+        // `connection` header names, no `host` (`:authority` names the authority, §8.3.1), no `content-length`, no field
+        // HTTP/2 cannot carry; the names are lowercase already (§8.2.1), the headers map storing them folded. They were
+        // copied as they were: `host`, `connection` or `transfer-encoding` made a promise the client must treat as
+        // malformed, and a value with a CR failed the whole promise in the HPACK encoder (Huly QB-1191).
+        std::vector<hpack::HeaderField> hf_vector;
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_METHOD_SV), std::string(promised_method)});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_SCHEME_SV), std::string(promised_uri.scheme())});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::move(promised_authority)});
+        hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::move(promised_path)});
+        append_sent_request_fields(promised_request, hf_vector);
+
         // Create a new stream context for the promised stream
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
         promised_stream.state            = Http2StreamConcreteState::RESERVED_LOCAL;
         promised_stream.parent_stream_id = associated_stream_id;
         // The promised request's method: send_response() reads it (a pushed HEAD gets no body).
-        promised_stream.assembled_request.method() = promised_request_pseudo_headers.method();
+        promised_stream.assembled_request.method() = promised_method;
 
         // Emplace the stream
         auto emp_res = _server_streams.emplace(promised_stream_id, std::move(promised_stream));
         if (!emp_res.second) {
             // QB_LOG_ERROR_PA(this->getName(), "Server: Failed to emplace promised stream " << promised_stream_id << " context.");
             return PushPromiseFailureReason::INTERNAL_ERROR;
-        }
-
-        std::vector<hpack::HeaderField> hf_vector;
-        // According to RFC 7540 Section 8.2:
-        // PUSH_PROMISE frames MUST include pseudo-header fields for :method, :scheme, :authority, and :path.
-        // They MAY include other headers that are valid for requests.
-
-        const auto &promised_uri = promised_request_pseudo_headers.uri();
-        // The authority every protocol writes for a URI (qb::http::origin::authority, Huly QB-1064).
-        std::string promised_authority = qb::http::origin::authority(promised_uri);
-
-        std::string promised_path = promised_uri.path().empty() ? std::string{"/"} : std::string(promised_uri.path());
-        if (!promised_uri.encoded_queries().empty()) {
-            promised_path.push_back('?');
-            promised_path += promised_uri.encoded_queries();
-        }
-
-        if (promised_request_pseudo_headers.method() == qb::http::method::UNINITIALIZED || promised_uri.scheme().empty()
-            || promised_authority.empty() || promised_path.empty()) {
-            _server_streams.erase(promised_stream_id);
-            return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
-        }
-
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_METHOD_SV), std::string(promised_request_pseudo_headers.method())});
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_SCHEME_SV), std::string(promised_uri.scheme())});
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::move(promised_authority)});
-        hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::move(promised_path)});
-
-        for (const auto &header_entry : promised_request_pseudo_headers.headers()) { // Iterate map from .headers()
-            // Skip pseudo-headers already added, and ":content-length" which is forbidden in PUSH_PROMISE
-            if (header_entry.first[0] == ':'
-                && (header_entry.first == qb::http::well_known::COLON_METHOD_SV || header_entry.first == qb::http::well_known::COLON_PATH_SV
-                    || header_entry.first == qb::http::well_known::COLON_SCHEME_SV
-                    || header_entry.first == qb::http::well_known::COLON_AUTHORITY_SV
-                    || header_entry.first == "content-length")) { // content-length also forbidden
-                continue;
-            }
-            for (const auto &value : header_entry.second) { // Iterate vector of values for this header name
-                hf_vector.push_back({header_entry.first, value});
-            }
         }
 
         std::vector<uint8_t> encoded_headers;
@@ -1412,6 +1417,7 @@ public:
             // The not_ok() might have been set by the transport, leading to CONNECTION_INACTIVE on next attempt
             return PushPromiseFailureReason::CONNECTION_INACTIVE; // Or a more generic send error
         }
+        _last_promised_stream_id = promised_stream_id;
         LOG_HTTP_INFO_PA(associated_stream_id, "Server: Sending PUSH_PROMISE for promised_stream_id " << promised_stream_id);
         return std::nullopt; // Success
     }

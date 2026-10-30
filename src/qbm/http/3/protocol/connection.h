@@ -44,6 +44,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -366,9 +367,9 @@ request_target(qb::io::uri const &uri) {
  * @param trailers The message's trailer section (qb::http::detail::plan_outgoing_trailers), or
  *               nullptr when it has none: the fields it takes are skipped, and its announcement is
  *               added (Huly QB-1073).
- * @return @c false (leaving @p block partially populated) if a forbidden field,
- *         an invalid field, or the field-count limit is encountered; @c true on
- *         success. @c host is dropped (folded into @c :authority).
+ * @return @c false (leaving @p block partially populated) if a forbidden field
+ *         -- a @c te other than @c trailers, a response's @c te --, an invalid field, or the field-count
+ *         limit is encountered; @c true on success. @c host is dropped (folded into @c :authority).
  */
 template <typename Message>
 bool
@@ -384,8 +385,13 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
         if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), lower) != trailers->moved.end()) {
             continue; // in the trailer section
         }
+        // `te` is a connection-specific field a request may carry as `trailers` alone (RFC 9114 §4.2): a peer's
+        // nghttp3 takes any other value for a malformed message and closes the connection, and a response carries
+        // none. It was sent as it was (Huly QB-1191).
+        const bool te = lower == "te";
         for (auto const &value : values) {
-            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
+            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)
+                || (te && !(std::is_same_v<Message, qb::http::Request> && qb::http::utility::iequals(value, "trailers")))) {
                 return false;
             }
             block.add(lower, value);

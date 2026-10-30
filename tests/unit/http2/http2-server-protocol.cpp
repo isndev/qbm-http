@@ -3123,6 +3123,247 @@ TEST(HTTP2ServerProtocol, SendPushPromiseWithUninitializedMethodIsInvalidRequest
     EXPECT_TRUE(protocol.is_stream_closed(2));
 }
 
+namespace {
+
+/// The fields of the one PUSH_PROMISE header block in @p output (its CONTINUATION frames joined), decoded from a fresh
+/// HPACK state: the caller resets the output before the push, and nothing else was encoded on the connection.
+[[nodiscard]] std::vector<qb::protocol::hpack::HeaderField>
+push_promise_fields(const qb::allocator::pipe<char> &output) {
+    std::vector<uint8_t> block;
+    bool                 in_block = false;
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (f.type == FrameType::PUSH_PROMISE) {
+            in_block           = true;
+            const auto payload = emitted_payload(output, f);
+            block.insert(block.end(), payload.begin() + 4, payload.end()); // the promised stream id first
+        } else if (in_block && f.type == FrameType::CONTINUATION) {
+            const auto payload = emitted_payload(output, f);
+            block.insert(block.end(), payload.begin(), payload.end());
+        }
+    }
+    qb::protocol::hpack::Decoder                  decoder;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+    bool                                          incomplete = false;
+    EXPECT_TRUE(in_block) << "a PUSH_PROMISE was emitted";
+    EXPECT_TRUE(decoder.decode(block, fields, incomplete) && !incomplete);
+    return fields;
+}
+
+} // namespace
+
+// The promised request's fields are sent as a client's request sends them (append_sent_request_fields, Huly QB-1191):
+// names lowercase (RFC 9113 section 8.2.1), no connection-specific field (section 8.2.2) nor one the `connection`
+// header names, no pseudo-header name, no `host` -- :authority names the authority (section 8.3.1) --, no
+// `content-length`, a promised request having no content (section 8.4). They were copied as they were: `Host`, `Connection` or `HTTP2-Settings`
+// made a promise the client must treat as malformed, and the `content-length` skip sat in a branch only pseudo-headers reached.
+TEST(HTTP2ServerProtocol, APushPromiseSendsOnlyTheFieldsARequestMayCarry) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_TRUE(protocol.ok());
+    io.output.reset();
+
+    auto promised = make_promised_request("https://example.test/asset.css?v=2");
+    promised.set_header("Host", "other.test");
+    promised.set_header("Connection", "keep-alive, X-Hop");
+    promised.set_header("X-Hop", "1");
+    promised.set_header(":protocol", "websocket");
+    promised.set_header("Proxy-Connection", "keep-alive");
+    promised.set_header("Keep-Alive", "timeout=5");
+    promised.set_header("Transfer-Encoding", "chunked");
+    promised.set_header("Upgrade", "h2c");
+    promised.set_header("HTTP2-Settings", "AAMAAABkAAQAAP__");
+    promised.set_header("Content-Length", "0");
+    promised.add_header("TE", "trailers");
+    promised.add_header("TE", "gzip");
+    promised.set_header("Accept-Encoding", "gzip");
+    promised.set_header("x-bad", std::string("a\rb"));
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, std::move(promised)).has_value());
+
+    const auto                                       fields = push_promise_fields(io.output);
+    std::vector<std::pair<std::string, std::string>> sent;
+    for (const auto &f : fields) {
+        sent.emplace_back(f.name, f.value);
+    }
+    ASSERT_GE(sent.size(), 4u);
+    const std::vector<std::pair<std::string, std::string>> pseudo{
+        {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/asset.css?v=2"}
+    };
+    EXPECT_TRUE(std::equal(pseudo.begin(), pseudo.end(), sent.begin())) << "the four pseudo-headers lead, in order";
+    std::vector<std::pair<std::string, std::string>> regular(sent.begin() + 4, sent.end());
+    std::sort(regular.begin(), regular.end());
+    const std::vector<std::pair<std::string, std::string>> expected{{"accept-encoding", "gzip"}, {"te", "trailers"}};
+    EXPECT_EQ(regular, expected) << "only the fields a request may carry, lowercase";
+}
+
+// A promised request is safe and cacheable -- GET or HEAD -- and carries no content or trailer section (RFC 9113
+// section 8.4): a client treats any other as a stream error. Such a promise is refused before anything is sent or
+// reserved; a HEAD is promised (Huly QB-1191: any method was promised, a body dropped).
+TEST(HTTP2ServerProtocol, APushPromiseOfAMethodThatIsNotSafeAndCacheableIsRefused) {
+    for (const qb::http::Method method :
+         {qb::http::method::POST, qb::http::method::PUT, qb::http::method::DEL, qb::http::method::PATCH, qb::http::method::OPTIONS}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        handshake_push_enabled(protocol, io);
+        open_post_stream_open(protocol, io, 1, "/parent");
+        ASSERT_TRUE(protocol.ok());
+        const std::size_t before   = io.output.size();
+        auto              promised = make_promised_request();
+        promised.method()          = method;
+        const auto failure         = protocol.send_push_promise(1, 2, std::move(promised));
+        ASSERT_TRUE(failure.has_value()) << std::string(method);
+        EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_PROMISED_REQUEST) << std::string(method);
+        EXPECT_TRUE(protocol.is_stream_closed(2)) << "the promised stream is rolled back";
+        EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value()) << std::string(method);
+    }
+    for (int shape = 0; shape < 3; ++shape) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        handshake_push_enabled(protocol, io);
+        open_post_stream_open(protocol, io, 1, "/parent");
+        const std::size_t before   = io.output.size();
+        auto              promised = make_promised_request();
+        if (shape == 0)
+            promised.body() = "content";
+        else if (shape == 1)
+            promised.trailers().set_header("x-sum", "1");
+        else
+            promised.set_header("trailer", "x-sum");
+        const auto failure = protocol.send_push_promise(1, 2, std::move(promised));
+        ASSERT_TRUE(failure.has_value()) << "shape " << shape;
+        EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_PROMISED_REQUEST) << "shape " << shape;
+        EXPECT_TRUE(protocol.is_stream_closed(2));
+        EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value()) << "shape " << shape;
+    }
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    io.output.reset();
+    auto promised     = make_promised_request();
+    promised.method() = qb::http::method::HEAD;
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, std::move(promised)).has_value());
+    const auto fields = push_promise_fields(io.output);
+    ASSERT_FALSE(fields.empty());
+    EXPECT_EQ(fields.front().name, ":method");
+    EXPECT_EQ(fields.front().value, "HEAD");
+}
+
+// A promised stream id exceeds every stream the server has promised (RFC 9113 section 5.1.1; a client treats a
+// reused or smaller one as a connection error): 4 then 2, or 4 again -- closed and erased or not -- is refused before
+// anything is sent; 6 is promised (Huly QB-1191: any even id was).
+TEST(HTTP2ServerProtocol, APromisedStreamIdExceedsEveryStreamPromisedBefore) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_FALSE(protocol.send_push_promise(1, 4, make_promised_request("https://example.test/a.css")).has_value());
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.send_response(4, response)); // the promised stream closes and is erased
+    for (const uint32_t id : {2u, 4u}) {
+        const std::size_t before  = io.output.size();
+        const auto        failure = protocol.send_push_promise(1, id, make_promised_request("https://example.test/b.css"));
+        ASSERT_TRUE(failure.has_value()) << id;
+        EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_PROMISED_STREAM) << id;
+        EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value()) << id;
+    }
+    EXPECT_FALSE(protocol.send_push_promise(1, 6, make_promised_request("https://example.test/c.css")).has_value());
+    // A stream still reserved is no fresher: 6 again is refused, not an internal error.
+    auto again = protocol.send_push_promise(1, 6, make_promised_request("https://example.test/d.css"));
+    ASSERT_TRUE(again.has_value());
+    EXPECT_EQ(*again, PushPromiseFailureReason::INVALID_PROMISED_STREAM);
+    // Past 2^31-1 the id does not exist: the frame would carry it masked, a reuse.
+    auto past = protocol.send_push_promise(1, 0x80000008u, make_promised_request("https://example.test/e.css"));
+    ASSERT_TRUE(past.has_value());
+    EXPECT_EQ(*past, PushPromiseFailureReason::INVALID_PROMISED_STREAM);
+    EXPECT_FALSE(protocol.send_push_promise(1, 0x7FFFFFFEu, make_promised_request("https://example.test/f.css")).has_value())
+        << "the largest even id is promised";
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A PUSH_PROMISE goes on a stream the client opened (RFC 9113 section 8.4): a pushed stream still answering -- half-closed
+// (remote), its body waiting for credit -- is refused as the associated stream (Huly QB-1191: it was accepted).
+TEST(HTTP2ServerProtocol, APushPromiseGoesOnAStreamTheClientOpened) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload(
+                   {{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}, {Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+    drive(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, make_promised_request()).has_value());
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "pushed body";
+    ASSERT_TRUE(protocol.send_response(2, response)); // no stream credit: the body waits, the stream stays open
+    ASSERT_FALSE(protocol.is_stream_closed(2));
+    const std::size_t before  = io.output.size();
+    const auto        failure = protocol.send_push_promise(2, 4, make_promised_request("https://example.test/b.css"));
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::INVALID_ASSOCIATED_STREAM);
+    EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value());
+    EXPECT_FALSE(protocol.send_push_promise(1, 4, make_promised_request("https://example.test/b.css")).has_value())
+        << "the client's stream still takes it";
+}
+
+// A refused promise spends no id, and a protocol reset forgets the ids promised (Huly QB-1191).
+TEST(HTTP2ServerProtocol, ARefusedPromiseSpendsNoStreamIdAndAResetForgetsThem) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    auto post     = make_promised_request();
+    post.method() = qb::http::method::POST;
+    ASSERT_TRUE(protocol.send_push_promise(1, 2, std::move(post)).has_value());
+    EXPECT_FALSE(protocol.send_push_promise(1, 2, make_promised_request()).has_value()) << "2 is still free";
+
+    protocol.reset();
+    io.input.reset();
+    io.output.reset();
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    EXPECT_FALSE(protocol.send_push_promise(1, 2, make_promised_request()).has_value()) << "a new connection promises from 2";
+}
+
+// A GOAWAY received forbids opening a stream (RFC 9113 section 6.8), and one sent -- the shutdown notice too -- starts a
+// shutdown: a push is refused with CONNECTION_INACTIVE, while the client's open request is still served (Huly QB-1191:
+// it was promised).
+TEST(HTTP2ServerProtocol, APushAfterAGoawayIsRefused) {
+    {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        handshake_push_enabled(protocol, io);
+        open_post_stream_open(protocol, io, 1, "/parent");
+        ASSERT_TRUE(protocol.begin_graceful_shutdown()) << "the notice: a GOAWAY naming the largest id, then a PING";
+        const std::size_t before  = io.output.size();
+        const auto        failure = protocol.send_push_promise(1, 2, make_promised_request());
+        ASSERT_TRUE(failure.has_value());
+        EXPECT_EQ(*failure, PushPromiseFailureReason::CONNECTION_INACTIVE);
+        EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value());
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        EXPECT_TRUE(protocol.send_response(1, response)) << "the open request is still answered";
+    }
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/parent");
+    push_frame(io, FrameType::GOAWAY, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0}); // last-stream-id 0, NO_ERROR
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok()) << "the open request keeps the connection";
+    const std::size_t before  = io.output.size();
+    const auto        failure = protocol.send_push_promise(1, 2, make_promised_request());
+    ASSERT_TRUE(failure.has_value());
+    EXPECT_EQ(*failure, PushPromiseFailureReason::CONNECTION_INACTIVE);
+    EXPECT_FALSE(first_frame_at_or_after(io.output, FrameType::PUSH_PROMISE, before).has_value());
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    EXPECT_TRUE(protocol.send_response(1, response)) << "the request is still answered";
+}
+
 // Two successive pushes: the second send_push_promise sees the first pushed
 // (even) stream still active, exercising the server-initiated (even) branch of
 // get_active_stream_count(true).
@@ -3373,7 +3614,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (2/protocol/server.h:1233-1238).
+// with INTERNAL_ERROR (2/protocol/server.h:1238-1243).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3401,7 +3642,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1215-1220).
+// (2/protocol/server.h:1220-1225).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3421,7 +3662,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:1189-1192).
+// (2/protocol/server.h:1194-1197).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3441,7 +3682,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:1183-1188).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:1188-1193).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3464,7 +3705,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:980-985).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:985-990).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3483,7 +3724,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:987-1005).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:992-1010).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3676,7 +3917,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:344-353).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:349-358).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -3699,7 +3940,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:344-348).
+// (qbm/http/src/qbm/http/2/protocol/server.h:349-353).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3716,7 +3957,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1109-1119 else arm).
+// (no stream context to store into; 2/protocol/server.h:1114-1124 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -3735,7 +3976,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1016-1028);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1021-1033);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
