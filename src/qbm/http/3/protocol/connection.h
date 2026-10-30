@@ -599,6 +599,10 @@ private:
         /// The `host` fields of the request's header section over the request limits: the first is kept, as one
         /// within them is, the others are counted -- a request carries one `host` field at most (Huly QB-1195).
         std::size_t host_fields_over_limits = 0;
+        /// A `content-length` of the header section over the request limits was kept: the body it declares is judged
+        /// as a field within them is; nghttp3 refuses a second one itself (1.18.0 measured), so one is kept at most
+        /// (Huly QB-1197).
+        bool content_length_over_limits = false;
     };
 
     Owner                                                          &_owner;
@@ -906,12 +910,13 @@ private:
     static int
     begin_headers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            auto &st                   = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-            st.incoming_headers        = {};
-            st.incoming_header_fields  = 0;
-            st.fields_over_limits      = false;
-            st.path_over_limit         = false;
-            st.host_fields_over_limits = 0;
+            auto &st                      = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers           = {};
+            st.incoming_header_fields     = 0;
+            st.fields_over_limits         = false;
+            st.path_over_limit            = false;
+            st.host_fields_over_limits    = 0;
+            st.content_length_over_limits = false;
             return 0;
         });
     }
@@ -942,10 +947,21 @@ private:
                     me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a response over the limits: this stream
                     return 0;
                 }
+                // A field over the limits is judged before it is dropped, by the rules that need no other field: a
+                // connection-specific field of the header section (nghttp3 leaves the proxy authentication fields to
+                // this module), a field of the trailer section a trailer section must not carry, refuse the stream as
+                // they do within the limits. They were dropped unread and the request answered 431 (Huly QB-1197).
+                if (st.main_headers_seen ? detail::is_forbidden_h3_trailer(header_name) : detail::is_forbidden_h3_header(header_name)) {
+                    me->refuse_stream(static_cast<std::uint64_t>(stream_id), st);
+                    return 0;
+                }
                 st.fields_over_limits = true; // a request: answered 431 at the end of its section (Huly QB-94)
                 // A `host` of the header section names the authority: the first one over the limits is kept for
-                // materialize_headers()'s checks, as one within them is; any other is counted (Huly QB-1195).
-                if (header_name == "host" && !st.main_headers_seen && st.host_fields_over_limits++ == 0)
+                // materialize_headers()'s checks, as one within them is; any other is counted (Huly QB-1195). Its
+                // `content-length` declares the body the request is judged by: kept too, once (Huly QB-1197).
+                if (!st.main_headers_seen
+                    && ((header_name == "host" && st.host_fields_over_limits++ == 0)
+                        || (header_name == "content-length" && !std::exchange(st.content_length_over_limits, true))))
                     st.incoming_headers.add(std::move(header_name), std::move(header_value));
                 return 0;
             }
@@ -958,7 +974,7 @@ private:
     }
 
     static int
-    end_headers_cb(nghttp3_conn *, int64_t stream_id, int, void *conn_user_data, void *) {
+    end_headers_cb(nghttp3_conn *, int64_t stream_id, int fin, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
             auto *me = self(conn_user_data);
             auto &st = me->state_for(static_cast<std::uint64_t>(stream_id));
@@ -970,6 +986,13 @@ private:
                 return 0;
             }
             st.main_headers_seen = true;
+            // A stream that ends with its header section carries no body: a `content-length` that declares one makes
+            // the message malformed (RFC 9114 §4.1.2), whatever the limits -- it was judged at the end of the stream,
+            // after the 414 or 431 below had answered it (Huly QB-1197). nghttp3 then closes the connection for it.
+            if (fin && !me->content_length_matches(st)) {
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st);
+                return 0;
+            }
             if (me->_role == role::server && (st.path_over_limit || st.fields_over_limits)) [[unlikely]] {
                 // A request over the server's limits is answered, as HTTP/1.1 and HTTP/2 answer it (Huly QB-94).
                 me->answer_refused_request(static_cast<std::uint64_t>(stream_id), st,
@@ -1013,6 +1036,13 @@ private:
             }
             if (!me->materialize_trailers(st)) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed trailers: this stream, not the connection
+                return 0;
+            }
+            // A trailer section ends the message: its body is whole, and a `content-length` it contradicts makes it
+            // malformed (RFC 9114 §4.1.2) before the limits answer it -- it was judged at the end of the stream, after
+            // the 431 below (Huly QB-1197). nghttp3 then closes the connection for it.
+            if (!me->content_length_matches(st)) {
+                me->refuse_stream(static_cast<std::uint64_t>(stream_id), st);
                 return 0;
             }
             if (me->_role == role::server && st.fields_over_limits) [[unlikely]] {

@@ -331,6 +331,33 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the push's emitted fields; every refused promise and the ordering of promised ids; HTTP/3 `te` on both sides, and on a
   direct client/server pair the connection kept.
 
+- **A malformed HTTP/2 or HTTP/3 request beside the request limits stays a stream error: a `content-length` that its
+  body contradicts, a `content-length` over a limit, a field a section must not carry over a limit are no longer
+  answered `431`, `414` or `413` (Huly QB-1197).** QB-94's rule -- a request over the limits is answered once it is
+  known well-formed -- still had exceptions. Measured on the base: a `HEADERS` that ends the stream with
+  `content-length: 5` beside a field over the value, name or count limit, or a `:path` over the target limit, in either
+  order, was answered `431` or `414` on both servers (HTTP/2 judged the length after those answers; HTTP/3 at the
+  stream's end, after them, and nghttp3 then closed the connection for the mismatch), and on HTTP/3 a `content-length`
+  over the body cap on such a stream `413`; a `content-length` that was itself over a limit was not read (HTTP/2 skipped
+  its parse, so one that is no number or contradicts another, past the count, got `431`; HTTP/3 dropped it); on HTTP/3 a
+  trailer section over the limits was answered `431` before the body was checked against `content-length`, and a field a
+  trailer section must not carry (`host`, `te`, the proxy authentication fields, `trailer`, `http2-settings`) -- or, in
+  the header section, one this module refuses beyond nghttp3 (`proxy-authorization`, `proxy-authenticate`) -- over the
+  value or name limit or past the count was dropped unread and the request answered `431`; on HTTP/2 a DATA frame past
+  `content-length` and the body limit was answered `413`. Now HTTP/2 parses and compares `content-length` before the
+  limits, refuses a block that ends the stream with a `content-length` its empty body contradicts before `414`, `431`
+  and `413`, and refuses a DATA frame past `content-length` before the body limit, giving its connection credit back;
+  HTTP/3 judges a field over the limits by the rules that need no other field before dropping it, keeps one
+  `content-length` over the limits as it keeps the first `host` (nghttp3 refuses a second itself), and checks the body
+  against `content-length` before any answer when the stream ends with its header section or with a trailer section, on
+  both roles (HEAD and 304 exempt). nghttp3 still closes the connection for such a mismatch; the stream is refused first
+  and nothing is answered. A request whose body may still come is no known malformation and is answered as before -- on
+  HTTP/3 too when the stream's end arrives in a later read than its header section (Huly QB-1204). Measured with QB-1191
+  and QB-1196, A/B against the base: a browser's request served within the noise over HTTP/2 (+0.03 %, -0.46 % with a
+  `host` field) and over HTTP/3 (-0.2 %). Tests: each shape beside each limit in both orders and over `CONTINUATION`,
+  the `content-length` itself over the value or name limit or past the count, the trailer-section mismatch, the DATA
+  overrun and its `WINDOW_UPDATE`, the well-formed controls answered `431`.
+
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
   outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over

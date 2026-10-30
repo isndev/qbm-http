@@ -43,6 +43,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1415,8 +1416,6 @@ TEST(Http3ConnectionDirect, RefusedStreamCreditsSubsequentDataOnce) {
     EXPECT_EQ(owner.credit[0], headers.size() + first.size() + second.size());
 }
 
-#endif // QBM_HTTP_HAS_HTTP3
-
 // =============================================================================
 // THE SERVER'S REQUEST LIMITS (Huly QB-94): A REQUEST OVER ONE IS ANSWERED, AS ON HTTP/1.1 AND HTTP/2
 // =============================================================================
@@ -1624,8 +1623,9 @@ TEST(Http3ConnectionDirect, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldL
         EXPECT_TRUE(reset(pair.server_owner, 0)) << "its stream is refused";
         EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
     }
-    // In a trailer section, a `host` over the limits is dropped as every field over them is, and the request answered
-    // 431: only the header section's `host` names the authority, and trailer sections are judged as before.
+    // In a trailer section, a `host` over the limits names no authority, and a trailer section must not carry one: the
+    // stream is refused, as it is for a `host` within the limits there (Huly QB-1197; it was dropped and the request
+    // answered 431).
     {
         LimitedPair                                      pair{limits};
         std::vector<std::pair<std::string, std::string>> fields{
@@ -1635,8 +1635,8 @@ TEST(Http3ConnectionDirect, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldL
         pair.server.read_stream(0, h3_data_frame("abc"), false);
         pair.server.read_stream(0, h3_headers_frame(0, {{"host", "example.test:8"}}), true);
         EXPECT_TRUE(pair.server_owner.requests.empty());
-        EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431";
-        EXPECT_FALSE(reset(pair.server_owner, 0)) << "answered, not refused";
+        EXPECT_FALSE(stopped_without_error(pair.server_owner, 0)) << "a malformed request is not answered";
+        EXPECT_TRUE(reset(pair.server_owner, 0)) << "its stream is refused";
         EXPECT_FALSE(pair.server_owner.close.has_value());
     }
     for (auto const &hosts :
@@ -1654,3 +1654,250 @@ TEST(Http3ConnectionDirect, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldL
         EXPECT_TRUE(by_nghttp3 || by_qbm_http) << "refused by neither layer with H3_MESSAGE_ERROR";
     }
 }
+
+namespace {
+
+/// Request limits of one kind tightened, the others left as they are: the name, the value, the field count, the target.
+struct TightLimits {
+    std::size_t name = 0, value = 0, count = 0, url = 0;
+
+    [[nodiscard]] qb::http::request_limits
+    limits() const {
+        qb::http::request_limits l;
+        if (name)
+            l.max_header_name_length = name;
+        if (value)
+            l.max_header_value_length = value;
+        if (count)
+            l.max_headers_count = count;
+        if (url)
+            l.max_url_length = url;
+        return l;
+    }
+};
+
+/// The request on stream 0 was refused by this module, never answered nor delivered.
+void
+expect_refused_unanswered(LimitedPair const &pair) {
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_FALSE(stopped_without_error(pair.server_owner, 0)) << "a malformed request is not answered";
+    ASSERT_EQ(pair.server_owner.resets.size(), 1u) << "its stream is refused";
+    EXPECT_EQ(pair.server_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+}
+
+} // namespace
+
+// A stream that ends with its header section carries no body: a `content-length` that declares one makes the request
+// malformed (RFC 9114 section 4.1.2), beside every limit, in both orders, and when the `content-length` field is itself
+// the one over a limit -- refused, never answered 431 or 414 (Huly QB-1197: the length was judged at the end of the
+// stream, after those answers, and a `content-length` over the limits was dropped unread). nghttp3 (1.18.0) then
+// closes the connection for the mismatch, as it does within the limits; a `content-length` that is no number, or two,
+// it refuses first. A `content-length: 0` beside a limit, and a `content-length: 5` whose body may still come, are
+// well-formed: answered 431.
+TEST(Http3ConnectionDirect, AContentLengthBesideTheLimitsIsJudgedFirst) {
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    const std::string over_value(9, 'v'); // over a value limit of 8
+    const std::string over_name(17, 'n'); // over a name limit of 16
+    auto              post = [](std::string path, Fields extra) {
+        Fields f{{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", std::move(path)}};
+        f.insert(f.end(), extra.begin(), extra.end());
+        return f;
+    };
+    const std::vector<std::tuple<std::string, TightLimits, Fields>> shapes{
+        {"value, before", {.value = 8}, post("/", {{"content-length", "5"}, {"x-v", over_value}})},
+        {"value, after", {.value = 8}, post("/", {{"x-v", over_value}, {"content-length", "5"}})},
+        {"name, before", {.name = 16}, post("/", {{"content-length", "5"}, {over_name, "1"}})},
+        {"name, after", {.name = 16}, post("/", {{over_name, "1"}, {"content-length", "5"}})},
+        {"count, before", {.count = 2}, post("/", {{"content-length", "5"}, {"x-a", "1"}, {"x-b", "2"}})},
+        {"count, the content-length past it", {.count = 2}, post("/", {{"x-a", "1"}, {"x-b", "2"}, {"content-length", "5"}})},
+        {"target", {.url = 8}, post("/" + std::string(16, 'p'), {{"content-length", "5"}})},
+        {"the content-length over the value limit", {.value = 4}, post("/", {{"content-length", "00005"}})},
+        {"the content-length over the name limit", {.name = 8}, post("/", {{"content-length", "5"}})},
+    };
+    for (auto const &[label, tight, fields] : shapes) {
+        SCOPED_TRACE(label);
+        LimitedPair pair{tight.limits()};
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_refused_unanswered(pair);
+        if (pair.server_owner.close)
+            EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+    }
+
+    // Well-formed beside the limits: answered -- a `content-length` over a limit itself included, kept and judged.
+    {
+        LimitedPair pair{TightLimits{.value = 8}.limits()};
+        pair.server.read_stream(0, h3_headers_frame(0, post("/", {{"content-length", "0"}, {"x-v", over_value}})), true);
+        pair.server.read_stream(4, h3_headers_frame(4, post("/", {{"content-length", "5"}, {"x-v", over_value}})), false);
+        pair.server.read_stream(8, h3_headers_frame(8, post("/", {{"content-length", "000000000"}})), true);
+        pair.server.read_stream(12, h3_headers_frame(12, post("/", {{"content-length", "000000005"}})), false);
+        for (std::uint64_t stream_id : {0u, 4u, 8u, 12u}) {
+            EXPECT_TRUE(stopped_without_error(pair.server_owner, stream_id)) << stream_id << " answered 431";
+            EXPECT_FALSE(reset(pair.server_owner, stream_id)) << stream_id;
+        }
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    // Where the stream's end comes in a later read than its header section, the request is not known malformed when the
+    // section ends: answered 431 then, as HTTP/2 answers a HEADERS without END_STREAM. nghttp3 closes the connection
+    // for the mismatch at the stream's end.
+    {
+        LimitedPair pair{TightLimits{.value = 8}.limits()};
+        pair.server.read_stream(0, h3_headers_frame(0, post("/", {{"content-length", "5"}, {"x-v", over_value}})), false);
+        pair.server.read_stream(0, "", true);
+        EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431 when the section ended";
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        if (pair.server_owner.close)
+            EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    }
+}
+
+// The same order before the body limit (Huly QB-1197): a `content-length` over the server's body cap on a stream that
+// ends with its header section is a malformed request, refused, not answered 413 -- malformed before it is too large,
+// as on HTTP/2 since QB-168.
+TEST(Http3ConnectionDirect, AContentLengthTheEndedStreamContradictsIsMalformedBeforeTheBodyLimit) {
+    ClientOwner            client_owner;
+    CappedServerOwner      server_owner;
+    ClientConnection       client{client_owner, 1, ClientConnection::role::client};
+    CappedServerConnection server{server_owner, 1, CappedServerConnection::role::server};
+    ASSERT_TRUE(client.bind_local_streams());
+    ASSERT_TRUE(server.bind_local_streams());
+    pump(client_owner, client, server_owner, server);
+    auto fields      = request_fields("/upload");
+    fields[0].second = "POST";
+    fields.emplace_back("content-length", "64"); // over the 16-byte cap
+    server.read_stream(0, h3_headers_frame(0, fields), true);
+    EXPECT_TRUE(server_owner.requests.empty());
+    EXPECT_FALSE(stopped_without_error(server_owner, 0)) << "a malformed request is not answered 413";
+    ASSERT_EQ(server_owner.resets.size(), 1u);
+    EXPECT_EQ(server_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+}
+
+// The client reads a response the same way: a header section that ends the stream with a `content-length` it
+// contradicts refuses the stream, as does a trailer section that ends a body its `content-length` contradicts; a HEAD
+// response, or a 304, declares a length it does not carry (Huly QB-1197).
+TEST(Http3ConnectionDirect, AResponseTheEndedStreamContradictsRefusesTheStream) {
+    for (auto const &[method, status] : std::vector<std::pair<qb::http::Method, std::string>>{
+             {qb::http::method::GET, "200"}, {qb::http::method::HEAD, "200"}, {qb::http::method::GET, "304"}
+         }) {
+        const bool exempt = method == qb::http::method::HEAD || status == "304";
+        SCOPED_TRACE(std::string(method) + " " + status);
+        Pair              pair;
+        qb::http::Request request{method, qb::io::uri("https://example.test/r")};
+        ASSERT_TRUE(pair.client.submit_request(0, request));
+        pair.settle();
+        pair.client.read_stream(0, h3_headers_frame(0, {{":status", status}, {"content-length", "5"}}), true);
+        if (exempt) {
+            ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "a HEAD response, or a 304, declares a length it does not carry";
+            EXPECT_TRUE(pair.client_owner.resets.empty());
+        } else {
+            EXPECT_TRUE(pair.client_owner.responses.empty());
+            ASSERT_EQ(pair.client_owner.resets.size(), 1u);
+            EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+        }
+    }
+    Pair              pair;
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    pair.client.read_stream(0, h3_headers_frame(0, {{":status", "200"}, {"content-length", "5"}}), false);
+    pair.client.read_stream(0, h3_data_frame("abc"), false);
+    pair.client.read_stream(0, h3_headers_frame(0, {{"x-sum", "1"}}), true);
+    EXPECT_TRUE(pair.client_owner.responses.empty()) << "a trailer section ends a body its content-length contradicts";
+    ASSERT_EQ(pair.client_owner.resets.size(), 1u);
+    EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    if (pair.client_owner.close)
+        EXPECT_EQ(pair.client_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+}
+
+// A trailer section ends the message: a `content-length` the body it ends contradicts makes the request malformed beside
+// every limit of the trailer section -- refused, never answered 431 (Huly QB-1197: the length was judged at the end of
+// the stream, after the 431). nghttp3 then closes the connection for the mismatch.
+TEST(Http3ConnectionDirect, AContentLengthATrailerSectionContradictsIsJudgedBeforeItsLimits) {
+    using Fields = std::vector<std::pair<std::string, std::string>>;
+    for (auto const &[tight, trailers] : std::vector<std::pair<TightLimits, Fields>>{
+             {{.value = 4}, {{"x-v", "12345"}}},
+             {{.name = 15}, {{"x-abcdefghijklmn", "1"}}}, // content-length's own name is within it
+             {{.count = 2}, {{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}},
+         }) {
+        SCOPED_TRACE(trailers.back().first);
+        LimitedPair pair{tight.limits()};
+        auto        fields = request_fields("/upload");
+        fields[0].second   = "POST";
+        fields.emplace_back("content-length", "5");
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        pair.server.read_stream(0, h3_headers_frame(0, trailers), true);
+        expect_refused_unanswered(pair);
+        if (pair.server_owner.close)
+            EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+    }
+    // The control: a trailer section over the count after the body its content-length declares is answered 431.
+    LimitedPair pair{TightLimits{.count = 2}.limits()};
+    auto        fields = request_fields("/upload");
+    fields[0].second   = "POST";
+    fields.emplace_back("content-length", "3");
+    pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+    pair.server.read_stream(0, h3_data_frame("abc"), false);
+    pair.server.read_stream(0, h3_headers_frame(0, {{"x-a", "1"}, {"x-b", "2"}, {"x-c", "3"}}), true);
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431";
+    EXPECT_FALSE(reset(pair.server_owner, 0));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+// A field over the limits is judged before it is dropped (Huly QB-1197): in the header section, a field this module
+// refuses beyond nghttp3 (the proxy authentication fields, detail::is_forbidden_h3_header); in a trailer section, a
+// field a trailer section must not carry (detail::is_forbidden_h3_trailer: `host`, `te`, the proxy authentication
+// fields, `trailer`, `http2-settings`) -- over the value or the name limit, or past the count. Each refuses the stream
+// as it does within the limits; it was dropped unread and the request answered 431. (nghttp3 refuses the
+// connection-specific fields first, and removes a trailer section's `content-length` before this module sees it.)
+TEST(Http3ConnectionDirect, AForbiddenFieldBesideTheLimitsRefusesTheStream) {
+    using Fields    = std::vector<std::pair<std::string, std::string>>;
+    auto shapes_for = [](std::string const &name, std::string const &value) {
+        return std::vector<std::pair<TightLimits, Fields>>{
+            {{.value = 4}, {{name, value}}},
+            {{.name = 1}, {{name, value}}},
+            {{.count = 2}, {{"x-a", "1"}, {"x-b", "2"}, {name, value}}},
+        };
+    };
+    for (std::string const name : {"proxy-authorization", "proxy-authenticate"}) {
+        for (auto const &[tight, extra] : shapes_for(name, "Basic x")) {
+            SCOPED_TRACE("header section: " + name + ", " + std::to_string(extra.size()) + " fields");
+            LimitedPair pair{tight.limits()};
+            auto        fields = request_fields();
+            fields.insert(fields.end(), extra.begin(), extra.end());
+            pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+            expect_refused_unanswered(pair);
+            EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
+        }
+    }
+    // Fields a header section may carry, over the limits there: answered 431 -- the trailer list is a trailer section's.
+    for (auto const &[name, value] :
+         std::vector<std::pair<std::string, std::string>>{{"te", "trailers"}, {"trailer", "x-sum"}, {"http2-settings", "xx"}}) {
+        SCOPED_TRACE("header section, well-formed: " + name);
+        LimitedPair pair{TightLimits{.value = 1}.limits()};
+        auto        fields = request_fields();
+        fields.emplace_back(name, value); // over a value limit of 1
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431";
+        EXPECT_FALSE(reset(pair.server_owner, 0));
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    for (std::string const name : {"host", "te", "proxy-authorization", "proxy-authenticate", "trailer", "http2-settings"}) {
+        // `te` is `trailers` or nghttp3 refuses it first; a value of 8 bytes passes a value limit of 4.
+        for (auto const &[tight, trailers] : shapes_for(name, "trailers")) {
+            SCOPED_TRACE("trailer section: " + name + ", " + std::to_string(trailers.size()) + " fields");
+            LimitedPair pair{tight.limits()};
+            auto        fields = request_fields("/upload");
+            fields[0].second   = "POST";
+            pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+            pair.server.read_stream(0, h3_data_frame("abc"), false);
+            pair.server.read_stream(0, h3_headers_frame(0, trailers), true);
+            expect_refused_unanswered(pair);
+            EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
+        }
+    }
+}
+
+#endif // QBM_HTTP_HAS_HTTP3
