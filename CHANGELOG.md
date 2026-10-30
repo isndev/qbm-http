@@ -179,8 +179,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   now reads a 256-octet table in one pass -- 12.2 to 6.25 ns for `example.test`, which every caller of
   `is_request_authority()` gains, HTTP/2's and HTTP/3's `:authority` and the redirect check included --, the parser
   counts the `Host` lines where it stores them instead of looking the field up, and the trim tests the last octet first.
-  What remains: `BM_Http1Parse_WholeBuffer/corpus:0` 236.5 to 245.8 ns (+3.9 %), an eight-field request +2.0 %, inside
-  the gate's macOS threshold (5.64 %); the HTTP/1.1 request it measures costs microseconds end to end. Tests: the router
+  What remained on the M4: `BM_Http1Parse_WholeBuffer/corpus:0` 236.5 to 245.8 ns (+3.9 %), an eight-field request +2.0 %,
+  inside the gate's macOS threshold (5.64 %); the HTTP/1.1 request it measures costs microseconds end to end. On x86 the
+  same check read +18 ns on the same cell (317 to 335 ns on an i9-12900K under g++ 14, 3 physical copies a side in a
+  seeded order, the parse of a two-line GET; 217 instructions a request, 171 of them `is_request_authority()` -- a call
+  that scanned the host, then re-read the port with `std::from_chars`), so the grammar is one pass now, inline where the
+  parser stores each field line: the host's octets through the table, the port's digits bounded as they are read, nothing
+  allocated, only an IP literal calling out (`origin::detail::is_ip_literal_authority`); the accept / refuse set is the
+  first form's, byte for byte -- a differential run of the two forms over 72 903 generated values (every octet alone
+  and in pairs, every octet at every position of 27 short host / port / literal templates, 29 port and 55 IPv6-literal
+  edge cases, the NUL and cut-encoding cases of the unit test; 7 130 accepted) found no disagreement -- and the gated
+  parse executes 84 fewer instructions a request for it (4 359 -> 4 275 with QB-1177's in-place reader; 4 076 before
+  the train), 273 against 280 ns on the same host in the same campaign (0.976), 1.024 [0.998, 1.041] of the previous
+  release's parse -- level with it within that campaign's 1.7 % A/A band. Tests: the router
   on the wire (each refused shape answered 400, an HTTP/1.0 request without `Host` served, an absolute-form target's
   `Host` reading its authority, a pipelined request without `Host` refused after the one before it and the one after it
   never read), the parser (each shape and its refusal status; the field a CONNECT, an absolute-form and an asterisk-form

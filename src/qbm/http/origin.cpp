@@ -10,8 +10,6 @@
 #include "./origin.h"
 
 #include <algorithm>
-#include <array>
-#include <cctype>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -155,78 +153,26 @@ authority(qb::io::uri const &uri) {
     return value;
 }
 
-namespace {
-
-/// `port = *DIGIT` (RFC 3986 §3.2.3), as a port qb can reach: leading zeros allowed, no greater than 65535 -- from_chars
-/// refuses a number past 32 bits instead of wrapping it into range. An empty port is the scheme's default.
-[[nodiscard]] bool
-is_port(std::string_view const port) noexcept {
-    if (port.empty())
-        return true;
-    std::uint32_t value  = 0;
-    auto const    end    = port.data() + port.size();
-    auto const    parsed = std::from_chars(port.data(), end, value);
-    return parsed.ec == std::errc{} && parsed.ptr == end && value <= 65535u;
-}
-
-/// The octets a reg-name holds as themselves (RFC 3986 §3.2.2): the unreserved characters and the sub-delims, as
-/// qb::io::is_unreserved() and is_sub_delim() class them -- one lookup an octet, on the path of every request, whose
-/// Host field and `:authority` are read here (Huly QB-1186). unit/message-types holds it to those two functions.
-constexpr auto reg_name_octet = [] {
-    std::array<bool, 256> table{};
-    for (unsigned char const c : std::string_view{"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;="})
-        table[c] = true;
-    return table;
-}();
-
-/// Where the reg-name or IPv4 address that begins @p text ends (RFC 3986 §3.2.2): the index of its first ':' -- or the
-/// size of @p text --, every octet before it unreserved, a sub-delim or a percent-encoding; npos for any other octet. One
-/// pass: a userinfo's '@' is no reg-name octet, nor a port digit after the ':'.
-[[nodiscard]] std::size_t
-reg_name_end(std::string_view const text) noexcept {
-    std::size_t i = 0;
-    for (; i < text.size() && text[i] != ':'; ++i) {
-        auto const c = static_cast<unsigned char>(text[i]);
-        if (c == '%') {
-            if (text.size() - i < 3 || !std::isxdigit(static_cast<unsigned char>(text[i + 1]))
-                || !std::isxdigit(static_cast<unsigned char>(text[i + 2])))
-                return std::string_view::npos;
-            i += 2;
-        } else if (!reg_name_octet[c]) {
-            return std::string_view::npos;
-        }
-    }
-    return i;
-}
-
-} // namespace
-
 bool
-is_request_authority(std::string_view text) noexcept {
-    if (text.empty())
+detail::is_ip_literal_authority(std::string_view const text) noexcept {
+    // An IP literal is an IPv6 address (RFC 3986 §3.2.2): `[127.0.0.1]` or `[cafe.de]` is none, and qb::io::uri
+    // drops the brackets of whatever it reads between them. Hex digits, ':' and '.' only, before inet_pton reads
+    // a C string: no NUL, no zone identifier (some inet_pton accept one, others refuse it), no IPvFuture.
+    auto const close = text.find(']');
+    if (close == std::string_view::npos)
         return false;
-    if (text.front() == '[') {
-        // An IP literal is an IPv6 address (RFC 3986 §3.2.2): `[127.0.0.1]` or `[cafe.de]` is none, and qb::io::uri
-        // drops the brackets of whatever it reads between them. Hex digits, ':' and '.' only, before inet_pton reads
-        // a C string: no NUL, no zone identifier (some inet_pton accept one, others refuse it), no IPvFuture.
-        auto const close = text.find(']');
-        if (close == std::string_view::npos)
-            return false;
-        auto const literal = text.substr(1, close - 1);
-        if (literal.empty() || literal.size() >= INET6_ADDRSTRLEN
-            || literal.find_first_not_of("0123456789abcdefABCDEF:.") != std::string_view::npos)
-            return false;
-        char address[INET6_ADDRSTRLEN];
-        std::memcpy(address, literal.data(), literal.size());
-        address[literal.size()] = '\0';
-        in6_addr parsed{};
-        if (qb::io::inet::ip::compat::inet_pton(AF_INET6, address, &parsed) != 1)
-            return false;
-        auto const suffix = text.substr(close + 1);
-        return suffix.empty() || (suffix.front() == ':' && is_port(suffix.substr(1)));
-    }
-    auto const host_end = reg_name_end(text);
-    return host_end != 0 && host_end != std::string_view::npos && (host_end == text.size() || is_port(text.substr(host_end + 1)));
+    auto const literal = text.substr(1, close - 1);
+    if (literal.empty() || literal.size() >= INET6_ADDRSTRLEN
+        || literal.find_first_not_of("0123456789abcdefABCDEF:.") != std::string_view::npos)
+        return false;
+    char address[INET6_ADDRSTRLEN];
+    std::memcpy(address, literal.data(), literal.size());
+    address[literal.size()] = '\0';
+    in6_addr parsed{};
+    if (qb::io::inet::ip::compat::inet_pton(AF_INET6, address, &parsed) != 1)
+        return false;
+    auto const suffix = text.substr(close + 1);
+    return suffix.empty() || (suffix.front() == ':' && is_port(suffix.substr(1)));
 }
 
 std::optional<qb::io::uri>

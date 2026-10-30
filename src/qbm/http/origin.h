@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -101,6 +102,46 @@ namespace qb::http::origin {
  */
 [[nodiscard]] std::string authority(qb::io::uri const &uri);
 
+namespace detail {
+
+/// The octets a reg-name holds as themselves (RFC 3986 §3.2.2): the unreserved characters and the sub-delims, as
+/// qb::io::is_unreserved() and is_sub_delim() class them -- one lookup an octet, on the path of every request, whose
+/// Host field and `:authority` are read here (Huly QB-1186). unit/message-types holds it to those two functions.
+inline constexpr auto reg_name_octet = [] {
+    std::array<bool, 256> table{};
+    for (unsigned char const c : std::string_view{"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;="})
+        table[c] = true;
+    return table;
+}();
+
+/// A hexadecimal digit, as std::isxdigit() classes it in the "C" locale: no locale call on the request path.
+[[nodiscard]] constexpr bool
+is_hex_octet(unsigned char const c) noexcept {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/// `port = *DIGIT` (RFC 3986 §3.2.3), as a port qb can reach: leading zeros allowed, no greater than 65535, read in one
+/// pass -- the value is bounded at every digit, so no width can overflow it. An empty port is the scheme's default.
+[[nodiscard]] constexpr bool
+is_port(std::string_view const port) noexcept {
+    std::uint32_t value = 0;
+    for (char const c : port) {
+        unsigned const digit = static_cast<unsigned char>(c) - static_cast<unsigned>('0');
+        if (digit > 9u)
+            return false;
+        value = value * 10u + digit;
+        if (value > 65535u)
+            return false;
+    }
+    return true;
+}
+
+/// The IP-literal form of an authority, `[` an IPv6 address `]` and an optional `:port`: the one branch of
+/// is_request_authority() that calls out (`inet_pton`), kept off the inline path.
+[[nodiscard]] bool is_ip_literal_authority(std::string_view text) noexcept;
+
+} // namespace detail
+
 /**
  * @brief Whether @p text is an authority a request may name: `uri-host [ ":" port ]` (RFC 3986 §3.2)
  *        without a userinfo part -- the `Host` of HTTP/1.1, the `:authority` of HTTP/2 and HTTP/3 (Huly
@@ -111,10 +152,41 @@ namespace qb::http::origin {
  * percent-encoded octets (RFC 3986 §3.2.2); then nothing, `:`, or `:` and a port of digits, leading
  * zeros allowed, no greater than 65535. Never a userinfo. The redirect target check uses it too.
  *
+ * One pass over the text and nothing allocated, inline where the HTTP/1.1 parser checks every request's
+ * Host field (Huly QB-1186): the host's octets through one table, the port's digits bounded as they are
+ * read; only an IP literal calls out. The first form of this check was an out-of-line function that
+ * scanned the host, then re-read the port with std::from_chars: 171 instructions a request on g++ 14.
+ *
  * @param text The field value.
  * @return Whether the text has that shape.
  */
-[[nodiscard]] bool is_request_authority(std::string_view text) noexcept;
+[[nodiscard]] inline bool
+is_request_authority(std::string_view const text) noexcept {
+    if (text.empty())
+        return false;
+    if (text.front() == '[') [[unlikely]]
+        return detail::is_ip_literal_authority(text);
+    std::size_t       i = 0;
+    std::size_t const n = text.size();
+    for (; i < n; ++i) { // the reg-name or IPv4 address, up to the ':' of a port or the end
+        auto const c = static_cast<unsigned char>(text[i]);
+        if (detail::reg_name_octet[c])
+            continue;
+        if (c == ':')
+            break;
+        if (c == '%') { // a percent-encoded octet: two hexadecimal digits must follow
+            if (n - i < 3 || !detail::is_hex_octet(static_cast<unsigned char>(text[i + 1]))
+                || !detail::is_hex_octet(static_cast<unsigned char>(text[i + 2])))
+                return false;
+            i += 2;
+            continue;
+        }
+        return false;
+    }
+    if (i == 0)
+        return false; // no host
+    return i == n || detail::is_port(text.substr(i + 1));
+}
 
 /**
  * @brief The URI of a request received over HTTP/2 or HTTP/3, from its `:scheme`, `:authority` (or `host`)
