@@ -1281,6 +1281,40 @@ TEST(Http3ConnectionDirect, ARequestWithoutAnAuthorityNeverReachesTheServer) {
     }
 }
 
+// A `host` field nghttp3's authority check refuses -- a byte outside its table: `@`, a space, `/`, `?`, `#`, a
+// control byte... -- is removed by nghttp3 before this module sees it (1.18.0 read: nghttp3_http.c returns
+// NGHTTP3_ERR_REMOVE_HTTP_HEADER, which nghttp3_conn.c drops with no callback this module could hook): the request is
+// served as if it carried none. Beside :authority, the authority is :authority's and the request has no Host -- HTTP/2
+// refuses that request, and the docs said HTTP/3 did (Huly QB-1195); as a second `host` without :authority, the first
+// names the authority -- HTTP/2 and HTTP/1.1 refuse two. Pinned, so that a nghttp3 that delivers the field shows here:
+// this module would then refuse both. Alone, the removed field leaves no authority, which nghttp3 refuses (above).
+TEST(Http3ConnectionDirect, AHostFieldNghttp3RemovesIsNeverSeen) {
+    {
+        Pair pair;
+        pair.server.read_stream(
+            0,
+            h3_headers_frame(
+                0, {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/h"}, {"host", "user@evil.test"}}),
+            true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "served: nghttp3 removed the field";
+        EXPECT_EQ(pair.server_owner.requests.front().uri().host(), "example.test");
+        EXPECT_FALSE(pair.server_owner.requests.front().has_header("host"));
+        EXPECT_TRUE(pair.server_owner.resets.empty());
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    {
+        Pair pair;
+        pair.server.read_stream(
+            0,
+            h3_headers_frame(0, {{":method", "GET"}, {":scheme", "https"}, {":path", "/h"}, {"host", "example.test"}, {"host", "u@evil.test"}}),
+            true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "served: nghttp3 removed the second field";
+        EXPECT_EQ(pair.server_owner.requests.front().uri().host(), "example.test");
+        EXPECT_EQ(pair.server_owner.requests.front().header("host"), "example.test");
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+}
+
 /**
  * @test A `trailer` field inside the trailer section refuses the stream only
  * @brief A second HEADERS frame after the body is the trailer section. nghttp3 drops a `content-length`

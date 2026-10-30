@@ -597,6 +597,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   stream served; on the direct HTTP/3 pair, `connect` and a CONNECT without `:scheme` and `:path` refused, the
   connection serving on, and nghttp3's own verdict.
 
+- **Documented: on HTTP/3 a `host` field nghttp3 finds invalid is removed before qbm-http sees it, so a request carrying
+  `:authority: example.test` and `host: user@evil.test` is served, with no `Host` (Huly QB-1195).** nghttp3 (1.18.0)
+  removes a `host` holding a byte outside its authority table -- `@`, a space, `/`, `?`, `#`, a control byte, ... --
+  and calls no hook for it; `llm.md` and readme 19 said such a field refused the stream, as it does on HTTP/2. Beside
+  `:authority`, the request is served with `:authority`'s authority and no `Host`; of two `host` fields without
+  `:authority`, the one nghttp3 keeps names the authority; alone, the request has no authority and nghttp3 refuses it.
+  A test pins the first two, so that a nghttp3 that delivers the field shows (qbm-http would then refuse both).
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),
