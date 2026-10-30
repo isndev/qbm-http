@@ -32,7 +32,8 @@
  *     unstreamable buffers it, its hooks run once; a handler's own `Transfer-Encoding: chunked` streams chunked;
  *   - the end of a stream: a piece past a declared length, an `end()` short of it, an explicit `abort()` and a
  *     dropped stream close the connection without a terminator; the peer leaving, an application `cancel()`, an
- *     extraction and the inactivity timeout cancel the stream and the context; a piece refreshes the timeout;
+ *     extraction and the inactivity timeout cancel the stream and the context; a piece refreshes the timeout; a
+ *     middleware's `complete(CANCELLED)` after `next()` ends a live stream as `cancel()` does (Huly QB-101);
  *   - what observers read of a streamed response: the head's status, the streamed bytes (AccessLog, RequestMetrics),
  *     a stream its producer dropped mid-body included;
  *   - a pipelined request is answered after the streamed one, in order;
@@ -899,6 +900,31 @@ public:
             stream->end();
         });
 
+        // A middleware completes the request CANCELLED after next(), while the handler's stream is on the wire: 4 MiB
+        // declared, the producer parked on on_drain() at the 256 KiB mark (nothing reaches the socket before the loop
+        // runs). What the stream had taken is read right after the cancellation, with whether it was told.
+        {
+            auto cancelled_after_next = router().group("/completed-cancelled");
+            cancelled_after_next->use([](std::shared_ptr<Ctx> ctx, std::function<void()> next) {
+                next(); // the handler runs here, synchronously: the head is out, the producer waits for a drain
+                const auto stream = ctx->stream();
+                if (!stream || !ctx->is_streaming() || ctx->is_completed())
+                    return; // no live stream: the case reads g_seen.cancelled and fails
+                ctx->complete(qb::http::AsyncTaskResult::CANCELLED);
+                g_seen.written_at_close      = stream->written(); // published before `cancelled`, which the case waits on
+                g_seen.stream_cancelled_seen = stream->cancelled();
+                g_seen.cancelled             = true;
+            });
+            cancelled_after_next->get("/bulk", [](std::shared_ptr<Ctx> ctx) {
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Length", std::to_string(std::size_t{4} << 20));
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                stream->set_watermarks(256 * 1024, 128 * 1024);
+                std::make_shared<BulkProducer>(std::move(stream), std::size_t{4} << 20, std::size_t{64} << 10)->run();
+            });
+        }
+
         router().compile();
     }
 };
@@ -1554,6 +1580,36 @@ TEST_F(ResponseStreamTest, AnApplicationCancelClosesAStreamedConnectionAndObserv
     EXPECT_EQ(access_of("/app-cancel")->bytes, g_seen.written_at_close.load()) << "the bytes the stream had taken when it was cancelled";
     EXPECT_EQ(server->server().metrics->count(qb::http::method::GET, "/app-cancel", 200), 1u);
     EXPECT_EQ(server->server().metrics->count(qb::http::method::GET, "/app-cancel", 503), 0u);
+}
+
+// complete(CANCELLED) under a streamed head is the cancellation cancel() is (Huly QB-101): the stream is told at once,
+// the connection closes short of the declared length and serves no other request, and the observers read the bytes
+// that left. It used to finalise the context alone: the producer streamed the whole body under a context its
+// observers had read as cancelled with nothing streamed, and the connection served on.
+TEST_F(ResponseStreamTest, ACompleteCancelledUnderAStreamedHeadEndsTheStreamAsCancelDoes) {
+    constexpr std::size_t declared = std::size_t{4} << 20;
+    RawClient             c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/completed-cancelled/bulk")));
+    ASSERT_TRUE(wait_for([] { return g_seen.cancelled.load(); })) << "the middleware never completed the request cancelled";
+    ASSERT_TRUE(g_seen.streaming.load()) << "the head was not on the wire: the case proves nothing";
+    EXPECT_TRUE(g_seen.stream_cancelled_seen.load()) << "the stream was not told its context was cancelled";
+    EXPECT_GT(g_seen.written_at_close.load(), 0u);
+    EXPECT_LT(g_seen.written_at_close.load(), declared) << "the producer was not parked when the request was cancelled";
+    EXPECT_TRUE(c.read_until([&] { return c.eof; })) << "a cancelled context under a streamed head must close the connection";
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200) << r.head;
+    EXPECT_FALSE(r.complete) << "the peer received a cancelled response whole: " << c.buffer.size() << " bytes";
+    ASSERT_TRUE(wait_for([] { return access_of("/completed-cancelled/bulk").has_value(); })) << "no access-log record";
+    EXPECT_EQ(access_of("/completed-cancelled/bulk")->status, 200) << "the head that left said 200";
+    EXPECT_EQ(access_of("/completed-cancelled/bulk")->bytes, g_seen.written_at_close.load())
+        << "the observers must read the bytes the stream had taken when it was cancelled";
+    EXPECT_FALSE(g_seen.producer_done.load()) << "the producer ran to its end under a cancelled context";
+    // The connection is over: a request sent on it is not answered.
+    c.buffer.erase(0, r.complete ? r.consumed : c.buffer.size());
+    (void) c.send(get("/plain"), 200ms);
+    EXPECT_FALSE(c.read_until([&] { return c.buffer.find("plain-body") != std::string::npos; }, 500ms))
+        << "the connection of a cancelled streamed response served the next request";
 }
 
 TEST_F(ResponseStreamTest, AnExtractionUnderALiveStreamTellsTheProducerAndTheContext) {

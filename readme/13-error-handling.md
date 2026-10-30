@@ -69,7 +69,7 @@ Use this when the handler already knows the exact response it wants. It is termi
 Set a status that gives downstream context, then call `complete(AsyncTaskResult::ERROR)`. The normal chain halts and the `Context` attempts to switch to the router's error chain. Use this when you want one place to format all error responses consistently.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 (AsyncTaskResult), src/qbm/http/routing/context.h:1309-1393 (complete()) -->
+// <!-- src: qbm/http/src/qbm/http/routing/types.h:53-62 (AsyncTaskResult), src/qbm/http/routing/context.h:1310-1400 (complete()) -->
 router.get("/items/:id", [](auto ctx) {
     auto item = find_item(ctx->path_param("id"));
     if (!item) {
@@ -173,7 +173,7 @@ flowchart TD
 You do not have to wrap handler bodies in `try/catch` to keep the server alive. The chain driver in `Context` runs each task inside a `try/catch`; an exception that escapes a middleware or handler is caught, and — provided the context is not already finalized or cancelled — converted into `complete(AsyncTaskResult::ERROR)`. That routes through the error chain exactly as an explicit `ERROR` would, defaulting the status to 500.
 
 ```cpp
-// <!-- src: qbm/http/src/qbm/http/routing/context.h:383-411 (task try/catch), :1308-1309 (complete()), :1357-1385 (the ERROR case: reseat the error chain, else 500) -->
+// <!-- src: qbm/http/src/qbm/http/routing/context.h:383-411 (task try/catch), :1309-1310 (complete()), :1364-1392 (the ERROR case: reseat the error chain, else 500) -->
 router.get("/risky", [](auto ctx) {
     auto data = parse_or_throw(ctx->request().body().template as<std::string_view>());
     // If parse_or_throw throws, the chain driver catches it,

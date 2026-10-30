@@ -71,7 +71,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `Transfer-Encoding: chunked` is set. The response to HEAD is whole at its head: its exchange ends there and the next
   request on the connection is served while the producer, whose pieces are counted and discarded, runs on. The producer
   owns the stream: one dropped before `end()` is aborted -- the connection closes; buffered, a 500 without the failed
-  body's framing and coding headers -- and the peer leaving, an application `cancel()`, an extraction or the inactivity
+  body's framing and coding headers -- and the peer leaving, an application `cancel()` or `complete(CANCELLED)` (a
+  middleware's, after `next()`: until Huly QB-101 it finalised the context alone, its observers read nothing streamed,
+  and the stream ran on to its end on a connection that served the next request), an extraction or the inactivity
   timeout cancels it: a parked `drain()` resumes with `false`, `write()` returns `closed`, the context is cancelled,
   and a server destroyed under a live stream releases it; a drain callback still registered when its stream dies is
   released without running. A response that cannot be streamed -- a status without a body, HTTP/1.0 without a length, a

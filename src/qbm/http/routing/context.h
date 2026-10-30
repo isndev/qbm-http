@@ -1251,7 +1251,8 @@ public:
      * The `result` parameter dictates how the `Context` should proceed:
      * - `AsyncTaskResult::CONTINUE`: Proceeds to the next task in the current chain.
      * - `AsyncTaskResult::COMPLETE`: Finalizes processing for this request. No further tasks in the current chain are run.
-     * - `AsyncTaskResult::CANCELLED`: Marks the context as cancelled and finalizes processing.
+     * - `AsyncTaskResult::CANCELLED`: Marks the context as cancelled and finalizes processing. The first cancellation
+     *   tells a stream still open, as `cancel()` does: a streamed head on the wire closes the connection (Huly QB-101).
      * - `AsyncTaskResult::ERROR`: Attempts to switch to a configured error handling chain. If no error chain is set, or if
      *   the context is already in an error chain, it sets a 500 Internal Server Error and finalizes.
      * - `AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR`: Indicates a critical error in a special handler (like 404 or error chain).
@@ -1339,8 +1340,13 @@ public:
                     finalize_processing_internal();
                     break;
 
-                case AsyncTaskResult::CANCELLED:
+                case AsyncTaskResult::CANCELLED: {
+                    // The first cancellation of a live context tells its stream, as cancel() does -- which arrives here
+                    // cancelled already, its stream told (Huly QB-101).
+                    const bool first = !_lc.is_cancelled && !is_finalised_internal();
                     _lc.is_cancelled = true;
+                    if (first)
+                        tell_stream_cancelled_internal();
                     // At the first cancellation, not at the finalisation a middleware's deferral scope may hold back,
                     // nor again at a later one: what the middleware writes after next() on the cancelled request stays
                     // its own (Huly QB-101).
@@ -1348,6 +1354,7 @@ public:
                         answer_unsent_stream_cancelled_internal();
                     finalize_processing_internal();
                     break;
+                }
 
                 case AsyncTaskResult::FATAL_SPECIAL_HANDLER_ERROR:
                     _response.status() = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -1410,11 +1417,7 @@ public:
         }
         _lc.is_cancelled              = true;
         _cancellation_reason_internal = reason;
-        if (auto stream = _stream.lock()) { // a producer is told; a streamed head on the wire closes the connection (Huly QB-86)
-            if (_streamed)
-                _streamed_bytes = stream->written();
-            stream->context_cancelled();
-        }
+        tell_stream_cancelled_internal(); // a producer is told; a streamed head on the wire closes the connection
 
         if (_lc.task_in_flight != InFlightTask::None && _task_chain && _current_task_index < _task_chain->size()) {
             const auto in_flight = std::exchange(_lc.task_in_flight, InFlightTask::None);
@@ -1672,6 +1675,20 @@ private:
         if (_streamed)
             _streamed_bytes = written;
         complete(AsyncTaskResult::COMPLETE);
+    }
+
+    /// The context is cancelled while its stream is open (Huly QB-86): the producer is told -- every wait ends, every
+    /// later write is refused -- and a streamed head on the wire closes the connection, the bytes that left recorded
+    /// first for the observers. Run at the first cancellation, by `cancel()` and `complete(AsyncTaskResult::CANCELLED)`
+    /// alike: the second finalised the context alone, and its stream ran on to its end on a connection that served
+    /// on (Huly QB-101).
+    void
+    tell_stream_cancelled_internal() noexcept {
+        if (auto stream = _stream.lock()) {
+            if (_streamed)
+                _streamed_bytes = stream->written();
+            stream->context_cancelled();
+        }
     }
 
 public:

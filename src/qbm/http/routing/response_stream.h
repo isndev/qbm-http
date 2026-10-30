@@ -150,7 +150,8 @@ concept streaming_session =
  *    CONNECTION instead, since the message cannot be completed -- and completes the context.
  * 4. The peer may go away at any time: the session cancels the stream, a parked `drain()` resumes with `false`, the
  *    next `write()` returns `closed`, and the context is cancelled; the producer's only duty is to stop. A
- *    `ctx->cancel()` does the same from the application's side, and closes the connection under a streamed head; a
+ *    `ctx->cancel()` -- or a `complete(AsyncTaskResult::CANCELLED)`, a middleware's after `next()` included (Huly
+ *    QB-101) -- does the same from the application's side, and closes the connection under a streamed head; a
  *    buffered stream, or one a `PRE_RESPONSE_SEND` hook cancels inside `begin_stream()`, answers 503 with no body and
  *    without the representation headers its head declared -- type, framing, coding, range, validators, caching
  *    (Huly QB-101).
