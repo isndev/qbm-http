@@ -18,13 +18,13 @@ llm/qbm-http.llm.api.md	1.1/http.h:1238-1238	967107c41a70	listen(qb::io::uri uri
 llm/qbm-http.llm.api.md	1.1/http.h:1249-1249	26cc9c388317	listen_no_start(qb::io::uri uri, TLSContext &&context) {
 llm/qbm-http.llm.api.md	1.1/http.h:1899-1899	c16a4a6db7e1	static_assert(streaming_session<DefaultSession>, "the HTTP/1.1 sessio...
 llm/qbm-http.llm.api.md	1.1/http.h:1975-1975	b6c085494c15	static_assert(streaming_session<DefaultSecureSession>, "the HTTPS/1.1...
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:173-173	3a733ae45e2e	template <typename MessageType>
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:817-817	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:825-825	b4e777a3315d	request_limits() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:833-833	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:841-841	c4437ea56b4b	max_body_size() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:855-855	50c9983a8354	refusal_status() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:97-97	1cea27b7e6a5	struct request_limits {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:174-174	3a733ae45e2e	template <typename MessageType>
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:818-818	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:826-826	b4e777a3315d	request_limits() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:834-834	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:842-842	c4437ea56b4b	max_body_size() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:856-856	50c9983a8354	refusal_status() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:98-98	1cea27b7e6a5	struct request_limits {
 llm/qbm-http.llm.api.md	1.1/protocol/server.h:103-103	59ebf4c707b5	dispatching_size() const noexcept {
 llm/qbm-http.llm.api.md	2/http2.h:939-939	e6164c1688f6	set_tls_context(qb::io::ssl::Context context) {
 llm/qbm-http.llm.api.md	2/http2.h:950-950	4baf7f11b3a0	reload_certificates(std::filesystem::path cert_file, std::filesystem:...
@@ -236,8 +236,9 @@ llm/qbm-http.llm.api.md	origin.h:245-245	1a667f94e9cb	[[nodiscard]] bool request
 llm/qbm-http.llm.api.md	origin.h:38-38	59a9a4c0618e	[[nodiscard]] bool scheme_eq(std::string_view lhs, std::string_view r...
 llm/qbm-http.llm.api.md	parameter_validator.h:115-115	85c8074984bc	class ParameterValidator {
 llm/qbm-http.llm.api.md	parameter_validator.h:35-35	bdccc56f9657	struct ParameterRuleSet {
-llm/qbm-http.llm.api.md	protocol/connection.h:1468-1468	93331a7177d4	control_stream_acknowledged() const noexcept {
-llm/qbm-http.llm.api.md	protocol/connection.h:749-749	e710b5de4f17	answer_refused_request(std::uint64_t stream_id, stream_state &st, qb:...
+llm/qbm-http.llm.api.md	protocol/connection.h:1510-1510	93331a7177d4	control_stream_acknowledged() const noexcept {
+llm/qbm-http.llm.api.md	protocol/connection.h:760-760	e710b5de4f17	answer_refused_request(std::uint64_t stream_id, stream_state &st, qb:...
+llm/qbm-http.llm.api.md	protocol/connection.h:79-79	8bb89adda3fb	inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
 llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1361-1420	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.api.md	rate_limit.h:142-142	cc4621c8922c	client_id_extractor(std::function<std::string(const Context<SessionTy...
 llm/qbm-http.llm.api.md	rate_limit.h:167-167	d1f5abc327d8	trust_forwarded_headers(bool enabled = true) noexcept {
@@ -353,10 +354,10 @@ llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:854-872	ab2d1495b1a8	Client::d
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.cpp:93-115	13c1e3c6b3c8	if (callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/3/client.h:110-110	b5d9130b44cc	class Client
 llm/qbm-http.llm.api.md	src/qbm/http/3/dual_stack.h:227-253	e15188a14076	dual_stack_server(dual_stack_server const &)            = delete;
-llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:1589-1589	127b700ae58f	submit_response(std::uint64_t stream_id, qb::http::Response const &re...
-llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:1648-1648	9fb86e3cbf55	submit_request(std::uint64_t stream_id, qb::http::Request const &requ...
-llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:419-419	b2a3ce1e0b61	make_trailer_block(qb::http::detail::outgoing_trailers const &trailer...
-llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:437-437	f42d5b262100	plan_trailers(Message const &msg) {
+llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:1631-1631	127b700ae58f	submit_response(std::uint64_t stream_id, qb::http::Response const &re...
+llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:1690-1690	9fb86e3cbf55	submit_request(std::uint64_t stream_id, qb::http::Request const &requ...
+llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:427-427	b2a3ce1e0b61	make_trailer_block(qb::http::detail::outgoing_trailers const &trailer...
+llm/qbm-http.llm.api.md	src/qbm/http/3/protocol/connection.h:445-445	f42d5b262100	plan_trailers(Message const &msg) {
 llm/qbm-http.llm.api.md	src/qbm/http/auth/manager.h:36-36	17e417635082	class Manager {
 llm/qbm-http.llm.api.md	src/qbm/http/auth/options.h:36-36	4433c05e97bb	class Options {
 llm/qbm-http.llm.api.md	src/qbm/http/auth/user.h:33-33	8d7c426a6b33	struct User {
