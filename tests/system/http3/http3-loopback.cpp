@@ -39,9 +39,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -51,6 +54,8 @@
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
+
+#include <qbm/http/middleware/static_files.h>
 
 using namespace std::chrono_literals;
 
@@ -3342,6 +3347,67 @@ TEST_F(Http3LoopbackTest, BodiesCrossSeveralSmallReceiveWindows) {
     EXPECT_EQ(response.body().as<std::string>(), std::string(response_size, 'R'));
     EXPECT_TRUE(client->is_connected());
     EXPECT_TRUE(server->is_open());
+
+    client->disconnect();
+    server->close();
+}
+
+// ---------------------------------------------------------------------------
+// Static files over HTTP/3 keep the buffered path (Huly QB-101). The HTTP/3 session offers no streaming hooks, so a
+// body over StaticFilesOptions::stream_threshold is read whole, as every body was, and max_file_size still bounds it;
+// HTTP/1.1 streams the same body (system/middleware/static-files-stream.cpp).
+// ---------------------------------------------------------------------------
+namespace {
+/// A temporary directory removed with its scope, an early failure included.
+struct TempRoot {
+    std::filesystem::path path;
+    explicit TempRoot(std::string const &prefix)
+        : path(std::filesystem::temp_directory_path()
+               / (prefix + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
+        std::filesystem::create_directories(path);
+    }
+    ~TempRoot() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+} // namespace
+
+TEST_F(Http3LoopbackTest, StaticFilesReadABodyOverTheStreamThresholdWholeAndTheCapStillBoundsIt) {
+    static_assert(!qb::http::streaming_session<qb::http3::DefaultSession>, "HTTP/3 is expected to buffer streams for now");
+    const TempRoot temp("qbm-h3-static-");
+    const auto    &root = temp.path;
+    ASSERT_TRUE(std::filesystem::is_directory(root));
+    std::string whole(std::size_t{512} * 1024, '\0');
+    for (std::size_t i = 0; i < whole.size(); ++i)
+        whole[i] = static_cast<char>((i * 131 + i / 251) & 0xff);
+    {
+        std::ofstream(root / "whole.bin", std::ios::binary).write(whole.data(), static_cast<std::streamsize>(whole.size()));
+        std::ofstream(root / "over.bin", std::ios::binary) << std::string(std::size_t{2} * 1024 * 1024, 'o');
+    }
+
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().use(qb::http::static_files_middleware<qb::http3::DefaultSession>(
+        qb::http::StaticFilesOptions(root).with_stream_threshold(std::size_t{64} * 1024).with_max_file_size(std::size_t{1024} * 1024)));
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    const auto get = [&](std::string const &path) {
+        // The callback owns what it writes: a late one, after a pump that timed out, writes into its own state.
+        auto state = std::make_shared<std::optional<qb::http::Response>>();
+        EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri(https_origin(port) + path)},
+                                         [state](qb::http::Response r) { *state = std::move(r); }));
+        EXPECT_TRUE(pump([&] { return state->has_value(); }, 10s));
+        return state->value_or(qb::http::Response{});
+    };
+    const auto served = get("/whole.bin");
+    EXPECT_EQ(served.status(), qb::http::status::OK);
+    EXPECT_EQ(served.header("Content-Length"), std::to_string(whole.size()));
+    EXPECT_TRUE(served.body().as<std::string>() == whole) << "the body read whole differs from the file's";
+    EXPECT_EQ(get("/over.bin").status(), qb::http::status::PAYLOAD_TOO_LARGE) << "a body read whole stays bounded by max_file_size";
 
     client->disconnect();
     server->close();

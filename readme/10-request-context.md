@@ -33,7 +33,7 @@ router.get("/users/:id", [](std::shared_ptr<qb::http::Context<MySession>> ctx) {
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:81, 657 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:81, 685 -->
 
 ### The session is held weakly
 
@@ -47,7 +47,7 @@ if (auto s = ctx->session()) {
 
 In normal request handling you rarely call `session()` directly — completing the context sends the response for you, and `ctx->begin_stream()` streams a body for you. You reach for it only in advanced flows (protocol upgrades, an ownership transfer) where you drive the transport by hand.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:129-130, 621-633 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:129-130, 649-661 -->
 
 ### Tasks are shared; per-request state lives on the context
 
@@ -74,7 +74,7 @@ After `router.compile()`, the task objects in a chain (`IAsyncTask`, middleware,
 | `query_param_or<T>(name, fallback)` | `T` | typed query-string value, or `fallback` on absent/empty/parse-fail |
 | `bind<T>()` | `std::optional<T>` | no-throw body deserializer; `nullopt` on failure (see below) |
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:621-778 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:649-806 -->
 
 ### Path parameters
 
@@ -93,7 +93,7 @@ router.get("/orders/:order_id/items/:item_id", [](auto ctx) {
 
 A standalone `PathParameters` copy still borrows its key names. Keep the original context alive, or copy the names into owned strings before retaining them beyond that context. Retaining a context does not retain the router's global error handlers or keep a destroyed session available for sending.
 
-<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:132-143,621-630,637-659; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,443-453 -->
+<!-- src: qbm/http/src/qbm/http/routing/path_parameters.h:32-57, 79; qbm/http/src/qbm/http/routing/context.h:132-143,649-658,665-687; qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,443-453 -->
 
 ### Query parameters and body binding
 
@@ -118,7 +118,7 @@ if (!dto) { ctx->bad_request("invalid body"); return; }
 use(*dto);
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:732-778 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:760-806 -->
 
 ### Per-request custom data
 
@@ -171,7 +171,7 @@ The shipped `RequestIdMiddleware` does exactly this for every request, under the
 
 Why prefer slots: `ctx->set<int>("k", 1)` written one place and `ctx->get<std::size_t>("k")` read another **compiles and silently returns `std::nullopt`** at runtime. A slot makes that a compile error, documents at the declaration what gets stored under the key and by whom, and keeps the same `any_cast` read cost. Both APIs swallow `std::bad_any_cast` and return `nullopt` / `nullptr` on a type mismatch — a wrong-type read fails silently rather than throwing, which is exactly the footgun slots remove.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:828-1069; qbm/http/src/qbm/http/routing/slot.h:56-104 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:856-1097; qbm/http/src/qbm/http/routing/slot.h:56-104 -->
 
 ## Completing a response
 
@@ -193,7 +193,7 @@ void complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE);
 
 `complete()` is **idempotent after finalization**: once the context is `Finalised` (or cancelled), further `complete()` calls are ignored — except `CANCELLED`, which is always honored. State only moves forward: `Ready → Running → Finalised`. This is what makes the late-arriving callback of an already-cancelled request harmless.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1281-1360 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1309-1393 -->
 
 ### Response helpers are terminal
 
@@ -228,17 +228,17 @@ router.post("/items", [](auto ctx) {
 
 Statuses are `qb::http::status` and JSON bodies are `qb::json` — see [Core HTTP concepts](./01-core-concepts.md).
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1073-1219 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1101-1247 -->
 
 ### Suppressing the response on ownership transfer
 
 If you hand the request or response off to another subsystem — most commonly a **WebSocket upgrade**, where the connection stops being an HTTP request/response exchange — call `ctx->suppress_response()`. It marks the context finalized *without* invoking the send callback, so the destructor won't push a stale or moved-from HTTP response back over a transport you no longer own. After this, `is_completed()` is `true` and neither the finalization callback nor `POST_HANDLER_EXECUTION` hooks run.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1446-1450 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1485-1489 -->
 
 ### Streaming the body instead
 
-A handler that writes its body piece by piece calls `ctx->begin_stream()` instead of a terminal helper (`qbm/http/src/qbm/http/routing/context.h:1480`, Huly QB-86). From that call the stream owns the completion: `complete()` is ignored while it is open, and the stream completes the context at `end()`, at `abort()` or when it is dropped, so the handler never calls `complete()` itself and may hand the stream on and return. The handler owns the stream, and a stream dropped before `end()` closes the connection (a 500 when buffered). For a response that cannot be streamed, or on a session without the streaming hooks, the same calls gather the body and send it whole at `end()`. `is_streaming()` says the head already left at `begin_stream()` (`qbm/http/src/qbm/http/routing/context.h:1557`), and `streamed_bytes()` what the stream handed to the session, once it ended (`qbm/http/src/qbm/http/routing/context.h:1571`). Backpressure, framing, `HEAD` and cancellation are in [Advanced topics](./16-advanced-topics.md).
+A handler that writes its body piece by piece calls `ctx->begin_stream()` instead of a terminal helper (`qbm/http/src/qbm/http/routing/context.h:1519`, Huly QB-86). From that call the stream owns the completion: `complete()` is ignored while it is open, and the stream completes the context at `end()`, at `abort()` or when it is dropped, so the handler never calls `complete()` itself and may hand the stream on and return. The handler owns the stream, and a stream dropped before `end()` closes the connection (a 500 when buffered). For a response that cannot be streamed, or on a session without the streaming hooks, the same calls gather the body and send it whole at `end()`. `is_streaming()` says the head already left at `begin_stream()` (`qbm/http/src/qbm/http/routing/context.h:1596`), and `streamed_bytes()` what the stream handed to the session, once it ended (`qbm/http/src/qbm/http/routing/context.h:1610`). Backpressure, framing, `HEAD` and cancellation are in [Advanced topics](./16-advanced-topics.md).
 
 ## Cancellation
 
@@ -248,13 +248,13 @@ A handler that writes its body piece by piece calls `ctx->begin_stream()` instea
 void cancel(const std::string& reason = "Cancelled by application") noexcept;
 ```
 
-It sets the sticky cancellation flag, records the reason, calls `cancel()` on the in-flight task (so it can release pending I/O), sets the response to **503 Service Unavailable**, and completes with `CANCELLED`. A streamed response is the exception to the status: its head already left at `begin_stream()`, so it keeps the status the peer received, and its connection closes, since the message can no longer be completed. It is a no-op if the context is already cancelled or finalized. Query it with:
+It sets the sticky cancellation flag, records the reason, calls `cancel()` on the in-flight task (so it can release pending I/O), sets the response to **503 Service Unavailable**, and completes with `CANCELLED`. A streamed response is the exception to the status: its head already left at `begin_stream()`, so it keeps the status the peer received, and its connection closes, since the message can no longer be completed. A context whose stream was begun but whose head never left -- a buffered stream, or one a `PRE_RESPONSE_SEND` hook cancelled inside `begin_stream()` -- answers its 503 with no body, and without the representation headers the head declared (`Content-Type`, `Content-Length`, `Transfer-Encoding`, `Content-Encoding`, `Content-Range`, `Content-Language`, `Content-Location`, `Content-Disposition`, `ETag`, `Last-Modified`, `Cache-Control`, `Expires`), whether it was cancelled through `cancel()` or `complete(CANCELLED)` (Huly QB-101): those headers describe a body the 503 does not carry. It is applied once, at the first cancellation, and not to a buffered stream that already ended, whose answer is decided: what a middleware writes after `next()` on the cancelled request is kept. It is a no-op if the context is already cancelled or finalized. Query it with:
 
 - `is_cancelled()` — `true` once `cancel()` has run (sticky; never clears).
 - `cancellation_reason()` — `std::optional<std::string>` with the reason, if one was given.
 
 For conditional middleware, the context notifies the child selected for this request, including a pending leaf inside nested conditionals. Selection belongs to the context, so two requests may select different children on the same conditional instance. The `IMiddleware::cancel()` interface has no context argument: it is a notification to that instance, not a guarantee that a shared user middleware can identify or preempt one particular native operation. Async callbacks still check `is_cancelled()` before proceeding.
-<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1368-1407; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
+<!-- src: qbm/http/src/qbm/http/middleware/conditional.h:87-111; qbm/http/src/qbm/http/routing/context.h:1407-1446; qbm/http/src/qbm/http/routing/middleware.h:58-61 -->
 
 The asymmetry to remember: a **handler or middleware** signals failure with `complete(AsyncTaskResult::ERROR)`; a task's own **`cancel()` override must not call `complete()`** — the context owns the cancellation-and-finalization sequence, and a second completion would double-finalize. For async work, check `is_cancelled()` in your completion callback before doing anything further; if it's set, clean up and return — the context is already finalizing.
 
@@ -268,7 +268,7 @@ qb::io::async::defer([ctx]() {
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1368-1428; qbm/http/src/qbm/http/routing/async_task.h:67-79 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1407-1467; qbm/http/src/qbm/http/routing/async_task.h:67-79 -->
 
 ## Lifecycle hooks
 
@@ -310,7 +310,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,334,575,789-813; qbm/http/src/qbm/http/routing/router_core.h:379-386,485; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:125-180,501-532 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,362,603,817-841; qbm/http/src/qbm/http/routing/router_core.h:379-386,485; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:125-180,501-532 -->
 
 ## Lifecycle in order
 
@@ -331,13 +331,13 @@ When a route is not matched, or a task returns `ERROR`, the same machinery runs 
 
 A `PRE_HANDLER_EXECUTION` hook that completes or cancels the context owns that outcome; the router does not restart the normal chain afterward. An asynchronous error chain selected by the hook remains in flight. Calling `complete(CONTINUE)` at this hook point is terminal for the normal route, as before; use the hook as an observer when you intend the route chain to run normally.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:92-111, 244-334, 552-575; qbm/http/src/qbm/http/routing/router_core.h:323-360, 485; qbm/http/src/qbm/http/routing/router.h:361-377 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:92-111, 244-362, 580-603; qbm/http/src/qbm/http/routing/router_core.h:323-360, 485; qbm/http/src/qbm/http/routing/router.h:361-377 -->
 
 ### Introspection (advanced)
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (the number of accepted `complete()` calls processed, including `CONTINUE`; ignored calls after finalization do not count). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1281-1297,1419-1450,1639-1679, 531 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1309-1325,1458-1489,1678-1718, 559 -->
 
 ## Pitfalls
 

@@ -100,7 +100,59 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ~60 ns a response on g++. The cells sit in `dev/bench/instrument-cases.txt`, not in the gate; three mutants per owner (the read
   not consumed, one request short, the read disarmed after the preflights) are refused.
 
+### Changed
+
+- **`StaticFilesMiddleware` streams a body over `StaticFilesOptions::stream_threshold` on HTTP/1.1: a download holds
+  the stream's high watermark and two 64 KiB pieces, not the file, so N concurrent downloads no longer cost N copies
+  of it (Huly QB-101).** Every request used to read the whole file, or the whole range, into the response, and the
+  session then held two more copies while it sent it: under 16 slow clients a 64 MiB file took the server's footprint
+  to 2,117 MiB (132 MiB a request), and a file over `max_file_size` (64 MiB by default) could not be served at all. A
+  body (the file, or the range asked for) of more than `stream_threshold` bytes -- 1 MiB by default,
+  `default_stream_high_watermark`; `with_stream_threshold()`, `0` streams every non-empty body, `SIZE_MAX` none -- now
+  goes through `Context::begin_stream()` (Huly QB-86) where the session is a `streaming_session` (the HTTP/1.1 and
+  HTTPS/1.1 server sessions): `internal::StaticFileStreamer` reads it in pieces of at most 64 KiB (half the high mark
+  at most) and reads the next one only while the connection's output is under the high watermark, waiting on
+  `on_drain()`; after a turn's worth of pieces that did not fill the output (a session that is disconnecting takes
+  writes it drops) it gives the turn back, so the disconnection reaches the stream before the file is read through.
+  The same 16 downloads now peak at 43 MiB (2.6 MiB a request) in the same 2.5 s, every body checked byte for byte;
+  with clients that read as fast as they can, 41.5 MiB against 2,117 MiB, in 1.31 s against 1.53 s; and 16 downloads
+  of a 512 MiB file, which the base refused, peak at 56 MiB. The answer is the one a buffered response gives -- status,
+  `Content-Length`, `Content-Range`, `ETag`, `Last-Modified`, `Accept-Ranges`, `Cache-Control`, bytes -- for a full
+  GET, a range, a suffix and an open range, `If-None-Match`, `If-Modified-Since`, `If-Range`, an unsatisfiable or a
+  multiple range and `HEAD`, which a test compares against the same server with streaming off; `HEAD`, `304` and `416`
+  never stream. What changes, and is documented in `readme/08`: `max_file_size` bounds a body read whole only, so a
+  streamed body is served whatever its size and a `HEAD` or a range of a file over the cap gets what its `GET` would
+  (`200`, `206`, `416`, not `413`); a streamed body is not compressed (`PRE_RESPONSE_SEND` hooks see an empty body:
+  raise the threshold to keep compressing larger text assets); a file that fails or shrinks after the head has left
+  closes the connection short of its declared length; a download keeps its file open until its last byte. A
+  `PRE_RESPONSE_SEND` hook that leaves a head a stream cannot carry gets the body read whole, under the cap, and over
+  it the 413 a buffered server gives; one that answers a status without a body leaves the file unread -- it used to be
+  read, and the serializer then refused the 304 it carried. HTTP/2 and HTTP/3 read every body whole, under
+  `max_file_size`, as before: their sessions offer no streaming hooks yet. No `sendfile()`: it would bypass the
+  session's output buffer, cannot serve TLS, and qb-io's transports do not offer it. The whole-read path's seek and
+  read failures answer their 500 without the length and range they no longer describe (the serializer refused the
+  pair, and the connection dropped with no answer). Small files take the path they always took: an A/B against the base (three byte-identical copies a side, seeded order, a drained host) puts loopback GETs of a 16 B to 1 MiB file and the middleware benchmark's GET, HEAD, range and `304` cells within 2 % of the base, inside the spread between identical copies, and serves a 4 MiB file, now streamed, 20 % faster. Proven by
+  `qbm-http-test-system-static-files-stream` (21 cases over a raw loopback client, one over TLS: every byte, the
+  output bound under a client that does not read, the differential against a buffered server, the cap, a peer that
+  leaves, a file that shrinks, a session that drops what it is given, HTTP/1.0, pipelining, chunked framing, every
+  hook case, compression), a case each in `qbm-http-test-system-http2-client` and
+  `qbm-http-test-system-http3-loopback` (the buffered path, the cap still enforced) and two in
+  `qbm-http-test-unit-middleware-static-files`; 11 of the first 13 fail on the base. 44 mutants on the final code: 38 caught, 6 equivalent or unreachable, each explained in the commit.
+
 ### Fixed
+
+- **A cancelled context whose stream was begun but whose head never left answers a well-formed 503: no body, and none
+  of the representation headers that head declared (Huly QB-101).** A buffered stream (HTTP/2, HTTP/3, HTTP/1.0
+  without a length, a head with two framings) cancelled before `end()`, or a stream a `PRE_RESPONSE_SEND` hook
+  cancelled inside `begin_stream()` -- through `cancel()` or `complete(CANCELLED)` -- kept the `Content-Length` the
+  handler had declared with an empty or partial body: on HTTP/1.1 the client waited for bytes that never came and read
+  the next answer as them, or the serializer refused the pair and dropped the connection; on HTTP/2 the response was
+  malformed. Its 503 now drops `Content-Type`, `Content-Length`, `Transfer-Encoding`, `Content-Encoding`,
+  `Content-Range`, `ETag`, `Last-Modified` and `Cache-Control` with the body, at the first cancellation: what a
+  middleware writes after `next()` on the cancelled request is kept, and an answer already decided (a buffered stream
+  that ended) is left alone. `qbm-http-test-system-response-stream`, `qbm-http-test-system-http2-client` and
+  `qbm-http-test-system-static-files-stream` hold each header, the body, the order against a middleware's own answer
+  and the decided answer.
 
 - **A request's `Cookie` header is read as a browser sends it: pairs split on `;` alone, a malformed pair dropped
   instead of the header, so a cookie another host plants can no longer replace, hide or wipe a prefixed one (Huly

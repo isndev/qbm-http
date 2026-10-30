@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <chrono>
@@ -26,7 +27,8 @@
 #include <system_error> // For std::error_code
 #include <vector>
 
-#include <qb/io/system/file.h> // qb::io::sys::resolve_resource (working-dir-independent root)
+#include <qb/io/async/listener.h> // qb::io::async::defer (a streamed file gives a turn back, Huly QB-101)
+#include <qb/io/system/file.h>    // qb::io::sys::resolve_resource (working-dir-independent root)
 #include <qb/system/container/unordered_map.h>
 #include "../date.h"
 #include "../request.h"
@@ -56,8 +58,23 @@ public:
     /// Maximum file size (in bytes) eligible for full-body materialisation.
     /// Requests that would allocate more than this are refused with
     /// `413 Payload Too Large`. Defaults to 64 MiB; set to `0` to disable
-    /// the cap (not recommended for production). See F44.
+    /// the cap (not recommended for production). See F44. A body that
+    /// streams (`stream_threshold`) is not materialised, and this cap
+    /// does not apply to it.
     std::size_t max_file_size = 64ULL * 1024 * 1024;
+    /// A body (the whole file, or the range asked for) of MORE than this
+    /// many bytes is streamed where the session can stream the response
+    /// (HTTP/1.1, Huly QB-101): read and written in pieces of at most
+    /// 64 KiB as the connection drains, so a download holds less than the
+    /// stream's high watermark (1 MiB by default) and a piece in the
+    /// session's output, and a piece of its own, whatever the file's
+    /// size. A body of at most this many bytes, and every body on a
+    /// session that cannot stream (HTTP/2, HTTP/3), is read whole into
+    /// the response, as before: `max_file_size` bounds it, and the
+    /// `PRE_RESPONSE_SEND` hooks (compression) see it -- a streamed body
+    /// leaves uncompressed. Defaults to 1 MiB, the default high
+    /// watermark; `0` streams every non-empty body, `SIZE_MAX` none.
+    std::size_t stream_threshold = default_stream_high_watermark;
     /// If `true`, requests whose final path component is a symbolic link
     /// are rejected with `403 Forbidden`, even when the link resolves
     /// inside the root directory. Matches `O_NOFOLLOW` semantics for
@@ -147,6 +164,13 @@ public:
     StaticFilesOptions &
     with_max_file_size(std::size_t bytes) noexcept {
         max_file_size = bytes;
+        return *this;
+    }
+
+    /// Fluent setter for `stream_threshold`. See the member for semantics.
+    StaticFilesOptions &
+    with_stream_threshold(std::size_t bytes) noexcept {
+        stream_threshold = bytes;
         return *this;
     }
 
@@ -306,6 +330,98 @@ std::string get_mime_type_for_file(const std::filesystem::path &file_path, const
  */
 std::string generate_directory_listing_html(const std::filesystem::path &directory_path, std::string_view request_uri_path,
                                             const StaticFilesOptions &opts);
+
+/// The largest piece a streamed file is read and written in (Huly QB-101).
+inline constexpr std::size_t static_file_stream_piece = std::size_t{64} * 1024;
+
+/**
+ * @brief Feeds a file's bytes to a streamed response, a piece at a time, as the session's output drains (Huly QB-101).
+ *
+ * It owns the stream and the open file, positioned at the first byte to send. While it waits it is owned by the
+ * `on_drain()` callback it registered, which the stream runs or releases on every way out: drained, ended,
+ * cancelled, its session destroyed. A piece is read only while the output is under the high watermark, so a
+ * download holds less than the watermark and a piece in the session's output (and the piece's chunk framing, when
+ * a hook made the body chunked), and one piece of its own, whatever the file's size; a piece is at most half the
+ * mark, so it always fits a drained output, chunked or not. The head
+ * left at `begin_stream()`: a file that fails or comes up short under the read can no longer be answered, and the
+ * stream is aborted -- the connection closes rather than deliver a short body under its Content-Length.
+ *
+ * One turn writes at most the pieces that take a drained output to the mark, and one more: a session that takes
+ * pieces without queuing them -- it is disconnecting, its io drops what it is given until it is disposed -- would
+ * otherwise have the whole file read in one turn, and the request end as if delivered. The producer then gives the
+ * turn back (`qb::io::async::defer`, after the turn's I/O events), so the disconnection reaches the stream first.
+ */
+template <typename SessionType>
+class StaticFileStreamer : public std::enable_shared_from_this<StaticFileStreamer<SessionType>> {
+public:
+    using stream_type = ResponseStream<SessionType>;
+
+    StaticFileStreamer(std::shared_ptr<stream_type> stream, std::ifstream file, std::uintmax_t length)
+        : _stream(std::move(stream))
+        , _file(std::move(file))
+        , _left(length)
+        , _piece_size(static_cast<std::size_t>(
+              std::min<std::uintmax_t>(length, std::min(static_file_stream_piece, std::max<std::size_t>(1, _stream->high_watermark() / 2)))))
+        , _turn_budget((_stream->high_watermark() + _piece_size - 1) / _piece_size + 1)
+        , _piece(new char[_piece_size]) {}
+
+    /// Write what the output has room for; end the stream after the last byte, or wait for a drain.
+    void
+    run() {
+        std::size_t taken = 0;
+        while (!_stream->cancelled() && !_stream->ended()) {
+            if (_held == 0) {
+                if (_left == 0) {
+                    _stream->end();
+                    return;
+                }
+                if (_stream->needs_drain()) {
+                    wait_for_drain();
+                    return;
+                }
+                if (taken == _turn_budget) { // the output did not fill: the session is not queuing what it takes
+                    qb::io::async::defer([self = this->shared_from_this()] { self->run(); });
+                    return;
+                }
+                const auto n = static_cast<std::size_t>(std::min<std::uintmax_t>(_left, _piece_size));
+                if (!_file.read(_piece.get(), static_cast<std::streamsize>(n))) {
+                    _stream->abort();
+                    return;
+                }
+                _held = n;
+                _left -= n;
+            }
+            switch (_stream->write(_piece.get(), _held)) {
+                case stream_type::write_result::taken:
+                    _held = 0;
+                    ++taken;
+                    break;
+                case stream_type::write_result::wait:
+                    wait_for_drain(); // the piece stays held: after a drain it always fits
+                    return;
+                case stream_type::write_result::too_large: // a piece of half the mark fits a drained output: never
+                    _stream->abort();
+                    return;
+                case stream_type::write_result::closed: // the peer, the context or the stream is over
+                    return;
+            }
+        }
+    }
+
+private:
+    void
+    wait_for_drain() {
+        _stream->on_drain([self = this->shared_from_this()] { self->run(); });
+    }
+
+    std::shared_ptr<stream_type> _stream;
+    std::ifstream                _file;
+    std::uintmax_t               _left; ///< bytes still to read from the file
+    std::size_t                  _piece_size;
+    std::size_t                  _turn_budget; ///< pieces one turn may write: a drained output's fill to the mark, and one
+    std::unique_ptr<char[]>      _piece;
+    std::size_t                  _held = 0; ///< bytes read and not yet taken by the stream
+};
 } // namespace internal
 
 /**
@@ -667,9 +783,17 @@ public:
         long long full_file_size = static_cast<long long>(file_stream.tellg());
         file_stream.seekg(0, std::ios::beg);
 
+        // A body of more than stream_threshold bytes streams where the session can stream it (Huly QB-101): it is
+        // never materialised, so max_file_size does not bound it. HEAD reads the same verdict as the GET it mirrors.
+        // The session is asked only for a body over the threshold: a small one costs a comparison.
+        const auto streams = [&](long long length) {
+            return length >= 0 && static_cast<unsigned long long>(length) > _options.stream_threshold && session_can_stream(*ctx);
+        };
+
         // F44 DoS guard: refuse full-body materialisation above the
         // configured budget. Zero means "unlimited" and is opt-in.
-        if (_options.max_file_size != 0 && full_file_size >= 0 && static_cast<unsigned long long>(full_file_size) > _options.max_file_size) {
+        if (_options.max_file_size != 0 && full_file_size >= 0 && static_cast<unsigned long long>(full_file_size) > _options.max_file_size
+            && !streams(full_file_size)) {
             send_error_response(ctx, qb::http::status::PAYLOAD_TOO_LARGE, "File exceeds configured max_file_size");
             return;
         }
@@ -703,7 +827,7 @@ public:
                     // F44 DoS guard: even for ranges, bound the single
                     // allocation under `max_file_size`.
                     if (_options.max_file_size != 0 && length_to_read >= 0
-                        && static_cast<unsigned long long>(length_to_read) > _options.max_file_size) {
+                        && static_cast<unsigned long long>(length_to_read) > _options.max_file_size && !streams(length_to_read)) {
                         send_error_response(ctx, qb::http::status::PAYLOAD_TOO_LARGE, "Range exceeds configured max_file_size");
                         return;
                     }
@@ -769,24 +893,25 @@ public:
         if (is_range_request) {
             file_stream.seekg(offset, std::ios::beg);
             if (file_stream.fail()) {
-                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error seeking in file for range request");
+                // The head is set: its length and range would describe a body this answer does not carry.
+                replace_body_with_error(ctx->response(), qb::http::status::INTERNAL_SERVER_ERROR, "Error seeking in file for range request");
+                ctx->complete(AsyncTaskResult::COMPLETE);
                 return;
             }
         }
 
-        // Efficiently read file to response body's underlying pipe
-        auto &response_body_pipe = ctx->response().body().raw();
-        response_body_pipe.clear(); // Ensure it's empty
+        if (streams(length_to_read)) {
+            serve_streamed(ctx, std::move(file_stream), static_cast<std::uintmax_t>(length_to_read));
+            return;
+        }
 
-        if (length_to_read > 0) {
-            response_body_pipe.allocate_back(static_cast<size_t>(length_to_read));
-            // Read exactly length_to_read bytes
-            if (!file_stream.read(response_body_pipe.begin(), length_to_read)) {
-                // Error reading file or read less than expected (should not happen if size checks were correct)
-                response_body_pipe.clear();
-                send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Error reading file content for range/full");
-                return;
-            }
+        // Efficiently read file to response body's underlying pipe
+        if (!read_into_body(ctx->response(), file_stream, length_to_read)) {
+            // The file failed or came up short under the read (it shrank since it was measured): the head is set, and
+            // its length and range would describe a body this answer does not carry.
+            replace_body_with_error(ctx->response(), qb::http::status::INTERNAL_SERVER_ERROR, "Error reading file content for range/full");
+            ctx->complete(AsyncTaskResult::COMPLETE);
+            return;
         }
 
         ctx->complete(AsyncTaskResult::COMPLETE);
@@ -799,12 +924,103 @@ public:
 
     void
     cancel() override {
-        // No specific cancellation for synchronous file I/O
+        // Nothing to stop here: a body read whole is read synchronously, and a streamed one stops at its stream, which
+        // the context's cancellation reaches (Huly QB-101).
     }
 
 private:
     StaticFilesOptions _options;
     std::string        _name;
+
+    /// Whether the session could stream the response to `ctx` now (Huly QB-101): it offers the streaming hooks
+    /// (HTTP/1.1) and answers this context. The same question `begin_stream()` asks first.
+    [[nodiscard]] static bool
+    session_can_stream([[maybe_unused]] Context<SessionType> &ctx) {
+        if constexpr (streaming_session<SessionType>) {
+            const auto session = ctx.session();
+            return session && session->stream_can_answer(ctx);
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * @brief Serve a body of `length` bytes from `file` (positioned at its first byte) through a stream (Huly QB-101).
+     * @details The head leaves at `begin_stream()`, the file follows as the connection drains. The head may be one a
+     *          stream cannot carry -- a `PRE_RESPONSE_SEND` hook set a status without a body, dropped the length of
+     *          an HTTP/1.0 answer, added a framing header; an earlier middleware set a `Transfer-Encoding`: the stream
+     *          is then buffered, and the body is read whole after all (`read_whole_under_cap()`).
+     */
+    void
+    serve_streamed([[maybe_unused]] ContextPtr const &ctx, [[maybe_unused]] std::ifstream file, [[maybe_unused]] std::uintmax_t length) {
+        if constexpr (streaming_session<SessionType>) {
+            ctx->response().body().clear(); // the file is the body: one an earlier middleware left would lead the stream
+            auto stream = ctx->begin_stream();
+            if (!stream) {
+                // Refused. A hook ended the request, or an earlier middleware completed it and still called next(): a
+                // live request whose answer no other stream owns is read whole, as it was before streaming.
+                if (!ctx->is_cancelled() && !ctx->is_completed() && !ctx->stream()) {
+                    read_whole_under_cap(ctx->response(), file, length);
+                    ctx->complete(AsyncTaskResult::COMPLETE);
+                }
+                return;
+            }
+            if (stream->framing() == stream_framing::buffered) {
+                read_whole_under_cap(ctx->response(), file, length);
+                stream->end(); // buffered: the response leaves whole, through the ordinary completion
+                return;
+            }
+            std::make_shared<internal::StaticFileStreamer<SessionType>>(std::move(stream), std::move(file), length)->run();
+        }
+    }
+
+    /// The body of an answer the session sends whole although it was meant to stream -- a hook made the stream
+    /// buffered, or `begin_stream()` refused it: read whole, under the bound of every body read whole. For a status a
+    /// hook made bodiless it is not read, and the file's length, type and range go with it, as the middleware's own
+    /// 304 drops them -- a later cancellation would otherwise answer 503 under the file's length.
+    void
+    read_whole_under_cap(Response &response, std::ifstream &file, std::uintmax_t length) const {
+        if (detail::status_carries_no_body(static_cast<int>(response.status().code()))) {
+            response.remove_header("Content-Length");
+            response.remove_header("Content-Type");
+            response.remove_header("Content-Range");
+            return;
+        }
+        if (_options.max_file_size != 0 && length > _options.max_file_size)
+            replace_body_with_error(response, qb::http::status::PAYLOAD_TOO_LARGE, "File exceeds configured max_file_size");
+        else if (!read_into_body(response, file, static_cast<long long>(length)))
+            replace_body_with_error(response, qb::http::status::INTERNAL_SERVER_ERROR, "Error reading file content for range/full");
+    }
+
+    /// Read `length` bytes of `file` into the response body; `false`, the body cleared, when the file cannot give them.
+    [[nodiscard]] static bool
+    read_into_body(Response &response, std::ifstream &file, long long length) {
+        auto &pipe = response.body().raw();
+        pipe.clear();
+        if (length > 0) {
+            pipe.allocate_back(static_cast<size_t>(length));
+            if (!file.read(pipe.begin(), length)) {
+                pipe.clear();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// An error answer in place of a body whose head was already set: the headers set after the size checks -- the
+    /// framing, the range, the caching policy -- and a framing or coding a hook added are dropped, so the answer is
+    /// the one those checks give.
+    static void
+    replace_body_with_error(Response &response, qb::http::status status, std::string_view message) {
+        response.status() = status;
+        response.remove_header("Content-Length");
+        response.remove_header("Transfer-Encoding");
+        response.remove_header("Content-Encoding");
+        response.remove_header("Content-Range");
+        response.remove_header("Cache-Control");
+        response.set_header("Content-Type", "text/plain; charset=utf-8");
+        response.body() = std::string(message);
+    }
 
     void
     send_error_response(ContextPtr ctx, qb::http::status status, const std::string &message) {
