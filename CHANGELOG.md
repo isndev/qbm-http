@@ -568,6 +568,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `is_forbidden_h3_header()` calls 2,672 to 225, the HTTP/2 server's `send_response()` -4,715 and the HTTP/2 client's
   response receipt -2,681 per response. No behaviour changes.
 
+- **The HTTP/3 server sends a response's `host` field, as HTTP/1.1 and HTTP/2 send it (Huly QB-1189).** QB-1189 made
+  the HTTP/2 server send it -- `host` is no connection-specific field (RFC 9113 §8.2.2, RFC 9114 §4.2) and a response
+  names no authority -- while HTTP/3's `detail::add_regular_headers()` dropped every `host` it would send, a request's
+  and a response's alike. A response's is sent now, and the HTTP/3 client delivers it; a request's is still left out
+  (`:authority` names the authority). Tests: the response field block, and a response through the direct
+  client/server pair.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

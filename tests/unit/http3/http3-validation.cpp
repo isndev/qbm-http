@@ -531,6 +531,19 @@ TEST(Http3ProtocolValidationTest, MakeResponseHeadersPutsStatusFirst) {
     EXPECT_EQ(block->storage[0].second, "200");
 }
 
+// A response's `host` is sent, as HTTP/1.1 and HTTP/2 send it (Huly QB-1189): it is no connection-specific field (RFC
+// 9114 section 4.2) and names no authority. It was dropped, as a request's is -- which stays.
+TEST(Http3ProtocolValidationTest, MakeResponseHeadersSendsAHostField) {
+    qb::http::Response res;
+    res.status() = qb::http::status::OK;
+    res.set_header("Host", "example.test");
+    const auto block = h3detail::make_response_headers(res);
+    ASSERT_TRUE(block.has_value());
+    ASSERT_EQ(field_count(*block, "host"), 1u);
+    const auto host = std::find_if(block->storage.begin(), block->storage.end(), [](const auto &f) { return f.first == "host"; });
+    EXPECT_EQ(host->second, "example.test");
+}
+
 TEST(Http3ProtocolValidationTest, MakeResponseHeadersSynthesizesContentLengthForBody) {
     qb::http::Response res;
     res.status() = qb::http::status::OK;

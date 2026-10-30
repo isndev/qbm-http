@@ -1037,7 +1037,7 @@ TEST(HTTP2ServerProtocol, SendResponseForbiddenHeaderIsStreamError) {
 }
 
 // `host` is no connection-specific field (RFC 9113 section 8.2.2): a response carrying one is sent with it, as
-// HTTP/1.1 sends it (HTTP/3 drops every `host` field it would send). It was a stream error, the response lost
+// HTTP/1.1 and HTTP/3 send it. It was a stream error, the response lost
 // (Huly QB-1189).
 TEST(HTTP2ServerProtocol, SendResponseWithAHostFieldSendsIt) {
     Http2FakeIO    io;

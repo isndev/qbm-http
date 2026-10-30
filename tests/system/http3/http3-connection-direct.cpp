@@ -734,6 +734,29 @@ TEST(Http3ConnectionDirect, AFieldValueWithWhitespaceAtAnEndNeverReachesTheServe
 }
 
 /**
+ * @test A response's `host` crosses (Huly QB-1189)
+ * @brief The server sends a response's `host` field, as HTTP/1.1 and HTTP/2 send it, and the client delivers it: it is no
+ *        connection-specific field (RFC 9114 section 4.2) and names no authority. The HTTP/3 server dropped it.
+ */
+TEST(Http3ConnectionDirect, AResponseHostFieldReachesTheClient) {
+    Pair pair;
+
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/x")};
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.set_header("Host", "example.test");
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+    EXPECT_EQ(pair.client_owner.responses.front().header("host"), "example.test");
+    EXPECT_FALSE(pair.client_owner.close.has_value());
+}
+
+/**
  * @test submit_response rejects a forbidden response header
  * @brief transfer-encoding is forbidden in HTTP/3; make_response_headers returns nullopt so
  *        submit_response returns false (server side) and the client never receives a response.

@@ -392,7 +392,7 @@ request_target(qb::io::uri const &uri) {
  *               added (Huly QB-1073).
  * @return @c false (leaving @p block partially populated) when the field-count limit is passed, a field name or
  *         value passes @c MAX_HEADER_NAME_LENGTH or @c MAX_HEADER_VALUE_LENGTH, or a response carries a forbidden
- *         field -- a connection-specific one, a @c te -- or an invalid field (its @c host is dropped); @c true on
+ *         field -- a connection-specific one, a @c te -- or an invalid field (its @c host is sent); @c true on
  *         success. A request's fields leave as the HTTP/2 client's do: those
  *         qb::protocol::http2::HeaderValidator::is_sent_request_field() keeps, less the fields its @c connection
  *         header names (qb::protocol::http2::connection_nominated_fields()); a field either rule leaves out is
@@ -436,9 +436,8 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
             if (name.empty() || name.front() == ':' || is_forbidden_h3_header(name)) {
                 return false;
             }
-            if (name == "host") {
-                continue;
-            }
+            // A response's `host` is sent, as HTTP/1.1 and HTTP/2 send it: no connection-specific field (RFC 9114 §4.2),
+            // and no authority a response names. It was dropped, as a request's is (Huly QB-1189).
             if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), name) != trailers->moved.end()) {
                 continue; // in the trailer section
             }
