@@ -617,6 +617,32 @@ TEST(Http3ConnectionDirect, SubmitRequestRejectsForbiddenHeader) {
 }
 
 /**
+ * @test A `te` field other than `trailers` is never submitted (Huly QB-1191)
+ * @brief RFC 9114 section 4.2: a request carries `te` as `trailers` alone. `te: gzip` was submitted, and the peer's
+ *        nghttp3 took it for a malformed message -- a connection error, every stream with it. It is refused before
+ *        anything is queued; `te: trailers` crosses, and the connection serves the next request.
+ */
+TEST(Http3ConnectionDirect, ATeFieldOtherThanTrailersIsNeverSubmitted) {
+    Pair pair;
+
+    qb::http::Request gzip{qb::http::method::GET, qb::io::uri("https://example.test/gzip")};
+    gzip.set_header("TE", "gzip");
+    EXPECT_FALSE(pair.client.submit_request(0, gzip));
+    pair.settle();
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_FALSE(pair.server_owner.close.has_value()) << "the peer closed the connection with " << pair.server_owner.close->first;
+
+    qb::http::Request trailers{qb::http::method::GET, qb::io::uri("https://example.test/trailers")};
+    trailers.set_header("TE", "trailers");
+    ASSERT_TRUE(pair.client.submit_request(4, trailers));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().uri().path(), "/trailers");
+    EXPECT_EQ(pair.server_owner.requests.front().header("te"), "trailers");
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+/**
  * @test submit_response rejects a forbidden response header
  * @brief transfer-encoding is forbidden in HTTP/3; make_response_headers returns nullopt so
  *        submit_response returns false (server side) and the client never receives a response.

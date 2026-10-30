@@ -147,6 +147,17 @@ HeaderValidator::is_valid_request_te_value(std::string_view value) noexcept {
 }
 
 bool
+HeaderValidator::is_sent_request_field(std::string_view name, std::string_view value) noexcept {
+    if (is_forbidden_header(name) || name == "host" || name == "content-length") {
+        return false;
+    }
+    if (name == "te" && !qb::http::utility::iequals(value, "trailers")) {
+        return false;
+    }
+    return is_valid_header_field(name, value);
+}
+
+bool
 HeaderValidator::is_valid_header_field(std::string_view name, std::string_view value) noexcept {
     if (name.empty()) {
         return false;

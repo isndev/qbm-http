@@ -241,6 +241,36 @@ All notable changes to the qbm-http module are documented here. The format is ba
   by qbm-http where nghttp3 lets it through, by either layer where nghttp3 refuses it first --; the field limits both
   ways, each malformed shape beside them a stream error; the validator.
 
+- **The HTTP/2 and HTTP/3 fields this module sends follow the rules its servers apply on receipt: a `PUSH_PROMISE`
+  promises a `GET` or a `HEAD` with a request's fields, the HTTP/2 client sends no `http2-settings`, and HTTP/3 sends
+  `te` only as `trailers`, in a request (Huly QB-1191).** Two HTTP/2 paths built a request header block with rules of
+  their own. `send_push_promise` copied the promised request's fields as they were: measured, a promise carried
+  `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`, `http2-settings`, `te: gzip`,
+  `content-length` and a `host` naming another authority than `:authority`, a promise the client must treat as malformed
+  (RFC 9113 §8.2.2, §8.3.1); a value with a CR failed the whole promise in the HPACK encoder; and a `POST`, a body, a
+  trailer section, any even stream id (a smaller, a reused one, one past 2^31-1), a push on a pushed stream and a push
+  after a `GOAWAY` were promised (§8.4, §5.1.1, §6.8). The client's own list lacked `http2-settings`, which a qbm-http
+  server answers with `RST_STREAM(PROTOCOL_ERROR)`, and it sent any list of `trailers` as `te` and the fields a
+  `connection` header names. Both now build the block with `append_sent_request_fields()`:
+  `HeaderValidator::is_sent_request_field()` -- no connection-specific field, `te` only as the one value `trailers`, no
+  `host` (`:authority` names the authority), no `content-length` but the one the client writes from the body, no field
+  HTTP/2 cannot carry -- less the fields the `connection` header names (RFC 9110 §7.6.1; `te` excepted); a field that
+  fails is dropped, as an intermediary translating an HTTP/1.1 message drops it. A promise is refused before a stream is
+  reserved: another method than `GET` or `HEAD`, a body, `trailers()` or a `trailer` header
+  (`INVALID_PROMISED_REQUEST`), an id not above every one promised before or past 2^31-1 (`INVALID_PROMISED_STREAM`), a
+  stream the client did not open (`INVALID_ASSOCIATED_STREAM`), any push once a `GOAWAY` was received or sent, the
+  shutdown notice included (`CONNECTION_INACTIVE`). The names were lowercase already: the headers map stores them
+  folded. On HTTP/3, `submit_request()` sent any `te` -- `te: gzip` made the peer's nghttp3 close the whole connection
+  (`H3_MESSAGE_ERROR`) -- and `submit_response()` sent one: a request now carries `te` only as `trailers` (any case, as
+  nghttp3 judges it), a response never, else the message is refused before anything is queued, as for the other
+  connection-specific fields. A field the `connection` header names still leaves in a request's trailer section (Huly
+  QB-1202). Push stays off by default. The client's field loop no longer copies and folds every name: a browser's
+  request through the HTTP/2 client measured 2.4 % faster, A/B against the base. HTTP/3's `te` test costs a response's
+  field block 1.5 % to 2.6 % (at most 17 ns) in a micro-benchmark; a whole HTTP/3 request served is within the noise
+  (-0.2 %). Tests: the client's emitted block for each left-out field, each request then served by a qbm-http server;
+  the push's emitted fields; every refused promise and the ordering of promised ids; HTTP/3 `te` on both sides, and on a
+  direct client/server pair the connection kept.
+
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
   outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over

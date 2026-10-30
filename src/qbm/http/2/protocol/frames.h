@@ -328,9 +328,9 @@ enum class PushPromiseFailureReason {
     PEER_CONCURRENCY_LIMIT_REACHED, ///< Sending would exceed client's MAX_CONCURRENT_STREAMS.
     INVALID_ASSOCIATED_STREAM,      ///< The client-initiated stream for association is invalid or in wrong state.
     INVALID_PROMISED_STREAM,        ///< The promised stream id is invalid for server push.
-    INVALID_PROMISED_REQUEST,       ///< The promised request cannot form valid HTTP/2 request pseudo-headers.
+    INVALID_PROMISED_REQUEST,       ///< No valid pseudo-headers, a method other than GET or HEAD, content or a trailer section.
     INTERNAL_HPACK_ERROR,           ///< HPACK encoding failed for push promise headers.
-    CONNECTION_INACTIVE,            ///< Connection is not active or protocol is not ok.
+    CONNECTION_INACTIVE,            ///< Connection is not active, protocol is not ok, or a GOAWAY was sent or received.
     INTERNAL_ERROR                  ///< An internal server error prevented sending the push promise.
     // Add other specific reasons as needed
 };

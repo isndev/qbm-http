@@ -281,6 +281,21 @@ public:
     [[nodiscard]] static bool is_valid_request_te_value(std::string_view value) noexcept;
 
     /**
+     * @brief Whether a regular field of a request this module sends -- a client's request, the promised request of
+     *        a PUSH_PROMISE -- goes on the wire, the rules the server applies on receipt (Huly QB-1191): not a
+     *        connection-specific field (is_forbidden_header, `http2-settings` included), `te` only as the one value
+     *        `trailers`, in any case (RFC 9113 §8.2.2: a sender writes no list, which the server tolerates on receipt
+     *        and nghttp2 does not), a name and a value HTTP/2 can carry (is_valid_header_field). `host` is left out
+     *        too: `:authority` names the authority (RFC 9113 §8.3.1). So is `content-length`, which the sender writes
+     *        from the body it sends -- a promised request has none (§8.4).
+     * @param name  Field name, lowercase as RFC 9113 §8.2.1 asks (a qb::http::Headers name is stored folded): an
+     *              uppercase name fails is_valid_header_field.
+     * @param value Field value.
+     * @return true when the field is sent.
+     */
+    [[nodiscard]] static bool is_sent_request_field(std::string_view name, std::string_view value) noexcept;
+
+    /**
      * @brief Check if header name is a pseudo-header
      * @param name Header name
      * @return true if it's a pseudo-header (starts with ':')
@@ -338,6 +353,59 @@ public:
      */
     static SettingsHelper::ValidationResult validate_response_pseudo_headers(const std::vector<qb::protocol::hpack::HeaderField> &headers);
 };
+
+/**
+ * @brief The fields a message's `connection` header names, connection-specific with it (RFC 9110 §7.6.1), lowercase,
+ *        `te` excepted -- HTTP/1.1 names it there, HTTP/2 judges it by its value; empty without the header, which a
+ *        message without one pays a lookup for (Huly QB-1191). They leave the header section; the trailer section is
+ *        sent as it is planned.
+ * @tparam Message `qb::http::Request`.
+ */
+template <typename Message>
+std::vector<std::string>
+connection_nominated_fields(const Message &message) {
+    std::vector<std::string> nominated;
+    if (const auto connection = message.headers().find("connection"); connection != message.headers().end()) [[unlikely]] {
+        for (const auto &value : connection->second) {
+            std::string_view rest{value};
+            while (!rest.empty()) {
+                const auto comma = rest.find(',');
+                const auto token = qb::http::utility::trim_http_whitespace(rest.substr(0, comma));
+                rest.remove_prefix(comma == std::string_view::npos ? rest.size() : comma + 1);
+                std::string name(token.size(), '\0');
+                std::transform(token.begin(), token.end(), name.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+                if (!name.empty() && name != "te") {
+                    nominated.push_back(std::move(name));
+                }
+            }
+        }
+    }
+    return nominated;
+}
+
+/**
+ * @brief Appends the regular fields of a request this module sends -- a client's request, the promised request of a
+ *        PUSH_PROMISE -- to @p out: those HeaderValidator::is_sent_request_field() keeps, less the fields its
+ *        `connection` header names (connection_nominated_fields). A field left out is dropped, as an intermediary
+ *        translating an HTTP/1.1 message to HTTP/2 removes it (RFC 9113 §8.2.2); the client and the push used two lists
+ *        of their own until Huly QB-1191.
+ * @tparam Message `qb::http::Request`.
+ */
+template <typename Message>
+void
+append_sent_request_fields(const Message &request, std::vector<qb::protocol::hpack::HeaderField> &out) {
+    const auto nominated = connection_nominated_fields(request);
+    for (const auto &[name, values] : request.headers()) {
+        if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) [[unlikely]] {
+            continue;
+        }
+        for (const auto &value : values) {
+            if (HeaderValidator::is_sent_request_field(name, value)) {
+                out.emplace_back(name, value);
+            }
+        }
+    }
+}
 
 /**
  * @brief A message's trailer section as HTTP/2 sends it: the fields of

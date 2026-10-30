@@ -2046,6 +2046,105 @@ TEST(HTTP2ClientProtocol, ARequestHostHeaderNeverLeavesAsAHostField) {
     }
 }
 
+// The regular fields a request sends are those the server accepts on receipt (append_sent_request_fields, Huly
+// QB-1191): a connection-specific field RFC 9113 section 8.2.2 names -- `http2-settings` left, and a qbm-http server
+// resets the stream that carries it --, a `te` other than the one value `trailers` (a list is what a sender must not
+// write, and nghttp2 refuses it), a `content-length` the client did not write from the body, a pseudo-header name, a
+// value HTTP/2 cannot carry are left out, whatever their case; the fields kept leave lowercase (section 8.2.1). Each
+// request then crosses a qbm-http server and is served.
+TEST(HTTP2ClientProtocol, ARequestSendsOnlyTheFieldsTheServerAccepts) {
+    const std::vector<std::pair<std::string, std::string>> left_out = {
+        {"HTTP2-Settings", "AAMAAABkAAQAAP__"},
+        {"http2-settings", "AAMAAABkAAQAAP__"},
+        {"Connection", "keep-alive"},
+        {"Proxy-Connection", "keep-alive"},
+        {"Keep-Alive", "timeout=5"},
+        {"Transfer-Encoding", "chunked"},
+        {"Upgrade", "h2c"},
+        {"TE", "gzip"},
+        {"TE", "trailers, trailers"},
+        {"TE", "trailers,"},
+        {"TE", " trailers"},
+        {"Content-Length", "99"},
+        {":protocol", "websocket"},
+        {"x-bad", "a\rb"},
+    };
+    for (const auto &[name, value] : left_out) {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        Http2PeerFakeIO                            server_io;
+        h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+        const std::size_t                          before = client_io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/r");
+        req.set_header(name, value);
+        req.set_header("X-Kept", "1");
+        ASSERT_TRUE(client.send_request(std::move(req), 1)) << name;
+
+        const auto blocks = sent_header_blocks(client_io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 1u) << name;
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+        EXPECT_EQ(blocks[0].count(lower), 0u) << name << " left the client";
+        EXPECT_EQ(blocks[0].value("x-kept"), "1") << "a field the server accepts leaves lowercase";
+        EXPECT_EQ(blocks[0].count("X-Kept"), 0u);
+
+        pump(server, server_io, client_io);
+        EXPECT_TRUE(server.ok()) << name;
+        EXPECT_EQ(server_io.request_count, 1) << name << ": the server refused the request";
+    }
+
+    // A field the `connection` header names is connection-specific with it (RFC 9110 section 7.6.1): left out, whatever
+    // its case -- `te` excepted, which HTTP/1.1 names there and HTTP/2 judges by its value.
+    {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        Http2PeerFakeIO                            server_io;
+        h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+        const std::size_t                          before = client_io.output.size();
+        qb::http::Request                          req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/r");
+        req.add_header("Connection", "X-Hop, te");
+        req.add_header("Connection", " x-other ,");
+        req.set_header("X-Hop", "1");
+        req.set_header("X-Other", "2");
+        req.set_header("TE", "trailers");
+        req.set_header("X-Kept", "3");
+        ASSERT_TRUE(client.send_request(std::move(req), 1));
+        const auto blocks = sent_header_blocks(client_io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 1u);
+        EXPECT_EQ(blocks[0].count("x-hop"), 0u);
+        EXPECT_EQ(blocks[0].count("x-other"), 0u);
+        EXPECT_EQ(blocks[0].count("connection"), 0u);
+        EXPECT_EQ(blocks[0].value("te"), "trailers");
+        EXPECT_EQ(blocks[0].value("x-kept"), "3");
+        pump(server, server_io, client_io);
+        EXPECT_EQ(server_io.request_count, 1);
+    }
+
+    // `te: trailers` is the one `te` a request carries; a second value it does not allow is left out alone.
+    Http2ClientFakeIO                          client_io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+    Http2PeerFakeIO                            server_io;
+    h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+    const std::size_t                          before = client_io.output.size();
+    qb::http::Request                          req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/r");
+    req.add_header("TE", "trailers");
+    req.add_header("TE", "gzip");
+    ASSERT_TRUE(client.send_request(std::move(req), 1));
+    const auto blocks = sent_header_blocks(client_io.output, 1, before);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(blocks[0].count("te"), 1u);
+    EXPECT_EQ(blocks[0].value("te"), "trailers");
+    pump(server, server_io, client_io);
+    EXPECT_EQ(server_io.request_count, 1);
+}
+
 // ===========================================================================
 // A request's trailers() leave in its trailer section once the body is out --
 // without send_request_trailers(), on a protocol that otherwise waits for it --
