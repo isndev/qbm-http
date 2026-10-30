@@ -530,7 +530,8 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 - HTTP/2 / HTTP/3 are TLS-only with ALPN; no plaintext h2c. HTTP/2 client `connect(nullptr)` for fire-and-forget.
 - The request limits are the server's `set_request_limits(qb::http::request_limits)` on HTTP/1.1, HTTP/2, HTTP/3 and
   the dual stack alike (0 = none; read live, so they apply to requests that arrive after the call; defaults the
-  `protocol_limits` constants -- a 100 MiB body, 64 MiB on h3; `set_max_body_size` sets the body alone). A request over
+  `protocol_limits` constants -- a 100 MiB body, 64 MiB on h3, which also bounds a field section at the 64 KiB it
+  advertises, Huly QB-1196; `set_max_body_size` sets the body alone). A request over
   one is answered before the handler runs, the same everywhere, once it is known well-formed -- a malformed one stays the
   stream error it is, whatever limit it also passes (Huly QB-1195, QB-1197): `414` target, `431` field name, value or a section's
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the

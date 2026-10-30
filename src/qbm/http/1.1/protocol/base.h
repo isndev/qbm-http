@@ -92,7 +92,8 @@ namespace qb::http {
  *          closes the connection after that answer, HTTP/2 resets the stream with NO_ERROR, HTTP/3 sends
  *          STOP_SENDING with H3_NO_ERROR. The defaults are `protocol_limits`' constants; the HTTP/3 server's
  *          body default is its own 64 MiB. Clients read responses under the defaults. HTTP/2 keeps its 1 MiB
- *          HPACK header-list cap (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`) under these.
+ *          HPACK header-list cap (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`) under these, HTTP/3 the 64 KiB
+ *          field section it advertises, a section past it answered 431 (Huly QB-1196).
  */
 struct request_limits {
     std::size_t max_url_length          = protocol_limits::MAX_URL_LENGTH;          ///< the request target, in bytes (414)

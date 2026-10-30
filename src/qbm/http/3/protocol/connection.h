@@ -73,6 +73,14 @@ namespace qb::protocol::http3 {
  */
 namespace detail {
 
+/// The largest field section a connection reads, the SETTINGS_MAX_FIELD_SECTION_SIZE it advertises (RFC 9114 §4.2.2).
+/// nghttp3 does not enforce it (nghttp3.h, `nghttp3_settings::max_field_section_size`): the connection does, a request's
+/// section past it answered 431 as a section over the request limits is, a response's refused (Huly QB-1196).
+inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
+
+/// What RFC 9114 §4.2.2 adds to a field's name and value when it counts the size of a field section.
+inline constexpr std::uint64_t field_line_overhead = 32;
+
 /**
  * @brief ASCII-lowercase a header name.
  * @param value Header name to fold.
@@ -603,6 +611,9 @@ private:
         /// as a field within them is; nghttp3 refuses a second one itself (1.18.0 measured), so one is kept at most
         /// (Huly QB-1197).
         bool content_length_over_limits = false;
+        /// The size of the section being read, as RFC 9114 §4.2.2 counts it, against detail::max_field_section_size
+        /// (Huly QB-1196).
+        std::uint64_t field_section_size = 0;
     };
 
     Owner                                                          &_owner;
@@ -917,6 +928,7 @@ private:
             st.path_over_limit            = false;
             st.host_fields_over_limits    = 0;
             st.content_length_over_limits = false;
+            st.field_section_size         = 0;
             return 0;
         });
     }
@@ -940,9 +952,15 @@ private:
             // line, whose `:path` has the target's limit below.
             const auto limits = me->request_limits_in_force();
             const bool pseudo = header_name.front() == ':';
+            // The section is bounded too: its size as RFC 9114 §4.2.2 counts it -- every field's name and value, and 32
+            // bytes -- against the SETTINGS_MAX_FIELD_SECTION_SIZE the connection advertises, which nghttp3 does not
+            // enforce (Huly QB-1196: 1.18.0 delivered sections of 72 KiB to 800 KiB, each field within the limits). A
+            // field past it is over the limits.
+            st.field_section_size += header_name.size() + header_value.size() + detail::field_line_overhead;
+            const bool section_over_limit = st.field_section_size > detail::max_field_section_size;
             if (!pseudo
                 && (++st.incoming_header_fields > limits.max_headers_count || header_name.size() > limits.max_header_name_length
-                    || header_value.size() > limits.max_header_value_length)) [[unlikely]] {
+                    || header_value.size() > limits.max_header_value_length || section_over_limit)) [[unlikely]] {
                 if (me->_role != role::server) {
                     me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a response over the limits: this stream
                     return 0;
@@ -964,6 +982,15 @@ private:
                         || (header_name == "content-length" && !std::exchange(st.content_length_over_limits, true))))
                     st.incoming_headers.add(std::move(header_name), std::move(header_value));
                 return 0;
+            }
+            if (section_over_limit) [[unlikely]] {
+                // A pseudo-header past it is read all the same -- they say whether the request is well-formed, and
+                // nghttp3 bounds each (a value at 64 KiB) -- and the section is answered 431.
+                if (me->_role != role::server) {
+                    me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a response over the limits: this stream
+                    return 0;
+                }
+                st.fields_over_limits = true;
             }
             if (header_name == ":path" && header_value.size() > limits.max_url_length) [[unlikely]] {
                 st.path_over_limit = true; // answered 414 at the end of the section, once it is known well-formed
@@ -1022,6 +1049,7 @@ private:
             st.incoming_headers       = {};
             st.incoming_header_fields = 0;
             st.fields_over_limits     = false;
+            st.field_section_size     = 0;
             return 0;
         });
     }
@@ -1064,6 +1092,12 @@ private:
             }
             if (!me->content_length_matches(st)) {
                 me->refuse_stream(id, st); // the body does not match content-length: this stream, not the connection
+                return 0;
+            }
+            if (me->_role == role::client && !st.response_headers_seen) {
+                // Only an informational response came: no response to hand over (nghttp3 1.18.0 closes the connection
+                // for this shape first; this module's own guard since its 1xx sections are dropped, Huly QB-1196).
+                me->refuse_stream(id, st);
                 return 0;
             }
             if (me->_role == role::server) {
@@ -1225,6 +1259,14 @@ private:
             if (!status) {
                 return false;
             }
+            if (*status < 200) {
+                // An informational response (1xx) is not the response: its fields go with it. They were added to the
+                // final response's, so that interim sections, each within the section bound, grew it without one
+                // (Huly QB-1196), and a 103's `link` read as the 200's.
+                st.response                = qb::http::Response{};
+                st.expected_content_length = std::nullopt;
+                return true;
+            }
             st.response.status()      = *status;
             st.response.major_version = 3;
             st.response.minor_version = 0;
@@ -1236,8 +1278,8 @@ private:
 
     bool
     materialize_trailers(stream_state &st) {
-        if (!st.main_headers_seen) {
-            return false;
+        if (!st.main_headers_seen || (_role == role::client && !st.response_headers_seen)) {
+            return false; // a trailer section after a 1xx alone ends no response (Huly QB-1196)
         }
         for (auto const &[name, value] : st.incoming_headers.storage) {
             if (detail::is_forbidden_h3_trailer(name)) {
@@ -1309,7 +1351,7 @@ public:
         nghttp3_settings settings;
         nghttp3_settings_default(&settings);
         settings.qpack_blocked_streams  = 32;
-        settings.max_field_section_size = 64 * 1024;
+        settings.max_field_section_size = detail::max_field_section_size; // enforced by recv_header_cb, not nghttp3
 
         const auto cb = callbacks();
         const auto rv = _role == role::server ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), _anchor.get())

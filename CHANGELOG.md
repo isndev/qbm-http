@@ -298,6 +298,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the `content-length` itself over the value or name limit or past the count, the trailer-section mismatch, the DATA
   overrun and its `WINDOW_UPDATE`, the well-formed controls answered `431`.
 
+- **An HTTP/3 field section is bounded by the 64 KiB the connection advertises -- nghttp3 does not enforce
+  `max_field_section_size` -- and a request whose section passes it is answered `431` (Huly QB-1196).** nghttp3.h
+  (1.18.0) says it does not, while `llm.api`, readme 19 and a test comment said a larger section was a connection error.
+  Measured: sections of 72 KiB, 160 KiB and 800 KiB, every field within the request limits, reached the server, and a
+  120 KB response section the client, whose informational (1xx) responses also added their fields to the final
+  response's. nghttp3 bounds one field -- a name at 256 bytes, a value at 64 KiB, by the length they decode to, a
+  Huffman-coded string at 8/5 of its encoded length (46811 bytes of `v` pass, 46812 do not) -- a connection error with
+  `H3_INTERNAL_ERROR`. The connection now counts every section as RFC 9114 §4.2.2 does -- each field's name and value
+  and 32 bytes, pseudo-headers included -- against `detail::max_field_section_size`, the value its SETTINGS carry: past
+  it a field is over the limits (judged, then dropped, the first `host` and one `content-length` kept), a pseudo-header
+  is kept, a request is answered `431` once known well-formed and a response's stream refused. Each section -- a trailer
+  section, an informational response's -- is counted on its own, and a 1xx response's fields go with it. The bound is
+  fixed, beside request limits a server sets (Huly QB-1203). Measured with QB-1191 and QB-1197, A/B against the base: an
+  HTTP/3 request's field block +0.3 % (the copies spread 1.6 %), a browser's request served -0.2 %. Tests: exactly 64
+  KiB served, a byte more answered `431` (through the client); a `:path` alone past it; a trailer section at and past
+  it; each malformed shape past it refused, each well-formed one answered; a response, its trailer section and an
+  interim section past it; three 103s and a 200 delivering the 200's fields alone.
+
 - **One request could terminate any qb HTTP/2 server: a `Cookie` header the parser refuses escaped the server's
   `noexcept` frame handlers (Huly QB-1174, security).** `dispatch_complete_request` called `parse_cookie_header()`
   outside the `try` that contains the application's exceptions, and `parse_cookies()` throws on a cookie name over

@@ -878,10 +878,12 @@ TEST(Http3ConnectionDirect, TooManyRequestHeaderFieldsAreAnswered431NotTheConnec
 
 /**
  * @test A field value over MAX_HEADER_VALUE_LENGTH is answered 431
- * @brief nghttp3 bounds the whole field section (the advertised 64 KiB) and checks the value's bytes,
- *        never one value's length below its own 64 KiB cap: the request limits are the only ones. (A
- *        NAME over this module's limit never gets here: nghttp3's QPACK decoder caps a name at 256 bytes
- *        and answers with a connection error first.) The request is answered 431 once its section ends
+ * @brief nghttp3 checks the value's bytes and caps one field with a connection error -- a value at 64 KiB and a
+ *        name at 256 bytes, bounded by the length they decode to, which for a Huffman-coded string it takes as 8/5 of
+ *        its encoded length (1.18.0 measured: 46811 'v' pass, 46812 do not; a Huffman name fails from 214 bytes) --,
+ *        never a value's length below that: the request limits, and the 64 KiB field section this module bounds itself
+ *        (nghttp3 does not, Huly QB-1196), are the only ones.
+ *        (A NAME over this module's limit never gets here.) The request is answered 431 once its section ends
  *        -- STOP_SENDING(H3_NO_ERROR), no reset, the connection kept (Huly QB-94; a reset until 3.3) --
  *        and the next request on the connection is served.
  */
@@ -1897,6 +1899,251 @@ TEST(Http3ConnectionDirect, AForbiddenFieldBesideTheLimitsRefusesTheStream) {
             expect_refused_unanswered(pair);
             EXPECT_FALSE(pair.server_owner.close.has_value()) << "the connection survives";
         }
+    }
+}
+
+namespace {
+
+/// The size RFC 9114 section 4.2.2 counts for @p fields: every name and value, and 32 bytes a field.
+std::uint64_t
+field_section_size(std::vector<std::pair<std::string, std::string>> const &fields) {
+    std::uint64_t size = 0;
+    for (auto const &[name, value] : fields)
+        size += name.size() + value.size() + 32;
+    return size;
+}
+
+/// request_fields() and ten 6000-byte fields, then one more that brings the section to @p size exactly -- each field
+/// within the default limits, the whole past nghttp3's reach: it does not enforce the 64 KiB it advertises.
+std::vector<std::pair<std::string, std::string>>
+section_of(std::uint64_t size, std::vector<std::pair<std::string, std::string>> fields = request_fields()) {
+    for (int i = 0; i < 10; ++i)
+        fields.emplace_back("x-" + std::to_string(i), std::string(6000, 'v'));
+    const auto filler = size - field_section_size(fields) - std::string("x-z").size() - 32;
+    fields.emplace_back("x-z", std::string(filler, 'v'));
+    EXPECT_EQ(field_section_size(fields), size);
+    return fields;
+}
+
+/// The request read raw on @p stream_id was answered -- its shape allows no answer but 431 -- then its read side
+/// stopped without an error, the connection kept.
+void
+expect_answered_raw(LimitedPair const &pair, std::uint64_t stream_id) {
+    // The answer's :status is no QPACK static-table entry, and its Huffman code is no shorter: it leaves as the text.
+    bool status_431 = false;
+    for (auto const &f : pair.server_owner.outbound)
+        status_431 = status_431 || (f.stream_id == stream_id && f.data.find("431") != std::string::npos);
+    EXPECT_TRUE(status_431) << "answered 431";
+    EXPECT_TRUE(pair.server_owner.requests.empty()) << "a refused request is never delivered";
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, stream_id)) << "answered, then asked to stop sending without an error";
+    EXPECT_FALSE(reset(pair.server_owner, stream_id)) << "answered, not refused";
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+}
+
+} // namespace
+
+// A field section is bounded by the 64 KiB the connection advertises as SETTINGS_MAX_FIELD_SECTION_SIZE, counted as RFC
+// 9114 section 4.2.2 counts it (Huly QB-1196): nghttp3 (1.18.0) does not enforce it, and sections of 72 KiB to 800 KiB,
+// every field within the request limits, were delivered. Exactly 64 KiB is served; a byte more is a section over the
+// limits -- answered 431 once the request is known well-formed, the fields past it dropped -- the header section as a
+// trailer section, a pseudo-header's bytes counted too.
+TEST(Http3ConnectionDirect, AFieldSectionPastTheAdvertisedSizeIsAnswered431) {
+    constexpr std::uint64_t advertised = 64 * 1024;
+    {
+        Pair pair;
+        pair.server.read_stream(0, h3_headers_frame(0, section_of(advertised)), true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "a section of exactly 64 KiB is served";
+        EXPECT_EQ(pair.server_owner.requests.front().header("x-z").size(), advertised - field_section_size(request_fields()) - 10 * 6035 - 35);
+    }
+    {
+        // Sent by the client, which writes the same four pseudo-headers: the 431 is decoded.
+        LimitedPair       pair{qb::http::request_limits{}};
+        qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/")};
+        for (auto const &[name, value] : section_of(advertised + 1))
+            if (name.front() != ':')
+                request.add_header(name, value);
+        pair.exchange(0, request);
+        EXPECT_TRUE(pair.server_owner.requests.empty()) << "a section of 64 KiB and a byte is refused";
+        expect_answered(pair, 0, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+    }
+    {
+        // A :path that alone passes the section, with no target limit: the pseudo-headers are read all the same, 431.
+        qb::http::request_limits limits;
+        limits.max_url_length = 0;
+        LimitedPair pair{limits};
+        auto        fields = request_fields("/" + std::string(65400, 'a'));
+        ASSERT_GT(field_section_size(fields), advertised);
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_answered_raw(pair, 0);
+    }
+    {
+        // A trailer section is bounded alike, its size its own.
+        LimitedPair pair{qb::http::request_limits{}};
+        auto        fields = request_fields("/upload");
+        fields[0].second   = "POST";
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        pair.server.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {})), true);
+        expect_answered_raw(pair, 0);
+
+        pair.server.read_stream(4, h3_headers_frame(4, fields), false);
+        pair.server.read_stream(4, h3_data_frame("abc"), false);
+        pair.server.read_stream(4, h3_headers_frame(4, section_of(advertised, {})), true);
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "a trailer section of exactly 64 KiB is read";
+    }
+}
+
+// The section bound is a limit like the others (Huly QB-1196): a malformed request past it stays malformed, its stream
+// refused, never answered 431 -- a field this module refuses, a `host` naming another authority than :authority, a
+// `content-length` an ended stream contradicts -- and a well-formed `host` past it that stands for :authority is a
+// field over the limits like any other, answered 431. The validation-beside-the-limits class of Huly QB-1195.
+TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
+    constexpr std::uint64_t advertised = 64 * 1024;
+    using Fields                       = std::vector<std::pair<std::string, std::string>>;
+    const auto past                    = [&](Fields after, Fields lead = request_fields()) {
+        auto fields = section_of(advertised, std::move(lead));
+        fields.insert(fields.end(), after.begin(), after.end());
+        return fields;
+    };
+    const Fields no_authority{{":method", "GET"}, {":scheme", "https"}, {":path", "/"}};
+    for (auto const &[label, fields] : std::vector<std::pair<std::string, Fields>>{
+             {"proxy-authorization past it", past({{"proxy-authorization", "Basic x"}})},
+             {"host naming another authority past it", past({{"host", "evil.test"}})},
+             {"host that is no authority, past it, without :authority", past({{"host", "example.test:99999"}}, no_authority)},
+             {"content-length past it, the stream ended", past({{"content-length", "5"}})},
+         }) {
+        SCOPED_TRACE(label);
+        LimitedPair pair{qb::http::request_limits{}};
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_refused_unanswered(pair);
+    }
+    // Well-formed past it, answered: a host that stands for :authority, a content-length the ended stream does not
+    // contradict -- both kept to be judged.
+    for (auto const &fields : {past({{"host", "example.test"}}, no_authority), past({{"content-length", "0"}})}) {
+        LimitedPair pair{qb::http::request_limits{}};
+        pair.server.read_stream(0, h3_headers_frame(0, fields), true);
+        expect_answered_raw(pair, 0);
+    }
+    // A trailer section past it carrying a field a trailer section must not: refused, never answered.
+    {
+        LimitedPair pair{qb::http::request_limits{}};
+        auto        fields = request_fields("/upload");
+        fields[0].second   = "POST";
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        auto trailers = section_of(advertised, {});
+        trailers.emplace_back("host", "example.test");
+        pair.server.read_stream(0, h3_headers_frame(0, trailers), true);
+        expect_refused_unanswered(pair);
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    // A trailer section past it, ending a body its content-length contradicts: refused, never answered 431.
+    {
+        LimitedPair pair{qb::http::request_limits{}};
+        auto        fields = request_fields("/upload");
+        fields[0].second   = "POST";
+        fields.emplace_back("content-length", "5");
+        pair.server.read_stream(0, h3_headers_frame(0, fields), false);
+        pair.server.read_stream(0, h3_data_frame("abc"), false);
+        pair.server.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {})), true);
+        expect_refused_unanswered(pair);
+    }
+}
+
+// The client reads a response under the same bound: a section past the 64 KiB it advertises refuses the stream, as a
+// response over the limits does; one of exactly 64 KiB is delivered (Huly QB-1196: any size was), a trailer section
+// alike. An informational response's section is a section of its own and its fields go with it: three 103s of 40 KB,
+// then a 200 of 40 KB, deliver the 200's fields alone -- they were added to the final response's, unbounded.
+TEST(Http3ConnectionDirect, AResponseSectionPastTheAdvertisedSizeRefusesTheStream) {
+    constexpr std::uint64_t advertised = 64 * 1024;
+    for (const std::uint64_t size : {advertised, advertised + 1}) {
+        Pair              pair;
+        qb::http::Request get{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+        ASSERT_TRUE(pair.client.submit_request(0, get));
+        pair.settle();
+        pair.client.read_stream(0, h3_headers_frame(0, section_of(size, {{":status", "200"}})), true);
+        if (size == advertised) {
+            ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "a section of exactly 64 KiB is delivered";
+            EXPECT_TRUE(pair.client_owner.resets.empty());
+        } else {
+            EXPECT_TRUE(pair.client_owner.responses.empty()) << "a section of 64 KiB and a byte is refused";
+            ASSERT_EQ(pair.client_owner.resets.size(), 1u);
+            EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+        }
+        EXPECT_FALSE(pair.client_owner.close.has_value());
+    }
+    Pair              pair;
+    qb::http::Request get{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+    ASSERT_TRUE(pair.client.submit_request(0, get));
+    pair.settle();
+    auto section = [](std::string status) {
+        std::vector<std::pair<std::string, std::string>> fields{{":status", std::move(status)}};
+        for (int i = 0; i < 8; ++i)
+            fields.emplace_back("x-" + std::to_string(i), std::string(5000, 'v'));
+        return fields;
+    };
+    for (int i = 0; i < 3; ++i) {
+        auto early = section("103");
+        early.emplace_back("link", "</a.css>; rel=preload");
+        pair.client.read_stream(0, h3_headers_frame(0, early), false);
+    }
+    pair.client.read_stream(0, h3_headers_frame(0, section("200")), true);
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "each section is counted on its own";
+    auto const &response = pair.client_owner.responses.front();
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_FALSE(response.has_header("link")) << "an informational response's field read as the final one's";
+    ASSERT_TRUE(response.has_header("x-0"));
+    EXPECT_EQ(response.headers().find("x-0")->second.size(), 1u) << "the final section's fields alone";
+    EXPECT_TRUE(pair.client_owner.resets.empty());
+
+    // A response's trailer section past the bound refuses the stream too.
+    Pair trailed;
+    ASSERT_TRUE(trailed.client.submit_request(0, get));
+    trailed.settle();
+    trailed.client.read_stream(0, h3_headers_frame(0, {{":status", "200"}}), false);
+    trailed.client.read_stream(0, h3_data_frame("abc"), false);
+    trailed.client.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {})), true);
+    EXPECT_TRUE(trailed.client_owner.responses.empty());
+    ASSERT_EQ(trailed.client_owner.resets.size(), 1u);
+    EXPECT_EQ(trailed.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+
+    // An informational response alone ends no response: one that ends the stream, one the stream's end follows, one a
+    // header section without :status follows -- nothing is delivered. nghttp3 (1.18.0) closes the connection for each
+    // first, so this pins its tier: this module's own guards (end_stream_cb, materialize_trailers) are defensive.
+    for (int shape = 0; shape < 3; ++shape) {
+        SCOPED_TRACE(shape);
+        Pair alone;
+        ASSERT_TRUE(alone.client.submit_request(0, get));
+        alone.settle();
+        alone.client.read_stream(0, h3_headers_frame(0, {{":status", "103"}, {"link", "</a.css>"}}), shape == 0);
+        if (shape == 1)
+            alone.client.read_stream(0, "", true);
+        if (shape == 2)
+            alone.client.read_stream(0, h3_headers_frame(0, {{"x-t", "1"}}), true);
+        EXPECT_TRUE(alone.client_owner.responses.empty()) << "no response came";
+        EXPECT_TRUE(alone.client_owner.close.has_value() || !alone.client_owner.resets.empty());
+    }
+
+    // An interim section past the bound refuses the stream as a final one does; a final response that ends the stream
+    // after a 1xx is judged by its own content-length, which the 1xx's reset left for it.
+    {
+        Pair big;
+        ASSERT_TRUE(big.client.submit_request(0, get));
+        big.settle();
+        big.client.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {{":status", "103"}})), false);
+        EXPECT_TRUE(big.client_owner.responses.empty());
+        ASSERT_EQ(big.client_owner.resets.size(), 1u);
+        EXPECT_EQ(big.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    }
+    {
+        Pair after;
+        ASSERT_TRUE(after.client.submit_request(0, get));
+        after.settle();
+        after.client.read_stream(0, h3_headers_frame(0, {{":status", "103"}, {"link", "</a.css>"}}), false);
+        after.client.read_stream(0, h3_headers_frame(0, {{":status", "200"}, {"content-length", "5"}}), true);
+        EXPECT_TRUE(after.client_owner.responses.empty());
+        ASSERT_EQ(after.client_owner.resets.size(), 1u);
+        EXPECT_EQ(after.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
     }
 }
 
