@@ -173,6 +173,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `OriginTest.EveryProtocolReadsTheSameRequestPath` reads `/a?b<byte>c` for every byte through the HTTP/1.1 parser and
   `request_uri()`: the two agree on all 256 bytes, where they differed on the 128 from 0x80 up.
 
+- **An HTTP/0.9 request is answered `505 HTTP Version Not Supported` instead of being dispatched with no version and no
+  `Host` (Huly QB-1186).** llhttp reads a request line with no version -- `GET /admin` then CRLF -- as HTTP/0.9, and
+  the field lines after it as a header section; the parser took it for a request older than HTTP/1.1, which needs no
+  `Host`, so `GET /` or `GET /admin` followed by a field line or none, then an empty line, reached its route with no
+  version and no authority (3.3.0 dispatched it too: it checked no `Host` at all). The parser refuses a request whose
+  major version is 0 -- that form, and `HTTP/0.9` written out -- once its header section has ended, with the status
+  RFC 9110 §15.6.6 gives a major version the server does not support; the session answers it with
+  `Connection: close` and closes, as it answers a target that names no resource. A client that sends the request line
+  alone and waits, as an HTTP/0.9 client does, gets nothing until it ends a header section or the server's timeout
+  closes the connection. No client of the module writes HTTP/0.9: a `Request` is HTTP/1.1 unless its `major_version`
+  is set, and no test or example sends a request line without a version. Test:
+  `Http1ProtocolFraming.AnHttp09RequestIsRefusedWith505`, three requests that are each dispatched on the base.
+
 - **A request's URI is the target the client sent: an HTTP/1.1 `//host/path` is a path, a target that is none of the
   four forms is answered 400, and an HTTP/2 or HTTP/3 `:path` or `host` field names no other authority (Huly
   QB-1177).** The HTTP/1.1 server read every request target as a URI reference (RFC 3986 §4.1), where an origin-form

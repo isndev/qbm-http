@@ -191,8 +191,8 @@ private:
         return HPE_USER;
     }
 
-    /// Fails the message for a size limit, a target that names no resource or a Host field that names no authority,
-    /// and records the status it answers (refusal_status()): the server's session answers it, then closes, instead of
+    /// Fails the message for a size limit, a target that names no resource, a Host field that names no authority or
+    /// the version HTTP/0.9, and records the status it answers (refusal_status()): the server's session answers it, then closes, instead of
     /// closing on silence (Huly QB-168, QB-1186).
     static int
     refuse_with_status(http_t *parser, const char *reason, http_status status) noexcept {
@@ -514,7 +514,7 @@ private:
      * Called when all headers have been parsed.
      * Finalizes header processing and prepares for body parsing.
      * This callback:
-     * 1. Sets the HTTP version
+     * 1. Sets the HTTP version, and refuses an HTTP/0.9 request: 505
      * 2. Checks a request's Host field (check_host_field()) and reserves memory for the body based on
      *    Content-Length if available
      * 3. Sets the upgrade flag if applicable
@@ -545,6 +545,13 @@ private:
         self->_header_pairs_seen = 0; // a trailer section counts its fields on its own, as HTTP/2 and HTTP/3 do (Huly QB-94)
         msg.major_version        = parser->http_major;
         msg.minor_version        = parser->http_minor;
+        if constexpr (MessageType::type == HTTP_REQUEST) {
+            // HTTP/0.9 -- a request line with no version, which llhttp reads with the field lines after it, or the
+            // version written out -- is a major version the server does not support: 505 (RFC 9110 §15.6.6). The Host
+            // rule exempts a version below 1.1, and such a request was dispatched with neither (review r1 N3).
+            if (parser->http_major == 0) [[unlikely]]
+                return refuse_with_status(parser, "HTTP/0.9 request", HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED);
+        }
         if (msg.has_header("Transfer-Encoding")) {
             if (msg.has_header("Content-Length")) {
                 return fail_with_reason(parser, "HTTP Transfer-Encoding with Content-Length is forbidden");
@@ -848,8 +855,8 @@ public:
      * @brief The HTTP status a refusal of the current message answers, or 0.
      *
      * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
-     * 431 or 413; on a target origin::request_target_uri() refuses: 400 (on_url_complete()); or on a Host field
-     * that names no authority: 400 (check_host_field()). 0 for any
+     * 431 or 413; on a target origin::request_target_uri() refuses: 400 (on_url_complete()); on a Host field
+     * that names no authority: 400 (check_host_field()); or on an HTTP/0.9 request: 505 (on_headers_complete()). 0 for any
      * other failure, which the protocol's fail_message() answers only for a request line llhttp refuses
      * at its target (400) -- any other malformed message is not answered. reset() clears it.
      */
@@ -952,12 +959,12 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     /// delivers the accumulated body on disconnect.
     bool _close_delimited = false;
 
-    /// True once a request was refused, for a limit, its target or Host (fail_message()): the stream lost its framing
-    /// -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
+    /// True once a request was refused, for a limit, its target, its version or Host (fail_message()): the stream lost
+    /// its framing -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
     bool _refused = false;
 
-    /// The message failed. A request refused for a limit, its target or Host the server can answer (the parser's
-    /// refusal_status(), the io's `http1_refuse_request`) is handed to the io, which answers it and ends the
+    /// The message failed. A request refused for a limit, its target, its version or Host the server can answer (the
+    /// parser's refusal_status(), the io's `http1_refuse_request`) is handed to the io, which answers it and ends the
     /// connection; what the peer sends next is dropped. A request line llhttp refuses at or just after its
     /// target (HPE_INVALID_URL) names no resource either, and is answered 400 the same way (RFC 9112 §3,
     /// Huly QB-1177). Anything else -- a malformed

@@ -1177,6 +1177,22 @@ TEST(Http1ProtocolFraming, AHostFieldThatNamesNoAuthorityIsRefusedWith400) {
     EXPECT_TRUE(io.refusals.empty());
 }
 
+// An HTTP/0.9 request -- a request line with no version, which llhttp reads with the field lines that follow it, or
+// the version HTTP/0.9 written out -- is refused with 505, the answer to a major version the server does not support
+// (RFC 9110 §15.6.6), once its header section has ended. It was dispatched: the Host rule exempts a version below
+// 1.1, so `GET /admin` reached its route with no Host field and no version at all (review r1 N3).
+TEST(Http1ProtocolFraming, AnHttp09RequestIsRefusedWith505) {
+    for (const char *head : {"GET /\r\n\r\n", "GET /admin\r\nX-A: b\r\n\r\n", "GET /admin HTTP/0.9\r\nHost: h\r\n\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, head);
+        EXPECT_EQ(step(proto, io), 0u) << head;
+        EXPECT_EQ(io.request_count, 0) << head;
+        EXPECT_EQ(io.refusals, std::vector<int>{505}) << head;
+        EXPECT_TRUE(proto.ok()) << head << ": the io answers before the connection ends";
+    }
+}
+
 // A field line's value excludes the whitespace around it (RFC 9112 §5): llhttp drops the run before it, the parser
 // the run after it -- a field followed by another, the last field of the header section, a trailer field alike.
 TEST(Http1ProtocolFraming, AFieldValueEndsAtItsLastOctetThatIsNoWhitespace) {

@@ -19,11 +19,11 @@ llm/qbm-http.llm.api.md	1.1/http.h:1249-1249	26cc9c388317	listen_no_start(qb::io
 llm/qbm-http.llm.api.md	1.1/http.h:1899-1899	c16a4a6db7e1	static_assert(streaming_session<DefaultSession>, "the HTTP/1.1 sessio...
 llm/qbm-http.llm.api.md	1.1/http.h:1975-1975	b6c085494c15	static_assert(streaming_session<DefaultSecureSession>, "the HTTPS/1.1...
 llm/qbm-http.llm.api.md	1.1/protocol/base.h:174-174	3a733ae45e2e	template <typename MessageType>
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:819-819	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:827-827	b4e777a3315d	request_limits() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:835-835	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:843-843	c4437ea56b4b	max_body_size() const noexcept {
-llm/qbm-http.llm.api.md	1.1/protocol/base.h:857-857	50c9983a8354	refusal_status() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:826-826	f86426e30f72	set_request_limits(qb::http::request_limits const &limits) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:834-834	b4e777a3315d	request_limits() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:842-842	e431f45a4021	set_max_body_size(std::size_t value) noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:850-850	c4437ea56b4b	max_body_size() const noexcept {
+llm/qbm-http.llm.api.md	1.1/protocol/base.h:864-864	50c9983a8354	refusal_status() const noexcept {
 llm/qbm-http.llm.api.md	1.1/protocol/base.h:98-98	1cea27b7e6a5	struct request_limits {
 llm/qbm-http.llm.api.md	1.1/protocol/server.h:103-103	59ebf4c707b5	dispatching_size() const noexcept {
 llm/qbm-http.llm.api.md	2/http2.h:939-939	e6164c1688f6	set_tls_context(qb::io::ssl::Context context) {
