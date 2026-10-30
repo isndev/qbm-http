@@ -575,6 +575,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (`:authority` names the authority). Tests: the response field block, and a response through the direct
   client/server pair.
 
+- **An HTTP/3 request's `host` and `content-length` over the request limits are judged as they arrive and no longer kept
+  (Huly QB-1196).** To judge them at the end of the section, the server kept the first `host` field and one
+  `content-length` over the limits whole -- nghttp3 caps a value at 64 KiB, so 64 KiB of zeros was a `content-length`
+  it let through -- for as long as the stream lived, the request answered `431`: measured, a request of 60 KB of
+  `host` and 60 KB of zeros of `content-length` grew the heap by 310 KB until the client closed its stream. A `host`
+  is now judged when it arrives -- against `:authority`, which precedes every regular field, or as an authority without
+  it (`qb::http::origin::is_request_authority()`) -- and counted; a `content-length` is parsed and its number kept;
+  neither field is kept (under 32 KB for the same request). The verdicts are unchanged: well-formed, the request is
+  answered `431`; a `host` naming another authority, no authority, a second `host`, a `content-length` that is no
+  number or that the body contradicts, refuse the stream. Tests: the heap the stream keeps (glibc builds without a
+  sanitizer), and the verdicts at receipt.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),

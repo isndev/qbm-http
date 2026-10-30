@@ -103,20 +103,23 @@ TEST(Http3ProtocolValidationTest, RequiresMethodSchemePathAndNoEmptyAuthority) {
 // A request names one authority by its `host` fields (Huly QB-1195): at most one beside :authority, exactly one
 // without it -- the fields over the request limits counted, the first of them among the kept ones. nghttp3 refuses a
 // second `host` and a request with neither itself; this is qbm-http's own rule, nghttp3 being a system library.
+// The `host` fields over the request limits are judged when they arrive and dropped, never kept (Huly QB-1196): the
+// count is of the kept ones and the dropped ones, apart.
 TEST(Http3ProtocolValidationTest, ARequestNamesOneAuthorityByItsHostFields) {
     using qb::protocol::http3::detail::has_one_request_authority;
     EXPECT_TRUE(has_one_request_authority(true, 0, 0));
     EXPECT_TRUE(has_one_request_authority(true, 1, 0));
-    EXPECT_TRUE(has_one_request_authority(true, 1, 1)) << "the one host over the limits is the kept one";
+    EXPECT_TRUE(has_one_request_authority(true, 0, 1)) << "one host over the limits, judged against :authority";
+    EXPECT_FALSE(has_one_request_authority(true, 1, 1)) << "a host within the limits and one over them: two";
     EXPECT_FALSE(has_one_request_authority(true, 2, 0));
-    EXPECT_FALSE(has_one_request_authority(true, 1, 2)) << "a second host over the limits, dropped, still counts";
+    EXPECT_FALSE(has_one_request_authority(true, 0, 2)) << "a second host over the limits, dropped, still counts";
     EXPECT_FALSE(has_one_request_authority(false, 0, 0)) << "neither :authority nor host";
     EXPECT_TRUE(has_one_request_authority(false, 1, 0));
-    EXPECT_TRUE(has_one_request_authority(false, 1, 1));
+    EXPECT_TRUE(has_one_request_authority(false, 0, 1)) << "one host over the limits, judged an authority";
+    EXPECT_FALSE(has_one_request_authority(false, 1, 1));
     EXPECT_FALSE(has_one_request_authority(false, 2, 0));
-    EXPECT_FALSE(has_one_request_authority(false, 2, 1));
+    EXPECT_FALSE(has_one_request_authority(false, 0, 2));
     EXPECT_FALSE(has_one_request_authority(false, 1, 3));
-    EXPECT_FALSE(has_one_request_authority(false, 0, 1)) << "no host kept: nothing to compose the URI from";
 }
 
 // ---------------------------------------------------------------------------

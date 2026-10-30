@@ -249,15 +249,22 @@ has_required_request_pseudo_headers(std::optional<std::string> const &method, st
  * @brief Check that a request names one authority by its `host` fields (RFC 9114 §4.3.1, Huly QB-1195): at most
  *        one `host` field beside @c :authority, exactly one without it.
  * @param has_authority     Whether the request carries @c :authority.
- * @param kept_hosts        The `host` fields among the request's headers.
- * @param hosts_over_limits The `host` fields over the request limits; the first of them is among @p kept_hosts.
- * @return @c true when the request may be composed: then, without @c :authority, one `host` field is kept.
+ * @param kept_hosts        The `host` fields among the request's headers: those within the request limits.
+ * @param hosts_over_limits The `host` fields over the request limits, each judged when it arrived and dropped (the
+ *                          first was kept among @p kept_hosts, whole: Huly QB-1196).
+ * @return @c true when the request may be composed: then, without @c :authority, its one `host` field is kept or was
+ *         judged an authority when it arrived.
  */
 inline bool
 has_one_request_authority(bool has_authority, std::size_t kept_hosts, std::size_t hosts_over_limits) noexcept {
-    const auto hosts = kept_hosts + (hosts_over_limits > 1 ? hosts_over_limits - 1 : 0);
-    return hosts <= 1 && (has_authority || kept_hosts == 1);
+    const auto hosts = kept_hosts + hosts_over_limits;
+    return hosts <= 1 && (has_authority || hosts == 1);
 }
+
+/// The authority materialize_headers() composes a request's URI with when its one `host` field, standing for
+/// :authority, was over the request limits: judged an authority when it arrived and dropped, the request answered
+/// 431 -- the URI only judges :scheme and :path, and is never routed. A reserved name (RFC 6761 §6.4).
+inline constexpr std::string_view judged_authority_stand_in = "authority.invalid";
 
 /**
  * @brief Test whether a byte is a valid HTTP token character for a header name.
@@ -651,13 +658,14 @@ private:
         /// message): it has been reset, what still arrives on it is dropped, and the message is
         /// never handed to the owner.
         bool refused = false;
-        /// The `host` fields of the request's header section over the request limits: the first is kept, as one
-        /// within them is, the others are counted -- a request carries one `host` field at most (Huly QB-1195).
+        /// The `host` fields of the request's header section over the request limits, each judged when it arrives --
+        /// against :authority, or as an authority without it -- and dropped, counted: a request carries one `host`
+        /// field at most (Huly QB-1195). The first was kept whole, up to nghttp3's 64 KiB a value (Huly QB-1196).
         std::size_t host_fields_over_limits = 0;
-        /// A `content-length` of the header section over the request limits was kept: the body it declares is judged
-        /// as a field within them is; nghttp3 refuses a second one itself (1.18.0 measured), so one is kept at most
-        /// (Huly QB-1197).
-        bool content_length_over_limits = false;
+        /// The length a `content-length` of the header section over the request limits declares, parsed when it
+        /// arrives and the field dropped: the body is judged by it as by a field within them (Huly QB-1197). The
+        /// field was kept whole, 64 KiB of zeros included (Huly QB-1196).
+        std::optional<std::uint64_t> content_length_over_limits;
         /// The size of the section being read, as RFC 9114 §4.2.2 counts it, against detail::max_field_section_size
         /// (Huly QB-1196).
         std::uint64_t field_section_size = 0;
@@ -814,6 +822,24 @@ private:
             return;
         }
         _owner.stop_http3_stream(_connection_id, stream_id, NGHTTP3_H3_NO_ERROR);
+    }
+
+    /**
+     * @brief Whether a `host` field of a request's header section over the request limits is well-formed beside the
+     *        request's authority, judged when it arrives so that it need not be kept (Huly QB-1195): it names
+     *        :authority -- as text without regard to case, as materialize_headers() compares one within the limits --
+     *        or, without :authority, it is an authority qb::http::origin::is_request_authority() accepts. The
+     *        pseudo-headers were read before it: they precede every regular field (RFC 9114 §4.3), as nghttp3
+     *        enforces.
+     */
+    [[nodiscard]] static bool
+    over_limit_host_names_the_authority(stream_state const &st, std::string_view host) noexcept {
+        for (auto const &[name, value] : st.incoming_headers.storage) {
+            if (name == ":authority") {
+                return qb::http::utility::iequals(host, value);
+            }
+        }
+        return qb::http::origin::is_request_authority(host);
     }
 
     /**
@@ -974,7 +1000,7 @@ private:
             st.fields_over_limits         = false;
             st.path_over_limit            = false;
             st.host_fields_over_limits    = 0;
-            st.content_length_over_limits = false;
+            st.content_length_over_limits = std::nullopt;
             st.field_section_size         = 0;
             return 0;
         });
@@ -1021,13 +1047,26 @@ private:
                     return 0;
                 }
                 st.fields_over_limits = true; // a request: answered 431 at the end of its section (Huly QB-94)
-                // A `host` of the header section names the authority: the first one over the limits is kept for
-                // materialize_headers()'s checks, as one within them is; any other is counted (Huly QB-1195). Its
-                // `content-length` declares the body the request is judged by: kept too, once (Huly QB-1197).
-                if (!st.main_headers_seen
-                    && ((header_name == "host" && st.host_fields_over_limits++ == 0)
-                        || (header_name == "content-length" && !std::exchange(st.content_length_over_limits, true))))
-                    st.incoming_headers.add(std::move(header_name), std::move(header_value));
+                // A `host` of the header section names the authority, its `content-length` the body the request is
+                // judged by: each is judged now, by what it needs -- :authority, read before any regular field, or the
+                // authority rules; the number it declares -- and dropped, what materialize_headers() needs kept as a
+                // count and a number. They were kept whole, up to nghttp3's 64 KiB a value (Huly QB-1195, QB-1197).
+                if (!st.main_headers_seen) {
+                    if (header_name == "host" && !me->over_limit_host_names_the_authority(st, header_value)) {
+                        me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed beside the limits
+                        return 0;
+                    }
+                    if (header_name == "host") {
+                        ++st.host_fields_over_limits;
+                    } else if (header_name == "content-length") {
+                        const auto declared = detail::parse_content_length(header_value);
+                        if (!declared || (st.content_length_over_limits && *st.content_length_over_limits != *declared)) {
+                            me->refuse_stream(static_cast<std::uint64_t>(stream_id), st);
+                            return 0;
+                        }
+                        st.content_length_over_limits = declared;
+                    }
+                }
                 return 0;
             }
             if (section_over_limit) [[unlikely]] {
@@ -1208,7 +1247,7 @@ private:
         std::optional<std::string>   authority;
         std::optional<std::string>   path;
         std::optional<int>           status;
-        std::optional<std::uint64_t> content_length;
+        std::optional<std::uint64_t> content_length = st.content_length_over_limits; // one over the limits, parsed
 
         for (auto const &[name, value] : st.incoming_headers.storage) {
             if (name == ":method") {
@@ -1280,7 +1319,7 @@ private:
             // A `host` field names the authority too: one, and :authority's (RFC 9114 §4.3.1). Read otherwise,
             // `header("Host")` was a second authority the client chose. Without :authority, it is the request's
             // authority: one of the two, or no URI is composed, whatever the scheme (Huly QB-1195). The fields over
-            // the limits count: the first is among the headers, the others were dropped.
+            // the limits count; each was judged when it arrived (over_limit_host_names_the_authority) and dropped.
             auto const host = st.request.headers().find("host");
             if (!detail::has_one_request_authority(authority.has_value(), host != st.request.headers().end() ? host->second.size() : 0,
                                                    st.host_fields_over_limits)) {
@@ -1291,9 +1330,13 @@ private:
             }
             // The URI the three fields name, its authority the request's: a :path that is no absolute path, a
             // userinfo or a text the URI parser refuses is a malformed request (Huly QB-1177), a `host` that names
-            // the authority read as :authority is (QB-1195).
-            auto uri = qb::http::origin::request_uri(*scheme, authority ? std::string_view{*authority} : host->second.front(), *path,
-                                                     parsed_method == qb::http::method::OPTIONS);
+            // the authority read as :authority is (QB-1195). A `host` over the limits that stands for :authority was
+            // judged an authority when it arrived: the URI composed to judge :scheme and :path takes a stand-in, and
+            // the request is answered 431, never routed.
+            std::string_view const request_authority = authority                            ? std::string_view{*authority}
+                                                       : host != st.request.headers().end() ? std::string_view{host->second.front()}
+                                                                                            : detail::judged_authority_stand_in;
+            auto uri = qb::http::origin::request_uri(*scheme, request_authority, *path, parsed_method == qb::http::method::OPTIONS);
             if (!uri) {
                 return false;
             }

@@ -50,6 +50,24 @@
 #include <qb/system/container/unordered_map.h>
 #include <nghttp3/nghttp3.h>
 
+// The heap in use, as glibc's mallinfo2() reports it: the measure of what a stream's state keeps. Not where a
+// sanitizer's allocator stands in for glibc's, nor off glibc.
+#if defined(__GLIBC__)
+#include <malloc.h>
+#define QBM_HTTP_TEST_HEAP_IN_USE 1
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#undef QBM_HTTP_TEST_HEAP_IN_USE
+#define QBM_HTTP_TEST_HEAP_IN_USE 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#undef QBM_HTTP_TEST_HEAP_IN_USE
+#define QBM_HTTP_TEST_HEAP_IN_USE 0
+#endif
+#endif
+#else
+#define QBM_HTTP_TEST_HEAP_IN_USE 0
+#endif
+
 namespace {
 
 using qb::protocol::http3::connection;
@@ -1812,6 +1830,44 @@ expect_refused_unanswered(LimitedPair const &pair) {
 }
 
 } // namespace
+
+// A `host` and a `content-length` over the request limits are judged when they arrive and dropped (Huly QB-1196): the
+// host against :authority, or as an authority without it, the length as the number it declares -- kept as a count and a
+// number. They were kept whole, up to nghttp3's 64 KiB a value, as long as the stream lived: the 431 answered, a
+// request of 60 KB of `host` and 60 KB of zeros of `content-length` held 120 KB until the client closed its stream.
+// The verdicts are unchanged: well-formed, answered 431; a host that is no authority without :authority, refused.
+TEST(Http3ConnectionDirect, AHostAndAContentLengthOverTheLimitsAreJudgedWhenTheyArriveAndNotKept) {
+    {
+        qb::http::request_limits limits;
+        limits.max_header_value_length = 12;
+        LimitedPair pair{limits};
+        pair.server.read_stream(
+            0, h3_headers_frame(0, {{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", "example.test:99999"}}), true);
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        EXPECT_FALSE(stopped_without_error(pair.server_owner, 0)) << "a host that is no authority: refused, not answered";
+        EXPECT_TRUE(reset(pair.server_owner, 0));
+    }
+#if !QBM_HTTP_TEST_HEAP_IN_USE
+    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2(), without a sanitizer's allocator";
+#else
+    const std::string                                      long_host(60000, 'a');
+    const std::string                                      long_length(60000, '0');
+    LimitedPair                                            pair{qb::http::request_limits{}};
+    const std::vector<std::pair<std::string, std::string>> fields{
+        {":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", long_host}, {"content-length", long_length}
+    };
+    const auto        frame  = h3_headers_frame(0, fields);
+    const std::size_t before = mallinfo2().uordblks;
+    pair.server.read_stream(0, frame, false); // the stream stays open: what its state keeps, it keeps
+    const std::size_t after = mallinfo2().uordblks;
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "well-formed: answered 431";
+    EXPECT_FALSE(reset(pair.server_owner, 0));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
+    const auto kept = static_cast<long long>(after) - static_cast<long long>(before);
+    EXPECT_LT(kept, 32 * 1024) << "the stream keeps " << kept << " bytes: the 120 KB of the two fields are not among them";
+#endif
+}
 
 // A stream that ends with its header section carries no body: a `content-length` that declares one makes the request
 // malformed (RFC 9114 section 4.1.2), beside every limit, in both orders, and when the `content-length` field is itself
