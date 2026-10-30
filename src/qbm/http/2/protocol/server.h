@@ -1174,10 +1174,10 @@ public:
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         std::optional<std::uint64_t> declared_content_length;
         bool                         announces_trailers = false;
-        for (const auto &header_item : http_response.headers()) { // Assuming http_response.headers() gives iterable key-value pairs
-            std::string name_lower = header_item.first;
-            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
-                           [](char c) { return qb::http::utility::ascii_to_lower(c); });
+        // A name is lowercase already: the headers map stores it folded, and is_valid_header_field() refuses an
+        // uppercase one. It was copied and folded before the field's own copy (Huly QB-1191).
+        for (const auto &header_item : http_response.headers()) {
+            const std::string &name_lower = header_item.first;
             if (name_lower.empty() || name_lower[0] == ':' || HeaderValidator::is_forbidden_response_header(name_lower)) {
                 this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
                                       "Forbidden or invalid HTTP/2 response header: " + header_item.first);

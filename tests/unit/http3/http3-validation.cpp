@@ -253,6 +253,16 @@ TEST(Http3ProtocolValidationTest, IsForbiddenH3HeaderMatchesConnectionFields) {
     EXPECT_FALSE(h3detail::is_forbidden_h3_header("Proxy-Authorization"));
     EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("proxy-authenticate"));
     EXPECT_TRUE(h3detail::is_forbidden_h3_trailer("proxy-authorization"));
+    // Compared in place, by length then without regard to case (Huly QB-1191: the name was copied and folded): every
+    // case of each name, and a name of each length one octet off, or one octet longer or shorter.
+    for (const char *name : {"UPGRADE", "Connection", "KEEP-ALIVE", "Proxy-Connection", "TRANSFER-ENCODING"}) {
+        EXPECT_TRUE(h3detail::is_forbidden_h3_header(name)) << name;
+    }
+    for (const char *name :
+         {"upgradx", "connectiox", "keep-alivx", "proxy-connectiox", "transfer-encodinx", "upgrades", "upgrad", "connections", "keep-alive ",
+          "", "te"}) {
+        EXPECT_FALSE(h3detail::is_forbidden_h3_header(name)) << name;
+    }
 }
 
 // Empty, a pseudo-header, or a field of the one trailer list HTTP/1.1, HTTP/2 and HTTP/3 share

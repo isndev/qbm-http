@@ -83,18 +83,6 @@ inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
 inline constexpr std::uint64_t field_line_overhead = 32;
 
 /**
- * @brief ASCII-lowercase a header name.
- * @param value Header name to fold.
- * @return Lowercased copy of @p value (ASCII only; non-ASCII bytes untouched).
- */
-inline std::string
-lower_header_name(std::string_view value) {
-    std::string out(value);
-    std::transform(out.begin(), out.end(), out.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
-    return out;
-}
-
-/**
  * @brief Test whether a header is a connection-specific field banned in HTTP/3.
  * @param name Header name (case-insensitive).
  * @return @c true if @p name is one of the connection-specific fields RFC 9114 section 4.2 names: @c connection,
@@ -104,9 +92,21 @@ lower_header_name(std::string_view value) {
  *         with H3_MESSAGE_ERROR, and served over HTTP/2 (Huly QB-1197).
  */
 inline bool
-is_forbidden_h3_header(std::string_view name) {
-    const auto lower = lower_header_name(name);
-    return lower == "connection" || lower == "keep-alive" || lower == "proxy-connection" || lower == "transfer-encoding" || lower == "upgrade";
+is_forbidden_h3_header(std::string_view name) noexcept {
+    // Compared in place by length, then without regard to case: the name was copied and folded on every call -- an
+    // allocation past 15 octets, for every field sent and received (Huly QB-1191).
+    switch (name.size()) {
+        case 7:
+            return qb::http::utility::iequals(name, "upgrade");
+        case 10:
+            return qb::http::utility::iequals(name, "connection") || qb::http::utility::iequals(name, "keep-alive");
+        case 16:
+            return qb::http::utility::iequals(name, "proxy-connection");
+        case 17:
+            return qb::http::utility::iequals(name, "transfer-encoding");
+        default:
+            return false;
+    }
 }
 
 /**
@@ -430,28 +430,29 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
             }
         }
     } else {
+        // A name is lowercase already: the headers map stores it folded, and is_valid_header_field() refuses an
+        // uppercase one. It was copied and folded again, then copied again by is_forbidden_h3_header() (Huly QB-1191).
         for (auto const &[name, values] : msg.headers()) {
-            const auto lower = lower_header_name(name);
-            if (lower.empty() || lower.front() == ':' || is_forbidden_h3_header(lower)) {
+            if (name.empty() || name.front() == ':' || is_forbidden_h3_header(name)) {
                 return false;
             }
-            if (lower == "host") {
+            if (name == "host") {
                 continue;
             }
-            if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), lower) != trailers->moved.end()) {
+            if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), name) != trailers->moved.end()) {
                 continue; // in the trailer section
             }
             // `te` is a connection-specific field a request may carry as `trailers` alone (RFC 9114 §4.2) and a
             // response never: a peer's nghttp3 takes it for a malformed message and closes the connection. It was
             // sent as it was (Huly QB-1191).
-            if (lower == "te") {
+            if (name == "te") {
                 return false;
             }
             for (auto const &value : values) {
-                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(lower, value)) {
+                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(name, value)) {
                     return false;
                 }
-                block.add(lower, value);
+                block.add(name, value);
             }
         }
     }

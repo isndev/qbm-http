@@ -2397,9 +2397,9 @@ private:
                     return false;
                 }
 
-                // Check for forbidden headers
-                std::string name_lower = hf.name;
-                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                // Check for forbidden headers. The name is lowercase: is_valid_header_field() refused an uppercase
+                // one above. It was copied and folded again (Huly QB-1191).
+                const std::string &name_lower = hf.name;
                 if (HeaderValidator::is_forbidden_response_header(name_lower)) {
                     send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header: " + hf.name);
                     return false;

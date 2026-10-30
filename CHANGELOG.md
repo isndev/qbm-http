@@ -555,6 +555,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   field the refused block indexed past the bound; the amplification shape answered `431`, its table entries in step;
   20 MiB of references closing the connection.
 
+- **The HTTP/2 server's response fields, the HTTP/2 client's response parse and HTTP/3's field paths no longer copy
+  and fold each field name (Huly QB-1191).** QB-1191 removed the copy from the HTTP/2 client's request loop only; the
+  server's response loop still copied and folded every name before the field's own copy, the client's response parse
+  copied and folded it with `::tolower` after validating it lowercase, and HTTP/3 copied a name twice to send it and
+  once to receive it (`detail::is_forbidden_h3_header()` folded a copy on every call) -- an allocation for every name
+  past 15 octets. The headers map stores names folded, HTTP/2 validates a received name lowercase and nghttp3 refuses
+  an uppercase one, so each path reads the name it has; `is_forbidden_h3_header()` compares in place, by length then
+  without regard to case, and is `noexcept`; `detail::lower_header_name()` is gone. Measured with callgrind on a
+  micro-loop (a response of eight typical fields, three names past 15 octets; twelve request names), instructions
+  per operation before and after: `make_response_headers()` 14,015 to 9,188 (-34 %), twelve
+  `is_forbidden_h3_header()` calls 2,672 to 225, the HTTP/2 server's `send_response()` -4,715 and the HTTP/2 client's
+  response receipt -2,681 per response. No behaviour changes.
+
 - **A request path may hold `[`, `]` and `|` as browsers send them, on HTTP/1.1, HTTP/2 and HTTP/3, and the router and
   the static files take each for its percent-encoding (Huly QB-1187).** RFC 3986 forbids the three in a path, and the
   WHATWG URL Standard's path percent-encode set leaves them unencoded (§1.3 of the Living Standard of 19 October 2026),
