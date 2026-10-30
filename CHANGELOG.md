@@ -206,7 +206,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   absolute for `//etc/passwd` (the static files middleware strips them all), and a `Location` or a link that echoes it
   without collapsing its leading slashes names another host. A directory listing of a path that
   begins with `//` led every link with it -- `href="//file1.txt"`, a link to the host `file1.txt` -- and leads it with
-  one slash now. Tests: the HTTP/1.1 router on the wire (`//a/where/x` reaches `/a/where/*`, `///where/x` keeps its
+  one slash now. The static files compare their prefix to strip as the router reads the path, its leading slashes
+  collapsed: `//static/a.txt`, which the router sends where `/static/a.txt` goes, was passed on by the middleware and
+  answered 404, and is served now, what follows the prefix being what `/static/a.txt` leaves (a path that matches as
+  it is is not touched; `qbm-http-test-unit-middleware-static-files`, through the router's root and a route group). Tests: the HTTP/1.1 router on the wire (`//a/where/x` reaches `/a/where/*`, `///where/x` keeps its
   slashes, `//u@a/where/x` is no route, the refused targets 400, a pipelined request before a refused one answered
   and the one after it never read, `OPTIONS *` reaching the router), a target split over two reads, both readers'
   accepted and refused targets and fields, the authority grammar, HTTP/2 and HTTP/3 servers fed them -- each refusal

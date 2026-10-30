@@ -373,6 +373,55 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixToEmptyServesRootIndex) {
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Root Index HTML");
 }
 
+// The router drops empty segments: `//static/file1.txt` is routed where `/static/file1.txt` is (Huly QB-1177). The
+// prefix to strip is compared as the router reads the path -- its leading slashes collapsed -- so the file is served,
+// through the router's root and through a route group alike; the middleware used to pass the request on, and the answer
+// was the 404 (here the final handler's 501) of a file it serves. What names the file is the rest `/static/...` leaves:
+// a traversal after the prefix is refused as it is with one slash. Requests are read as the server reads a target
+// (origin::request_target_uri(): `//static` is a path, not a host).
+TEST_F(StaticFilesMiddlewareTest, PathPrefixIsComparedWithTheLeadingSlashesTheRouterCollapses) {
+    const auto as_received = [](std::string const &target) {
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        EXPECT_TRUE(qb::http::origin::request_target_uri(req.uri(), target, false, false)) << target;
+        req.major_version = 1;
+        req.minor_version = 1;
+        return req;
+    };
+    const auto sf_mw = make_mw(qb::http::StaticFilesOptions(_test_root_dir).with_path_prefix_to_strip("/static"));
+
+    for (std::string const target : {"/static/file1.txt", "//static/file1.txt", "///static/file1.txt"}) {
+        configure_router_and_run(sf_mw, as_received(target));
+        EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << target;
+        EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt") << target;
+        EXPECT_FALSE(_session->_final_handler_called) << target;
+    }
+
+    // Through a route group, where the router sends `//static/...` only because it collapses the slashes.
+    _router    = std::make_unique<qb::http::Router<MockMiddlewareSession>>();
+    auto group = _router->group("/static");
+    group->use(sf_mw);
+    group->get("/*rest", dummy_final_handler());
+    _router->compile();
+    _session->reset();
+    _router->route(_session, as_received("//static/file1.txt"));
+    EXPECT_EQ(_session->_response.status(), qb::http::status::OK) << "the group's middleware passed the request on";
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Contents of file1.txt");
+    EXPECT_FALSE(_session->_final_handler_called);
+
+    // A prefix that does not match with its slashes collapsed is still passed on.
+    configure_router_and_run(sf_mw, as_received("//static_assets/file1.txt"), false);
+    EXPECT_EQ(_session->_response.body().as<std::string>(), "Passthrough handler reached.");
+    EXPECT_TRUE(_session->_final_handler_called);
+
+    // The rest is the one-slash path's: a traversal after the prefix is refused as it is there.
+    for (std::string const target : {"/static/../outside_root.txt", "//static/../outside_root.txt", "//static//../outside_root.txt"}) {
+        SCOPED_TRACE(target);
+        configure_router_and_run(sf_mw, as_received(target));
+        expect_traversal_denied();
+    }
+}
+
 // --- The octets a browser sends as they are (Huly QB-1187) ------------------
 
 // `[`, `]` and `|` in a request path name the file their percent-encodings name, in either case of hex digit or mixed

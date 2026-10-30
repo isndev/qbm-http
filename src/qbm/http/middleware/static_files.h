@@ -223,6 +223,17 @@ path_prefix_matches(std::string_view path, std::string_view prefix) noexcept {
     return prefix.back() == '/' || path[prefix.size()] == '/';
 }
 
+/// `path` with its leading slashes collapsed to one, as the router reads it: it drops empty segments, so
+/// `//static/a.txt` is routed where `/static/a.txt` is (Huly QB-1177). A view of `path`: nothing is copied.
+[[nodiscard]] inline std::string_view
+collapse_leading_slashes(std::string_view path) noexcept {
+    const auto first   = path.find_first_not_of('/');
+    const auto slashes = first == std::string_view::npos ? path.size() : first;
+    if (slashes > 1)
+        path.remove_prefix(slashes - 1);
+    return path;
+}
+
 [[nodiscard]] inline std::string_view
 trim_optional_whitespace(std::string_view value) noexcept {
     const auto begin = value.find_first_not_of(" \t");
@@ -520,6 +531,13 @@ public:
                 effective_request_path_sv = decoded_request_path;
             if (internal::path_prefix_matches(effective_request_path_sv, _options.path_prefix_to_strip)) {
                 effective_request_path_sv.remove_prefix(_options.path_prefix_to_strip.length());
+            } else if (const auto collapsed = internal::collapse_leading_slashes(effective_request_path_sv);
+                       collapsed.size() != effective_request_path_sv.size()
+                       && internal::path_prefix_matches(collapsed, _options.path_prefix_to_strip)) {
+                // `//static/a.txt`, which the router sends where `/static/a.txt` goes (Huly QB-1177): the prefix is
+                // compared as the router reads the path, and what is left -- what names the file, and what every check
+                // below sees -- is what `/static/a.txt` leaves. A path that matches as it is is not touched.
+                effective_request_path_sv = collapsed.substr(_options.path_prefix_to_strip.length());
             } else {
                 ctx->complete(AsyncTaskResult::CONTINUE); // Let other handlers try
                 return;
