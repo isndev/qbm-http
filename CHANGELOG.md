@@ -126,7 +126,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   streamed body is served whatever its size and a `HEAD` or a range of a file over the cap gets what its `GET` would
   (`200`, `206`, `416`, not `413`); a streamed body is not compressed (`PRE_RESPONSE_SEND` hooks see an empty body:
   raise the threshold to keep compressing larger text assets); a file that fails or shrinks after the head has left
-  closes the connection short of its declared length; a download keeps its file open until its last byte. A
+  closes the connection short of its declared length; a download keeps its file open until its last byte, for as long
+  as its client takes -- read through qb-io's descriptor (`internal::StaticFileSource` over `qb::io::sys::file`), which
+  on Windows shares delete (Huly QB-320), so a file being downloaded can be renamed away and its name removed there
+  too, where `std::ifstream` refused both until the download's last byte (an operator replaces a served file by
+  renaming the old one away first: a rename over it is refused on Windows while it is read). A
   `PRE_RESPONSE_SEND` hook that leaves a head a stream cannot carry gets the body read whole, under the cap, and over
   it the 413 a buffered server gives; one that answers a status without a body leaves the file unread -- it used to be
   read, and the serializer then refused the 304 it carried. HTTP/2 and HTTP/3 read every body whole, under

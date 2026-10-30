@@ -15,6 +15,17 @@
  */
 #include "./static_files.h"
 
+#include <cstdio> // SEEK_SET
+#include <fcntl.h>
+#include <limits>
+#include <sys/stat.h>
+#include <sys/types.h>
+#ifdef _WIN32
+#include <io.h> // _lseeki64, _fstat64 on the descriptor qb-io wraps its HANDLE in
+#else
+#include <unistd.h> // lseek
+#endif
+
 namespace qb::http {
 
 StaticFilesOptions::StaticFilesOptions(std::filesystem::path root_dir)
@@ -384,6 +395,64 @@ generate_directory_listing_html(const std::filesystem::path &directory_path,
 
     html << "</table>\n</body>\n</html>";
     return html.str();
+}
+
+// The file a body is read from (Huly QB-101): qb-io's descriptor, so that on Windows it is opened sharing delete (Huly
+// QB-320) -- a download in flight no longer locks it against a rename or a removal. Binary on Windows, where a CRT
+// descriptor opened without a mode would read in the process's default one (_fmode), text if it was set so.
+bool
+StaticFileSource::open(std::filesystem::path const &path) noexcept {
+#ifdef _WIN32
+    _file.open(path, _O_RDONLY | _O_BINARY);
+#else
+    _file.open(path, O_RDONLY);
+#endif
+    return _file.is_open();
+}
+
+bool
+StaticFileSource::is_open() const noexcept {
+    return _file.is_open();
+}
+
+long long
+StaticFileSource::size() const noexcept {
+    if (!_file.is_open())
+        return -1;
+#ifdef _WIN32
+    struct _stat64 st{};
+    if (::_fstat64(_file.native_handle(), &st) != 0)
+        return -1;
+#else
+    struct stat st{};
+    if (::fstat(_file.native_handle(), &st) != 0)
+        return -1;
+#endif
+    return static_cast<long long>(st.st_size);
+}
+
+bool
+StaticFileSource::seek(std::uintmax_t offset) noexcept {
+    if (!_file.is_open() || offset > static_cast<std::uintmax_t>(std::numeric_limits<long long>::max()))
+        return false;
+#ifdef _WIN32
+    return ::_lseeki64(_file.native_handle(), static_cast<__int64>(offset), SEEK_SET) == static_cast<__int64>(offset);
+#else
+    return ::lseek(_file.native_handle(), static_cast<off_t>(offset), SEEK_SET) == static_cast<off_t>(offset);
+#endif
+}
+
+bool
+StaticFileSource::read(char *data, std::size_t size) noexcept {
+    // qb-io's read() returns what one system call gave: a regular file may give less than asked, and 0 at its end.
+    while (size > 0) {
+        const int n = _file.read(data, size);
+        if (n <= 0)
+            return false;
+        data += n;
+        size -= static_cast<std::size_t>(n);
+    }
+    return true;
 }
 
 } // namespace internal

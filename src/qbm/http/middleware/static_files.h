@@ -337,6 +337,36 @@ std::string generate_directory_listing_html(const std::filesystem::path &directo
 inline constexpr std::size_t static_file_stream_piece = std::size_t{64} * 1024;
 
 /**
+ * @brief The file a response body is read from: qb-io's descriptor (`qb::io::sys::file`), opened read-only, binary.
+ *
+ * A streamed download holds it open until its last byte is read, for as long as the client takes (Huly QB-101). On
+ * Windows qb-io opens a file sharing read, write AND delete (Huly QB-320), as POSIX lets any open file be: while a
+ * download reads it, the file can be renamed away and its name removed, the new one put in its place, and the
+ * download reads the old bytes to its end. A rename OVER the open file is still refused there. `std::ifstream`, which
+ * this replaces, shares no delete on Windows: every rename and removal of the file was refused until the download
+ * ended.
+ */
+class StaticFileSource {
+public:
+    /// Opens `path` for reading, positioned at its first byte; false when it cannot be opened.
+    [[nodiscard]] bool open(std::filesystem::path const &path) noexcept;
+
+    [[nodiscard]] bool is_open() const noexcept;
+
+    /// The size of the open file, read from its descriptor; -1 when it cannot be read.
+    [[nodiscard]] long long size() const noexcept;
+
+    /// Moves to `offset` bytes from the start; false when the file cannot.
+    [[nodiscard]] bool seek(std::uintmax_t offset) noexcept;
+
+    /// Reads exactly `size` bytes into `data`; false when the file fails or ends first.
+    [[nodiscard]] bool read(char *data, std::size_t size) noexcept;
+
+private:
+    qb::io::sys::file _file;
+};
+
+/**
  * @brief Feeds a file's bytes to a streamed response, a piece at a time, as the session's output drains (Huly QB-101).
  *
  * It owns the stream and the open file, positioned at the first byte to send. While it waits it is owned by the
@@ -358,7 +388,7 @@ class StaticFileStreamer : public std::enable_shared_from_this<StaticFileStreame
 public:
     using stream_type = ResponseStream<SessionType>;
 
-    StaticFileStreamer(std::shared_ptr<stream_type> stream, std::ifstream file, std::uintmax_t length)
+    StaticFileStreamer(std::shared_ptr<stream_type> stream, StaticFileSource file, std::uintmax_t length)
         : _stream(std::move(stream))
         , _file(std::move(file))
         , _left(length)
@@ -386,7 +416,7 @@ public:
                     return;
                 }
                 const auto n = static_cast<std::size_t>(std::min<std::uintmax_t>(_left, _piece_size));
-                if (!_file.read(_piece.get(), static_cast<std::streamsize>(n))) {
+                if (!_file.read(_piece.get(), n)) {
                     _stream->abort();
                     return;
                 }
@@ -417,7 +447,7 @@ private:
     }
 
     std::shared_ptr<stream_type> _stream;
-    std::ifstream                _file;
+    StaticFileSource             _file;
     std::uintmax_t               _left; ///< bytes still to read from the file
     std::size_t                  _piece_size;
     std::size_t                  _turn_budget; ///< pieces one turn may write: a drained output's fill to the mark, and one
@@ -770,8 +800,10 @@ public:
             }
         }
 
-        std::ifstream file_stream(target_file_abs, std::ios::binary | std::ios::ate);
-        if (!file_stream.is_open()) {
+        // qb-io's descriptor: on Windows it shares delete, so a download in flight does not lock the file against a
+        // rename or a removal (Huly QB-101).
+        internal::StaticFileSource file_stream;
+        if (!file_stream.open(target_file_abs)) {
             send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Could not open file");
             return;
         }
@@ -788,8 +820,11 @@ public:
             }
         }
 
-        long long full_file_size = static_cast<long long>(file_stream.tellg());
-        file_stream.seekg(0, std::ios::beg);
+        const long long full_file_size = file_stream.size(); // the file opened, not the name: it is read from its descriptor
+        if (full_file_size < 0) {
+            send_error_response(ctx, qb::http::status::INTERNAL_SERVER_ERROR, "Could not open file");
+            return;
+        }
 
         // A body of more than stream_threshold bytes streams where the session can stream it (Huly QB-101): it is
         // never materialised, so max_file_size does not bound it. HEAD reads the same verdict as the GET it mirrors.
@@ -899,8 +934,7 @@ public:
 
         // Seek to the correct offset if it's a range request
         if (is_range_request) {
-            file_stream.seekg(offset, std::ios::beg);
-            if (file_stream.fail()) {
+            if (!file_stream.seek(static_cast<std::uintmax_t>(offset))) {
                 // The head is set: its length and range would describe a body this answer does not carry.
                 replace_body_with_error(ctx->response(), qb::http::status::INTERNAL_SERVER_ERROR, "Error seeking in file for range request");
                 ctx->complete(AsyncTaskResult::COMPLETE);
@@ -960,7 +994,8 @@ private:
      *          is then buffered, and the body is read whole after all (`read_whole_under_cap()`).
      */
     void
-    serve_streamed([[maybe_unused]] ContextPtr const &ctx, [[maybe_unused]] std::ifstream file, [[maybe_unused]] std::uintmax_t length) {
+    serve_streamed([[maybe_unused]] ContextPtr const &ctx, [[maybe_unused]] internal::StaticFileSource file,
+                   [[maybe_unused]] std::uintmax_t length) {
         if constexpr (streaming_session<SessionType>) {
             ctx->response().body().clear(); // the file is the body: one an earlier middleware left would lead the stream
             auto stream = ctx->begin_stream();
@@ -987,7 +1022,7 @@ private:
     /// hook made bodiless it is not read, and the file's length, type and range go with it, as the middleware's own
     /// 304 drops them -- a later cancellation would otherwise answer 503 under the file's length.
     void
-    read_whole_under_cap(Response &response, std::ifstream &file, std::uintmax_t length) const {
+    read_whole_under_cap(Response &response, internal::StaticFileSource &file, std::uintmax_t length) const {
         if (detail::status_carries_no_body(static_cast<int>(response.status().code()))) {
             response.remove_header("Content-Length");
             response.remove_header("Content-Type");
@@ -1002,12 +1037,12 @@ private:
 
     /// Read `length` bytes of `file` into the response body; `false`, the body cleared, when the file cannot give them.
     [[nodiscard]] static bool
-    read_into_body(Response &response, std::ifstream &file, long long length) {
+    read_into_body(Response &response, internal::StaticFileSource &file, long long length) {
         auto &pipe = response.body().raw();
         pipe.clear();
         if (length > 0) {
             pipe.allocate_back(static_cast<size_t>(length));
-            if (!file.read(pipe.begin(), length)) {
+            if (!file.read(pipe.begin(), static_cast<std::size_t>(length))) {
                 pipe.clear();
                 return false;
             }

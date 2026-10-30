@@ -23,7 +23,8 @@
  *   - a peer that leaves mid-body cancels the request; a file that shrinks under the read closes the connection short
  *     of its Content-Length; a session that drops what it is given (it is disconnecting) ends the request cancelled,
  *     not delivered, without the whole file read in one turn; an HTTP/1.0 request streams under its length;
- *     pipelined requests stay in order;
+ *     pipelined requests stay in order; a file being downloaded can be renamed away, replaced and its old name removed,
+ *     on Windows too, the download reading the old bytes to its end;
  *   - PRE_RESPONSE_SEND hooks: one that drops the length streams chunked; one that leaves a head a stream cannot
  *     carry gets the body read whole, under the cap, and over it a 413 with the head of the historical one, a framing
  *     it added dropped; one that answers 304 leaves the file unread; one that ends the request gets no stream, and a
@@ -667,6 +668,51 @@ TEST_F(StaticFilesStreamTest, AFileThatShrinksUnderTheReadClosesTheConnectionSho
     EXPECT_TRUE(c.buffer.compare(c.buffer.find("\r\n\r\n") + 4, received, shrinking, 0, received) == 0) << "what left is the file's prefix";
     ASSERT_TRUE(wait_for([] { return record_of("shrink").has_value(); }));
     EXPECT_TRUE(record_of("shrink")->cancelled) << "an aborted stream cancels its request";
+}
+
+// An operator replaces a file a slow client is downloading: the new one is written beside it, the served one renamed
+// away, the new one renamed in, the old name removed. Every step succeeds while the download reads; the download ends
+// with the old bytes, and the next request gets the new file. On Windows the read used to hold the file without
+// delete-sharing until its last byte -- every rename and the removal refused for as long as the client took (Huly
+// QB-101); the file is opened through qb-io's descriptor now, which shares delete (Huly QB-320).
+TEST_F(StaticFilesStreamTest, AFileBeingDownloadedCanBeRenamedAwayReplacedAndRemoved) {
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto fresh = pattern(kBig, 8);
+    write_file("huge.new", fresh);
+    auto server = serve(options());
+    ASSERT_TRUE(server->ready());
+    RawClient c;
+    ASSERT_TRUE(c.connect(server->port(), kClientRcv));
+    ASSERT_TRUE(c.send(request("/static/huge.bin", "replaced")));
+    ASSERT_TRUE(c.read_until([&] { return c.buffer.find("\r\n\r\n") != std::string::npos; }));
+    // The client reads nothing more: the producer is parked mid-file, the file open.
+    ASSERT_TRUE(wait_for([] { return g_max_pending.load() >= kHighMark; })) << "the output never reached the mark";
+    ASSERT_FALSE(record_of("replaced").has_value()) << "the download must still be in flight";
+
+    std::error_code away, in, removed;
+    std::filesystem::rename(root / "huge.bin", root / "huge.old", away);
+    EXPECT_FALSE(away) << "renaming a file being downloaded away: " << away.message();
+    std::filesystem::rename(root / "huge.new", root / "huge.bin", in);
+    EXPECT_FALSE(in) << "putting the new file in its place: " << in.message();
+    std::filesystem::remove(root / "huge.old", removed);
+    EXPECT_FALSE(removed) << "removing the old name while the download reads it: " << removed.message();
+
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; }, 60s)) << "eof=" << c.eof;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_EQ(r.field("content-length"), std::to_string(kHuge));
+    EXPECT_TRUE(r.body == huge) << "the download in flight must read the file it began with to its end";
+    ASSERT_TRUE(wait_for([] { return record_of("replaced").has_value(); }));
+    EXPECT_FALSE(record_of("replaced")->cancelled);
+    EXPECT_EQ(record_of("replaced")->streamed, kHuge);
+
+    const auto next = exchange(server->port(), request("/static/huge.bin", "replacement"));
+    EXPECT_EQ(next.response.status, 200);
+    EXPECT_EQ(next.response.field("content-length"), std::to_string(kBig));
+    EXPECT_TRUE(next.response.body == fresh) << "the next request must get the file now at that name";
+    std::error_code ec;
+    EXPECT_FALSE(std::filesystem::exists(root / "huge.old", ec)) << "the old name outlived the download";
 }
 
 TEST_F(StaticFilesStreamTest, AnHttp10RequestStreamsUnderItsLengthThenTheConnectionCloses) {
