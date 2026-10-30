@@ -283,7 +283,7 @@ Location resolution preserves encoded octets, repeated/trailing slashes and an e
 Each attempt receives a fresh copy of the logical request body, so replay does not compress an already-compressed snapshot. Body-dropping rewrites clear trailers and body/framing metadata; preserved-body rewrites recalculate Content-Length, and Host is rebuilt for the destination. Cross-origin permission can therefore also permit replaying a retained body to the new origin.
 
 History retains complete request and response bodies. The cap bounds followed hops, not retained bytes: storage grows with actual followed exchanges rather than being reserved up front from `max_hops`. A very large cap permits a correspondingly large history.
-<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,128-150,174-200; qbm/http/src/qbm/http/origin.h:105-189; qbm/http/src/qbm/http/detail/redirect.cpp:64-112,123-151,161-229,233-270 -->
+<!-- src: qbm/http/src/qbm/http/redirect.h:25-38,128-150,174-200; qbm/http/src/qbm/http/origin.h:106-192; qbm/http/src/qbm/http/detail/redirect.cpp:64-112,123-151,161-229,233-270 -->
 
 ## Persistent client capability matrix
 

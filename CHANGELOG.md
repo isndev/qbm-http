@@ -191,7 +191,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   edge cases, the NUL and cut-encoding cases of the unit test; 7 130 accepted) found no disagreement -- and the gated
   parse executes 84 fewer instructions a request for it (4 359 -> 4 275 with QB-1177's in-place reader; 4 076 before
   the train), 273 against 280 ns on the same host in the same campaign (0.976), 1.024 [0.998, 1.041] of the previous
-  release's parse -- level with it within that campaign's 1.7 % A/A band. Tests: the router
+  release's parse -- level with it within that campaign's 1.7 % A/A band. MSVC 19.51 read the same cell +34 ns (318 ->
+  352 ns, +11 %, [1.079, 1.127]): it kept the parser's three helpers around the check (`without_trailing_whitespace`,
+  `note_host_field`, `check_host_field`) out of line -- three calls a request where g++ inlined them -- and, once those
+  were forced, `is_request_authority()`; the four are `QB_MSVC_FORCEINLINE` (plain `inline` on g++ and clang, whose
+  binary is byte-identical), 352 -> 338 ns (0.959 [0.952, 0.966]); the +20 ns (+6 %) that remain there are the check's
+  own MSVC codegen. Tests: the router
   on the wire (each refused shape answered 400, an HTTP/1.0 request without `Host` served, an absolute-form target's
   `Host` reading its authority, a pipelined request without `Host` refused after the one before it and the one after it
   never read), the parser (each shape and its refusal status; the field a CONNECT, an absolute-form and an asterisk-form

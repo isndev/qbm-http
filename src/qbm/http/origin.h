@@ -23,6 +23,7 @@
 #include <string_view>
 
 #include <qb/io/uri.h>
+#include <qb/utility/branch_hints.h> // QB_MSVC_FORCEINLINE (is_request_authority, Huly QB-1186)
 
 namespace qb::http::origin {
 
@@ -155,12 +156,14 @@ is_port(std::string_view const port) noexcept {
  * One pass over the text and nothing allocated, inline where the HTTP/1.1 parser checks every request's
  * Host field (Huly QB-1186): the host's octets through one table, the port's digits bounded as they are
  * read; only an IP literal calls out. The first form of this check was an out-of-line function that
- * scanned the host, then re-read the port with std::from_chars: 171 instructions a request on g++ 14.
+ * scanned the host, then re-read the port with std::from_chars: 171 instructions a request on g++ 14. Forced
+ * inline on MSVC: once the parser's three helpers around it were, MSVC kept this function out of line instead,
+ * one call on the header-complete path of every request (the HTTP/1.1 parser's base.h says what that cost).
  *
  * @param text The field value.
  * @return Whether the text has that shape.
  */
-[[nodiscard]] inline bool
+[[nodiscard]] QB_MSVC_FORCEINLINE bool
 is_request_authority(std::string_view const text) noexcept {
     if (text.empty())
         return false;

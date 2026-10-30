@@ -114,9 +114,10 @@ struct request_limits {
 
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
-#include "../../headers.h"      // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
-#include "../../message_base.h" // detail::store_received_trailer (trailers(), Huly QB-1073)
-#include "../../origin.h"       // origin::request_target_uri (Huly QB-1177), is_request_authority (QB-1186)
+#include <qb/utility/branch_hints.h> // QB_MSVC_FORCEINLINE (the Host check's helpers, Huly QB-1186)
+#include "../../headers.h"           // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
+#include "../../message_base.h"      // detail::store_received_trailer (trailers(), Huly QB-1073)
+#include "../../origin.h"            // origin::request_target_uri (Huly QB-1177), is_request_authority (QB-1186)
 #include "../../types.h"
 #include "../../utility.h"
 
@@ -198,7 +199,10 @@ private:
 
     /// Ends @p value at its last octet that is no whitespace: the OWS around a field line value is not part of it (RFC
     /// 9112 §5), and llhttp drops only the run before it -- `Host: a ` was the value `a `, no host (Huly QB-1186).
-    static String &
+    /// Forced inline on MSVC, as note_host_field() and check_host_field() are: left out of line there -- three calls
+    /// on the header-complete path of every request, where g++ inlines them -- the Host check cost a 2-line GET 38 ns
+    /// (+12 %) a parse on MSVC 19.51 against the 7..10 ns of the check itself on g++ 14 (Huly QB-1186).
+    static QB_MSVC_FORCEINLINE String &
     without_trailing_whitespace(String &value) noexcept {
         if (!value.empty() && (value.back() == ' ' || value.back() == '\t')) [[unlikely]]
             value.erase(value.find_last_not_of(" \t") + 1); // npos + 1 is 0 (llhttp hands no value of whitespace alone)
@@ -315,7 +319,8 @@ private:
 
     /// Counts and checks a request's Host field line as the header section stores it, so that check_host_field() looks
     /// nothing up on the path of every request: a name of four octets is compared, any other costs one comparison.
-    static void
+    /// Forced inline on MSVC, which kept it out of line (without_trailing_whitespace()).
+    static QB_MSVC_FORCEINLINE void
     note_host_field(Parser *self, String const &name, String const &value) noexcept {
         if constexpr (MessageType::type == HTTP_REQUEST) {
             if (name.size() == 4 && utility::iequals(name, "host")) {
@@ -339,8 +344,10 @@ private:
      * absolute-form (§3.2.2), or a CONNECT request's authority-form (§3.3) -- overrides the field, which is still
      * required and checked: the field then reads the target's authority as the client wrote it, so no reader of it
      * takes the host it named instead (an HTTP/1.0 request that sends none has none: the URI names it).
+     *
+     * Forced inline on MSVC, which kept it out of line (without_trailing_whitespace()).
      */
-    static int
+    static QB_MSVC_FORCEINLINE int
     check_host_field(http_t *parser, MessageType &msg) {
         auto const *self = self_of(parser);
         if (self->_host_fields == 0) {
