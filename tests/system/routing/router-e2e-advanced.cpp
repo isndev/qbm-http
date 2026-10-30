@@ -335,6 +335,13 @@ public:
         router().get("/", target_echo("root"));
         router().get("/where/*rest", target_echo("plain"));
         router().get("/a/where/*rest", target_echo("a"));
+        // `[`, `]` and `|` as a browser sends them (Huly QB-1187): a static route, a parameter.
+        router().get("/octets/a|b[c]", target_echo("octets"));
+        router().get("/octets/p/:v", [](std::shared_ptr<Context> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "v=" + ctx->path_param("v") + ";path=" + std::string{ctx->request().uri().path()};
+            ctx->complete();
+        });
 
         // ---- Middleware-induced error -> global error chain -> 503 ----
         {
@@ -585,13 +592,30 @@ TEST_F(RouterE2ETest, AnOriginFormDoubleSlashIsAPathNotAnAuthority) {
 
 // A target that is none of the four forms (RFC 9112 §3.2), one the URI parser refuses or one llhttp refuses itself
 // (`?x`) names no resource: it is answered 400 -- not served at the path a refused parse leaves empty, the route of
-// `/`, nor closed on silence.
+// `/`, nor closed on silence. A path byte refused is one RFC 3986 forbids that a browser never sends as it is
+// (Huly QB-1187).
 TEST_F(RouterE2ETest, ATargetThatNamesNoResourceIsABadRequest) {
     for (std::string const target :
-         {"/where/a|b", "/where/a{b}", "*", "/where/x#f", "http://u@localhost/where/x", "http:///where/x", "http://[127.0.0.1]/where/x", "?x"})
+         {"/where/a^b", "/where/a{b}", "/where/a\\b", "/where/a\"b", "*", "/where/x#f", "http://u@localhost/where/x", "http:///where/x",
+          "http://[127.0.0.1]/where/x", "http://localhost/where/a^b", "?x"})
         EXPECT_EQ(exchange("GET", target).first, "HTTP/1.1 400 Bad Request") << target;
-    EXPECT_EQ(exchange("GET", "/where/a%7Cb").first, "HTTP/1.1 200 OK") << "the same byte, percent-encoded";
+    EXPECT_EQ(exchange("GET", "/where/a%5Eb").first, "HTTP/1.1 200 OK") << "the same byte, percent-encoded";
     EXPECT_EQ(exchange("OPTIONS", "*").first, "HTTP/1.1 404 Not Found") << "the asterisk-form of OPTIONS reaches the router";
+}
+
+// `[`, `]` and `|`, which a browser sends as they are (WebKit, Node's fetch; Chrome 156 encodes `|`), are served
+// (Huly QB-1187): in an origin-form and an absolute-form target, by the route their percent-encodings name, the path
+// kept as it was sent. Before, the request was answered 400 -- and before Huly QB-1177, served at the route of `/`.
+TEST_F(RouterE2ETest, TheOctetsABrowserSendsRawNameTheRouteTheirEncodingsName) {
+    using Wire = std::pair<std::string, std::string>;
+    for (std::string const target : {"/octets/a|b[c]", "/octets/a%7Cb%5Bc%5D", "/octets/a%7cb[c%5d"})
+        EXPECT_EQ(exchange("GET", target), (Wire{"HTTP/1.1 200 OK", "route=octets;path=" + target + ";host=;userinfo=;Host=localhost"}))
+            << target;
+    EXPECT_EQ(exchange("GET", url("/octets/a|b[c]")),
+              (Wire{"HTTP/1.1 200 OK", "route=octets;path=/octets/a|b[c];host=localhost;userinfo=;Host=localhost:" + std::to_string(_port)}));
+    EXPECT_EQ(exchange("GET", "/octets/p/[x]|y"), (Wire{"HTTP/1.1 200 OK", "v=[x]|y;path=/octets/p/[x]|y"}));
+    EXPECT_EQ(exchange("GET", "/octets/p/%5Bx%5D%7Cy"), (Wire{"HTTP/1.1 200 OK", "v=[x]|y;path=/octets/p/%5Bx%5D%7Cy"}));
+    EXPECT_EQ(exchange("GET", "/octets/a%257Cb[c]").first, "HTTP/1.1 404 Not Found") << "`%25` is a percent sign, not the start of `%7C`";
 }
 
 // Pipelined on one connection: the request before a refused target is answered, then the 400, then the connection
@@ -600,7 +624,7 @@ TEST_F(RouterE2ETest, ARefusedTargetIsAnsweredAfterThePipelinedRequestBeforeIt) 
     qb::io::tcp::socket socket;
     ASSERT_EQ(socket.connect_v4("127.0.0.1", _port), qb::io::SocketStatus::Done);
     ASSERT_TRUE(write_all(socket, "GET /where/first HTTP/1.1\r\nHost: localhost\r\n\r\n"
-                                  "GET /where/a|b HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                                  "GET /where/a^b HTTP/1.1\r\nHost: localhost\r\n\r\n"
                                   "GET /where/third HTTP/1.1\r\nHost: localhost\r\n\r\n"));
     const std::string wire = read_wire_response(socket);
     socket.disconnect();

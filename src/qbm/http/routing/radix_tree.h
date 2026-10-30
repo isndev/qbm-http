@@ -28,6 +28,7 @@
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map (ska::flat_hash_map, cache-friendly O(1) lookup for static_children)
 
 #include "../types.h"          // For qb::http::method enum
+#include "../utility.h"        // For utility::decode_raw_path_octets (Huly QB-1187)
 #include "./async_task.h"      // For IAsyncTask
 #include "./path_parameters.h" // For PathParameters
 // #include <iostream> // Removed: For debug prints
@@ -218,8 +219,9 @@ private:
         std::unique_ptr<Node> wildcard_child;
         /**
          * @brief The canonical pattern of the route ending at this node -- `/`, `/users/:id`, `/files/ *path` (no space): its
-         *        segments joined by `/`, captures with their `:` or `*`. Set when a handler is first registered
-         *        here; it views the name arena. Empty for a node no route ends at.
+         *        segments joined by `/`, captures with their `:` or `*`, `%5B`, `%5D` and `%7C` of a static segment
+         *        decoded (Huly QB-1187). Set when a handler is first registered here; it views the name arena. Empty
+         *        for a node no route ends at.
          */
         std::string_view pattern;
 
@@ -348,7 +350,9 @@ public:
      * The provided `task_chain_list` (middleware + handler) is associated with the terminal node of the path
      * for the specified HTTP method.
      *
-     * @param path_pattern_str The full, normalized path pattern string for the route (e.g., "/users/:id").
+     * @param path_pattern_str The full, normalized path pattern string for the route (e.g., "/users/:id"). A static
+     *        segment is held with `%5B`, `%5D` and `%7C` decoded, as match() reads a request path: `/a|b` and
+     *        `/a%7Cb` are one route (Huly QB-1187); a capture's name is kept as written.
      * @param method The HTTP method this route responds to.
      * @param task_chain_list A vector of `IAsyncTask` shared pointers representing the compiled execution chain for this route.
      * @throws std::invalid_argument if the path pattern is malformed (e.g., empty segment, misplaced wildcard, conflicting parameters).
@@ -421,9 +425,15 @@ public:
                 }
                 current_node = current_node->param_child.get();
             } else {
-                // Static segment
-                _name_arena->segments.emplace_back(segment_sv);
+                // Static segment, held with `[`, `]` and `|` as themselves whichever spelling the pattern used: a
+                // request names the route with the octet or its percent-encoding alike (Huly QB-1187). The
+                // canonical pattern below is joined from the segments as held.
+                if (std::string decoded; utility::decode_raw_path_octets(segment_sv, decoded))
+                    _name_arena->segments.emplace_back(std::move(decoded));
+                else
+                    _name_arena->segments.emplace_back(segment_sv);
                 std::string_view static_segment_sv = _name_arena->segments.back();
+                segments[i]                        = static_segment_sv;
 
                 auto it = current_node->static_children.find(static_segment_sv);
                 if (it == current_node->static_children.end()) {
@@ -486,6 +496,9 @@ public:
         if (slot >= METHOD_SLOT_COUNT) {
             return std::nullopt; // unknown / uninitialised method -> cannot match anything
         }
+        std::string decoded_path; // `[`, `]` and `|` as the tree holds them (Huly QB-1187); the captures are copies
+        if (utility::decode_raw_path_octets(path_sv, decoded_path))
+            path_sv = decoded_path;
         const std::vector<std::string_view> segments = split_path_to_segments(path_sv);
         return match_recursive(_root.get(), segments, slot, 0, PathParameters{});
     }
@@ -555,7 +568,8 @@ private:
 
         // 3. Try wildcard child match (lowest priority; it consumes all remaining segments)
         if (current_node_ptr->wildcard_child) {
-            // Zero-copy wildcard slice: segments are views into the request path, so
+            // Zero-copy wildcard slice: segments are views into the request path (or into match()'s copy of
+            // it, `%5B`, `%5D` and `%7C` decoded), so
             // "segments[idx]/.../segments[last]" is a single contiguous substring. Compute it
             // without allocations and let `PathParameters::set` do the sole owning copy.
             const auto      &first_seg   = segments[segment_idx];
@@ -589,7 +603,10 @@ public:
      */
     [[nodiscard]] std::optional<PathAllowedMethodsInfo<SessionType>>
     allowed_methods(std::string_view path_sv) const {
-        PathParameters                params;
+        PathParameters params;
+        std::string    decoded_path; // as match() reads the path (Huly QB-1187)
+        if (utility::decode_raw_path_octets(path_sv, decoded_path))
+            path_sv = decoded_path;
         std::vector<std::string_view> segments = split_path_to_segments(path_sv);
 
         std::function<std::optional<PathAllowedMethodsInfo<SessionType>>(const Node *, size_t, PathParameters)> find_path_recursive =

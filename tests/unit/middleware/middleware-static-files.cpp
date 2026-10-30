@@ -49,6 +49,7 @@
 #include "../../shared/middleware_test_fixture.h"
 
 #include <qbm/http/middleware/static_files.h>
+#include <qbm/http/origin.h>
 #include <qbm/http/routing/context.h>
 #include <qbm/http/routing/router.h>
 
@@ -370,6 +371,70 @@ TEST_F(StaticFilesMiddlewareTest, PathPrefixToEmptyServesRootIndex) {
     configure_router_and_run(sf_mw, create_request(qb::http::method::GET, "/static"));
     EXPECT_EQ(_session->_response.status(), qb::http::status::OK);
     EXPECT_EQ(_session->_response.body().as<std::string>(), "Root Index HTML");
+}
+
+// --- The octets a browser sends as they are (Huly QB-1187) ------------------
+
+// `[`, `]` and `|` in a request path name the file their percent-encodings name, in either case of hex digit or mixed
+// with them, and a prefix to strip written with either spelling matches both. Requests are read as the server reads a
+// target (qb::http::origin::request_target_uri()): create_request() reads a URI reference, which refuses the three.
+// Windows names no file with a `|`: there, every spelling of one is answered alike.
+TEST_F(StaticFilesMiddlewareTest, ARawOctetAndItsPercentEncodingNameOneFile) {
+    create_test_file(_test_root_dir / "[x].txt", "bracketed");
+    std::ofstream pipe_file(_test_root_dir / "a|b.txt");
+    const bool    pipe_named = pipe_file.is_open();
+    pipe_file << "piped";
+    pipe_file.close();
+#ifndef _WIN32
+    EXPECT_TRUE(pipe_named) << "a POSIX file system names a file with a `|`";
+#endif
+    const auto as_received = [](std::string const &target) {
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        auto uri     = qb::http::origin::request_target_uri(target, false, false);
+        EXPECT_TRUE(uri.has_value()) << target;
+        if (uri)
+            req.uri() = std::move(*uri);
+        req.major_version = 1;
+        req.minor_version = 1;
+        return req;
+    };
+    struct Served {
+        int         status;
+        std::string body;
+        bool        operator==(Served const &) const = default;
+    };
+    const auto serve = [&](std::shared_ptr<qb::http::StaticFilesMiddleware<MockMiddlewareSession>> const &mw, std::string const &target) {
+        configure_router_and_run(mw, as_received(target));
+        return Served{_session->_response.status().code(), _session->_response.body().as<std::string>()};
+    };
+
+    const auto plain = make_mw(qb::http::StaticFilesOptions(_test_root_dir));
+    for (std::string const target : {"/[x].txt", "/%5Bx%5D.txt", "/%5bx%5d.txt", "/[x%5D.txt"}) {
+        const auto served = serve(plain, target);
+        EXPECT_EQ(served.status, 200) << target;
+        EXPECT_EQ(served.body, "bracketed") << target;
+    }
+    const auto piped = serve(plain, "/a|b.txt");
+    if (pipe_named) {
+        EXPECT_EQ(piped.status, 200);
+        EXPECT_EQ(piped.body, "piped");
+    }
+    for (std::string const target : {"/a%7Cb.txt", "/a%7cb.txt"})
+        EXPECT_TRUE(serve(plain, target) == piped) << target;
+
+    for (std::string const prefix : {"/files[1]|", "/files%5B1%5D%7c"}) {
+        const auto prefixed = make_mw(qb::http::StaticFilesOptions(_test_root_dir).with_path_prefix_to_strip(prefix));
+        for (std::string const target : {"/files[1]|/[x].txt", "/files%5B1%5D%7C/[x].txt", "/files%5b1]%7c/%5Bx%5D.txt"}) {
+            const auto served = serve(prefixed, target);
+            EXPECT_EQ(served.status, 200) << prefix << " " << target;
+            EXPECT_EQ(served.body, "bracketed") << prefix << " " << target;
+        }
+        // `%25` is a percent sign: `%257C` names no `|`, and the prefix does not match.
+        const auto other = serve(prefixed, "/files[1]%257C/[x].txt");
+        EXPECT_EQ(other.status, 501) << prefix << ": passed on to the next handler";
+        EXPECT_TRUE(_session->_final_handler_called) << prefix;
+    }
 }
 
 // --- Not found / methods ---------------------------------------------------

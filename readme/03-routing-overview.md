@@ -49,19 +49,19 @@ These are described in [Defining routes](./04-defining-routes.md), [Route groups
 
 A path pattern is split into `/`-delimited segments. Each segment is one of three kinds:
 
-1. **Static** — a literal that must match exactly: `users`, `list`.
+1. **Static** — a literal that must match exactly: `users`, `list` (`[`, `]` and `|` match their percent-encodings, below).
 2. **Parameter** — a segment beginning with `:`, capturing exactly one segment under the given name: `/users/:id` captures `id`. The name must be non-empty.
 3. **Wildcard** — a segment beginning with `*`, capturing the entire remainder of the path (including embedded slashes): `/files/*path`. A wildcard **must be the last segment** in the pattern, and the name must be non-empty.
 
 Capture names must be unique within a single pattern. A `:` or `*` with no name, an empty segment, a misplaced wildcard, or two conflicting captures at the same tree level all throw `std::invalid_argument` — raised from `add_route`, which surfaces during `compile()`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:357-459 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:361-469 -->
 
 ### Match precedence and path handling
 
 When more than one branch could match a segment, the radix tree applies a fixed priority: **static > parameter > wildcard**. A wildcard is the lowest priority and is terminal-only. So for a request to `/users/active`, a registered `/users/active` wins over `/users/:status`, which wins over `/users/*rest`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:469-471,538-574 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:479-481,551-588 -->
 
 Path segmentation handles slashes for you:
 
@@ -69,7 +69,7 @@ Path segmentation handles slashes for you:
 - **Consecutive slashes** produce no empty segments — `/foo//bar` segments to `{"foo", "bar"}`.
 - The root `/` segments to the empty list, so a handler registered at `/` attaches to the tree root.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:300-334 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:302-336 -->
 
 ### The `compile()` step
 
@@ -108,14 +108,14 @@ Calling `compile()` again recompiles from scratch — it is idempotent and safe 
    - **No match** → sets phase `NOT_FOUND_CHAIN` and selects the 404 chain.
 5. Fires the `PRE_HANDLER_EXECUTION` hook and starts the selected chain on the context.
 
-Path parameters are URI-decoded exactly once, at match time, and only when a parameterized route matches — static routes never allocate decoded strings. In path components `+` stays literal (only query/form decoding maps `+` to a space).
+Path parameters are URI-decoded exactly once, at match time, and only when a parameterized route matches — static routes never allocate decoded strings (a path holding `%5B`, `%5D` or `%7C` is matched through one copy with those three decoded, below). In path components `+` stays literal (only query/form decoding maps `+` to a space).
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:370-491 -->
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:370-493 -->
 
 The `Context` returned by `route()` manages its own asynchronous lifecycle. When the chain finishes, the context invokes the router's finalization callback, which (if the session is still alive) fires `PRE_RESPONSE_SEND` and writes the response back over the session. See [Request context](./10-request-context.md) for the full lifecycle.
 
 The selected compiled chain also keeps its route-parameter names alive. A retained context can finish or run its destructor hooks after the router and session are gone; session access remains weak. Parameter names stay tied to the matching compilation through a 405 or error-chain transition. A copied standalone `PathParameters` remains a borrowed-key container, so retain the context or copy those names when keeping them separately.
-<!-- src: qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,443-453; qbm/http/src/qbm/http/routing/path_parameters.h:32-57 -->
+<!-- src: qbm/http/src/qbm/http/routing/async_task.h:92-115; qbm/http/src/qbm/http/routing/router_core.h:88-94,445-455; qbm/http/src/qbm/http/routing/path_parameters.h:32-57 -->
 
 ### Compiled chains are shared and immutable
 
@@ -179,7 +179,11 @@ server->router().get("/files/:bucket/*path", [](auto ctx) {
 
 Values arrive URI-decoded: a request to `/notes/My%20Note` matched by `/notes/:title` yields `title == "My Note"`. The parameter keys are `string_view`s into the route pattern held by the router, so the router must outlive the context — which it does by construction.
 
-<!-- src: qbm/http/src/qbm/http/routing/router_core.h:420-430; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
+`[`, `]` and `|` and their percent-encodings name one route (Huly QB-1187). A browser may send those three unencoded in a path (the server accepts them, `qb::io::is_request_path_character()`), another client may encode them: the router decodes `%5B`, `%5D` and `%7C`, in either case of hex digit, in the request path and in each static segment of the route pattern before it matches, so `/doc/[1]|a` and `/doc/%5B1%5D%7Ca` reach the route registered as either; a capture's name is kept as written, and `ctx->route_pattern()` reports the decoded spelling. No other escape is decoded before matching: `%2F` stays inside its segment, and `%257C` is `%7C` once decoded, never `|`. `uri().path()` keeps what the client sent. The static files compare the prefix they strip the same way.
+
+<!-- src: qbm/http/src/qbm/http/utility.h:162; qbm/http/src/qbm/http/routing/radix_tree.h:431-436,500-501,607-609 -->
+
+<!-- src: qbm/http/src/qbm/http/routing/router_core.h:420-432; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
 
 ### Customize the not-found and error behavior
 

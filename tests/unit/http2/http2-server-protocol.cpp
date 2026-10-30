@@ -2054,14 +2054,16 @@ TEST(HTTP2ServerProtocol, EmptyPathPseudoHeaderIsStreamError) {
 }
 
 // The request's URI is the one :scheme, :authority and :path name, its authority :authority's (Huly QB-1177):
-// a `//evil.test/x` path stays a path, `*` is the asterisk-form of an OPTIONS request.
+// a `//evil.test/x` path stays a path, `*` is the asterisk-form of an OPTIONS request. `[`, `]` and `|`, which a
+// browser sends as they are, stay in the path as they were sent (Huly QB-1187).
 TEST(HTTP2ServerProtocol, TheTargetPseudoHeadersNameTheRequestUri) {
     struct Named {
         std::string method, authority, path, host, uri_path;
     };
     for (auto const &c :
          {Named{"GET", "example.test", "//evil.test/x", "example.test", "//evil.test/x"},
-          Named{"GET", "example.test:8443", "/a?b=1", "example.test", "/a"}, Named{"OPTIONS", "example.test", "*", "", "*"}}) {
+          Named{"GET", "example.test:8443", "/a?b=1", "example.test", "/a"}, Named{"OPTIONS", "example.test", "*", "", "*"},
+          Named{"GET", "example.test", "/a|b/[c]", "example.test", "/a|b/[c]"}}) {
         Http2FakeIO    io;
         ServerProtocol protocol(io);
         do_handshake(protocol, io);
@@ -2090,10 +2092,11 @@ TEST(HTTP2ServerProtocol, AMalformedTargetPseudoHeaderIsStreamError) {
          {Malformed{"GET", "https", "example.test", "@evil.test/x"}, Malformed{"GET", "https", "example.test", "evil.test/x"},
           Malformed{"GET", "https", "example.test", "*"}, Malformed{"GET", "https", "user@example.test", "/x"},
           Malformed{"GET", "https", "example.test/evil", "/x"}, Malformed{"GET", "ht/tps", "example.test", "/x"},
-          Malformed{"GET", "https", "example.test", "/a|b"}, Malformed{"GET", "https", ":443", "/x"}, Malformed{"GET", "https", "a:b:c", "/x"},
+          Malformed{"GET", "https", "example.test", "/a^b"}, Malformed{"GET", "https", ":443", "/x"}, Malformed{"GET", "https", "a:b:c", "/x"},
           Malformed{"GET", "https", "example.test:99999", "/x"}, Malformed{"GET", "https", "evil]", "/x"},
           Malformed{"GET", "https", "[127.0.0.1]", "/x"}, Malformed{"GET", "https", "example.test", "/x#f"},
-          Malformed{"GET", "https", "example.test", "/x y"}}) {
+          Malformed{"GET", "https", "example.test", "/x y"}, Malformed{"GET", "https", "example.test", "/a\\b"},
+          Malformed{"GET", "https", "example.test", "/a{b}"}}) {
         Http2FakeIO    io;
         ServerProtocol protocol(io);
         do_handshake(protocol, io);
@@ -4316,7 +4319,7 @@ TEST(HTTP2ServerProtocol, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldLim
     const auto errors = io.stream_error_count;
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next,
                encode_hpack_headers(
-                   {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|b"}, {"x-v", "1234567890123"}}));
+                   {{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a^b"}, {"x-v", "1234567890123"}}));
     drive(protocol, io);
     EXPECT_EQ(io.stream_error_count, errors + 1) << "a :path that is no absolute path, beside the limits";
     EXPECT_TRUE(emitted_header_blocks(io.output, next).empty()) << "a malformed request is not answered";
@@ -4337,7 +4340,7 @@ TEST(HTTP2ServerProtocol, AHostFieldThatStandsForTheAuthorityIsHeldToTheFieldLim
     EXPECT_EQ(last_rst_stream_error(io.output, next + 4), ErrorCode::PROTOCOL_ERROR);
     io.limits.max_url_length = 8;
     push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, next + 6,
-               encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a|bcdefghij"}}));
+               encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/a^bcdefghij"}}));
     drive(protocol, io);
     EXPECT_EQ(io.stream_error_count, errors + 3) << "the unknown method, then the malformed :path over the target limit";
     EXPECT_TRUE(emitted_header_blocks(io.output, next + 6).empty()) << "a malformed request is not answered 414";
