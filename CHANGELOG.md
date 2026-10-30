@@ -158,6 +158,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **An HTTP/2 or HTTP/3 request whose `:path` holds a byte from 0x80 up in its query is malformed, as the same target
+  is on HTTP/1.1 (Huly QB-1187).** HTTP/1.1 reads a target with llhttp built strict, which refuses such a byte in a
+  query as it refuses a control byte (`HPE_INVALID_URL`: `400 Bad Request`, then the connection closes);
+  `qb::http::origin::request_uri()`, which composes the HTTP/2 and HTTP/3 request URI, refused there only `#`, a space,
+  a control byte and DEL, so `/search?q=` followed by the octets C3 A9 (an e acute in UTF-8, not percent-encoded) was
+  answered 400 on one protocol and served on the two others, the raw octets in `query("q")` -- as 3.3.0 served it on
+  both. It refuses the byte now, as
+  llhttp does: an HTTP/2 client gets `RST_STREAM(PROTOCOL_ERROR)` for that request and an HTTP/3 client its stream
+  refused with `H3_MESSAGE_ERROR`, the connection staying open on both, as for any other malformed `:path`. The
+  percent-encoded query (`?q=%C3%A9`) is served on every protocol. A `qb::io::uri` built from raw UTF-8 keeps the raw
+  octets in its query, and the module's clients send them as they are (the HTTP/1.1 serializer refuses only a space, a
+  control byte and DEL): percent-encode them, `qb::io::uri::encode()`, for a qbm-http server or any strict one.
+  `OriginTest.EveryProtocolReadsTheSameRequestPath` reads `/a?b<byte>c` for every byte through the HTTP/1.1 parser and
+  `request_uri()`: the two agree on all 256 bytes, where they differed on the 128 from 0x80 up.
+
 - **A request's URI is the target the client sent: an HTTP/1.1 `//host/path` is a path, a target that is none of the
   four forms is answered 400, and an HTTP/2 or HTTP/3 `:path` or `host` field names no other authority (Huly
   QB-1177).** The HTTP/1.1 server read every request target as a URI reference (RFC 3986 §4.1), where an origin-form
@@ -189,8 +204,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   raw, are path bytes since QB-1187). The HTTP/2 and HTTP/3 servers composed `:scheme://:authority` followed by
   `:path` by hand: on HTTP/2 a `:path` `@evil.test/x` made `evil.test` the host, and on both `OPTIONS *` the host
   `example.test*`.
-  `qb::http::origin::request_uri()` composes it for both: `:path` is an absolute path, with no fragment, space or
-  control byte, or the `*` of an OPTIONS request (its URI is `*`, without an authority, as HTTP/1.1's); `:scheme` a
+  `qb::http::origin::request_uri()` composes it for both: `:path` is an absolute path, with no fragment, space,
+  control byte or byte from 0x80 up (in the query too, below), or the `*` of an OPTIONS request (its URI is `*`, without an authority, as HTTP/1.1's); `:scheme` a
   scheme; `:authority` one `is_request_authority()` accepts -- an IP literal that is an IPv6 address, or a reg-name or
   an IPv4 address with no `:`, `[` or `]` and well-formed percent-encodings, and a port of digits no greater than
   65535 (the authorities `:443`, `a:b:c` and `h:99999` were accepted, `[127.0.0.1]` read as the IPv4 host

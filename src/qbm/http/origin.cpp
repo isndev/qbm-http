@@ -182,10 +182,12 @@ request_uri(std::string_view scheme, std::string_view authority, std::string_vie
     if (options_request && path == "*")
         return qb::io::uri(std::string{"*"});
     // An absolute path and an optional query (RFC 9113 §8.3.1): no fragment, and no byte an HTTP/1.1 request line
-    // could not carry either -- a space or a control character.
+    // could not carry either -- a space, a control character or a byte from 0x80 up, which llhttp refuses in a
+    // target as it refuses a control byte (400). The path's own bytes are the URI parser's below; the query's are
+    // these alone, as on HTTP/1.1, so `?q=\xC3\xA9` is refused on every protocol (review r1 M2, Huly QB-1187).
     if (path.empty() || path.front() != '/' || std::any_of(path.begin(), path.end(), [](char const c) {
             auto const byte = static_cast<unsigned char>(c);
-            return c == '#' || byte <= 0x20 || byte == 0x7f;
+            return c == '#' || byte <= 0x20 || byte >= 0x7f;
         }))
         return std::nullopt;
     std::string text;

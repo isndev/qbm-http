@@ -35,6 +35,7 @@
 
 #include <qb/io/uri.h>
 
+#include <qbm/http/1.1/protocol/base.h> // qb::http::Parser: the HTTP/1.1 side of the request target's grammar
 #include <qbm/http/origin.h>
 #include <qbm/http/request.h>
 #include <qbm/http/response.h>
@@ -774,6 +775,23 @@ TEST(OriginTest, EveryProtocolReadsTheSameRequestPath) {
         EXPECT_EQ(request_uri("https", "victim.test", path, false).has_value(), accepted) << ":path, byte " << c;
         if (accepted && c != '?') {
             EXPECT_EQ(request_uri("https", "victim.test", path, false)->path(), path) << "byte " << c;
+        }
+    }
+    // The query: HTTP/1.1's grammar is llhttp's, which reads it before the target reader does and refuses a byte past
+    // 0x7E as it refuses a control byte (HPE_INVALID_URL, answered 400; a space or CR, LF ends the target), so the
+    // HTTP/1.1 side is the parser itself. `#` begins a fragment, which no target holds. The HTTP/2 and HTTP/3 reader
+    // took a byte from 0x80 up (review r1 M2): `/x?q=\xC3\xA9` was refused on HTTP/1.1 and served on the others.
+    for (int c = 0; c < 256; ++c) {
+        std::string const         target   = std::string{"/a?b"} + static_cast<char>(c) + "c";
+        bool const                accepted = c > 0x20 && c < 0x7f && c != '#';
+        std::string const         request  = "GET " + target + " HTTP/1.1\r\nHost: victim.test\r\n\r\n";
+        qb::http::Parser<Request> parser;
+        EXPECT_EQ(parser.parse(request.data(), request.size()) == HPE_PAUSED, accepted) << "HTTP/1.1, query byte " << c;
+        auto const uri_of_path = request_uri("https", "victim.test", target, false);
+        EXPECT_EQ(uri_of_path.has_value(), accepted) << ":path, query byte " << c;
+        if (accepted) {
+            EXPECT_EQ(uri_of_path->encoded_queries(), target.substr(3)) << "query byte " << c;
+            EXPECT_EQ(parser.get_parsed_message().uri().encoded_queries(), target.substr(3)) << "query byte " << c;
         }
     }
 }
