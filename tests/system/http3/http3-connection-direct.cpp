@@ -1822,8 +1822,9 @@ TEST(Http3ConnectionDirect, AContentLengthBesideTheLimitsIsJudgedFirst) {
         LimitedPair pair{tight.limits()};
         pair.server.read_stream(0, h3_headers_frame(0, fields), true);
         expect_refused_unanswered(pair);
-        if (pair.server_owner.close)
+        if (pair.server_owner.close) {
             EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+        }
     }
 
     // Well-formed beside the limits: answered -- a `content-length` over a limit itself included, kept and judged.
@@ -1849,8 +1850,9 @@ TEST(Http3ConnectionDirect, AContentLengthBesideTheLimitsIsJudgedFirst) {
         pair.server.read_stream(0, "", true);
         EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered 431 when the section ended";
         EXPECT_TRUE(pair.server_owner.requests.empty());
-        if (pair.server_owner.close)
+        if (pair.server_owner.close) {
             EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+        }
     }
 }
 
@@ -1908,8 +1910,9 @@ TEST(Http3ConnectionDirect, AResponseTheEndedStreamContradictsRefusesTheStream) 
     EXPECT_TRUE(pair.client_owner.responses.empty()) << "a trailer section ends a body its content-length contradicts";
     ASSERT_EQ(pair.client_owner.resets.size(), 1u);
     EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
-    if (pair.client_owner.close)
+    if (pair.client_owner.close) {
         EXPECT_EQ(pair.client_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+    }
 }
 
 // A trailer section ends the message: a `content-length` the body it ends contradicts makes the request malformed beside
@@ -1931,8 +1934,9 @@ TEST(Http3ConnectionDirect, AContentLengthATrailerSectionContradictsIsJudgedBefo
         pair.server.read_stream(0, h3_data_frame("abc"), false);
         pair.server.read_stream(0, h3_headers_frame(0, trailers), true);
         expect_refused_unanswered(pair);
-        if (pair.server_owner.close)
+        if (pair.server_owner.close) {
             EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR)) << "nghttp3's own verdict";
+        }
     }
     // The control: a trailer section over the count after the body its content-length declares is answered 431.
     LimitedPair pair{TightLimits{.count = 2}.limits()};
