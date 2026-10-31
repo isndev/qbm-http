@@ -218,11 +218,29 @@ sweep(std::vector<Piece> const &pieces, int const refusal) {
     return injected;
 }
 
+/// MSVC's debug STL (`_ITERATOR_DEBUG_LEVEL` above 0) gives every container a `_Container_proxy` it allocates in
+/// operations the standard makes noexcept -- a std::string's move among them --, so a failure injected into that
+/// allocation terminates inside the library: the header map's insertion moves its key, and the Windows gate's debug,
+/// dev-cxx23 and feature-gates builds aborted there, before any callback could refuse the message. What this binary
+/// sweeps holds for a release STL only; MSVC's release and relwithdebinfo builds and every g++ and clang build run it.
+constexpr bool kStlAllocatesInNoexcept =
+#if defined(_ITERATOR_DEBUG_LEVEL) && _ITERATOR_DEBUG_LEVEL > 0
+    true;
+#else
+    false;
+#endif
+constexpr char const *kStlAllocatesInNoexceptReason =
+    "MSVC's debug STL allocates a container proxy in noexcept moves: an injected failure there terminates in the library";
+
 TEST(Http1ParseAllocFailure, EveryAllocationOfARequestThatFailsRefusesItWith503) {
+    if (kStlAllocatesInNoexcept)
+        GTEST_SKIP() << kStlAllocatesInNoexceptReason;
     EXPECT_GE(sweep<qb::http::Request>(kRequest, HTTP_STATUS_SERVICE_UNAVAILABLE), 5u);
 }
 
 TEST(Http1ParseAllocFailure, EveryAllocationOfAResponseThatFailsFailsItsParse) {
+    if (kStlAllocatesInNoexcept)
+        GTEST_SKIP() << kStlAllocatesInNoexceptReason;
     EXPECT_GE(sweep<qb::http::Response>(kResponse, HTTP_STATUS_SERVICE_UNAVAILABLE), 4u);
 }
 
@@ -253,6 +271,8 @@ struct RefusingServerFakeIO {
 // The server's side: a request whose header section cannot be stored is handed to the session for its 503, and the
 // protocol stays valid for that answer. On the base the exception reached getMessageSize(), noexcept: terminate.
 TEST(Http1ParseAllocFailure, TheServerAnswersARequestItCannotStore503) {
+    if (kStlAllocatesInNoexcept)
+        GTEST_SKIP() << kStlAllocatesInNoexceptReason;
     RefusingServerFakeIO                             io;
     qb::protocol::http::server<RefusingServerFakeIO> proto(io);
     for (std::size_t i = 0; i < 3; ++i) {
