@@ -283,13 +283,19 @@ Decoder::decode_block(const std::vector<uint8_t> &encoded_block, std::vector<Hea
             }
 
             // Read in place: a field dropped past the bound costs no copy, so a reference to a large entry repeated
-            // across the block amplifies nothing.
+            // across the block amplifies nothing. A field kept is written into the vector from the two views, name
+            // then value -- no temporary, no move. Two temporaries moved in (`std::string(name), std::string(value)`)
+            // cost g++ 14 +6.7 % on a browser's request with FEWER instructions: built to their exact length, their
+            // buffers fell into a glibc bin the request's own malloc_consolidate() empties, fifteen allocations a
+            // request past the tcache, where assign() on an empty string sizes as the pushed train's copies did (QB-1196).
             std::string_view name, value;
             if (!get_dynamic_table_entry(index, name, value)) {
                 return false;
             }
             if (admit(name.size() + value.size() + HPACK_ENTRY_OVERHEAD)) {
-                out_headers.emplace_back(std::string(name), std::string(value));
+                auto &field = out_headers.emplace_back();
+                field.name.assign(name.data(), name.size());
+                field.value.assign(value.data(), value.size());
             } else if (refused) {
                 return false;
             }
@@ -364,8 +370,13 @@ Decoder::decode_block(const std::vector<uint8_t> &encoded_block, std::vector<Hea
 
             const std::size_t name_length = index == 0 ? literal_name.length() : indexed_name.length();
             if (admit(name_length + decoded_value->length() + HPACK_ENTRY_OVERHEAD)) {
-                out_headers.emplace_back(index == 0 ? std::move(literal_name) : std::string(indexed_name), std::move(decoded_value.value()),
-                                         never_indexed);
+                // The literal name moves straight in and the indexed one is copied straight in: a conditional
+                // expression over the two materialised a temporary, moved in, for both.
+                if (index == 0) {
+                    out_headers.emplace_back(std::move(literal_name), std::move(decoded_value.value()), never_indexed);
+                } else {
+                    out_headers.emplace_back(std::string(indexed_name), std::move(decoded_value.value()), never_indexed);
+                }
             } else if (refused) {
                 return false;
             }

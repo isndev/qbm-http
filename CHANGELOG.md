@@ -582,7 +582,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (a closed or reset stream, over the concurrency cap) is decoded the same way. The client is unchanged. Tests: the
   advertised value; a list of exactly 1 MiB served, one octet more answered `431` and the next stream served with a
   field the refused block indexed past the bound; the amplification shape answered `431`, its table entries in step;
-  20 MiB of references closing the connection.
+  20 MiB of references closing the connection. The decoder's indexed fields were then built as two temporaries moved
+  into the vector (`std::string(name), std::string(value)`), the two literal arms through a conditional expression that
+  materialised a third: g++ 14 read a browser's request (`qbm-http-bench-http2-server-request`, 18 fields, 15 of them
+  indexed) +6.7 % (+270 ns) with 435 FEWER instructions, in two alignment families (an i9-12900K, 3 copies a side,
+  seeded order) -- the exact-length buffers fell into a glibc bin the request's own `malloc_consolidate()` empties,
+  fifteen allocations a request past the tcache (`_int_malloc` +205 instructions a request, callgrind). A kept field is
+  now written into the vector from the two views, name then value, and the literal name moves straight in: g++ reads
+  the request 4 % FASTER than the train before this fix, in both alignment families (0.957 [0.944, 0.968] and 0.952
+  [0.940, 0.973] with `host`, 0.959 / 0.961 under `-falign-functions=64`; the temporaries alone 1.067 / 1.042), MSVC 19.51,
+  whose allocator never had the bin walk, reads it where it read the temporaries (0.973 / 0.970 against the train, 0.974 /
+  0.977 before). No behaviour changes.
 
 - **The HTTP/2 server's response fields, the HTTP/2 client's response parse and HTTP/3's field paths no longer copy
   and fold each field name (Huly QB-1191).** QB-1191 removed the copy from the HTTP/2 client's request loop only; the

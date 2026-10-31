@@ -6,7 +6,7 @@
  * paths that the existing suite leaves uncovered, with an emphasis on:
  *
  * - The Encoder's per-header representation-selection strategy
- *   (Encoder::encode in hpack.cpp:444-556): exact dynamic-table match ->
+ *   (Encoder::encode in hpack.cpp:455-567): exact dynamic-table match ->
  *   indexed, literal-with-incremental-indexing using a dynamic / static /
  *   absent name index, never-indexed branches (dynamic / static / new name),
  *   and the "without indexing" fallback taken when a header is too large for
