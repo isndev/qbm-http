@@ -322,11 +322,11 @@ struct Http2ClientStream : public Http2StreamBase {
  * the assembled request, response handling state, and push promise support.
  */
 struct Http2ServerStream : public Http2StreamBase {
-    // Application-specific members for server side
+    // Application-specific members for server side. The request's method and URI are assembled_request's own:
+    // a `method` string, a `request_uri` and an `application_tracking_id` nothing read sat here until Huly QB-1215.
     qb::http::Request assembled_request;          ///< Request being assembled
     bool              request_dispatched = false; ///< Request has been dispatched
     bool              response_sent      = false; ///< Tracks if initial HEADERS frame for response was sent
-    std::string       method;                     ///< HTTP method from request
 
     // Response sending state for the current response_to_send
     size_t send_buffer_offset = 0; ///< Current offset in response_to_send.body().raw()
@@ -336,13 +336,9 @@ struct Http2ServerStream : public Http2StreamBase {
         0; ///< If *this* stream *is* a server-pushed stream, this is the ID of the client-initiated stream it's associated with.
     // uint32_t associated_stream_id = 0;       ///< REMOVED - Consolidate to parent_stream_id for clarity when this stream IS a pushed stream.
 
-    // Fields for header processing (incoming request headers)
-    std::vector<qb::protocol::hpack::HeaderField> decoded_header_fields; ///< Decoded HPACK fields for current header block
-    std::vector<uint8_t> last_received_header_block_fragment;            ///< Raw bytes of last header block for PUSH_PROMISE validation
-    FrameHeader          last_received_frame_header;                     ///< Header of the frame that completed the last header block
-
-    qb::io::uri request_uri;                 ///< URI assembled from incoming request pseudo-headers
-    uint64_t    application_tracking_id = 0; ///< For app to track request/response pair
+    // The decoded fields of a header block live in the connection's vector (ServerHttp2Protocol::_decoded_header_fields),
+    // read once the block is complete; neither the raw block nor the header of the frame that completed it is kept
+    // (a copy of the block a request, read by nothing, went until Huly QB-1215).
 
     // State for current outgoing response
     bool has_pending_data_to_send = false;  ///< True if response_to_send.body() has data remaining or if trailers are pending after body.

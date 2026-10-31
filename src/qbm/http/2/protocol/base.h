@@ -864,12 +864,17 @@ protected:
             headers_frame_data.header.flags &= static_cast<uint8_t>(~FLAG_END_HEADERS);
         }
         headers_frame_data.header.set_stream_id(stream_id);
-        headers_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        if (last_fragment) {
+            // One frame carries the block: it is the fragment, moved, not copied (Huly QB-1215).
+            headers_frame_data.payload.header_block_fragment = std::move(encoded_header_block);
+        } else {
+            headers_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
+        }
         this->_io << headers_frame_data;
         if (!this->ok()) {
             return false;
         }
-        return send_continuation_frames(stream_id, encoded_header_block, first_size);
+        return last_fragment || send_continuation_frames(stream_id, encoded_header_block, first_size);
     }
 
     /**

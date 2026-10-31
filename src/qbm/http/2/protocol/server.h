@@ -91,6 +91,22 @@ private:
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
     uint32_t             _current_header_stream_id = 0;     ///< Stream ID for header assembly
     bool                 _discarding_header_block  = false; ///< The block in assembly is refused: decode it, drop its fields
+    /// The fields of the block in assembly, decoded: one vector a connection, read once the block is complete and
+    /// cleared on every exit of its handler, so its capacity serves every stream and nothing of one stream reaches
+    /// the next. A vector a stream grew 1 -> 2 -> 4 -> ... -> 32 fields for a browser's request -- six allocations,
+    /// two of them past 1 KiB, the size from which glibc consolidates its fast bins before serving, after which the
+    /// request's small allocations took the allocator's slow path (Huly QB-1215).
+    std::vector<qb::protocol::hpack::HeaderField> _decoded_header_fields;
+    /// The fields of the response being sent, the same way: one vector a connection, filled and encoded in
+    /// send_response(), cleared on its every exit (Huly QB-1215).
+    std::vector<qb::protocol::hpack::HeaderField> _response_header_fields;
+    /// Clears a connection-level field vector when the scope that filled it ends, whatever the exit.
+    struct ClearedOnExit {
+        std::vector<qb::protocol::hpack::HeaderField> &fields;
+        ~ClearedOnExit() {
+            fields.clear();
+        }
+    };
 
     int64_t              _connection_send_window;                                                    ///< Connection-level send window
     int64_t              _connection_receive_window          = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
@@ -1170,7 +1186,10 @@ public:
         }
 
         LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Building response headers with status " << http_response.status().code());
-        std::vector<qb::protocol::hpack::HeaderField> hf_vector;
+        // The fields go to the connection's vector, cleared on every exit of this function: its capacity serves every
+        // response, where a fresh vector grew with each (Huly QB-1215).
+        std::vector<qb::protocol::hpack::HeaderField> &hf_vector = _response_header_fields;
+        const ClearedOnExit                            response_fields_cleared{hf_vector};
         hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
         std::optional<std::uint64_t> declared_content_length;
         bool                         announces_trailers = false;
@@ -1720,10 +1739,11 @@ private:
         if (!end_headers) {
             return;
         }
-        std::vector<qb::protocol::hpack::HeaderField> dropped;
-        bool                                          incomplete = false;
-        bool                                          over_list  = false; // dropped all the same
-        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete, over_list) && !incomplete;
+        bool       incomplete = false;
+        bool       over_list  = false; // dropped all the same
+        const bool decoded =
+            _hpack_decoder.decode(_current_header_block_fragment, _decoded_header_fields, incomplete, over_list) && !incomplete;
+        _decoded_header_fields.clear(); // dropped
         this->clear_header_assembly_state();
         if (!decoded) {
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
@@ -1758,20 +1778,19 @@ private:
         // past the bound SETTINGS_MAX_HEADER_LIST_SIZE advertises is decoded to its end and its
         // fields past the bound dropped: the request is answered 431 below, once the fields kept
         // say it is well-formed, its stream alone -- the connection was closed (Huly QB-1196).
-        if (!_hpack_decoder.decode(_current_header_block_fragment, stream.decoded_header_fields, possibly_incomplete_hpack,
-                                   over_header_list_size)
+        // The fields land in the connection's vector (_decoded_header_fields), read once below and cleared on every
+        // exit, success or stream error: its capacity is the next block's, and a stream that dies mid-block leaves
+        // nothing for the next (Huly QB-1215).
+        const ClearedOnExit decoded_fields_cleared{_decoded_header_fields};
+        if (!_hpack_decoder.decode(_current_header_block_fragment, _decoded_header_fields, possibly_incomplete_hpack, over_header_list_size)
             || possibly_incomplete_hpack) {
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
             return false;
         }
 
-        // Convert decoded_header_fields into stream.assembled_request: its header fields for the main
+        // Convert the decoded fields into stream.assembled_request: its header fields for the main
         // block (pseudo-headers validated), its trailers() for a trailer block.
 
-        // Store original current header block fragment for potential PUSH_PROMISE validation if this is a request
-        if (!is_trailers_block) {
-            stream.last_received_header_block_fragment = _current_header_block_fragment;
-        }
         _current_header_block_fragment.clear(); // Clear for next use
         stream.expecting_continuation = false;
 
@@ -1790,9 +1809,9 @@ private:
 
             std::string temp_method_str; // Temporary for method conversion
 
-            for (const auto &hf : stream.decoded_header_fields) {
+            for (auto &hf : _decoded_header_fields) {
                 const std::string &name  = hf.name;
-                const std::string &value = hf.value;
+                std::string       &value = hf.value; // moved into the request below: the field vector is read once
 
                 if (name.empty()) {
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
@@ -1879,7 +1898,13 @@ private:
                         fields_over_limits = true; // answered 431 once the block is known well-formed
                         continue;
                     }
-                    stream.assembled_request.add_header(name, value);
+                    // The value moves: its buffer becomes the request's instead of being copied and freed with the
+                    // field (Huly QB-1215). A `host` value is copied -- host_sv names it after the loop.
+                    if (host_sv && host_sv->data() == value.data()) [[unlikely]] {
+                        stream.assembled_request.add_header(name, value);
+                    } else {
+                        stream.assembled_request.add_header(name, std::move(value));
+                    }
                 }
             }
 
@@ -1959,7 +1984,7 @@ private:
 
         } else { // Trailers block
             stream.trailers_received = true;
-            for (const auto &hf : stream.decoded_header_fields) {
+            for (const auto &hf : _decoded_header_fields) {
                 const std::string &name  = hf.name;
                 const std::string &value = hf.value;
                 if (name.empty() || name[0] == ':') {

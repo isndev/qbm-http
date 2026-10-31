@@ -104,6 +104,34 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
+  18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
+  (`qbm-http-bench-http2-server-request`, DHAT and callgrind on g++ 14; the P9 finding). Each stream owned a fresh
+  `std::vector<HeaderField>` that grew 1 -> 2 -> 4 -> 8 -> 16 -> 32 fields for that request -- six allocations, 4 536
+  bytes, two of them past 1 KiB --, copied every regular field's value into the request's header map, copied the raw
+  header block into the stream "for PUSH_PROMISE validation" (read by nothing), carried a `qb::io::uri`, a `method`
+  string and two more members nothing read (a 1 080-byte node), and every response grew a fresh field vector and
+  copied its encoded block into the HEADERS frame. Now the block is decoded into ONE vector a connection
+  (`ServerHttp2Protocol::_decoded_header_fields`), cleared on every exit of the block handler and after a refused
+  block is dropped -- its capacity serves every stream, nothing of one stream reaches the next --; a regular field's
+  value moves into the request (a `host` value is still copied: it names the authority after the loop); the block copy
+  and the four dead members of `Http2ServerStream` are gone (the struct is private to the protocol; the request's
+  method and URI are `assembled_request`'s); the response's fields go to one vector a connection too, and a block that
+  fits one frame is moved into it, CONTINUATION frames sent only when it does not. DHAT: 61 blocks / 12 108 bytes a
+  request (75 / 17 385 before); callgrind: 55 015 instructions a request (61 135 before, -10 %). A/B (3 physical
+  copies a side, seeded order, a pinned P-core, against the tip): g++ 14 reads the request 7.6 % / 10.2 % faster
+  (0.924 [0.911, 0.940] and 0.899 [0.886, 0.904] with `host`; 3 850 -> 3 557 ns and 3 920 -> 3 523 ns), under
+  `-falign-functions=64` 8.0 % / 9.3 % (0.920 [0.912, 0.929] and 0.908 [0.904, 0.916]); MSVC 19.51, whose heap charges
+  more per allocation, reads it 17.0 % / 15.9 % faster (0.830 [0.821, 0.841] and 0.841 [0.829, 0.846]; 4 958 -> 4 115
+  ns and 5 069 -> 4 262 ns). What stays is named in the ticket: the header map's own 39 allocations (a node, a value
+  vector and the strings of each field: the container's shape), the 3 folded key copies (qb's
+  `string_to_lower::convert()` takes no rvalue), the URI's and the cookies' 6 each, and the two 4 KiB buffers a
+  default-constructed `qb::allocator::pipe` allocates for the Request's and the Response's empty bodies -- 8 KiB a
+  stream, the large allocations that still make glibc consolidate on every request (a qb primitive). No behaviour
+  changes: the header-list bound, the dynamic table, the whitespace rule, the limits and the 431 / 414 / 413 answers
+  are as they were; `ctest -L http2` on the landed tree, g++ 14: 19 registered / 19 executed / 0 skipped, 0 failed,
+  Release and under ASan+UBSan alike.
+
 - **Upgrade note: under `CompressionMiddleware`, a static file larger than `StaticFilesOptions::stream_threshold` is
   no longer compressed on HTTP/1.1 (Huly QB-101).** The static files stream such a body (next entry), and a streamed
   body reaches the `PRE_RESPONSE_SEND` hooks empty, so the compression hook leaves it alone. With the default
