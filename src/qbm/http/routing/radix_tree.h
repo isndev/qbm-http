@@ -26,6 +26,7 @@
 #include <utility>                             // For std::move
 #include <vector>                              // For std::vector
 #include <qb/system/container/unordered_map.h> // For qb::unordered_map (ska::flat_hash_map, cache-friendly O(1) lookup for static_children)
+#include <qb/utility/branch_hints.h>           // For QB_NOINLINE (match_decoded, Huly QB-1187)
 
 #include "../types.h"          // For qb::http::method enum
 #include "../utility.h"        // For utility::decode_raw_path_octets (Huly QB-1187)
@@ -496,10 +497,13 @@ public:
         if (slot >= METHOD_SLOT_COUNT) {
             return std::nullopt; // unknown / uninitialised method -> cannot match anything
         }
-        std::string decoded_path; // `[`, `]` and `|` as the tree holds them (Huly QB-1187); the captures are copies
-        if (utility::decode_raw_path_octets(path_sv, decoded_path))
-            path_sv = decoded_path;
-        const std::vector<std::string_view> segments = split_path_to_segments(path_sv);
+        // A `%` in the path may spell a `[`, `]` or `|` the tree holds as itself (Huly QB-1187): noticed by the split
+        // every match makes, and only then decoded, out of line. A scan of its own for it (decode_raw_path_octets on
+        // every path) and the std::string it filled cost MSVC 38 instructions, two calls and a security cookie a match.
+        bool                                percent  = false;
+        const std::vector<std::string_view> segments = split_path_to_segments(path_sv, percent);
+        if (percent) [[unlikely]]
+            return match_decoded(path_sv, slot);
         return match_recursive(_root.get(), segments, slot, 0, PathParameters{});
     }
 
@@ -588,6 +592,58 @@ private:
         }
 
         return std::nullopt; // No match found down any path from this node
+    }
+
+    /**
+     * @brief match() for a request path holding a `%`: `%5B`, `%5D` and `%7C` decoded to the `[`, `]` and `|` the tree
+     *        holds (Huly QB-1187), the path split again and matched. Out of line, so that the common path -- a path with
+     *        no `%` -- carries neither the std::string this fills (its buffer gave match() a security cookie on MSVC)
+     *        nor a call; the captures are copies, so the decoded path may die with this frame.
+     */
+    [[nodiscard]] QB_NOINLINE std::optional<MatchedRouteInfo<SessionType>>
+                              match_decoded(std::string_view path_sv, std::size_t slot) const {
+        std::string decoded_path;
+        if (utility::decode_raw_path_octets(path_sv, decoded_path))
+            path_sv = decoded_path;
+        const std::vector<std::string_view> segments = split_path_to_segments(path_sv);
+        return match_recursive(_root.get(), segments, slot, 0, PathParameters{});
+    }
+
+    /**
+     * @brief split_path_to_segments() for the match path: the same segments, and whether the path holds a `%` -- read by
+     *        the one pass over the bytes the split makes anyway, where a scan of its own cost a call and a vectorised
+     *        find a match (Huly QB-1187).
+     * @param path_sv The request path.
+     * @param percent Set to whether @p path_sv holds a `%` at any position the split reads (every byte but a leading `/`).
+     */
+    [[nodiscard]] static std::vector<std::string_view>
+    split_path_to_segments(std::string_view path_sv, bool &percent) noexcept {
+        std::vector<std::string_view> segments;
+        percent = false;
+        if (path_sv.empty()) {
+            return segments;
+        }
+        size_t       start = 0;
+        const size_t n     = path_sv.length();
+        if (path_sv[0] == '/') {
+            start = 1;
+        }
+        bool seen = false;
+        for (size_t i = start; i < n; ++i) {
+            const char c = path_sv[i];
+            seen |= c == '%';
+            if (c == '/') {
+                if (i > start) {
+                    segments.push_back(path_sv.substr(start, i - start));
+                }
+                start = i + 1;
+            }
+        }
+        if (start < n) {
+            segments.push_back(path_sv.substr(start, n - start));
+        }
+        percent = seen;
+        return segments;
     }
 
 public:

@@ -55,13 +55,13 @@ A path pattern is split into `/`-delimited segments. Each segment is one of thre
 
 Capture names must be unique within a single pattern. A `:` or `*` with no name, an empty segment, a misplaced wildcard, or two conflicting captures at the same tree level all throw `std::invalid_argument` — raised from `add_route`, which surfaces during `compile()`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:361-469 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:362-470 -->
 
 ### Match precedence and path handling
 
 When more than one branch could match a segment, the radix tree applies a fixed priority: **static > parameter > wildcard**. A wildcard is the lowest priority and is terminal-only. So for a request to `/users/active`, a registered `/users/active` wins over `/users/:status`, which wins over `/users/*rest`.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:479-481,551-588 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:480-482,555-592 -->
 
 Path segmentation handles slashes for you:
 
@@ -69,7 +69,7 @@ Path segmentation handles slashes for you:
 - **Consecutive slashes** produce no empty segments — `/foo//bar` segments to `{"foo", "bar"}`.
 - The root `/` segments to the empty list, so a handler registered at `/` attaches to the tree root.
 
-<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:302-336 -->
+<!-- src: qbm/http/src/qbm/http/routing/radix_tree.h:303-337 -->
 
 ### The `compile()` step
 
@@ -181,7 +181,7 @@ Values arrive URI-decoded: a request to `/notes/My%20Note` matched by `/notes/:t
 
 `[`, `]` and `|` and their percent-encodings name one route (Huly QB-1187). A browser may send those three unencoded in a path (the server accepts them, `qb::io::is_request_path_character()`), another client may encode them: the router decodes `%5B`, `%5D` and `%7C`, in either case of hex digit, in the request path and in each static segment of the route pattern before it matches, so `/doc/[1]|a` and `/doc/%5B1%5D%7Ca` reach the route registered as either; a capture's name is kept as written, and `ctx->route_pattern()` reports the decoded spelling. No other escape is decoded before matching: `%2F` stays inside its segment, and `%257C` is `%7C` once decoded, never `|`. `uri().path()` keeps what the client sent. The static files compare the prefix they strip the same way.
 
-<!-- src: qbm/http/src/qbm/http/utility.h:162; qbm/http/src/qbm/http/routing/radix_tree.h:431-436,500-501,607-609 -->
+<!-- src: qbm/http/src/qbm/http/utility.h:162; qbm/http/src/qbm/http/routing/radix_tree.h:432-437,503-507,604-610,663-665 -->
 
 <!-- src: qbm/http/src/qbm/http/routing/router_core.h:420-432; qbm/http/src/qbm/http/routing/path_parameters.h:36-39,77-83 -->
 

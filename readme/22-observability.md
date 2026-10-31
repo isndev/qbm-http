@@ -30,7 +30,7 @@ router.get("/users/:id", [](auto ctx) {
 ```
 <!-- src: qbm/http/src/qbm/http/routing/context.h:698 -->
 
-The view is valid for the context's whole life, the router's destruction included: it points into the compiled route names, which the context's task chain retains (`qbm/http/src/qbm/http/routing/radix_tree.h:61`).
+The view is valid for the context's whole life, the router's destruction included: it points into the compiled route names, which the context's task chain retains (`qbm/http/src/qbm/http/routing/radix_tree.h:62`).
 
 ## Router observers
 

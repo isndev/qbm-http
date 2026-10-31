@@ -662,7 +662,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   field 3512.9 to 3507.2 (-0.2 %); `BM_Route_*/routes:16` over two sessions, a static hit +0.4 % and +0.1 %, a parameter
   hit +0.7 % and +0.9 %, a 404 +3.5 % and +2.3 % (1103 to 1142 ns) -- one memchr of the path in `match()`, and again in
   `allowed_methods()` on a miss, which a component bench of the same router does not tell from noise (-2.7 % on a 404,
-  +0.4 % on a hit). qb reads a target's path from a table now: `request_target_uri("/health")` 24.8 to 22.0 ns,
+  +0.4 % on a hit). On MSVC 19.51 that memchr was `__std_find_trivial_1` behind a call, with a `std::string` whose buffer
+  put a security cookie on every `match()`: +8..11 ns on a static hit and +15..25 ns on a 404 (an i9-12900K, six placements
+  a side relinked from the frozen objects, 3 copies each). `match()` now notices a `%` in the one pass over the bytes the
+  split already makes and decodes out of line only then (`match_decoded()`): MSVC reads the pre-QB-1187 figures again on the
+  six cells (fix / before 0.976-0.992, the pre-QB-1187 train 0.980-0.988, 48 launches in a seeded order), g++ 14 level on
+  all six (0.997-1.009); `allowed_methods()`, the 405 answer, keeps its decode. qb reads a target's path from a table now: `request_target_uri("/health")` 24.8 to 22.0 ns,
   `request_uri()` 211.7 to 202.4. Tests: for each of the 256 bytes, the HTTP/1.1 origin-form and absolute-form readers
   and the HTTP/2-HTTP/3 one accept a path together or refuse it together, against a written-out set, and the HTTP/1.1
   protocol dispatches it with its path as sent or answers 400 (a space and LF end the line); the three raw on each
