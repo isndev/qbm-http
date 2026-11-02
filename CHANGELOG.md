@@ -735,17 +735,6 @@ All notable changes to the qbm-http module are documented here. The format is ba
   line, so a request split into 99 lines carried some 800 KB of cookies. Only the header section's lines are read now,
   and `max_cookie_header_size` (16 KiB) caps them joined; two unit cases more, each caught by its mutant.
 
-- **An HTTP/1.1 session extracted from its server runs its extraction handler: its watcher stops and the context
-  it was answering is cancelled (Huly QB-1182).** `extractSession()` -- a WebSocket upgrade, an ownership transfer --
-  runs a session's `on(event::extracted)` only when io_handler's probe, `qb::has_on<Session, event::extracted>`, sees it
-  on the concrete session type, and the HTTP/1.1 session's handler was private and befriended for the internal base
-  only: the probe answered false for `DefaultSession`, `ssl::DefaultSecureSession` and every user session, and no
-  extraction ran the handler. The session kept watching the socket it had handed over -- bytes the new owner's peer
-  sent next were reported to it, it read its moved-out transport, failed, and was torn down, running its disconnection
-  hooks -- and its context was neither cancelled nor released, against what the module's docs state. The detector is
-  now befriended whole, so a probe on the concrete session -- or on a class deriving from it -- sees the handler; a
-  session class that declares an `on()` of its own (the
-
 - **An HTTP/1.1 or HTTP/2 session extracted from its server runs its extraction handler: its watcher stops and the
   contexts it was answering are cancelled (Huly QB-1182).** `extractSession()` -- a WebSocket upgrade, an ownership
   transfer -- runs a session's `on(event::extracted)` only when io_handler's probe,
