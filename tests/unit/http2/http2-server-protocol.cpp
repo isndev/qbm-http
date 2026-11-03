@@ -6114,3 +6114,22 @@ TEST(HTTP2ServerProtocol, AnErrorGoawayResetsNoStream) {
         EXPECT_NE(f.type, FrameType::RST_STREAM) << "a RST_STREAM on stream " << f.stream_id << " after an error GOAWAY";
     }
 }
+
+// ===========================================================================
+// A SETTINGS_MAX_HEADER_LIST_SIZE of 0 is a bound like any other (RFC 9113 section 6.5.2): no response list fits it, and
+// every response is refused before it is encoded; the old comparison skipped a bound of 0 (Huly QB-1235).
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AHeaderListBoundOfZeroRefusesEveryResponse) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 0}}));
+    drive(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/zero");
+    qb::http::Response empty;
+    empty.status() = qb::http::status::NO_CONTENT;
+    EXPECT_FALSE(protocol.send_response(1, empty)) << ":status alone counts 42 octets";
+    EXPECT_FALSE(headers_sent_on(io.output, 1));
+    EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(protocol.ok());
+}
