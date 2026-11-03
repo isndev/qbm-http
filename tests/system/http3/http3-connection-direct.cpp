@@ -2705,7 +2705,7 @@ TEST(Http3ConnectionDirect, AFieldNameAPeersNghttp3CannotDecodeIsNeverSent) {
  * @brief A field the server drops for its limits -- read, judged by the rules that need no other field, counted -- was
  *        copied twice first, its name and its value, then dropped: the CPU a peer chose by the length of its section.
  *        recv_header_cb reads the field in place and copies one it keeps: six values of 9000 bytes over an 8 KiB limit,
- *        answered 431, allocate less than one of them.
+ *        answered 431, allocate less than one of them, and their names 100 bytes longer each allocate no more.
  */
 TEST(Http3ConnectionDirect, AFieldOverTheLimitsIsNeverCopied) {
     if (!allocation_counter_is_live()) {
@@ -2713,11 +2713,14 @@ TEST(Http3ConnectionDirect, AFieldOverTheLimitsIsNeverCopied) {
     }
     // The bytes C++ allocates while a request of six dropped values of @p n bytes is read and answered 431: the stream's
     // state and the answer cost the same whatever n, so what grows with n is a copy of a dropped field.
-    const auto read_with = [](std::size_t n) {
+    const auto read_with = [](std::size_t n, std::size_t name_length) {
         LimitedPair pair{qb::http::request_limits{}};
         auto        fields = request_fields();
-        for (int i = 0; i < 6; ++i)
-            fields.emplace_back("x-over-" + std::to_string(i), std::string(n, 'v'));
+        for (int i = 0; i < 6; ++i) {
+            auto name = "x-over-" + std::to_string(i);
+            name.resize(name_length, 'n');
+            fields.emplace_back(std::move(name), std::string(n, 'v'));
+        }
         const auto  frame = h3_headers_frame(0, fields);
         std::size_t bytes = 0;
         {
@@ -2728,10 +2731,15 @@ TEST(Http3ConnectionDirect, AFieldOverTheLimitsIsNeverCopied) {
         expect_answered_raw(pair, 0);
         return bytes;
     };
-    const std::size_t small = read_with(9000);  // over the 8 KiB value limit
-    const std::size_t large = read_with(18000); // twice that, within nghttp3's 64 KiB
+    const std::size_t small = read_with(9000, 8);  // over the 8 KiB value limit
+    const std::size_t large = read_with(18000, 8); // twice that, within nghttp3's 64 KiB
     EXPECT_LT(large - std::min(small, large), std::size_t{9000})
         << small << " then " << large << " bytes allocated: the dropped fields were copied (6 x 9000 more bytes)";
+    // Their names likewise: 100 bytes more a name, within every name bound, is no more allocated.
+    const std::size_t short_names = read_with(9000, 100);
+    const std::size_t long_names  = read_with(9000, 200);
+    EXPECT_LT(long_names - std::min(short_names, long_names), std::size_t{300})
+        << short_names << " then " << long_names << " bytes allocated: the dropped fields' names were copied (6 x 100 more bytes)";
 }
 
 /**
@@ -2846,39 +2854,61 @@ TEST(Http3ConnectionDirect, ADiscardedResponseReadsNothingMoreFromItsPeer) {
 /**
  * @test A section read leaves nothing beside its request while its stream lives (Huly QB-1203)
  * @brief Once a header section's fields have moved into the request, the section's own storage -- the block that held
- *        them and the views nghttp3 reads -- is released: what a live stream keeps beside its request does not grow
- *        with the number of fields. Measured as a difference -- 91 regular fields against one, each side less what the
- *        same request costs built alone -- so what a stream costs whatever its fields cancels out. Kept, the storage
- *        grows by a deque block and a view each per field: some 9 KB between the two.
+ *        them -- is released: what a live stream keeps beside its request does not grow with the number of fields. A
+ *        section refused part-way, by a `host` over the limits that names another authority, is released likewise.
+ *        Measured as the C++ bytes a read keeps (AllocScope::live_bytes(): allocated less freed, each block by the size
+ *        the allocator gave it -- an allocator's own statistics count the blocks its thread cache holds as in use), 91
+ *        regular fields against one, each less what the same request costs built alone, so what a stream costs whatever
+ *        its fields cancels out; one warm-up read first. Kept, the storage grows by a deque block every 85 fields (libc++)
+ *        or 8 (libstdc++): some 4 KB between the two.
  */
 TEST(Http3ConnectionDirect, AReadSectionLeavesNothingBesideItsRequest) {
-#if !QBM_HTTP_TEST_HEAP_IN_USE
-    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2() or Apple's malloc_zone_statistics(), without a sanitizer";
-#else
-    const auto beside_request = [](int n) {
+    if (!allocation_counter_is_live() || !allocation_counter_tracks_live_bytes()) {
+        GTEST_SKIP() << "the replaced operator new does not see live blocks here (a sanitizer's allocator intercepts first)";
+    }
+    // The C++ bytes a call keeps.
+    const auto kept_by = [](auto &&call) {
+        AllocScope scope;
+        call();
+        return AllocScope::live_bytes();
+    };
+    const auto request_of = [](int n) {
+        auto request = std::make_unique<qb::http::Request>(qb::http::method::POST, qb::io::uri("https://example.test/upload"));
+        request->add_header("content-length", "5");
+        for (int i = 0; i < n; ++i)
+            request->add_header("x-" + std::to_string(i), "v");
+        return request;
+    };
+    // What a live stream keeps beside its request once @p n regular fields are read -- or refused, at the last field.
+    const auto beside_request = [&](int n, bool refused) {
         auto fields           = request_fields("/upload");
         fields.front().second = "POST";
         fields.emplace_back("content-length", "5");
         for (int i = 0; i < n; ++i)
             fields.emplace_back("x-" + std::to_string(i), "v");
-        const auto        frame = h3_headers_frame(0, fields);
-        Pair              pair;
-        const std::size_t before = heap_in_use();
-        EXPECT_TRUE(pair.server.read_stream(0, frame, false)); // the body is still to come: the stream lives
-        const auto        stream         = static_cast<long long>(heap_in_use()) - static_cast<long long>(before);
-        const std::size_t before_request = heap_in_use();
-        qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/upload")};
-        request.add_header("content-length", "5");
-        for (int i = 0; i < n; ++i)
-            request.add_header("x-" + std::to_string(i), "v");
-        const auto message = static_cast<long long>(heap_in_use()) - static_cast<long long>(before_request);
-        EXPECT_TRUE(pair.server_owner.resets.empty());
+        if (refused) // judged as it arrives, over the limits: it names another authority than :authority
+            fields.emplace_back("host", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'a'));
+        const auto frame = h3_headers_frame(0, fields);
+        Pair       pair;
+        const auto stream = kept_by([&] { EXPECT_TRUE(pair.server.read_stream(0, frame, false)); }); // the stream lives
+        EXPECT_EQ(pair.server_owner.resets.size(), refused ? 1u : 0u);
+        std::unique_ptr<qb::http::Request> alone;
+        const auto                         message = refused ? 0 : kept_by([&] { alone = request_of(n); });
         return stream - message;
     };
-    const long long one  = beside_request(1);
-    const long long many = beside_request(90);
+    (void) beside_request(1, false); // warm-up: what a first read allocates once
+    {
+        std::unique_ptr<qb::http::Request> one, many;
+        const auto                         one_costs  = kept_by([&] { one = request_of(1); });
+        const auto                         many_costs = kept_by([&] { many = request_of(90); });
+        EXPECT_GT(many_costs - one_costs, 89 * 32) << "the instrument sees a request's own fields";
+    }
+    const long long one  = beside_request(1, false);
+    const long long many = beside_request(90, false);
     EXPECT_LT(many - one, 2048) << one << " then " << many << " bytes beside the request: the read section is kept";
-#endif
+    const long long refused_one  = beside_request(1, true);
+    const long long refused_many = beside_request(90, true);
+    EXPECT_LT(refused_many - refused_one, 2048) << refused_one << " then " << refused_many << " bytes: the refused section is kept";
 }
 
 /**
