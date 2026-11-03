@@ -875,12 +875,17 @@ private:
      *        (1.18.0) judges it, as it judges any stream it finds malformed.
      */
     void
-    shut_refused_read(std::uint64_t stream_id) noexcept {
-        // Its result is dropped: the stream is refused already, and a failure leaves nghttp3 judging what still arrives,
-        // as it did before this call. With this decoder's dynamic table capacity left 0 (nghttp3's default), no Section
-        // Acknowledgment can follow the Stream Cancellation it queues: RFC 9204 §4.4.1 acknowledges only a section
-        // whose Required Insert Count is not zero.
-        (void) nghttp3_conn_shutdown_stream_read(_conn, static_cast<int64_t>(stream_id));
+    shut_refused_read(std::uint64_t stream_id) {
+        // Its two documented failures are fatal -- NGHTTP3_ERR_NOMEM, NGHTTP3_ERR_QPACK_FATAL (the decoder stream
+        // overflowed) -- and fail the nghttp3 callback that refused the stream (guard_callback): the connection closes,
+        // as nghttp3 asks after a fatal error. The Stream Cancellation it queues is the only decoder instruction a
+        // refusal adds, one that RFC 9204 §4.4.2 lets a decoder with a dynamic table capacity of 0 omit, and no Section
+        // Acknowledgment can follow it: with that capacity 0, set in the constructor, no section has a Required Insert
+        // Count (§4.4.1).
+        if (const int rv = nghttp3_conn_shutdown_stream_read(_conn, static_cast<int64_t>(stream_id)); rv != 0 && nghttp3_err_is_fatal(rv))
+            [[unlikely]] {
+            throw std::runtime_error("nghttp3_conn_shutdown_stream_read failed");
+        }
     }
 
     /**
@@ -1572,8 +1577,9 @@ public:
         , _connection_id(connection_id) {
         nghttp3_settings settings;
         nghttp3_settings_default(&settings);
-        settings.qpack_blocked_streams  = 32;
-        settings.max_field_section_size = detail::max_field_section_size; // enforced by recv_header_cb, not nghttp3
+        settings.qpack_blocked_streams     = 32;
+        settings.qpack_max_dtable_capacity = 0;                              // nghttp3's default, pinned: shut_refused_read() relies on it
+        settings.max_field_section_size    = detail::max_field_section_size; // enforced by recv_header_cb, not nghttp3
 
         const auto cb = callbacks();
         const auto rv = _role == role::server ? nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), _anchor.get())
