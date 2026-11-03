@@ -409,6 +409,7 @@ request_target(qb::io::uri const &uri) {
 template <typename Message>
 bool
 add_regular_headers(header_block &block, Message const &msg, std::size_t &fields, qb::http::detail::outgoing_trailers const *trailers) {
+    std::vector<std::string> nominated; // a request's: a response carrying `connection` is refused below
     if constexpr (std::is_same_v<Message, qb::http::Request>) {
         // A request leaves with the rules the servers apply on receipt, the HTTP/2 client's (Huly QB-1191): a field
         // they would refuse is dropped, as an intermediary translating an HTTP/1.1 message removes the
@@ -417,7 +418,7 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
         // `te: gzip` --, which HTTP/2 served (Huly QB-1191). A name is lowercase already: the headers map stores it
         // folded, and an uppercase one fails the rule. The field bounds stay a refusal: a peer's nghttp3 takes a field
         // past its own (a value of 64 KiB) for a connection error, every stream with it.
-        const auto nominated = qb::protocol::http2::connection_nominated_fields(msg);
+        nominated = qb::protocol::http2::connection_nominated_fields(msg);
         for (auto const &[name, values] : msg.headers()) {
             if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) [[unlikely]] {
                 continue;
@@ -463,10 +464,15 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
         }
     }
     if (trailers && !trailers->announcement.empty()) {
-        if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT) {
-            return false;
+        // A field the `connection` header names is not announced, as it is not sent (Huly QB-1202).
+        auto announced =
+            nominated.empty() ? trailers->announcement : qb::protocol::http2::announcement_without(trailers->announcement, nominated);
+        if (!announced.empty()) {
+            if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT) {
+                return false;
+            }
+            block.add("trailer", std::move(announced));
         }
-        block.add("trailer", trailers->announcement);
     }
     return true;
 }
@@ -477,14 +483,19 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
  *        a trailer section may carry, then its @c trailers() -- the section HTTP/1.1 and HTTP/2
  *        send (Huly QB-1073).
  * @param trailers The message's trailer section.
- * @return The trailer field block -- empty when the section has no field (announced, not set) --
- *         or @c std::nullopt on an invalid field or a count-limit breach.
+ * @param nominated The fields a request's @c connection header names (qb::protocol::http2::connection_nominated_fields):
+ *        left out, as they are of its header section (Huly QB-1202).
+ * @return The trailer field block -- empty when the section has no field (announced, not set) or
+ *         only nominated ones -- or @c std::nullopt on an invalid field or a count-limit breach.
  */
 inline std::optional<header_block>
-make_trailer_block(qb::http::detail::outgoing_trailers const &trailers) {
+make_trailer_block(qb::http::detail::outgoing_trailers const &trailers, std::vector<std::string> const &nominated = {}) {
     header_block block;
     std::size_t  fields = 0;
     for (auto const &[name, value] : trailers.fields) {
+        if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) {
+            continue;
+        }
         if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(name, value)) {
             return std::nullopt;
         }
@@ -1801,9 +1812,12 @@ public:
         }
         std::optional<detail::header_block> trailers;
         if (plan && !plan->fields.empty()) {
-            trailers = detail::make_trailer_block(*plan);
+            trailers = detail::make_trailer_block(*plan, qb::protocol::http2::connection_nominated_fields(request));
             if (!trailers) {
                 return false;
+            }
+            if (trailers->nva.empty()) {
+                trailers.reset(); // every field nominated by `connection`: no trailer section (Huly QB-1202)
             }
         }
         st.request    = request;

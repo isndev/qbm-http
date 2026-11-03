@@ -226,6 +226,31 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A field a request's `connection` header names never leaves in its trailer section either, on HTTP/2 and HTTP/3
+  (Huly QB-1202).** RFC 9110 §7.6.1 has an intermediary remove "any header or trailer field(s)" a `connection` option
+  names, and RFC 9113 §8.2.2 and RFC 9114 §4.2 have one translating an HTTP/1.1 message do so. QB-1191 dropped them
+  from the header section only: `connection: x-hop` with `x-hop` among the fields the `trailer` header announces, or
+  in `trailers()`, sent `x-hop` in the trailer block of both clients, and the announcement the clients compose for
+  `trailers()` named it; `ClientHttp2Protocol::send_request_trailers()` sent it too. Each section now leaves without
+  it, an announcement does not name it, and whether a request sets its trailer fields is read from the section it
+  plans, never from what is left: a section whose every field is nominated still ends the stream, with an empty
+  HTTP/2 block or no HTTP/3 trailer section -- a first attempt waited for `send_request_trailers()` for ever (review
+  R3 of QB-1191). The same rule now holds behind a body that waited for flow-control credit: a request announcing
+  fields it does not set ended its stream there with an empty block as soon as the credit came, under explicit request
+  trailers (the protocol's default), and the trailers handed over next were refused; it waits for them, as a request
+  whose body fit the windows does.
+- **`ServerHttp2Protocol::send_push_promise()` judges what can never succeed before what only has to wait, counts the
+  pushed streams the client's limit counts, and a pushed response opens within that limit (Huly QB-1202).** It
+  returned `PEER_CONCURRENCY_LIMIT_REACHED` before `INVALID_ASSOCIATED_STREAM` and `INVALID_PROMISED_REQUEST`, so a
+  caller retrying on the transient refusal retried a promise that could never be made; that refusal comes last now.
+  It counted the reserved streams toward the client's `SETTINGS_MAX_CONCURRENT_STREAMS`, which RFC 9113 §5.1.2
+  excludes ("Streams in either of the "reserved" states do not count toward the stream limit"): under a limit of one a
+  second promise was refused. A reserved stream counts once its HEADERS open it, and "Endpoints MUST NOT exceed the
+  limit set by their peer": `send_response()` on a promised stream sent those HEADERS at once, past a limit the client
+  had lowered. A promised response without room now waits, kept, and leaves -- in the order the responses were given
+  -- as a pushed stream ends or the client raises its limit (`send_response()` returns `true` for it, `false` for a
+  second response on the stream). A client allowing no pushed stream (a limit of zero) still gets
+  `PEER_CONCURRENCY_LIMIT_REACHED`.
 - **An HTTP/2 or HTTP/3 request whose `:path` holds a byte from 0x80 up in its query is malformed, as the same target
   is on HTTP/1.1 (Huly QB-1187).** HTTP/1.1 reads a target with llhttp built strict, which refuses such a byte in a
   query as it refuses a control byte (`HPE_INVALID_URL`: `400 Bad Request`, then the connection closes);

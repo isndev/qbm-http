@@ -2401,4 +2401,72 @@ TEST(Http3ConnectionDirect, AResponseSectionPastTheAdvertisedSizeRefusesTheStrea
     }
 }
 
+/**
+ * @test A field the request's `connection` header names never leaves in its trailer section either (Huly QB-1202)
+ * @brief RFC 9110 section 7.6.1: intermediaries "remove any header or trailer field(s) from the message with the same
+ *        name as the connection-option"; RFC 9114 section 4.2: an intermediary transforming an HTTP/1.x message to
+ *        HTTP/3 "MUST remove connection-specific header fields as discussed in Section 7.6.1 of [HTTP]". QB-1191 left
+ *        them out of the header section, as the HTTP/2 client does; the trailer section, the header fields its
+ *        `trailer` header announces and trailers() alike, still carried them, and so did the announcement the client
+ *        composes for trailers(). A section whose every field is nominated leaves no trailer section, and the request
+ *        is served all the same.
+ */
+TEST(Http3ConnectionDirect, AFieldTheConnectionHeaderNamesNeverLeavesInTheTrailerSection) {
+    for (const bool announced_header : {true, false}) {
+        for (const bool only_nominated : {false, true}) {
+            SCOPED_TRACE(std::string(announced_header ? "announced header fields" : "trailers()") + (only_nominated ? ", all nominated" : ""));
+            Pair              pair;
+            qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/nominated")};
+            request.body() = "ab";
+            request.set_header("Connection", "X-Hop");
+            if (announced_header) {
+                request.set_header("trailer", only_nominated ? "x-hop" : "x-hop, x-sum");
+                request.set_header("x-hop", "1");
+                if (!only_nominated)
+                    request.set_header("x-sum", "2");
+            } else {
+                request.trailers().set_header("x-hop", "1");
+                if (!only_nominated)
+                    request.trailers().set_header("x-sum", "2");
+            }
+            ASSERT_TRUE(pair.client.submit_request(0, request));
+            // The HTTP/3 frames the request stream carries: HEADERS, DATA, and a trailer HEADERS unless no field is left.
+            std::string wire;
+            for (auto const &f : pair.client_owner.outbound)
+                if (f.stream_id == 0)
+                    wire += f.data;
+            std::size_t headers_frames = 0;
+            for (std::size_t at = 0; at < wire.size();) {
+                const auto varint = [&](std::size_t &pos) {
+                    const auto    first = static_cast<unsigned char>(wire[pos]);
+                    const auto    n     = std::size_t{1} << (first >> 6);
+                    std::uint64_t v     = first & 0x3f;
+                    for (std::size_t i = 1; i < n; ++i)
+                        v = (v << 8) | static_cast<unsigned char>(wire[pos + i]);
+                    pos += n;
+                    return v;
+                };
+                const auto type = varint(at);
+                const auto len  = varint(at);
+                headers_frames += type == 0x1 ? 1 : 0;
+                at += static_cast<std::size_t>(len);
+            }
+            EXPECT_EQ(headers_frames, only_nominated ? 1u : 2u) << "a section of nominated fields alone is no trailer section";
+            pair.settle();
+            ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+            auto const &served = pair.server_owner.requests.front();
+            EXPECT_EQ(served.body().template as<std::string>(), "ab");
+            EXPECT_FALSE(served.has_header("x-hop")) << "a nominated field reached the server";
+            EXPECT_FALSE(served.trailers().has_header("x-hop"));
+            EXPECT_EQ(served.trailers().header_count(), only_nominated ? 0u : 1u);
+            if (!only_nominated)
+                EXPECT_EQ(served.trailers().header("x-sum"), "2");
+            if (!announced_header)
+                EXPECT_EQ(served.header("trailer"), only_nominated ? "" : "x-sum") << "the composed announcement";
+            EXPECT_TRUE(pair.server_owner.resets.empty());
+            EXPECT_FALSE(pair.server_owner.close.has_value());
+        }
+    }
+}
+
 #endif // QBM_HTTP_HAS_HTTP3

@@ -439,6 +439,24 @@ StreamIdValidator::get_frame_type_name(FrameType frame_type) {
     }
 }
 
+std::string
+announcement_without(std::string_view announcement, const std::vector<std::string> &nominated) {
+    std::string kept;
+    while (!announcement.empty()) {
+        const auto comma = announcement.find(',');
+        const auto name  = qb::http::utility::trim_http_whitespace(announcement.substr(0, comma));
+        announcement.remove_prefix(comma == std::string_view::npos ? announcement.size() : comma + 1);
+        if (name.empty() || std::find(nominated.begin(), nominated.end(), name) != nominated.end()) {
+            continue;
+        }
+        if (!kept.empty()) {
+            kept += ", ";
+        }
+        kept += name;
+    }
+    return kept;
+}
+
 } // namespace qb::protocol::http2
 
 // ---------------------------------------------------------------------------

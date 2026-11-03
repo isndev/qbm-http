@@ -349,8 +349,8 @@ public:
 /**
  * @brief The fields a message's `connection` header names, connection-specific with it (RFC 9110 §7.6.1), lowercase,
  *        `te` excepted -- HTTP/1.1 names it there, HTTP/2 judges it by its value; empty without the header, which a
- *        message without one pays a lookup for (Huly QB-1191). They leave the header section; the trailer section is
- *        sent as it is planned.
+ *        message without one pays a lookup for (Huly QB-1191). They leave the header section and the trailer section
+ *        alike (Huly QB-1202).
  * @tparam Message `qb::http::Request`.
  */
 template <typename Message>
@@ -403,24 +403,42 @@ append_sent_request_fields(const Message &request, std::vector<qb::protocol::hpa
  * @brief A message's trailer section as HTTP/2 sends it: the fields of
  *        qb::http::detail::plan_outgoing_trailers -- those its `trailer` header announces that a
  *        trailer section may carry, then its `trailers()` -- names lowercase, a field HTTP/2 cannot
- *        encode left out. The same section HTTP/1.1 and HTTP/3 send, for a response
+ *        encode left out, and a field its `connection` header names (connection_nominated_fields, Huly
+ *        QB-1202). The same section HTTP/1.1 and HTTP/3 send, for a response
  *        (ServerHttp2Protocol, Huly QB-1058) as for a request (ClientHttp2Protocol, Huly QB-1061);
  *        `trailers()` since Huly QB-1073. Cold: called only for a message with a trailer section.
  * @tparam Message `qb::http::Request` or `qb::http::Response`.
+ * @param planned Set, when given, to whether the plan holds a field -- what says the message sets its trailer
+ *        fields, whatever is left out here: a section whose every field is left out is still a section the message
+ *        sets, sent empty, never one announced and left to the caller (Huly QB-1202).
  */
 template <typename Message>
 std::vector<qb::protocol::hpack::HeaderField>
-outgoing_trailer_fields(const Message &message) {
+outgoing_trailer_fields(const Message &message, bool *planned = nullptr) {
     const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
+    if (planned) {
+        *planned = !plan.fields.empty();
+    }
+    const auto                                    nominated = connection_nominated_fields(message);
     std::vector<qb::protocol::hpack::HeaderField> fields;
     fields.reserve(plan.fields.size());
     for (const auto &[name, value] : plan.fields) {
+        if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) {
+            continue;
+        }
         if (HeaderValidator::is_valid_header_field(name, value)) {
             fields.emplace_back(std::string(name), std::string(value));
         }
     }
     return fields;
 }
+
+/**
+ * @brief The names of a `trailer` announcement plan_outgoing_trailers composed -- "a, b", one each, lowercase -- less
+ *        those @p nominated holds (connection_nominated_fields): a field that never leaves is not announced either
+ *        (Huly QB-1202). Shared with HTTP/3.
+ */
+[[nodiscard]] std::string announcement_without(std::string_view announcement, const std::vector<std::string> &nominated);
 
 /**
  * @brief Prepares the leading header block of a message that has a trailer section (a `trailer`
@@ -454,6 +472,12 @@ prepare_trailed_header_block(std::vector<qb::protocol::hpack::HeaderField> &lead
         });
     }
     if (!plan.announcement.empty()) {
+        if (const auto nominated = connection_nominated_fields(message); !nominated.empty()) [[unlikely]] {
+            if (auto announced = announcement_without(plan.announcement, nominated); !announced.empty()) {
+                leading.emplace_back("trailer", std::move(announced));
+            }
+            return nullptr;
+        }
         leading.emplace_back("trailer", plan.announcement);
     }
     return nullptr;

@@ -119,6 +119,11 @@ private:
     bool     _peer_allows_push            = true;                                    ///< Whether client allows server push
     /// The largest stream the server has reserved with a PUSH_PROMISE: a promised stream exceeds it (RFC 9113 §5.1.1).
     uint32_t _last_promised_stream_id = 0;
+    /// The promised streams whose response waits, kept in the stream, for room under the client's
+    /// SETTINGS_MAX_CONCURRENT_STREAMS -- a reserved stream counts once its HEADERS open it (RFC 9113 §5.1.2) --, in
+    /// the order they were answered: send_waiting_push_responses() sends them (Huly QB-1202).
+    std::vector<uint32_t> _waiting_push_responses;
+    bool                  _sending_waiting_push_responses = false;
 
     // Our Settings
     qb::unordered_map<Http2SettingIdentifier, uint32_t> _our_settings;                  ///< Server's HTTP/2 settings
@@ -240,6 +245,7 @@ public:
         _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
         _peer_allows_push            = true;
         _last_promised_stream_id     = 0;
+        _waiting_push_responses.clear();
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -827,6 +833,10 @@ public:
         ack_frame.header.set_stream_id(0);
         this->_io << ack_frame;
         LOG_HTTP_DEBUG_PA(0, "Server: Processed SETTINGS frame from client. Sending ACK.");
+        // A SETTINGS_MAX_CONCURRENT_STREAMS raised makes room for a promised response that waits (Huly QB-1202).
+        if (!_waiting_push_responses.empty()) [[unlikely]] {
+            send_waiting_push_responses();
+        }
     }
 
     /**
@@ -974,7 +984,13 @@ public:
         if (error_code != ErrorCode::NO_ERROR) {
             _connection_active = false;
             this->not_ok(error_code); // Signal specific error
-        } else if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
+            return;
+        }
+        // The pushed streams closed above made room for a promised response that waits (Huly QB-1202).
+        if (!_waiting_push_responses.empty()) [[unlikely]] {
+            send_waiting_push_responses();
+        }
+        if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
             // Nothing left to finish: the graceful shutdown is complete at once.
             _connection_active = false;
             this->not_ok(ErrorCode::NO_ERROR);
@@ -1163,8 +1179,6 @@ public:
             return false; // Or send RST_STREAM(STREAM_CLOSED) if appropriate
         }
         Http2ServerStream &stream = it->second;
-        stream.response_to_send   = http_response;
-        stream.send_buffer_offset = 0;
 
         if (stream.state == Http2StreamConcreteState::IDLE) {
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE state");
@@ -1175,10 +1189,23 @@ public:
             // A promised stream (send_push_promise) is answered here, its documented next step:
             // sending its HEADERS moves it to half-closed (remote) -- the client never sends on a
             // pushed stream -- and the response's END_STREAM closes it (RFC 9113 §5.1, §8.4; Huly
-            // QB-529).
+            // QB-529). Those HEADERS open a stream the client's SETTINGS_MAX_CONCURRENT_STREAMS
+            // counts, which a server MUST NOT exceed (§5.1.2): without room the response waits,
+            // kept, and leaves once a pushed stream ends or the client raises its limit. It left at
+            // once, past a limit the client had lowered (Huly QB-1202).
+            if (std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream_id) != _waiting_push_responses.end()) {
+                return false; // answered already, the response waiting
+            }
+            if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
+                stream.response_to_send = http_response;
+                _waiting_push_responses.push_back(stream_id);
+                return true;
+            }
             stream.state               = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
             stream.end_stream_received = true;
         }
+        stream.response_to_send   = http_response;
+        stream.send_buffer_offset = 0;
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
             LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on already closed/half-closed(local) stream");
@@ -1336,8 +1363,13 @@ public:
      *        (append_sent_request_fields, Huly QB-1191).
      * @return std::nullopt once the PUSH_PROMISE is sent, else why it was not: INVALID_PROMISED_STREAM for a promised
      *         stream id that is zero, odd, past 2^31-1 or not above every stream already promised (RFC 9113 §5.1.1),
-     *         INVALID_ASSOCIATED_STREAM for one the client did not open or that is not open (§8.4), CONNECTION_INACTIVE
-     *         once a GOAWAY was received (§6.8) or sent, the shutdown notice included
+     *         INVALID_ASSOCIATED_STREAM for one the client did not open or that is not open (§8.4),
+     *         INVALID_PROMISED_REQUEST for a promised request §8.4 does not allow, CONNECTION_INACTIVE once a GOAWAY was
+     *         received (§6.8) or sent, the shutdown notice included -- each a refusal a retry cannot change, and judged
+     *         first -- and last PEER_CONCURRENCY_LIMIT_REACHED, which only has to wait: the pushed streams the client's
+     *         SETTINGS_MAX_CONCURRENT_STREAMS counts -- those a response opened, not those reserved (§5.1.2) -- fill it
+     *         (Huly QB-1202). A promise made under it reserves its stream; the response, once given (send_response()),
+     *         waits for room as long as the limit has none.
      */
     [[nodiscard]] std::optional<PushPromiseFailureReason>
     send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request) {
@@ -1359,13 +1391,6 @@ public:
             LOG_HTTP_WARN_PA(associated_stream_id, "Server: Invalid promised stream id " << promised_stream_id << " for PUSH_PROMISE.");
             return PushPromiseFailureReason::INVALID_PROMISED_STREAM;
         }
-        if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
-            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id "
-                                                       << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: "
-                                                       << _peer_max_concurrent_streams);
-            return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
-        }
-
         // A PUSH_PROMISE goes on a stream the client opened (RFC 9113 §8.4): a pushed stream was accepted (Huly QB-1191).
         auto it_assoc_stream = (associated_stream_id & 1u) != 0u ? _server_streams.find(associated_stream_id) : _server_streams.end();
         if (it_assoc_stream == _server_streams.end()) {
@@ -1395,6 +1420,16 @@ public:
             || promised_authority.empty() || !promised_request.body().empty() || promised_request.has_trailers()
             || promised_request.has_header("trailer")) {
             return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
+        }
+        // The one refusal that only has to wait comes last: it came before the associated stream and the promised
+        // request were judged, and a caller that retries on it retried a promise that could never be made (Huly
+        // QB-1202). A reserved stream does not count (RFC 9113 §5.1.2): a second promise was refused under a limit of
+        // one.
+        if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
+            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id "
+                                                       << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: "
+                                                       << _peer_max_concurrent_streams);
+            return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
         }
 
         // :method, :scheme, :authority and :path, then the promised request's fields under the rules a client's request
@@ -2279,6 +2314,10 @@ private:
                 }
                 _server_streams.erase(it);
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
+                // A pushed stream ended: room for a promised response that waits (Huly QB-1202).
+                if (!_waiting_push_responses.empty() && (stream_id & 1u) == 0u) [[unlikely]] {
+                    send_waiting_push_responses();
+                }
 
                 // The drain a client's NO_ERROR GOAWAY started completes with the last stream it
                 // left us, whatever its id (our own GOAWAY deactivated the connection when sent).
@@ -2777,7 +2816,34 @@ private:
     }
 
     /**
-     * @brief Get the count of active streams.
+     * @brief Send the promised responses that wait for room under the client's SETTINGS_MAX_CONCURRENT_STREAMS, in the
+     *        order they were answered, as long as it has room (RFC 9113 §5.1.2, Huly QB-1202). A stream reset or
+     *        reclaimed meanwhile is skipped. Re-entered from a response it sends -- one that ends its stream at once --
+     *        it returns: the loop below goes on.
+     */
+    void
+    send_waiting_push_responses() noexcept {
+        if (_sending_waiting_push_responses) {
+            return;
+        }
+        _sending_waiting_push_responses = true;
+        while (!_waiting_push_responses.empty() && this->ok() && get_active_stream_count(true) < _peer_max_concurrent_streams) {
+            const uint32_t stream_id = _waiting_push_responses.front();
+            _waiting_push_responses.erase(_waiting_push_responses.begin());
+            const auto it = _server_streams.find(stream_id);
+            if (it == _server_streams.end() || it->second.state != Http2StreamConcreteState::RESERVED_LOCAL || it->second.rst_stream_sent
+                || it->second.rst_stream_received) {
+                continue;
+            }
+            const qb::http::Response response = std::move(it->second.response_to_send);
+            (void) send_response(stream_id, response);
+        }
+        _sending_waiting_push_responses = false;
+    }
+
+    /**
+     * @brief Get the count of active streams: open or half-closed, those a peer's SETTINGS_MAX_CONCURRENT_STREAMS
+     *        counts -- a reserved stream is not (RFC 9113 §5.1.2), and a promised one was (Huly QB-1202).
      * @param server_initiated_check If true, counts even-numbered (server-pushed) streams.
      *                               If false, counts odd-numbered (client-initiated) request streams.
      * @return Number of active streams matching the criteria.
@@ -2787,7 +2853,8 @@ private:
         uint32_t count = 0;
         for (const auto &[stream_id, stream_obj] : _server_streams) {
             if (stream_obj.state != Http2StreamConcreteState::IDLE && stream_obj.state != Http2StreamConcreteState::CLOSED
-                && !stream_obj.rst_stream_sent && !stream_obj.rst_stream_received) {
+                && stream_obj.state != Http2StreamConcreteState::RESERVED_LOCAL && !stream_obj.rst_stream_sent
+                && !stream_obj.rst_stream_received) {
                 if (server_initiated_check) { // Count server-initiated/pushed (even) streams
                     if (stream_id % 2 == 0) {
                         count++;
