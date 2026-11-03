@@ -1810,8 +1810,8 @@ private:
             std::string temp_method_str; // Temporary for method conversion
 
             for (auto &hf : _decoded_header_fields) {
-                const std::string &name  = hf.name;
-                std::string       &value = hf.value; // moved into the request below: the field vector is read once
+                std::string &name  = hf.name;  // name and value move into the request below: the field vector is read once
+                std::string &value = hf.value; // (the value since QB-1215, the name since QB-1216 gave convert() an rvalue overload)
 
                 if (name.empty()) {
                     this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
@@ -1898,12 +1898,12 @@ private:
                         fields_over_limits = true; // answered 431 once the block is known well-formed
                         continue;
                     }
-                    // The value moves: its buffer becomes the request's instead of being copied and freed with the
-                    // field (Huly QB-1215). A `host` value is copied -- host_sv names it after the loop.
+                    // The name and the value move: their buffers become the request's instead of being copied and freed
+                    // with the field (Huly QB-1215, QB-1216). A `host` value is copied -- host_sv names it after the loop.
                     if (host_sv && host_sv->data() == value.data()) [[unlikely]] {
-                        stream.assembled_request.add_header(name, value);
+                        stream.assembled_request.add_header(std::move(name), value);
                     } else {
-                        stream.assembled_request.add_header(name, std::move(value));
+                        stream.assembled_request.add_header(std::move(name), std::move(value));
                     }
                 }
             }

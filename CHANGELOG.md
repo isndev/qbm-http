@@ -104,6 +104,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The HTTP/2 server moves a regular field's NAME into the request beside its value (Huly QB-1216).** The value moved
+  since QB-1215; the name was still copied and folded by qb's `string_to_lower::convert()`, which took only a const
+  string -- three allocations a browser's request (the names past 15 octets). With qb's new `convert(std::string &&)`
+  the name is folded in place and moved into the header map: 3 blocks and 62 bytes fewer a request, ~620 instructions
+  (callgrind, g++ 14, on top of the lazy body). A/B on top of the lazy body (3 copies a side, seeded order, pinned
+  P-core): g++ 14 0.998 / 0.992 (default family) and 0.979 / 0.978 (`-falign-functions=64`), MSVC 19.51 0.960 / 0.960
+  and 0.968 / 0.966 / 0.991 across three `/FUNCTIONPADMIN` layouts. Taken without the lazy body it reads 4..6 % SLOWER
+  on g++'s `BrowserGet`: while the two 4 KiB bodies keep `malloc_consolidate()` running, the request's new allocation
+  pattern sends 8 more small allocations a request down `_int_malloc`'s slow path.
+
 - **A `Body` creates its pipe at its first write: an empty request or response body allocates nothing, and the HTTP/2
   request path no longer makes glibc consolidate its fast bins (Huly QB-1216).** A default-constructed
   `qb::allocator::pipe` allocates 4 KiB up front, and `Body` held one by value, so every `Request` and `Response` paid
