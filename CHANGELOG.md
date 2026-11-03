@@ -111,10 +111,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   copies of every section, up to the 64 KiB bound each, for as long as a body took to come. Fields are now read in
   place, a kept one copied once -- a header section's moved into the message, a trailer section's copied there --,
   and the section released once read (or refused), allocating nothing: the empty section assigned in its place, and
-  at the start of every section, allocated a map and a node under libstdc++. Measured on the in-process nghttp3 pair
-  (macOS, libc++): six dropped values of 9 000 bytes allocated 79 784 bytes on the base and 25 736 now (the stream's
-  state and the 431 answer); a request with 56 KB of fields, its body still to come, kept 130 KB and now under 84 KB;
-  a browser's 18-field GET read by the server allocates 345 bytes less. The fixed 64 KiB
+  at the start of every section, allocated a map and a node under libstdc++. A received section no longer builds the
+  `nghttp3_nv` views a section that is sent needs, which nothing read: a vector grown field by field. Measured on the
+  in-process nghttp3 pair (macOS, libc++): six dropped values of 9 000 bytes allocated 79 784 bytes on the base and
+  25 736 now (the stream's state and the 431 answer); a request with 56 KB of fields, its body still to come, kept
+  130 KB and now under 84 KB; a browser's 18-field GET read by the server on a warm connection allocates 16 057 bytes
+  where it allocated 18 914. The fixed 64 KiB
   section bound beside the settable request limits (point 1) is a decision left to the maintainer.
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions

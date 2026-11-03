@@ -240,9 +240,21 @@ struct header_block {
     }
 
     /**
+     * @brief Append a field of a section READ from the peer: kept in @c storage alone, as nothing reads a received
+     *        section's views -- the views of every section read were built, a vector that grew with each (Huly QB-1203).
+     * @param name  Field name (moved into the block).
+     * @param value Field value (moved into the block).
+     */
+    void
+    add_received(std::string name, std::string value) {
+        section_size += name.size() + value.size() + field_line_overhead;
+        storage.emplace_back(std::move(name), std::move(value));
+    }
+
+    /**
      * @brief Drop every field and the room they took, allocating nothing: a section read or refused is never read
-     *        again (Huly QB-1203). An empty block assigned instead allocated, under libstdc++, the map and the node an
-     *        empty deque holds there.
+     *        again (Huly QB-1203). libc++ and MSVC's STL give every block back; libstdc++ keeps the map and the one node
+     *        its empty deque holds. An empty block assigned instead allocated that map and node again under libstdc++.
      */
     void
     release() {
@@ -1190,7 +1202,7 @@ private:
             if (header_name == ":path" && header_value.size() > limits.max_url_length) [[unlikely]] {
                 st.path_over_limit = true; // answered 414 at the end of the section, once it is known well-formed
             }
-            st.incoming_headers.add(std::string(header_name), std::string(header_value));
+            st.incoming_headers.add_received(std::string(header_name), std::string(header_value));
             return 0;
         });
     }

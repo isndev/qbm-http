@@ -24,16 +24,24 @@
 
 #ifdef _MSC_VER
 #include <malloc.h> // _aligned_malloc / _aligned_free (see the aligned pair below)
+#elif defined(__APPLE__)
+#include <malloc/malloc.h> // malloc_size(): what a live block holds (AllocScope::live_bytes)
+#elif defined(__GLIBC__)
+#include <malloc.h> // malloc_usable_size(): likewise
 #endif
 
 namespace {
 std::atomic<bool>        g_counting{false};
 std::atomic<std::size_t> g_bytes{0};
+/// The bytes C++ allocated minus those it freed while counting, each block by the size the allocator gave it -- what
+/// a measured call keeps (Huly QB-1203). The allocator's own statistics count blocks a thread cache holds as in use.
+std::atomic<long long> g_live{0};
 
 /// RAII arm/disarm so a throw inside the parser cannot leave counting on.
 struct AllocScope {
     AllocScope() {
         g_bytes.store(0, std::memory_order_relaxed);
+        g_live.store(0, std::memory_order_relaxed);
         g_counting.store(true, std::memory_order_relaxed);
     }
     ~AllocScope() {
@@ -43,7 +51,28 @@ struct AllocScope {
     bytes() {
         return g_bytes.load(std::memory_order_relaxed);
     }
+    /// The bytes still allocated of what C++ allocated while counting, less what it freed then, the aligned forms
+    /// left out; 0 where the allocator does not say a block's size (allocation_counter_tracks_live_bytes()).
+    [[nodiscard]] static long long
+    live_bytes() {
+        return g_live.load(std::memory_order_relaxed);
+    }
 };
+
+/// The size the allocator gave a block from std::malloc, 0 where it cannot say.
+inline std::size_t
+allocated_block_size(void *p) noexcept {
+#if defined(_MSC_VER)
+    return _msize(p);
+#elif defined(__APPLE__)
+    return malloc_size(p);
+#elif defined(__GLIBC__)
+    return malloc_usable_size(p);
+#else
+    (void) p;
+    return 0;
+#endif
+}
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -88,9 +117,21 @@ struct AllocScope {
 namespace {
 inline void *
 tracked_alloc_nothrow(std::size_t n) noexcept {
-    if (g_counting.load(std::memory_order_relaxed))
+    void *p = std::malloc(n ? n : 1);
+    if (g_counting.load(std::memory_order_relaxed)) {
         g_bytes.fetch_add(n, std::memory_order_relaxed);
-    return std::malloc(n ? n : 1);
+        if (p)
+            g_live.fetch_add(static_cast<long long>(allocated_block_size(p)), std::memory_order_relaxed);
+    }
+    return p;
+}
+
+/// The plain forms' release: what a block held leaves the live count while counting.
+inline void
+tracked_free(void *p) noexcept {
+    if (p && g_counting.load(std::memory_order_relaxed))
+        g_live.fetch_sub(static_cast<long long>(allocated_block_size(p)), std::memory_order_relaxed);
+    std::free(p);
 }
 
 inline void *
@@ -189,27 +230,27 @@ operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t &) noexce
 }
 void
 operator delete(void *p) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 void
 operator delete[](void *p) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 void
 operator delete(void *p, std::size_t) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 void
 operator delete[](void *p, std::size_t) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 void
 operator delete(void *p, const std::nothrow_t &) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 void
 operator delete[](void *p, const std::nothrow_t &) noexcept {
-    std::free(p);
+    tracked_free(p);
 }
 // Every ALIGNED form pairs with qb_aligned_free -- std::free here would be an
 // allocator-family mismatch (heap corruption on Windows, where the aligned block carries a
@@ -261,6 +302,23 @@ allocation_counter_is_live() {
     (void) sink;
     delete[] p;
     return seen >= n;
+}
+
+/// Does AllocScope::live_bytes() see a block live, then gone once freed? Not where the allocator cannot say a block's
+/// size, nor where the replacement is not live (allocation_counter_is_live()).
+inline bool
+allocation_counter_tracks_live_bytes() {
+    static volatile std::size_t opaque = 4096;
+    const std::size_t           n      = opaque;
+    AllocScope                  scope;
+    auto                       *p = new char[n];
+    p[0]                          = 'x';
+    p[n - 1]                      = 'y';
+    const auto    held            = AllocScope::live_bytes();
+    volatile char sink            = static_cast<char>(p[0] + p[n - 1]);
+    (void) sink;
+    delete[] p;
+    return held >= static_cast<long long>(n) && AllocScope::live_bytes() == 0;
 }
 
 } // namespace
