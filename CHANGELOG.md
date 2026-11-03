@@ -231,8 +231,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   - a request answered `431`, `414` or `413` -- or refused -- before its end arrived kept being read by nghttp3, and a
     `content-length` the end contradicted closed the CONNECTION with `H3_MESSAGE_ERROR` (the QB-1197 residual), in
     the three shapes where the end comes in a later read: its read side is now shut when the stream is refused or
-    answered (`nghttp3_conn_shutdown_stream_read`), and what still arrives is discarded. In the read that refused it,
-    an empty DATA frame or a reserved one then the end are still judged by nghttp3, as any stream it finds malformed;
+    answered (`nghttp3_conn_shutdown_stream_read`) -- an answer the client cannot take, past its field-section bound,
+    falling back to a reset that shuts it too -- and what still arrives is discarded; a response the client discards
+    alike. In the read that refused it, a DATA frame -- empty or not -- or a reserved one then the end are still
+    judged by nghttp3, as any stream it finds malformed;
   - a response whose field or section passed the client's limits reset its stream with `H3_MESSAGE_ERROR`, the code
     of a malformed message; it is discarded with `H3_REQUEST_CANCELLED`, the code the client's body cap already sent
     (§8.1: "The request or its response ... is cancelled").

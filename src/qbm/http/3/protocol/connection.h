@@ -857,11 +857,15 @@ private:
      *        is discarded, never judged. A `content-length` the end of such a stream contradicted was nghttp3's
      *        malformed message, a CONNECTION error after the stream had been refused or answered: every stream of the
      *        connection went with it (Huly QB-1204, the residual of QB-1197). What follows in the very read that refused
-     *        the stream is still read -- an empty DATA frame or a reserved one, then the end, in one read: nghttp3
+     *        the stream is still read -- a DATA frame, empty or not, or a reserved one, then the end, in one read: nghttp3
      *        (1.18.0) judges it, as it judges any stream it finds malformed.
      */
     void
     shut_refused_read(std::uint64_t stream_id) noexcept {
+        // Its result is dropped: the stream is refused already, and a failure leaves nghttp3 judging what still arrives,
+        // as it did before this call. With this decoder's dynamic table capacity left 0 (nghttp3's default), no Section
+        // Acknowledgment can follow the Stream Cancellation it queues: RFC 9204 §4.4.1 acknowledges only a section
+        // whose Required Insert Count is not zero.
         (void) nghttp3_conn_shutdown_stream_read(_conn, static_cast<int64_t>(stream_id));
     }
 
@@ -902,10 +906,10 @@ private:
         response.stream_id = stream_id;
         if (!submit_response(stream_id, response)) {
             _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
-            return;
+        } else {
+            _owner.stop_http3_stream(_connection_id, stream_id, NGHTTP3_H3_NO_ERROR);
         }
-        _owner.stop_http3_stream(_connection_id, stream_id, NGHTTP3_H3_NO_ERROR);
-        shut_refused_read(stream_id);
+        shut_refused_read(stream_id); // the reset too: an answer past the client's field-section bound falls back to it
     }
 
     /**
