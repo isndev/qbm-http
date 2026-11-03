@@ -1719,7 +1719,7 @@ TEST_F(Http3LoopbackTest, ClientWritesTheBodysContentLengthOverOneWithOWS) {
 }
 
 // The server refuses to SEND a response whose body does not match its content-length (the
-// outgoing validation of submit_response) and resets the stream with H3_MESSAGE_ERROR, so the
+// outgoing validation of submit_response) and resets the stream with H3_REQUEST_CANCELLED (Huly QB-1241), so the
 // client settles the exchange as a 502 -- a stream reset, never a connection close (Huly QB-234;
 // RFC 9114 section 4.1.2). The connection carries the client's other exchanges: the SAME one --
 // never reconnected, the server's peak of one connection proves it -- serves the next request.
@@ -4027,4 +4027,94 @@ TEST_F(Http3LoopbackTest, LegacyBackendRttFallbackRemainsBoundedByTheDrainDeadli
         server.reset();
         qb::io::async::listener::current.clear();
     }
+}
+
+namespace http3_reset_code_test {
+
+// The HTTP/3 client, with the first code of each stream the server resets or stops recorded as it arrives on the wire:
+// the client settles such an exchange as a 502 whatever its code.
+class ResetRecordingClient : public qb::http3::Client {
+public:
+    using qb::http3::Client::Client;
+    using qb::http3::Client::dispatch;
+
+    std::vector<std::uint64_t> codes; // one a stream, the server's
+
+protected:
+    void
+    dispatch(qb::io::async::quic::event::stream_closed const &ev) override {
+        bool seen = false;
+        for (const auto id : _streams)
+            seen = seen || id == ev.id;
+        if ((ev.reason == qb::io::quic::stream_close_reason::reset || ev.reason == qb::io::quic::stream_close_reason::stop_sending) && !seen) {
+            _streams.push_back(ev.id);
+            codes.push_back(ev.error_code);
+        }
+        qb::http3::Client::dispatch(ev);
+    }
+
+private:
+    std::vector<std::uint64_t> _streams;
+};
+
+} // namespace http3_reset_code_test
+
+// A response the server cannot submit resets its stream with H3_REQUEST_CANCELLED, read on the wire by the client (Huly
+// QB-1241): a `content-length` its body contradicts (Huly QB-234), a `te` field, which a response never carries (Huly
+// QB-1191). The request was well-formed, and RFC 9114 section 4.1.1 has a server that abandons a response after partial
+// processing abort its response stream with that code; H3_MESSAGE_ERROR, sent until 3.4, told the client its own message
+// was malformed. The client settles each exchange as a 502, and the same connection serves the next request.
+TEST_F(Http3LoopbackTest, AResponseTheServerCannotSubmitIsResetWithRequestCancelled) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/bad-length", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().set_header("content-length", "1");
+        ctx->response().body() = "abc";
+        ctx->complete();
+    });
+    server->router().get("/te", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().set_header("te", "trailers");
+        ctx->response().body() = "abc";
+        ctx->complete();
+    });
+    server->router().get("/good", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = "accepted";
+        ctx->complete();
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = std::make_shared<http3_reset_code_test::ResetRecordingClient>(https_origin(port));
+    client->set_verify_peer(false);
+    for (std::string const path : {"/bad-length", "/te"}) {
+        SCOPED_TRACE(path);
+        const auto         before = client->codes.size();
+        std::atomic<bool>  done{false};
+        qb::http::Response response;
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(path)}, [&](qb::http::Response res) {
+            response = std::move(res);
+            done     = true;
+        }));
+        ASSERT_TRUE(pump([&] { return done.load() && client->codes.size() > before; }));
+        EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+        ASSERT_EQ(client->codes.size(), before + 1) << "the server reset the response's stream";
+        EXPECT_EQ(client->codes.back(), static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED)) << "the code on the wire";
+    }
+
+    std::atomic<bool>  next_done{false};
+    qb::http::Response next;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/good")}, [&](qb::http::Response res) {
+        next      = std::move(res);
+        next_done = true;
+    }));
+    ASSERT_TRUE(pump([&] { return next_done.load(); }));
+    EXPECT_EQ(next.status(), qb::http::status::OK);
+    EXPECT_EQ(next.body().as<std::string>(), "accepted");
+    EXPECT_EQ(server->stats().active_connections, 1u) << "the follow-up went over a new connection";
+
+    client->disconnect();
+    server->close();
 }
