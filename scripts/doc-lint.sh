@@ -2,8 +2,8 @@
 #
 # doc-lint.sh — documentation anti-drift guard for the qbm-http module.
 #
-# Fails on: retired tokens in docs, broken internal Markdown links, cross-repo URLs naming
-# a dead repo or a non-released ref, missing module governance files. Warns on: pages missing a "Verified-against" marker.
+# Fails on: retired tokens in docs, broken internal Markdown links, cross-repo URLs naming a dead repo or a non-released
+# ref, missing module governance files, a CHANGELOG [Unreleased] paragraph cut short or a headline written twice. Warns on: pages missing a "Verified-against" marker.
 # Module-wide policy (versioning, support) lives in the qb framework; this guard
 # checks qbm-http's own Markdown (README.md, readme/**, CHANGELOG/SECURITY/CONTRIBUTING)
 # plus, through section 1c, the agent-facing llm/ docs that moved into this repo from
@@ -216,6 +216,19 @@ if [ "$badmarker" -ne 0 ]; then
   fail=1
 elif [ "$nomarker" -eq 0 ]; then
   grn "  all pages carry a Verified-against marker naming qb ${EXPECTED_VERSION}"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== 5. CHANGELOG [Unreleased] (every paragraph ends its sentence, no headline written twice) =="
+# An entry rewritten beside the one it replaced left the old one cut off on "(the" in qbm-http's
+# [Unreleased] for four days, under every guard here (Huly QB-1221): nothing read the section whole.
+# The release body is generated from these entries, so check-changelog.py reads them as the
+# superproject's release-gate.sh does; it is shared by the four repositories, byte-identical.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "${SCRIPT_DIR}/check-changelog.py" CHANGELOG.md || fail=1   # run from ${ROOT}, above
+else
+  red "  python3 not found — check-changelog.py cannot run, and this lint does not pass without it"
+  fail=1
 fi
 
 echo
