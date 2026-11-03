@@ -238,6 +238,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The HTTP/2 server ignores a frame on a pushed stream that has ended, and a client that cancels pushes is no Rapid
+  Reset (Huly QB-1239).** A pushed stream is erased once it ends, and a WINDOW_UPDATE or a RST_STREAM the client sent
+  on it before it saw the end was judged against the client's own stream ids: an idle stream, `GOAWAY(PROTOCOL_ERROR)`,
+  every stream of the connection with it. RFC 9113 §5.1: an endpoint that ends a stream "might receive a WINDOW_UPDATE
+  or RST_STREAM frame from its peer in the time before the peer receives and processes the frame that closes the
+  stream", and §6.9 "MUST NOT treat this as an error"; a pushed id is idle only above the largest promised (§5.1.1).
+  The client's resets of pushed streams counted toward the
+  Rapid Reset guard (CVE-2023-44487) whenever their ids sat below its own, so a client cancelling the pushes it did
+  not want could close the connection with `ENHANCE_YOUR_CALM`. Since QB-1202 a promised stream that a client's GOAWAY
+  or the idle sweep cancels is erased at once, which a crossing reset met the same way.
+
 - **The HTTP/2 server judges a response against the client's `SETTINGS_MAX_HEADER_LIST_SIZE` before it encodes it,
   and counts the list as RFC 9113 §6.5.2 does (Huly QB-1235).** `send_response()` encoded the header block, then
   compared its ENCODED size with the bound and, past it, reset the stream and dropped the block. The HPACK encoder
