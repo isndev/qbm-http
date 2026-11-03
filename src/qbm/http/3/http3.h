@@ -624,9 +624,9 @@ public:
      * `content-length` or for DATA that passes the body limit -- then STOP_SENDING with `H3_NO_ERROR` asks the
      * client to stop sending the rest (RFC 9114 §4.1.1); the connection keeps serving. The fields were reset
      * with H3_MESSAGE_ERROR against constants until 3.3. The defaults are `qb::http::protocol_limits`'
-     * constants, with a body limit of 64 MiB. nghttp3 bounds a field section by itself before these: a
-     * QPACK-decoded name past 256 bytes, or a section past the 64 KiB this server advertises, is a connection
-     * error.
+     * constants, with a body limit of 64 MiB. nghttp3 bounds a field by itself before these: a QPACK-decoded
+     * name past 256 bytes is a connection error. A section past the 1 MiB this server advertises is a section
+     * over the limits, answered 431 (Huly QB-1196, QB-1203); the default limits keep a section below it.
      * @param limits The limits.
      */
     void

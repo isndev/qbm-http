@@ -237,7 +237,7 @@ llm/qbm-http.llm.api.md	origin.h:38-38	59a9a4c0618e	[[nodiscard]] bool scheme_eq
 llm/qbm-http.llm.api.md	parameter_validator.h:115-115	85c8074984bc	class ParameterValidator {
 llm/qbm-http.llm.api.md	parameter_validator.h:35-35	bdccc56f9657	struct ParameterRuleSet {
 llm/qbm-http.llm.api.md	protocol/connection.h:1750-1750	93331a7177d4	control_stream_acknowledged() const noexcept {
-llm/qbm-http.llm.api.md	protocol/connection.h:80-80	8bb89adda3fb	inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
+llm/qbm-http.llm.api.md	protocol/connection.h:80-80	f34c4add2bb2	inline constexpr std::uint64_t max_field_section_size = 1024 * 1024;
 llm/qbm-http.llm.api.md	protocol/connection.h:932-932	e710b5de4f17	answer_refused_request(std::uint64_t stream_id, stream_state &st, qb:...
 llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1366-1425	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.api.md	rate_limit.h:142-142	cc4621c8922c	client_id_extractor(std::function<std::string(const Context<SessionTy...

@@ -74,10 +74,10 @@ namespace qb::protocol::http3 {
  */
 namespace detail {
 
-/// The largest field section a connection reads, the SETTINGS_MAX_FIELD_SECTION_SIZE it advertises (RFC 9114 §4.2.2).
-/// nghttp3 does not enforce it (nghttp3.h, `nghttp3_settings::max_field_section_size`): the connection does, a request's
-/// section past it answered 431 as a section over the request limits is, a response's refused (Huly QB-1196).
-inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
+/// The largest field section a connection reads, the SETTINGS_MAX_FIELD_SECTION_SIZE it advertises (RFC 9114 §4.2.2): 1 MiB,
+/// HTTP/2's header-list bound (64 KiB until Huly QB-1203). nghttp3 does not enforce it (nghttp3.h, `nghttp3_settings::
+/// max_field_section_size`): the connection does, a request's section past it answered 431, a response's refused (QB-1196).
+inline constexpr std::uint64_t max_field_section_size = 1024 * 1024;
 
 /// What RFC 9114 §4.2.2 adds to a field's name and value when it counts the size of a field section.
 inline constexpr std::uint64_t field_line_overhead = 32;
