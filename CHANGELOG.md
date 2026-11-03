@@ -226,6 +226,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The HTTP/2 client advertises the header-list bound it enforces, and a response past it fails its request instead of
+  closing the connection (Huly QB-1211).** The client's HPACK decoder stops at 1 MiB of decoded list
+  (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`), but the client advertised no `SETTINGS_MAX_HEADER_LIST_SIZE`,
+  and a response list past it failed the decode: `GOAWAY(COMPRESSION_ERROR)`, every request multiplexed on the
+  connection with it -- the client's twin of what QB-1196 fixed on the server. Measured on the base: a response list
+  of 1 MiB and 38 octets, and a 4 KiB dynamic-table entry referenced 300 times (4.3 KB of block, 1.2 MiB of list),
+  each closed the connection. The client now advertises the bound; a list past it is decoded to the end of its block
+  -- the dynamic table kept in step with the server's encoder, RFC 9113 §10.5.1 ("The field block MUST be processed to
+  ensure a consistent connection state") -- its fields past the bound dropped, and the response is discarded once the
+  fields kept say it is well-formed: `RST_STREAM(ENHANCE_YOUR_CALM)`, the code of the client's other refusals of a
+  response too large, and an `Http2StreamErrorEvent` that fails its request; the connection serves the next one. A
+  list past 16 times the bound still closes the connection, as on the server.
 - **A field a request's `connection` header names never leaves in its trailer section either, on HTTP/2 and HTTP/3
   (Huly QB-1202).** RFC 9110 §7.6.1 has an intermediary remove "any header or trailer field(s)" a `connection` option
   names, and RFC 9113 §8.2.2 and RFC 9114 §4.2 have one translating an HTTP/1.1 message do so. QB-1191 dropped them
