@@ -256,7 +256,9 @@ public:
         // Bound the DECODED header-list size we accept from the server. Without this the
         // decoder keeps its 4 GiB no-op default and a malicious server can expand a
         // ≤1 MB encoded block into ~4 GiB of decoded HeaderFields (HPACK decompression
-        // bomb) via repeated indexed references to a large dynamic-table entry.
+        // bomb) via repeated indexed references to a large dynamic-table entry. The bound is
+        // advertised (initialize_our_settings_map), and a response past it is decoded and
+        // discarded and its stream reset, up to HPACK_DISCARDED_LIST_FACTOR times it (Huly QB-1211).
         _hpack_decoder.set_max_header_list_size(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
         // Apply our SETTINGS_HEADER_TABLE_SIZE to the encoder
         auto it_table_size = _our_settings.find(Http2SettingIdentifier::SETTINGS_HEADER_TABLE_SIZE);
@@ -561,9 +563,10 @@ public:
             // Decoding...");
             stream.expecting_continuation = false; // No more CONTINUATIONs for this block
             std::vector<hpack::HeaderField> decoded_fields;
-            bool                            hpack_incomplete = false;
+            bool                            hpack_incomplete      = false;
+            bool                            over_header_list_size = false; // the response is discarded below
 
-            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
+            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete, over_header_list_size)) {
                 // LOG_ERROR_PA("ClientHttp2Protocol", "[HTTP/2 Client] HPACK decoding failed for CONTINUATION on stream " << stream.id);
                 send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed (CONTINUATION)");
                 this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
@@ -580,7 +583,7 @@ public:
             }
             clear_header_assembly_state(); // Also resets _active_header_block_stream_id
 
-            if (!process_response_header_block(stream, decoded_fields, stream.end_stream_received)) {
+            if (!process_response_header_block(stream, decoded_fields, stream.end_stream_received, over_header_list_size)) {
                 return;
             }
             // State transitions for OPEN/HALF_CLOSED_REMOTE if applicable (e.g. if PUSH_PROMISE HEADERS was split)
@@ -1470,6 +1473,10 @@ private:
         _our_settings[Http2SettingIdentifier::SETTINGS_ENABLE_PUSH]         = 0;
         _our_settings[Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE] = 65535;
         _our_settings[Http2SettingIdentifier::SETTINGS_MAX_FRAME_SIZE]      = 16384;
+        // The bound the decoder enforces (set in reset()), advertised, as the server advertises its own: nothing was,
+        // and a response past 1 MiB closed the connection (Huly QB-1211). Past it a response's stream is reset.
+        _our_settings[Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE] =
+            static_cast<uint32_t>(::qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE);
     }
 
     /**
@@ -1545,7 +1552,8 @@ private:
         }
         std::vector<hpack::HeaderField> dropped;
         bool                            incomplete = false;
-        const bool                      decoded    = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete) && !incomplete;
+        bool                            over_list  = false; // dropped all the same (Huly QB-1211)
+        const bool decoded = _hpack_decoder.decode(_current_header_block_fragment, dropped, incomplete, over_list) && !incomplete;
         clear_header_assembly_state();
         if (!decoded) {
             this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
@@ -2231,9 +2239,14 @@ private:
 
         if (headers_event.header.flags & FLAG_END_HEADERS) {
             std::vector<hpack::HeaderField> decoded_fields;
-            bool                            hpack_incomplete = false;
+            bool                            hpack_incomplete      = false;
+            bool                            over_header_list_size = false; // the response is discarded below
 
-            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete)) {
+            // A list past the bound SETTINGS_MAX_HEADER_LIST_SIZE advertises is decoded to its end -- the
+            // table kept in step with the server's encoder (RFC 9113 §10.5.1) -- and its fields past the bound
+            // dropped: the response is discarded on its stream, the connection serving on. It failed the decode,
+            // COMPRESSION_ERROR, every stream with it (Huly QB-1211).
+            if (!_hpack_decoder.decode(_current_header_block_fragment, decoded_fields, hpack_incomplete, over_header_list_size)) {
                 send_rst_stream(stream.id, ErrorCode::COMPRESSION_ERROR, "HPACK decoding failed");
                 this->send_goaway_and_close(ErrorCode::COMPRESSION_ERROR, "HPACK decoding error.");
                 clear_header_assembly_state();
@@ -2249,7 +2262,8 @@ private:
 
             clear_header_assembly_state();
 
-            if (!process_response_header_block(stream, decoded_fields, (headers_event.header.flags & FLAG_END_STREAM) != 0)) {
+            if (!process_response_header_block(stream, decoded_fields, (headers_event.header.flags & FLAG_END_STREAM) != 0,
+                                               over_header_list_size)) {
                 return;
             }
 
@@ -2299,12 +2313,21 @@ private:
     }
 
     // Both HEADERS and its final CONTINUATION use the same classification. Only a final
-    // status establishes headers_received_main; informational fields never leak into it.
+    // status establishes headers_received_main; informational fields never leak into it. A block
+    // past the advertised header-list bound -- its fields past it dropped by the decoder -- is
+    // discarded once the fields kept say it is well-formed: its stream is reset with
+    // ENHANCE_YOUR_CALM, the client's refusal of a response too large, and its request fails
+    // (Huly QB-1211); a malformed one stays the PROTOCOL_ERROR it is.
     [[nodiscard]] bool
-    process_response_header_block(Http2ClientStream &stream, const std::vector<hpack::HeaderField> &decoded_fields, bool end_stream) {
+    process_response_header_block(Http2ClientStream &stream, const std::vector<hpack::HeaderField> &decoded_fields, bool end_stream,
+                                  bool over_header_list_size) {
         const bool is_trailers_block = stream.headers_received_main;
         if (!parse_and_validate_headers_into_response(stream, decoded_fields, is_trailers_block)) {
             return false; // The stream may already have been erased by the error callback.
+        }
+        if (over_header_list_size) [[unlikely]] {
+            send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response header list exceeds SETTINGS_MAX_HEADER_LIST_SIZE");
+            return false;
         }
         if (is_trailers_block) {
             stream.trailers_received = true;
