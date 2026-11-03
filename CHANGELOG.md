@@ -156,8 +156,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   in-process nghttp3 pair (macOS, libc++): six dropped values of 9 000 bytes allocated 79 784 bytes on the base and
   25 736 now (the stream's state and the 431 answer); a request with 56 KB of fields, its body still to come, kept
   130 KB and now under 84 KB; a browser's 18-field GET read by the server on a warm connection allocates 16 057 bytes
-  where it allocated 18 914. The fixed 64 KiB
-  section bound beside the settable request limits (point 1) is a decision left to the maintainer.
+  where it allocated 18 914. The section bound itself (point 1) is the next entry.
+
+- **The HTTP/3 field-section bound is 1 MiB, the bound HTTP/2 puts on a header list (Huly QB-1203, point 1; the
+  maintainer's decision of 2026-11-03).** Both roles advertised and enforced 64 KiB as `SETTINGS_MAX_FIELD_SECTION_SIZE`
+  (`detail::max_field_section_size`, Huly QB-1196) beside request limits that are settable: under the default limits --
+  100 fields, a value of 8 KiB -- a request of 90 fields of 8 000 bytes, some 0.7 MiB, which the HTTP/2 server serves,
+  was refused by the HTTP/3 client before it was sent (the server's 64 KiB) and answered `431` by the HTTP/3 server
+  that read it, and a response of that size was refused by the client. Both roles now advertise and enforce 1 MiB:
+  such a section crosses both ways. The default limits keep every section below the bound (nghttp3 decodes a name of
+  256 bytes at most), so it binds a server whose limits are raised: exactly 1 MiB is served, a byte more answered
+  `431`. A section a stream keeps while its body comes can now reach what the limits allow, under 1 MiB, as an HTTP/2
+  stream's header list can. A peer that advertises less is still held to its own bound (Huly QB-1204).
+
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
   (`qbm-http-bench-http2-server-request`, DHAT and callgrind on g++ 14; the P9 finding). Each stream owned a fresh
