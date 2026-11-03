@@ -887,13 +887,13 @@ private:
      */
     void
     shut_refused_read(std::uint64_t stream_id) {
-        // Its two documented failures -- NGHTTP3_ERR_NOMEM, NGHTTP3_ERR_QPACK_FATAL (the decoder stream overflowed: a
-        // peer that gives it no credit while it refuses stream after stream) -- fail the nghttp3 callback that refused
-        // the stream (guard_callback): the connection closes. nghttp3_err_is_fatal() would not have said so of
-        // QPACK_FATAL (-108, above NGHTTP3_ERR_FATAL). The Stream Cancellation it queues is the only decoder instruction
-        // a refusal adds, one that RFC 9204 §4.4.2 lets a decoder with a dynamic table capacity of 0 omit, and no
-        // Section Acknowledgment can follow it: with that capacity 0, set in the constructor, no section has a Required
-        // Insert Count (§4.4.1).
+        // Its two documented failures -- NGHTTP3_ERR_NOMEM, NGHTTP3_ERR_QPACK_FATAL -- fail the nghttp3 callback that
+        // refused the stream (guard_callback) and close the connection; nghttp3_err_is_fatal() misses QPACK_FATAL.
+        // Defensive: drain() hands on every byte nghttp3 writes at once, so its decoder buffer does not fill here, and
+        // an allocation failure alone gets this far. The Stream Cancellation it queues is the only decoder instruction a
+        // refusal adds, one RFC 9204 §4.4.2 lets a decoder with a dynamic table capacity of 0 omit, and no Section
+        // Acknowledgment can follow it: with that capacity 0, set in the constructor, no section has a Required Insert
+        // Count (§4.4.1).
         if (nghttp3_conn_shutdown_stream_read(_conn, static_cast<int64_t>(stream_id)) != 0) [[unlikely]] {
             throw std::runtime_error("nghttp3_conn_shutdown_stream_read failed");
         }
