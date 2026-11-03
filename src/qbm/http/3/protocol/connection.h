@@ -76,7 +76,7 @@ namespace detail {
 
 /// The largest field section a connection reads, the SETTINGS_MAX_FIELD_SECTION_SIZE it advertises (RFC 9114 §4.2.2): 1 MiB,
 /// HTTP/2's header-list bound (64 KiB until Huly QB-1203). nghttp3 does not enforce it (nghttp3.h, `nghttp3_settings::
-/// max_field_section_size`): the connection does, a request's section past it answered 431, a response's refused (QB-1196).
+/// max_field_section_size`): the connection does, a request's section past it answered 431, a response's discarded (QB-1196).
 inline constexpr std::uint64_t max_field_section_size = 1024 * 1024;
 
 /// What RFC 9114 §4.2.2 adds to a field's name and value when it counts the size of a field section.
@@ -1147,7 +1147,7 @@ private:
             const bool pseudo = header_name.front() == ':';
             // The section is bounded too: its size as RFC 9114 §4.2.2 counts it -- every field's name and value, and 32
             // bytes -- against the SETTINGS_MAX_FIELD_SECTION_SIZE the connection advertises, which nghttp3 does not
-            // enforce (Huly QB-1196: 1.18.0 delivered sections of 72 KiB to 800 KiB, each field within the limits). A
+            // enforce (Huly QB-1196: 1.18.0 delivered sections of 72 KiB to 800 KiB past the 64 KiB then advertised). A
             // field past it is over the limits.
             st.field_section_size += header_name.size() + header_value.size() + detail::field_line_overhead;
             const bool section_over_limit = st.field_section_size > detail::max_field_section_size;
@@ -1190,8 +1190,8 @@ private:
                 return 0;
             }
             if (section_over_limit) [[unlikely]] {
-                // A pseudo-header past it is read all the same -- they say whether the request is well-formed, and
-                // nghttp3 bounds each (a value at 64 KiB) -- and the section is answered 431.
+                // A pseudo-header past it is read all the same and the section answered 431. Defensive: nghttp3 (1.18.0)
+                // takes five at most, before any regular field, each value at 64 KiB, so none reaches 1 MiB (QB-1203).
                 if (me->_role != role::server) {
                     me->discard_response(static_cast<std::uint64_t>(stream_id), st); // a response over the limits: this stream
                     return 0;

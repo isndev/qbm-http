@@ -159,15 +159,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   where it allocated 18 914. The section bound itself (point 1) is the next entry.
 
 - **The HTTP/3 field-section bound is 1 MiB, the bound HTTP/2 puts on a header list (Huly QB-1203, point 1; the
-  maintainer's decision of 2026-11-03).** Both roles advertised and enforced 64 KiB as `SETTINGS_MAX_FIELD_SECTION_SIZE`
-  (`detail::max_field_section_size`, Huly QB-1196) beside request limits that are settable: under the default limits --
-  100 fields, a value of 8 KiB -- a request of 90 fields of 8 000 bytes, some 0.7 MiB, which the HTTP/2 server serves,
-  was refused by the HTTP/3 client before it was sent (the server's 64 KiB) and answered `431` by the HTTP/3 server
-  that read it, and a response of that size was refused by the client. Both roles now advertise and enforce 1 MiB:
+  maintainer's decision of 2026-11-03).** 3.3.0 advertised 64 KiB as `SETTINGS_MAX_FIELD_SECTION_SIZE` and enforced
+  nothing; QB-1196 (under Fixed) and QB-1204 enforced that 64 KiB on both roles, beside request limits that are
+  settable: under the default limits -- 100 fields, a value of 8 KiB -- a request of 90 fields of 8 000 bytes, some
+  0.7 MiB, which the HTTP/2 server serves, was refused by the HTTP/3 client before it was sent (the server's 64 KiB)
+  and answered `431` by the HTTP/3 server that read it, and a response of that size was refused by the client. Both roles now advertise and enforce 1 MiB:
   such a section crosses both ways. The default limits keep every section below the bound (nghttp3 decodes a name of
   256 bytes at most), so it binds a server whose limits are raised: exactly 1 MiB is served, a byte more answered
-  `431`. A section a stream keeps while its body comes can now reach what the limits allow, under 1 MiB, as an HTTP/2
-  stream's header list can. A peer that advertises less is still held to its own bound (Huly QB-1204).
+  `431`. A section a stream keeps while its body comes can now reach what the limits allow, under 1 MiB (some 0.9 MB
+  under the default limits), as an HTTP/2 stream's header list can: with QUIC's 100 concurrent streams a connection's
+  sections can hold some 90 MB, where the 64 KiB kept them near 6.5 MB (HTTP/2: 50 streams). A peer that advertises less is still held to its own bound (Huly QB-1204).
 
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
@@ -704,8 +705,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the `content-length` itself over the value or name limit or past the count, the trailer-section mismatch, the DATA
   overrun and its `WINDOW_UPDATE`, the well-formed controls answered `431`.
 
-- **An HTTP/3 field section is bounded by the 64 KiB the connection advertises -- nghttp3 does not enforce
-  `max_field_section_size` -- and a request whose section passes it is answered `431` (Huly QB-1196).** nghttp3.h
+- **An HTTP/3 field section is bounded by the size the connection advertises, 1 MiB since Huly QB-1203 -- nghttp3 does
+  not enforce `max_field_section_size` -- and a request whose section passes it is answered `431` (Huly QB-1196).** nghttp3.h
   (1.18.0) says it does not, while `llm.api`, readme 19 and a test comment said a larger section was a connection error.
   Measured: sections of 72 KiB, 160 KiB and 800 KiB, every field within the request limits, reached the server, and a
   120 KB response section the client, whose informational (1xx) responses also added their fields to the final
@@ -716,11 +717,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   it a field is over the limits (judged, then dropped, the first `host` and one `content-length` kept), a pseudo-header
   is kept, a request is answered `431` once known well-formed and a response's stream refused. Each section -- a trailer
   section, an informational response's -- is counted on its own, and a 1xx response's fields go with it. The bound is
-  fixed, beside request limits a server sets (Huly QB-1203). Measured with QB-1191 and QB-1197, A/B against the base: an
-  HTTP/3 request's field block +0.3 % (the copies spread 1.6 %), a browser's request served -0.2 %. Tests: exactly 64
-  KiB served, a byte more answered `431` (through the client); a `:path` alone past it; a trailer section at and past
-  it; each malformed shape past it refused, each well-formed one answered; a response, its trailer section and an
-  interim section past it; three 103s and a 200 delivering the 200's fields alone.
+  1 MiB, the entry under Changed (Huly QB-1203: it was 64 KiB, fixed beside request limits a server sets). Measured with QB-1191 and QB-1197, A/B against the base: an
+  HTTP/3 request's field block +0.3 % (the copies spread 1.6 %), a browser's request served -0.2 %. Tests (at 1 MiB since
+  QB-1203): exactly the bound served, a byte more answered `431`, a pseudo-header's bytes counted; a trailer section at
+  and past it; each malformed shape past it refused, each well-formed one answered; a response, its trailer section
+  and an interim section past the client's limits; three 103s and a 200 delivering the 200's fields alone.
 
 - **An HTTP/3 header section may carry `proxy-authorization` and `proxy-authenticate`, as an HTTP/2 one does (Huly
   QB-1197).** `detail::is_forbidden_h3_header()` counted them among the connection-specific fields, which RFC 9114
