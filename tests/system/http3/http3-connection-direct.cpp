@@ -2843,4 +2843,42 @@ TEST(Http3ConnectionDirect, ADiscardedResponseReadsNothingMoreFromItsPeer) {
     }
 }
 
+/**
+ * @test A section read leaves nothing beside its request while its stream lives (Huly QB-1203)
+ * @brief Once a header section's fields have moved into the request, the section's own storage -- the block that held
+ *        them and the views nghttp3 reads -- is released: what a live stream keeps beside its request does not grow
+ *        with the number of fields. Measured as a difference -- 91 regular fields against one, each side less what the
+ *        same request costs built alone -- so what a stream costs whatever its fields cancels out. Kept, the storage
+ *        grows by a deque block and a view each per field: some 9 KB between the two.
+ */
+TEST(Http3ConnectionDirect, AReadSectionLeavesNothingBesideItsRequest) {
+#if !QBM_HTTP_TEST_HEAP_IN_USE
+    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2() or Apple's malloc_zone_statistics(), without a sanitizer";
+#else
+    const auto beside_request = [](int n) {
+        auto fields           = request_fields("/upload");
+        fields.front().second = "POST";
+        fields.emplace_back("content-length", "5");
+        for (int i = 0; i < n; ++i)
+            fields.emplace_back("x-" + std::to_string(i), "v");
+        const auto        frame = h3_headers_frame(0, fields);
+        Pair              pair;
+        const std::size_t before = heap_in_use();
+        EXPECT_TRUE(pair.server.read_stream(0, frame, false)); // the body is still to come: the stream lives
+        const auto        stream         = static_cast<long long>(heap_in_use()) - static_cast<long long>(before);
+        const std::size_t before_request = heap_in_use();
+        qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/upload")};
+        request.add_header("content-length", "5");
+        for (int i = 0; i < n; ++i)
+            request.add_header("x-" + std::to_string(i), "v");
+        const auto message = static_cast<long long>(heap_in_use()) - static_cast<long long>(before_request);
+        EXPECT_TRUE(pair.server_owner.resets.empty());
+        return stream - message;
+    };
+    const long long one  = beside_request(1);
+    const long long many = beside_request(90);
+    EXPECT_LT(many - one, 2048) << one << " then " << many << " bytes beside the request: the read section is kept";
+#endif
+}
+
 #endif // QBM_HTTP_HAS_HTTP3
