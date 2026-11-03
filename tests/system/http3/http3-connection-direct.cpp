@@ -2613,4 +2613,44 @@ TEST(Http3ConnectionDirect, ARefusedOrAnsweredStreamReadsNothingMoreFromItsPeer)
     EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
 }
 
+/**
+ * @test A field name a peer's nghttp3 cannot decode is never sent (Huly QB-1210)
+ * @brief nghttp3's QPACK decoder takes a field name of 256 octets at most and, coded by Huffman, a code of 160 at most
+ *        (8/5 of it is 256); past either it closes the CONNECTION with H3_INTERNAL_ERROR, every stream with it --
+ *        measured on 1.18.0: names of 'a' (a 5-bit code) are served up to 256 octets, of 'n' (6 bits) up to 213, of
+ *        'x' (7 bits) up to 182, of '!' (sent raw, its code longer) up to 256. The client sent names up to
+ *        `MAX_HEADER_NAME_LENGTH` (1024), and the server too in a response. A request or a response with a name past
+ *        the bound is refused before anything is submitted, as one past the other field bounds is; at the bound it is
+ *        served.
+ */
+TEST(Http3ConnectionDirect, AFieldNameAPeersNghttp3CannotDecodeIsNeverSent) {
+    struct Edge {
+        char        c;
+        std::size_t longest;
+    };
+    for (const Edge e : {Edge{'a', 256}, Edge{'n', 213}, Edge{'x', 182}, Edge{'!', 256}}) {
+        for (const std::size_t n : {e.longest, e.longest + 1, std::size_t{1024}}) {
+            const bool fits = n <= e.longest;
+            SCOPED_TRACE(std::string(1, e.c) + " x " + std::to_string(n));
+            Pair              pair;
+            qb::http::Request get{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+            get.set_header(std::string(n, e.c), "v");
+            EXPECT_EQ(pair.client.submit_request(0, get), fits) << "a request";
+            pair.settle();
+            EXPECT_FALSE(pair.server_owner.close.has_value()) << "the server's nghttp3 closed the connection";
+            EXPECT_EQ(pair.server_owner.requests.size(), fits ? 1u : 0u);
+
+            ASSERT_TRUE(pair.client.submit_request(4, qb::http::Request{qb::http::method::GET, qb::io::uri("https://example.test/s")}));
+            pair.settle();
+            qb::http::Response response;
+            response.status() = qb::http::status::OK;
+            response.set_header(std::string(n, e.c), "v");
+            EXPECT_EQ(pair.server.submit_response(4, response), fits) << "a response";
+            pair.settle();
+            EXPECT_FALSE(pair.client_owner.close.has_value()) << "the client's nghttp3 closed the connection";
+            EXPECT_EQ(pair.client_owner.responses.size(), fits ? 1u : 0u);
+        }
+    }
+}
+
 #endif // QBM_HTTP_HAS_HTTP3
