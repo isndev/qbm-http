@@ -35,6 +35,8 @@ std::atomic<bool>        g_counting{false};
 std::atomic<std::size_t> g_bytes{0};
 /// The bytes C++ allocated minus those it freed while counting, each block by the size the allocator gave it -- what
 /// a measured call keeps (Huly QB-1203). The allocator's own statistics count blocks a thread cache holds as in use.
+/// A block allocated before the scope and freed in it counts against it; every thread counts; a nested AllocScope
+/// starts both counts again.
 std::atomic<long long> g_live{0};
 
 /// RAII arm/disarm so a throw inside the parser cannot leave counting on.
