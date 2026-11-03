@@ -2664,7 +2664,9 @@ TEST(Http3ConnectionDirect, AFieldNameAPeersNghttp3CannotDecodeIsNeverSent) {
         char        c;
         std::size_t longest;
     };
-    for (const Edge e : {Edge{'a', 256}, Edge{'n', 213}, Edge{'x', 182}, Edge{'!', 256}}) {
+    // '&' has an 8-bit code: a name of '&' codes to its own length, so it is sent raw -- nghttp3 Huffman-codes a string
+    // only when that is shorter -- up to 256.
+    for (const Edge e : {Edge{'a', 256}, Edge{'n', 213}, Edge{'x', 182}, Edge{'!', 256}, Edge{'&', 256}}) {
         for (const std::size_t n : {e.longest, e.longest + 1, std::size_t{1024}}) {
             const bool fits = n <= e.longest;
             SCOPED_TRACE(std::string(1, e.c) + " x " + std::to_string(n));
@@ -2685,6 +2687,15 @@ TEST(Http3ConnectionDirect, AFieldNameAPeersNghttp3CannotDecodeIsNeverSent) {
             pair.settle();
             EXPECT_FALSE(pair.client_owner.close.has_value()) << "the client's nghttp3 closed the connection";
             EXPECT_EQ(pair.client_owner.responses.size(), fits ? 1u : 0u);
+
+            // A trailer section's name is held to the same bound.
+            qb::http::Request post{qb::http::method::POST, qb::io::uri("https://example.test/t")};
+            post.body() = "abc";
+            post.trailers().add_header(std::string(n, e.c), "v");
+            EXPECT_EQ(pair.client.submit_request(8, post), fits) << "a request trailer section";
+            pair.settle();
+            EXPECT_FALSE(pair.server_owner.close.has_value()) << "the server's nghttp3 closed the connection on a trailer name";
+            EXPECT_EQ(pair.server_owner.requests.size(), fits ? 3u : 1u) << "the requests on streams 0 and 4, then this one";
         }
     }
 }
