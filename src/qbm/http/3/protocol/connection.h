@@ -841,7 +841,8 @@ private:
      */
     void
     refuse_stream(std::uint64_t stream_id, stream_state &st) {
-        st.refused = true;
+        st.refused          = true;
+        st.incoming_headers = {}; // a refused section is never read (Huly QB-1203)
         if (_role == role::server) {
             st.request.body().clear();
         } else {
@@ -873,7 +874,8 @@ private:
      */
     void
     discard_response(std::uint64_t stream_id, stream_state &st) {
-        st.refused = true;
+        st.refused          = true;
+        st.incoming_headers = {};
         st.response.body().clear();
         _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
         shut_refused_read(stream_id);
@@ -1095,8 +1097,12 @@ private:
             if (st.refused) {
                 return 0; // the rest of a refused message is dropped
             }
-            auto header_name  = detail::rcbuf_to_string(name);
-            auto header_value = detail::rcbuf_to_string(value);
+            // Read in place: a field is copied once, when it is kept. Each was copied twice before it was judged, one
+            // dropped past the limits included (Huly QB-1203).
+            const auto             name_buf  = nghttp3_rcbuf_get_buf(name);
+            const auto             value_buf = nghttp3_rcbuf_get_buf(value);
+            const std::string_view header_name{reinterpret_cast<const char *>(name_buf.base), name_buf.len};
+            const std::string_view header_value{reinterpret_cast<const char *>(value_buf.base), value_buf.len};
             if (!detail::is_valid_incoming_header_field(header_name, header_value)) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // a malformed field: this stream
                 return 0;
@@ -1161,7 +1167,7 @@ private:
             if (header_name == ":path" && header_value.size() > limits.max_url_length) [[unlikely]] {
                 st.path_over_limit = true; // answered 414 at the end of the section, once it is known well-formed
             }
-            st.incoming_headers.add(std::move(header_name), std::move(header_value));
+            st.incoming_headers.add(std::string(header_name), std::string(header_value));
             return 0;
         });
     }
@@ -1174,7 +1180,9 @@ private:
             if (st.refused) {
                 return 0;
             }
-            if (!me->materialize_headers(static_cast<std::uint64_t>(stream_id), st)) {
+            const bool well_formed = me->materialize_headers(static_cast<std::uint64_t>(stream_id), st);
+            st.incoming_headers    = {}; // read: its fields are the message's now (Huly QB-1203)
+            if (!well_formed) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed headers: this stream, not the connection
                 return 0;
             }
@@ -1228,7 +1236,9 @@ private:
             if (st.refused) {
                 return 0;
             }
-            if (!me->materialize_trailers(st)) {
+            const bool well_formed = me->materialize_trailers(st);
+            st.incoming_headers    = {}; // read (Huly QB-1203)
+            if (!well_formed) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed trailers: this stream, not the connection
                 return 0;
             }
@@ -1339,27 +1349,30 @@ private:
         std::optional<int>           status;
         std::optional<std::uint64_t> content_length = st.content_length_over_limits; // one over the limits, parsed
 
-        for (auto const &[name, value] : st.incoming_headers.storage) {
+        // The section's fields move into the message, and the section is released once read (end_headers_cb): the
+        // values were copied, and the section kept beside them until the stream closed -- two copies a stream, in the
+        // section bound (Huly QB-1203). Its nva views are never read for a received section.
+        for (auto &[name, value] : st.incoming_headers.storage) {
             if (name == ":method") {
                 if (method || _role != role::server) {
                     return false;
                 }
-                method = value;
+                method = std::move(value);
             } else if (name == ":scheme") {
                 if (scheme || _role != role::server) {
                     return false;
                 }
-                scheme = value;
+                scheme = std::move(value);
             } else if (name == ":authority") {
                 if (authority || _role != role::server) {
                     return false;
                 }
-                authority = value;
+                authority = std::move(value);
             } else if (name == ":path") {
                 if (path || _role != role::server) {
                     return false;
                 }
-                path = value;
+                path = std::move(value);
             } else if (name == ":status") {
                 if (status || _role != role::client) {
                     return false;
@@ -1381,9 +1394,9 @@ private:
                 }
                 content_length = *parsed;
                 if (_role == role::server) {
-                    st.request.add_header(name, value);
+                    st.request.add_header(std::move(name), std::move(value));
                 } else {
-                    st.response.add_header(name, value);
+                    st.response.add_header(std::move(name), std::move(value));
                 }
             } else {
                 // `te` is a request's field, as `trailers` alone (RFC 9114 §4.2): a response carrying one is malformed,
@@ -1393,9 +1406,9 @@ private:
                     return false;
                 }
                 if (_role == role::server) {
-                    st.request.add_header(name, value);
+                    st.request.add_header(std::move(name), std::move(value));
                 } else {
-                    st.response.add_header(name, value);
+                    st.response.add_header(std::move(name), std::move(value));
                 }
             }
         }

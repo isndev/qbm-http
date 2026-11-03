@@ -50,10 +50,16 @@
 #include <qb/system/container/unordered_map.h>
 #include <nghttp3/nghttp3.h>
 
-// The heap in use, as glibc's mallinfo2() reports it: the measure of what a stream's state keeps. Not where a
-// sanitizer's allocator stands in for glibc's, nor off glibc.
+#include "../../shared/allocation_counter.h" // the bytes C++ allocates while a section is read (Huly QB-1203)
+
+// The heap in use, as glibc's mallinfo2() or Apple's malloc_zone_statistics() reports it: the measure of what a
+// stream's state keeps. Not where a sanitizer's allocator stands in for the system's, nor elsewhere.
+#if defined(__GLIBC__) || defined(__APPLE__)
 #if defined(__GLIBC__)
 #include <malloc.h>
+#else
+#include <malloc/malloc.h>
+#endif
 #define QBM_HTTP_TEST_HEAP_IN_USE 1
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #undef QBM_HTTP_TEST_HEAP_IN_USE
@@ -69,6 +75,19 @@
 #endif
 
 namespace {
+
+#if QBM_HTTP_TEST_HEAP_IN_USE
+std::size_t
+heap_in_use() {
+#if defined(__GLIBC__)
+    return mallinfo2().uordblks;
+#else
+    malloc_statistics_t stats{};
+    malloc_zone_statistics(nullptr, &stats);
+    return stats.size_in_use;
+#endif
+}
+#endif
 
 using qb::protocol::http3::connection;
 // NOTE: `connection<Owner>::role` is a member enum, so each instantiation has its own `role` type.
@@ -1914,7 +1933,7 @@ TEST(Http3ConnectionDirect, AHostAndAContentLengthOverTheLimitsAreJudgedWhenThey
         EXPECT_TRUE(reset(pair.server_owner, 0));
     }
 #if !QBM_HTTP_TEST_HEAP_IN_USE
-    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2(), without a sanitizer's allocator";
+    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2() or Apple's malloc_zone_statistics(), without a sanitizer";
 #else
     const std::string                                      long_host(60000, 'a');
     const std::string                                      long_length(60000, '0');
@@ -1923,9 +1942,9 @@ TEST(Http3ConnectionDirect, AHostAndAContentLengthOverTheLimitsAreJudgedWhenThey
         {":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {"host", long_host}, {"content-length", long_length}
     };
     const auto        frame  = h3_headers_frame(0, fields);
-    const std::size_t before = mallinfo2().uordblks;
+    const std::size_t before = heap_in_use();
     pair.server.read_stream(0, frame, false); // the stream stays open: what its state keeps, it keeps
-    const std::size_t after = mallinfo2().uordblks;
+    const std::size_t after = heap_in_use();
     EXPECT_TRUE(pair.server_owner.requests.empty());
     EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "well-formed: answered 431";
     EXPECT_FALSE(reset(pair.server_owner, 0));
@@ -2651,6 +2670,81 @@ TEST(Http3ConnectionDirect, AFieldNameAPeersNghttp3CannotDecodeIsNeverSent) {
             EXPECT_EQ(pair.client_owner.responses.size(), fits ? 1u : 0u);
         }
     }
+}
+
+/**
+ * @test A field over the limits is never copied (Huly QB-1203)
+ * @brief A field the server drops for its limits -- read, judged by the rules that need no other field, counted -- was
+ *        copied twice first, its name and its value, then dropped: the CPU a peer chose by the length of its section.
+ *        recv_header_cb reads the field in place and copies one it keeps: six values of 9000 bytes over an 8 KiB limit,
+ *        answered 431, allocate less than one of them.
+ */
+TEST(Http3ConnectionDirect, AFieldOverTheLimitsIsNeverCopied) {
+    if (!allocation_counter_is_live()) {
+        GTEST_SKIP() << "the replaced operator new is not live here (a sanitizer's allocator intercepts first)";
+    }
+    // The bytes C++ allocates while a request of six dropped values of @p n bytes is read and answered 431: the stream's
+    // state and the answer cost the same whatever n, so what grows with n is a copy of a dropped field.
+    const auto read_with = [](std::size_t n) {
+        LimitedPair pair{qb::http::request_limits{}};
+        auto        fields = request_fields();
+        for (int i = 0; i < 6; ++i)
+            fields.emplace_back("x-over-" + std::to_string(i), std::string(n, 'v'));
+        const auto  frame = h3_headers_frame(0, fields);
+        std::size_t bytes = 0;
+        {
+            AllocScope scope;
+            pair.server.read_stream(0, frame, true);
+            bytes = AllocScope::bytes();
+        }
+        expect_answered_raw(pair, 0);
+        return bytes;
+    };
+    const std::size_t small = read_with(9000);  // over the 8 KiB value limit
+    const std::size_t large = read_with(18000); // twice that, within nghttp3's 64 KiB
+    EXPECT_LT(large - std::min(small, large), std::size_t{9000})
+        << small << " then " << large << " bytes allocated: the dropped fields were copied (6 x 9000 more bytes)";
+}
+
+/**
+ * @test A section read is kept once while its stream lives (Huly QB-1203)
+ * @brief The fields of a header section moved into the request -- they were copied -- and the section itself stayed
+ *        beside them until the stream closed: two copies of every request's section, up to the 64 KiB bound each, for
+ *        as long as its body takes to come. A request whose 56 KB of fields are within every limit, its body still to
+ *        come, now keeps one.
+ */
+TEST(Http3ConnectionDirect, AReadSectionIsKeptOnceWhileItsStreamLives) {
+#if !QBM_HTTP_TEST_HEAP_IN_USE
+    GTEST_SKIP() << "the heap in use is measured with glibc's mallinfo2() or Apple's malloc_zone_statistics(), without a sanitizer";
+#else
+    Pair pair;
+    auto fields           = request_fields("/upload");
+    fields.front().second = "POST";
+    fields.emplace_back("content-length", "5");
+    constexpr std::size_t values = 7 * 8000;
+    for (int i = 0; i < 7; ++i)
+        fields.emplace_back("x-kept-" + std::to_string(i), std::string(8000, 'v'));
+    const auto        frame  = h3_headers_frame(0, fields);
+    const std::size_t before = heap_in_use();
+    std::size_t       copied = 0;
+    {
+        AllocScope scope;
+        EXPECT_TRUE(pair.server.read_stream(0, frame, false)); // the body is still to come: the stream lives
+        copied = AllocScope::bytes();
+    }
+    const std::size_t after = heap_in_use();
+    if (allocation_counter_is_live()) {
+        EXPECT_LT(copied, values * 3 / 2) << copied << " bytes allocated: the fields were copied into the request, not moved";
+    }
+    EXPECT_TRUE(pair.server_owner.requests.empty());
+    EXPECT_TRUE(pair.server_owner.resets.empty());
+    const auto kept = static_cast<long long>(after) - static_cast<long long>(before);
+    EXPECT_GT(kept, static_cast<long long>(values)) << "the request holds its fields: the instrument reads them";
+    EXPECT_LT(kept, static_cast<long long>(values * 3 / 2)) << "the stream keeps " << kept << " bytes: two copies of the section";
+    pair.server.read_stream(0, h3_data_frame("abcde"), true);
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().header("x-kept-6").size(), 8000u);
+#endif
 }
 
 #endif // QBM_HTTP_HAS_HTTP3
