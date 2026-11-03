@@ -5928,6 +5928,8 @@ TEST(HTTP2ServerProtocol, AFrameOnAPushedStreamThatEndedIsIgnored) {
     for (const auto &f : parse_emitted_frames(reset_io.output))
         goaway = goaway || f.type == FrameType::GOAWAY;
     EXPECT_TRUE(goaway);
+    ASSERT_TRUE(reset_protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*reset_protocol.get_last_error_code(), ErrorCode::PROTOCOL_ERROR);
 }
 
 TEST(HTTP2ServerProtocol, AClientCancellingPushesIsNoRapidReset) {
@@ -5993,7 +5995,9 @@ handshake(ObservedProtocol &protocol, ObservingIO &io, uint32_t max_concurrent) 
 // ===========================================================================
 // RFC 9113 section 6.8: "Receivers of a GOAWAY frame MUST NOT open additional streams" -- from an observer of the
 // GOAWAY too (Huly QB-1202, review R2): the handler notified the application before it cancelled the promised streams,
-// and a promised stream answered there opened, its HEADERS sent after the GOAWAY. It is cancelled as the others are.
+// and a promised stream answered there opened, its HEADERS sent after the GOAWAY. It is refused, and closed as the GOAWAY
+// says: one RST_STREAM(CANCEL) at or below its last-stream-id, no frame above it or on an error GOAWAY -- whether the
+// application answers from Http2GoAwayEvent or from a stream's Http2StreamErrorEvent inside the handler's loop.
 // ===========================================================================
 TEST(HTTP2ServerProtocol, APromisedStreamAnsweredFromAGoawayObserverNeverOpens) {
     using namespace qb1202_observer_test;
@@ -6031,6 +6035,35 @@ TEST(HTTP2ServerProtocol, APromisedStreamAnsweredFromAGoawayObserverNeverOpens) 
         EXPECT_EQ(resets, cancelled ? 1u : 0u) << "the frame the GOAWAY's code and last-stream-id call for, once";
         EXPECT_TRUE(protocol.is_stream_closed(2));
         EXPECT_TRUE(protocol.is_stream_closed(4));
+    }
+    // From the loop: the observer of the first stream the handler cancels answers the other, still reserved -- the map
+    // walks in no fixed order, so whichever comes first.
+    ObservingIO      io;
+    ObservedProtocol protocol(io);
+    handshake(protocol, io, 2);
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    qb::http::Response empty;
+    empty.status()     = qb::http::status::NO_CONTENT;
+    bool     answered  = true;
+    uint32_t other     = 0;
+    io.on_stream_error = [&](const qb::protocol::http2::Http2StreamErrorEvent &e) {
+        if (other == 0) {
+            other    = e.stream_id == 2 ? 4 : 2;
+            answered = protocol.send_response(other, empty);
+        }
+    };
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(4, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+    ASSERT_NE(other, 0u);
+    EXPECT_FALSE(answered) << "a promised stream answered from the handler's loop";
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(headers_sent_on(io.output, id)) << id;
+        std::size_t resets = 0;
+        for (const auto &f : parse_emitted_frames(io.output))
+            resets += (f.type == FrameType::RST_STREAM && f.stream_id == id) ? 1u : 0u;
+        EXPECT_EQ(resets, 1u) << id;
     }
 }
 
