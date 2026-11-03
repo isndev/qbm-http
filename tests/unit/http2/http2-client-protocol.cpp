@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -4098,9 +4099,12 @@ TEST(HTTP2ClientProtocol, AResponseHeaderListPastTheBoundIsDiscardedAcrossContin
     refused.header.flags = h2::FLAG_END_HEADERS;
     protocol.on(std::move(refused));
     ASSERT_EQ(qb1211_test::last_rst_stream_error(io.output, 3), h2::ErrorCode::PROTOCOL_ERROR);
-    auto late = response_list_of_size(header_list_bound);
-    late.erase(late.begin()); // a trailer section: no :status
-    late.emplace_back("x-later", "2");
+    auto late    = response_list_of_size(header_list_bound);
+    late.front() = qb::protocol::hpack::HeaderField{"x-status", "20"}; // a trailer section: no :status, the same octets
+    late.emplace_back("x-later", "2");                                 // past the bound
+    ASSERT_GT(std::accumulate(late.begin(), late.end(), std::size_t{0},
+                              [](std::size_t n, const qb::protocol::hpack::HeaderField &f) { return n + f.hpack_size(); }),
+              header_list_bound);
     protocol.on(response_headers(3, block_of(late)));
     EXPECT_TRUE(protocol.ok()) << "a refused block past the bound is decoded and dropped, the connection kept";
     EXPECT_EQ(io.goaway_count, 0);
@@ -4156,4 +4160,23 @@ TEST(HTTP2ClientProtocol, ATrailerOrInformationalSectionPastTheBoundFailsItsStre
     ASSERT_EQ(io.response_count, 1) << "the next request is served";
     EXPECT_EQ(io.last_response->header("x-after"), "1");
     EXPECT_EQ(io.last_response->header("x-early"), "1");
+}
+
+// A block past the bound is refused for its size only once the fields kept say it is well-formed (Huly QB-1211): a
+// malformed one -- a connection-specific field among the fields kept -- stays the PROTOCOL_ERROR it is, as within the
+// bound.
+TEST(HTTP2ClientProtocol, AMalformedResponsePastTheBoundStaysAProtocolError) {
+    using namespace qb1211_test;
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_streams(protocol, 1);
+    qb::protocol::hpack::Encoder encoder;
+    auto                         past = response_list_of_size(header_list_bound);
+    past.insert(past.begin() + 1, qb::protocol::hpack::HeaderField{"connection", "close"}); // kept: before the bound
+    std::vector<uint8_t> block;
+    ASSERT_TRUE(encoder.encode(past, block));
+    protocol.on(response_headers(1, block));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 1), h2::ErrorCode::PROTOCOL_ERROR) << "malformed, whatever its size";
 }
