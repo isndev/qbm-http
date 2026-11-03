@@ -238,6 +238,20 @@ struct header_block {
             stored_value.size(), NGHTTP3_NV_FLAG_NONE
         });
     }
+
+    /**
+     * @brief Drop every field and the room they took, allocating nothing: a section read or refused is never read
+     *        again (Huly QB-1203). An empty block assigned instead allocated, under libstdc++, the map and the node an
+     *        empty deque holds there.
+     */
+    void
+    release() {
+        storage.clear();
+        storage.shrink_to_fit();
+        nva.clear();
+        nva.shrink_to_fit();
+        section_size = 0;
+    }
 };
 
 /**
@@ -841,8 +855,8 @@ private:
      */
     void
     refuse_stream(std::uint64_t stream_id, stream_state &st) {
-        st.refused          = true;
-        st.incoming_headers = {}; // a refused section is never read (Huly QB-1203)
+        st.refused = true;
+        st.incoming_headers.release(); // a refused section is never read (Huly QB-1203)
         if (_role == role::server) {
             st.request.body().clear();
         } else {
@@ -878,8 +892,8 @@ private:
      */
     void
     discard_response(std::uint64_t stream_id, stream_state &st) {
-        st.refused          = true;
-        st.incoming_headers = {};
+        st.refused = true;
+        st.incoming_headers.release();
         st.response.body().clear();
         _owner.reset_http3_stream(_connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
         shut_refused_read(stream_id);
@@ -1080,8 +1094,8 @@ private:
     static int
     begin_headers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            auto &st                      = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-            st.incoming_headers           = {};
+            auto &st = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers.release();
             st.incoming_header_fields     = 0;
             st.fields_over_limits         = false;
             st.path_over_limit            = false;
@@ -1185,7 +1199,7 @@ private:
                 return 0;
             }
             const bool well_formed = me->materialize_headers(static_cast<std::uint64_t>(stream_id), st);
-            st.incoming_headers    = {}; // read: its fields are the message's now (Huly QB-1203)
+            st.incoming_headers.release(); // read: its fields are the message's now (Huly QB-1203)
             if (!well_formed) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed headers: this stream, not the connection
                 return 0;
@@ -1223,8 +1237,8 @@ private:
     static int
     begin_trailers_cb(nghttp3_conn *, int64_t stream_id, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            auto &st                  = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
-            st.incoming_headers       = {};
+            auto &st = self(conn_user_data)->state_for(static_cast<std::uint64_t>(stream_id));
+            st.incoming_headers.release();
             st.incoming_header_fields = 0;
             st.fields_over_limits     = false;
             st.field_section_size     = 0;
@@ -1241,7 +1255,7 @@ private:
                 return 0;
             }
             const bool well_formed = me->materialize_trailers(st);
-            st.incoming_headers    = {}; // read (Huly QB-1203)
+            st.incoming_headers.release(); // read (Huly QB-1203)
             if (!well_formed) {
                 me->refuse_stream(static_cast<std::uint64_t>(stream_id), st); // malformed trailers: this stream, not the connection
                 return 0;
