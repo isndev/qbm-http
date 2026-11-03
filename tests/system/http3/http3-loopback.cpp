@@ -4031,8 +4031,10 @@ TEST_F(Http3LoopbackTest, LegacyBackendRttFallbackRemainsBoundedByTheDrainDeadli
 
 namespace http3_reset_code_test {
 
-// The HTTP/3 client, with the first code of each stream the server resets or stops recorded as it arrives on the wire:
-// the client settles such an exchange as a 502 whatever its code.
+// The HTTP/3 client, with the first code each stream closes with on a reset or a stop recorded: the client settles such
+// an exchange as a 502 whatever its code. qb's backend raises the same event for the client's own reset_stream() and
+// stop_stream(), but the client resets nothing of a GET it sent whole before the server's RESET_STREAM arrives: the
+// first code of such a stream is the one ngtcp2's stream_reset callback read off the wire.
 class ResetRecordingClient : public qb::http3::Client {
 public:
     using qb::http3::Client::Client;
@@ -4103,6 +4105,13 @@ TEST_F(Http3LoopbackTest, AResponseTheServerCannotSubmitIsResetWithRequestCancel
         ASSERT_EQ(client->codes.size(), before + 1) << "the server reset the response's stream";
         EXPECT_EQ(client->codes.back(), static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED)) << "the code on the wire";
     }
+
+    // Let a CONNECTION_CLOSE arrive if one was sent: the next request must go over the same connection.
+    const auto settle = std::chrono::steady_clock::now() + 150ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_TRUE(client->is_connected()) << "a refused response closed the whole connection";
 
     std::atomic<bool>  next_done{false};
     qb::http::Response next;
