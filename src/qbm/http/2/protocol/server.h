@@ -941,11 +941,14 @@ public:
         // the last stream has finished (try_close_stream_context). An error GOAWAY ends the
         // connection and every stream with it. This used to apply the bound to the CLIENT's
         // requests, closing the ones above it -- every request, for last-stream-id 0 -- and the
-        // connection before their responses (Huly QB-530).
+        // connection before their responses (Huly QB-530). A promised stream still reserved is
+        // cancelled under the bound too: its HEADERS would open it, and "Receivers of a GOAWAY
+        // frame MUST NOT open additional streams" -- a response that waited went out (Huly QB-1202).
         _graceful_shutdown_initiated         = true;
         const uint32_t last_pushed_stream_id = goaway_event.payload.last_stream_id;
         FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(last_pushed_stream_id);
         const ErrorCode error_code = goaway_event.payload.error_code;
+        _waiting_push_responses.clear();
 
         Http2GoAwayEvent event_to_dispatch{error_code, last_pushed_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
@@ -960,7 +963,8 @@ public:
                 continue;
             }
             const bool pushed = (sid % 2) == 0;
-            if (error_code != ErrorCode::NO_ERROR || (pushed && sid > last_pushed_stream_id)) {
+            if (error_code != ErrorCode::NO_ERROR
+                || (pushed && (sid > last_pushed_stream_id || stream.state == Http2StreamConcreteState::RESERVED_LOCAL))) {
                 ids_to_close.push_back(sid);
             }
         }
@@ -970,11 +974,18 @@ public:
                 continue;
             }
             const bool      pushed       = (sid % 2) == 0;
+            const bool      cancelled    = error_code == ErrorCode::NO_ERROR && sid <= last_pushed_stream_id; // reserved, never opened
             const ErrorCode stream_error = error_code != ErrorCode::NO_ERROR ? error_code : ErrorCode::CANCEL;
             // Erased before the observer runs, so nothing it does can reach a dangling stream.
             _server_streams.erase(it);
+            if (cancelled) {
+                this->send_rst_stream(sid, ErrorCode::CANCEL, "Promised stream cancelled by the client's GOAWAY"); // the frame alone
+            }
             Http2StreamErrorEvent stream_event{
-                sid, stream_error, pushed ? "Pushed stream not processed by the client (GOAWAY)" : "Stream closed by the client's GOAWAY"
+                sid, stream_error,
+                cancelled ? "Promised stream cancelled by the client's GOAWAY"
+                : pushed  ? "Pushed stream not processed by the client (GOAWAY)"
+                          : "Stream closed by the client's GOAWAY"
             };
             if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                 this->get_io_handler().on(stream_event);
@@ -985,10 +996,6 @@ public:
             _connection_active = false;
             this->not_ok(error_code); // Signal specific error
             return;
-        }
-        // The pushed streams closed above made room for a promised response that waits (Huly QB-1202).
-        if (!_waiting_push_responses.empty()) [[unlikely]] {
-            send_waiting_push_responses();
         }
         if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
             // Nothing left to finish: the graceful shutdown is complete at once.
@@ -1185,26 +1192,15 @@ public:
             this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Sending response on stream in invalid state for response.");
             return false;
         }
-        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
-            // A promised stream (send_push_promise) is answered here, its documented next step:
-            // sending its HEADERS moves it to half-closed (remote) -- the client never sends on a
-            // pushed stream -- and the response's END_STREAM closes it (RFC 9113 §5.1, §8.4; Huly
-            // QB-529). Those HEADERS open a stream the client's SETTINGS_MAX_CONCURRENT_STREAMS
-            // counts, which a server MUST NOT exceed (§5.1.2): without room the response waits,
-            // kept, and leaves once a pushed stream ends or the client raises its limit. It left at
-            // once, past a limit the client had lowered (Huly QB-1202).
-            if (std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream_id) != _waiting_push_responses.end()) {
-                return false; // answered already, the response waiting
-            }
-            if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
-                stream.response_to_send = http_response;
-                _waiting_push_responses.push_back(stream_id);
-                return true;
-            }
-            stream.state               = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
-            stream.end_stream_received = true;
+        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL
+            && std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream_id) != _waiting_push_responses.end()) {
+            return false; // answered already, the response waiting
         }
-        stream.response_to_send   = http_response;
+        // A response that waited is sent from the one its stream keeps (send_waiting_push_responses): nothing below reads
+        // it once the stream may be gone.
+        if (&http_response != &stream.response_to_send) {
+            stream.response_to_send = http_response;
+        }
         stream.send_buffer_offset = 0;
 
         if (stream.state == Http2StreamConcreteState::CLOSED || stream.state == Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
@@ -1294,6 +1290,23 @@ public:
                 send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
                 return false;
             }
+        }
+
+        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
+            // A promised stream (send_push_promise) is answered here, its documented next step:
+            // sending its HEADERS moves it to half-closed (remote) -- the client never sends on a
+            // pushed stream -- and the response's END_STREAM closes it (RFC 9113 §5.1, §8.4; Huly
+            // QB-529). Those HEADERS open a stream the client's SETTINGS_MAX_CONCURRENT_STREAMS
+            // counts, which a server MUST NOT exceed (§5.1.2): without room the response waits,
+            // judged first as any response is, kept, and leaves once a pushed stream ends or the
+            // client raises its limit -- or is cancelled as an idle stream is (cleanup_idle_streams).
+            // It left at once, past a limit the client had lowered (Huly QB-1202).
+            if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
+                _waiting_push_responses.push_back(stream_id);
+                return true;
+            }
+            stream.state               = Http2StreamConcreteState::HALF_CLOSED_REMOTE;
+            stream.end_stream_received = true;
         }
 
         std::vector<uint8_t> encoded_headers;
@@ -1512,15 +1525,19 @@ public:
         uint32_t   cleaned_count = 0;
         const auto now           = std::chrono::steady_clock::now();
 
-        for (auto it = _server_streams.begin(); it != _server_streams.end();) {
-            auto    &stream    = it->second;
-            uint32_t stream_id = it->first;
-
+        // The ids first, each found again: a stream reset below closes, and its close can send a promised response that
+        // waits (send_waiting_push_responses), whose stream may end and be erased at once -- the stream an iterator held
+        // past the reset pointed to (Huly QB-1202); the reset's observer may act on the protocol too.
+        std::vector<uint32_t> stream_ids;
+        stream_ids.reserve(_server_streams.size());
+        for (const auto &pair : _server_streams)
+            stream_ids.push_back(pair.first);
+        for (const uint32_t stream_id : stream_ids) {
+            const auto it = _server_streams.find(stream_id);
             // Skip already closed streams
-            if (stream.state == Http2StreamConcreteState::CLOSED) {
-                ++it;
+            if (it == _server_streams.end() || it->second.state == Http2StreamConcreteState::CLOSED)
                 continue;
-            }
+            auto &stream = it->second;
 
             if (stream.progressed_since_idle_sweep) {
                 stream.progressed_since_idle_sweep = false;
@@ -1545,15 +1562,10 @@ public:
 
             if (should_cleanup) {
                 // send_rst_stream() (close_context defaults to true) closes and ERASES this
-                // stream's context, invalidating `it`. Capture the successor first, then resume
-                // from it — erasing the already-invalidated `it` again was undefined behaviour.
-                auto next = std::next(it);
+                // stream's context: `stream` dangles past it.
                 this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
                 _server_streams.erase(stream_id); // idempotent safety net (reclaims if send_rst_stream didn't, e.g. !ok())
-                it = next;
                 cleaned_count++;
-            } else {
-                ++it;
             }
         }
 
@@ -2846,8 +2858,7 @@ private:
                 || it->second.rst_stream_received) {
                 continue;
             }
-            const qb::http::Response response = std::move(it->second.response_to_send);
-            (void) send_response(stream_id, response);
+            (void) send_response(stream_id, it->second.response_to_send);
         }
         _sending_waiting_push_responses = false;
     }
