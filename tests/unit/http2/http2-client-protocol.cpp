@@ -4111,3 +4111,49 @@ TEST(HTTP2ClientProtocol, AResponseHeaderListPastTheBoundIsDiscardedAcrossContin
     EXPECT_EQ(io.last_response->header("x-after"), "1") << "the table kept in step through the CONTINUATION frame";
     EXPECT_EQ(io.last_response->header("x-later"), "2") << "the table kept in step through the reset stream";
 }
+
+// The bound holds on every section a response carries (Huly QB-1211): a trailer section past it, and an informational
+// response past it, reset the stream -- ENHANCE_YOUR_CALM -- and fail the request, the connection kept and its table in
+// step with the server's.
+TEST(HTTP2ClientProtocol, ATrailerOrInformationalSectionPastTheBoundFailsItsStream) {
+    using namespace qb1211_test;
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_streams(protocol, 3);
+    qb::protocol::hpack::Encoder encoder;
+    const auto                   block_of = [&](const std::vector<qb::protocol::hpack::HeaderField> &fields) {
+        std::vector<uint8_t> block;
+        EXPECT_TRUE(encoder.encode(fields, block));
+        return block;
+    };
+
+    // Stream 1: the header section, then a trailer section past the bound -- x-status 20 counts as :status 200 does.
+    auto head         = response_headers(1, block_of({{":status", "200"}}));
+    head.header.flags = h2::FLAG_END_HEADERS;
+    protocol.on(std::move(head));
+    auto trailers    = response_list_of_size(header_list_bound);
+    trailers.front() = qb::protocol::hpack::HeaderField{"x-status", "20"};
+    trailers.emplace_back("x-after", "1");
+    protocol.on(response_headers(1, block_of(trailers)));
+    EXPECT_TRUE(protocol.ok()) << "the stream is refused, not the connection";
+    EXPECT_EQ(io.response_count, 0) << "a response whose trailer section passed the bound was delivered";
+    EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 1), h2::ErrorCode::ENHANCE_YOUR_CALM);
+
+    // Stream 3: a 103 past the bound.
+    auto early          = response_list_of_size(header_list_bound);
+    early.front().value = "103";
+    early.emplace_back("x-early", "1");
+    auto informational         = response_headers(3, block_of(early));
+    informational.header.flags = h2::FLAG_END_HEADERS;
+    protocol.on(std::move(informational));
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 3), h2::ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(io.stream_error_count, 2) << "both requests fail";
+    EXPECT_EQ(io.goaway_count, 0);
+
+    protocol.on(response_headers(5, block_of({{":status", "200"}, {"x-after", "1"}, {"x-early", "1"}})));
+    ASSERT_TRUE(protocol.ok());
+    ASSERT_EQ(io.response_count, 1) << "the next request is served";
+    EXPECT_EQ(io.last_response->header("x-after"), "1");
+    EXPECT_EQ(io.last_response->header("x-early"), "1");
+}
