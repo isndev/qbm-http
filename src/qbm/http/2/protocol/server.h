@@ -864,8 +864,12 @@ public:
         // a synchronous-response server erases the stream inside the HEADERS handler (dispatch →
         // send_response → close) before the paired RST arrives, so gating the count on the
         // _server_streams.find() below would let that (common) configuration bypass the guard.
-        // Idle streams (id > highest opened) are a protocol error handled further down, not here.
-        if (stream_id <= _last_client_initiated_stream_id) {
+        // Idle streams (id > highest opened) are a protocol error handled further down, not here. A pushed (even)
+        // stream is the server's work, not the client's: its resets are no Rapid Reset, and one at or below the largest
+        // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a
+        // window update crossing the end of a push closed the connection (Huly QB-1239).
+        const bool pushed = (stream_id & 1u) == 0u;
+        if (!pushed && stream_id <= _last_client_initiated_stream_id) {
             ++_rst_stream_count;
             const std::uint32_t streams_opened = static_cast<std::uint32_t>((_last_client_initiated_stream_id + 1u) / 2u);
             if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > streams_opened) {
@@ -903,7 +907,7 @@ public:
             // The observer may have erased the stream. Reclaim by fresh lookup
             // and never use the preceding stream reference after user code.
             this->try_close_stream_context(stream_id);
-        } else if (stream_id > _last_client_initiated_stream_id) {
+        } else if (stream_id > (pushed ? _last_promised_stream_id : _last_client_initiated_stream_id)) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
         // If stream not found (already closed), the reset was still counted above.
@@ -1055,7 +1059,9 @@ public:
         } else {
             auto it = _server_streams.find(stream_id);
             if (it == _server_streams.end()) {
-                if (stream_id > _last_client_initiated_stream_id) {
+                // A pushed stream at or below the largest promised has closed: its window update is ignored (RFC 9113
+                // §6.9, Huly QB-1239).
+                if (stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _last_client_initiated_stream_id)) {
                     this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE frame received on idle stream");
                 }
                 return;
