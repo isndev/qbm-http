@@ -5997,30 +5997,41 @@ handshake(ObservedProtocol &protocol, ObservingIO &io, uint32_t max_concurrent) 
 // ===========================================================================
 TEST(HTTP2ServerProtocol, APromisedStreamAnsweredFromAGoawayObserverNeverOpens) {
     using namespace qb1202_observer_test;
-    ObservingIO      io;
-    ObservedProtocol protocol(io);
-    handshake(protocol, io, 2);
-    for (const uint32_t id : {2u, 4u}) {
-        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
-    }
-    qb::http::Response empty;
-    empty.status() = qb::http::status::NO_CONTENT;
-    bool answered  = true;
-    io.on_goaway   = [&](const auto &) {
-        answered = protocol.send_response(2, empty);
+    struct Case {
+        uint32_t    answered;    // the promised stream the observer answers
+        uint32_t    last_stream; // the GOAWAY's last-stream-id
+        ErrorCode   code;
+        const char *what;
     };
-    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(4, ErrorCode::NO_ERROR));
-    drive(protocol, io);
-    EXPECT_FALSE(answered) << "a promised stream answered after the client's GOAWAY";
-    EXPECT_FALSE(headers_sent_on(io.output, 2)) << "a stream opened after the client's GOAWAY";
-    std::size_t resets_on_2 = 0;
-    for (const auto &f : parse_emitted_frames(io.output))
-        resets_on_2 += (f.type == FrameType::RST_STREAM && f.stream_id == 2) ? 1u : 0u;
-    EXPECT_EQ(resets_on_2, 1u) << "cancelled once";
-    EXPECT_EQ(last_rst_stream_error(io.output, 2), ErrorCode::CANCEL);
-    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::CANCEL);
-    EXPECT_TRUE(protocol.is_stream_closed(2));
-    EXPECT_TRUE(protocol.is_stream_closed(4));
+    for (const Case c :
+         {Case{2, 4, ErrorCode::NO_ERROR, "at or below the bound: cancelled"},
+          Case{4, 2, ErrorCode::NO_ERROR, "above the bound: dropped without a frame"},
+          Case{2, 4, ErrorCode::INTERNAL_ERROR, "an error GOAWAY: no frame"}}) {
+        SCOPED_TRACE(c.what);
+        ObservingIO      io;
+        ObservedProtocol protocol(io);
+        handshake(protocol, io, 2);
+        for (const uint32_t id : {2u, 4u}) {
+            EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+        }
+        qb::http::Response empty;
+        empty.status() = qb::http::status::NO_CONTENT;
+        bool answered  = true;
+        io.on_goaway   = [&](const auto &) {
+            answered = protocol.send_response(c.answered, empty);
+        };
+        push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(c.last_stream, c.code));
+        drive(protocol, io);
+        EXPECT_FALSE(answered) << "a promised stream answered after the client's GOAWAY";
+        EXPECT_FALSE(headers_sent_on(io.output, c.answered)) << "a stream opened after the client's GOAWAY";
+        std::size_t resets = 0;
+        for (const auto &f : parse_emitted_frames(io.output))
+            resets += (f.type == FrameType::RST_STREAM && f.stream_id == c.answered) ? 1u : 0u;
+        const bool cancelled = c.code == ErrorCode::NO_ERROR && c.answered <= c.last_stream;
+        EXPECT_EQ(resets, cancelled ? 1u : 0u) << "the frame the GOAWAY's code and last-stream-id call for, once";
+        EXPECT_TRUE(protocol.is_stream_closed(2));
+        EXPECT_TRUE(protocol.is_stream_closed(4));
+    }
 }
 
 // ===========================================================================
@@ -6047,6 +6058,10 @@ TEST(HTTP2ServerProtocol, AResponseGivenFromAnObserverWaitsBehindTheOneWaiting) 
     EXPECT_TRUE(answered);
     EXPECT_TRUE(headers_sent_on(io.output, 4)) << "the response waiting first";
     EXPECT_FALSE(headers_sent_on(io.output, 6)) << "a response given later went out ahead of the one waiting";
+    make_window_update_frame(io, 0, 100);
+    make_window_update_frame(io, 4, 100); // stream 4 ends: stream 6, waiting behind it, leaves
+    drive(protocol, io);
+    EXPECT_TRUE(headers_sent_on(io.output, 6)) << "the response given from the observer leaves in its turn";
     EXPECT_TRUE(protocol.ok());
 }
 

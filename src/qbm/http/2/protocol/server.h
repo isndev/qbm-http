@@ -1211,8 +1211,8 @@ public:
             }
             if (_peer_goaway_received) [[unlikely]] {
                 // Its HEADERS would open it after the client's GOAWAY (RFC 9113 §6.8): one answered from an observer of
-                // the GOAWAY, before the handler reached it, is cancelled as the handler cancels the others.
-                this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Promised stream answered after the client's GOAWAY");
+                // the GOAWAY, before the handler reached it, is refused and left to the handler, which cancels it with
+                // the others, as the GOAWAY's code and last-stream-id say.
                 return false;
             }
         }
