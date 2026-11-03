@@ -1721,8 +1721,8 @@ TEST_F(Http3LoopbackTest, ClientWritesTheBodysContentLengthOverOneWithOWS) {
 // The server refuses to SEND a response whose body does not match its content-length (the
 // outgoing validation of submit_response) and resets the stream with H3_REQUEST_CANCELLED (Huly QB-1241), so the
 // client settles the exchange as a 502 -- a stream reset, never a connection close (Huly QB-234;
-// RFC 9114 section 4.1.2). The connection carries the client's other exchanges: the SAME one --
-// never reconnected, the server's peak of one connection proves it -- serves the next request.
+// RFC 9114 section 4.1.1). The connection carries the client's other exchanges: the SAME one --
+// never reconnected: still connected after a settle, one connection on the server -- serves the next request.
 TEST_F(Http3LoopbackTest, ClientRejectsResponseContentLengthMismatch) {
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
@@ -4031,10 +4031,11 @@ TEST_F(Http3LoopbackTest, LegacyBackendRttFallbackRemainsBoundedByTheDrainDeadli
 
 namespace http3_reset_code_test {
 
-// The HTTP/3 client, with the first code each stream closes with on a reset or a stop recorded: the client settles such
-// an exchange as a 502 whatever its code. qb's backend raises the same event for the client's own reset_stream() and
-// stop_stream(), but the client resets nothing of a GET it sent whole before the server's RESET_STREAM arrives: the
-// first code of such a stream is the one ngtcp2's stream_reset callback read off the wire.
+// The HTTP/3 client, with the first code each stream is reset with recorded: the client settles such an exchange as a
+// 502 whatever its code. qb's backend raises the same event for the client's own reset_stream(), but the client resets
+// nothing of a GET it sent whole before the server's RESET_STREAM arrives: the first code of such a stream is the one
+// ngtcp2's stream_reset callback read off the wire. (A stop is always local here: the client's own stop_stream() or
+// ngtcp2's read shutdown.)
 class ResetRecordingClient : public qb::http3::Client {
 public:
     using qb::http3::Client::Client;
@@ -4048,7 +4049,7 @@ protected:
         bool seen = false;
         for (const auto id : _streams)
             seen = seen || id == ev.id;
-        if ((ev.reason == qb::io::quic::stream_close_reason::reset || ev.reason == qb::io::quic::stream_close_reason::stop_sending) && !seen) {
+        if (ev.reason == qb::io::quic::stream_close_reason::reset && !seen) {
             _streams.push_back(ev.id);
             codes.push_back(ev.error_code);
         }
@@ -4064,7 +4065,7 @@ private:
 // A response the server cannot submit resets its stream with H3_REQUEST_CANCELLED, read on the wire by the client (Huly
 // QB-1241): a `content-length` its body contradicts (Huly QB-234), a `te` field, which a response never carries (Huly
 // QB-1191). The request was well-formed, and RFC 9114 section 4.1.1 has a server that abandons a response after partial
-// processing abort its response stream with that code; H3_MESSAGE_ERROR, sent until 3.4, told the client its own message
+// processing abort its response stream with that code; H3_MESSAGE_ERROR, sent until Huly QB-1241, told the client its own message
 // was malformed. The client settles each exchange as a 502, and the same connection serves the next request.
 TEST_F(Http3LoopbackTest, AResponseTheServerCannotSubmitIsResetWithRequestCancelled) {
     const auto port   = next_port();
