@@ -134,6 +134,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   fewer 4 KiB chunks freed around it that allocation takes a longer path through glibc's bins (`_int_malloc` 142 -> 601
   instructions a frame in the timed decode; no page fault).
 
+- **The HTTP/1.1 Host check tests a four-octet field name with one 32-bit load (Huly QB-1218, follow-up of QB-1186).**
+  `note_host_field()` compared every four-octet name with `utility::iequals(name, "host")`, which MSVC 19.51 renders as
+  four byte compares with three branches each on the header-complete path of every request; it now ORs one 32-bit load
+  with `0x20202020` and compares it with `host` (`is_host_name()`): the only octets that fold to `h`, `o`, `s`, `t` under
+  that OR are the two cases of each letter, so the verdict is the same for every input. MSVC's header-complete path is
+  15 instructions shorter (`on_headers_complete` 419 -> 404, `on_header_field` 250 -> 237). The +2.6 % MSVC read on
+  `BM_Http1Parse_WholeBuffer/corpus:0` when this form was first measured is code placement: across three `/FUNCTIONPADMIN`
+  layouts the cell reads 1.023, 0.979 and 0.964 (the sign flips); g++ 14 reads it level in two alignment families (0.998,
+  1.004). Absent, duplicate and malformed Host fields are judged as before (RFC 9112 Section 3.2).
+
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
   (`qbm-http-bench-http2-server-request`, DHAT and callgrind on g++ 14; the P9 finding). Each stream owned a fresh

@@ -24,7 +24,11 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <climits>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <string>
@@ -347,13 +351,24 @@ private:
         return refuse_for_exception(parser);
     }
 
+    /// Whether the four octets at @p name spell `host` in any case: one 32-bit load OR'd with 0x20202020 against `host`.
+    /// The only octets that fold to `h`, `o`, `s` and `t` under that OR are the two cases of each letter, so the verdict is
+    /// utility::iequals()'s on a name of four octets -- which MSVC 19.51 rendered as four byte compares with three branches
+    /// each, on the header-complete path of every request (Huly QB-1186). Forced inline on MSVC, as its callers are.
+    static QB_MSVC_FORCEINLINE bool
+    is_host_name(char const *const name) noexcept {
+        std::uint32_t word;
+        std::memcpy(&word, name, sizeof word);
+        return (word | 0x20202020u) == std::bit_cast<std::uint32_t>(std::array<char, 4>{'h', 'o', 's', 't'});
+    }
+
     /// Counts and checks a request's Host field line as the header section stores it, so that check_host_field() looks
     /// nothing up on the path of every request: a name of four octets is compared, any other costs one comparison.
     /// Forced inline on MSVC, which kept it out of line (without_trailing_whitespace()).
     static QB_MSVC_FORCEINLINE void
     note_host_field(Parser *self, String const &name, String const &value) noexcept {
         if constexpr (MessageType::type == HTTP_REQUEST) {
-            if (name.size() == 4 && utility::iequals(name, "host")) {
+            if (name.size() == 4 && is_host_name(name.data())) {
                 ++self->_host_fields;
                 self->_host_malformed |= !value.empty() && !qb::http::origin::is_request_authority(value);
             }
