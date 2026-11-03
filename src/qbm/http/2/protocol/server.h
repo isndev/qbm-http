@@ -124,6 +124,10 @@ private:
     /// the order they were answered: send_waiting_push_responses() sends them (Huly QB-1202).
     std::vector<uint32_t> _waiting_push_responses;
     bool                  _sending_waiting_push_responses = false;
+    /// The promised stream send_waiting_push_responses() is sending: it alone passes the responses waiting behind it.
+    uint32_t _push_response_leaving = 0;
+    /// A GOAWAY received: no promised stream opens any more (RFC 9113 §6.8, Huly QB-1202).
+    bool _peer_goaway_received = false;
 
     // Our Settings
     qb::unordered_map<Http2SettingIdentifier, uint32_t> _our_settings;                  ///< Server's HTTP/2 settings
@@ -246,6 +250,8 @@ public:
         _peer_allows_push            = true;
         _last_promised_stream_id     = 0;
         _waiting_push_responses.clear();
+        _push_response_leaving = 0;
+        _peer_goaway_received  = false;
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -953,6 +959,7 @@ public:
         FramerBase::set_last_peer_initiated_stream_id_processed_in_goaway(last_pushed_stream_id);
         const ErrorCode error_code = goaway_event.payload.error_code;
         _waiting_push_responses.clear();
+        _peer_goaway_received = true; // before any observer runs: send_response() opens no promised stream now
 
         Http2GoAwayEvent event_to_dispatch{error_code, last_pushed_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
@@ -1198,9 +1205,16 @@ public:
             this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Sending response on stream in invalid state for response.");
             return false;
         }
-        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL
-            && std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream_id) != _waiting_push_responses.end()) {
-            return false; // answered already, the response waiting
+        if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
+            if (std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream_id) != _waiting_push_responses.end()) {
+                return false; // answered already, the response waiting
+            }
+            if (_peer_goaway_received) [[unlikely]] {
+                // Its HEADERS would open it after the client's GOAWAY (RFC 9113 §6.8): one answered from an observer of
+                // the GOAWAY, before the handler reached it, is cancelled as the handler cancels the others.
+                this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Promised stream answered after the client's GOAWAY");
+                return false;
+            }
         }
         // A response that waited is sent from the one its stream keeps (send_waiting_push_responses): nothing below reads
         // it once the stream may be gone.
@@ -1307,7 +1321,7 @@ public:
             // judged first as any response is, kept, and leaves once a pushed stream ends or the
             // client raises its limit -- or is cancelled as an idle stream is (cleanup_idle_streams).
             // It left at once, past a limit the client had lowered (Huly QB-1202).
-            if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
+            if (get_active_stream_count(true) >= _peer_max_concurrent_streams || waits_behind_a_promised_response(stream_id)) {
                 _waiting_push_responses.push_back(stream_id);
                 return true;
             }
@@ -2343,8 +2357,9 @@ private:
                 }
                 _server_streams.erase(it);
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
-                // A pushed stream ended: room for a promised response that waits (Huly QB-1202).
+                // A pushed stream ended: room for a promised response that waits, and one waiting no more (Huly QB-1202).
                 if (!_waiting_push_responses.empty() && (stream_id & 1u) == 0u) [[unlikely]] {
+                    std::erase(_waiting_push_responses, stream_id);
                     send_waiting_push_responses();
                 }
 
@@ -2864,9 +2879,31 @@ private:
                 || it->second.rst_stream_received) {
                 continue;
             }
+            _push_response_leaving = stream_id;
             (void) send_response(stream_id, it->second.response_to_send);
+            _push_response_leaving = 0;
         }
         _sending_waiting_push_responses = false;
+    }
+
+    /**
+     * @brief Whether a response given for @p stream_id has a promised response still waiting before it (Huly QB-1202):
+     *        given from an observer of the stream whose close makes room, before the drain runs, it went out first. The
+     *        response the drain is sending passes; a stream the list names that was reset or reclaimed holds none.
+     */
+    [[nodiscard]] bool
+    waits_behind_a_promised_response(uint32_t stream_id) const noexcept {
+        if (stream_id == _push_response_leaving) {
+            return false;
+        }
+        for (const uint32_t waiting : _waiting_push_responses) {
+            const auto it = _server_streams.find(waiting);
+            if (it != _server_streams.end() && it->second.state == Http2StreamConcreteState::RESERVED_LOCAL && !it->second.rst_stream_sent
+                && !it->second.rst_stream_received) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
