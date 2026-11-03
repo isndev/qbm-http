@@ -2479,10 +2479,12 @@ TEST(Http3ConnectionDirect, AFieldTheConnectionHeaderNamesNeverLeavesInTheTraile
             EXPECT_FALSE(served.has_header("x-hop")) << "a nominated field reached the server";
             EXPECT_FALSE(served.trailers().has_header("x-hop"));
             EXPECT_EQ(served.trailers().header_count(), only_nominated ? 0u : 1u);
-            if (!only_nominated)
+            if (!only_nominated) {
                 EXPECT_EQ(served.trailers().header("x-sum"), "2");
-            if (!announced_header)
+            }
+            if (!announced_header) {
                 EXPECT_EQ(served.header("trailer"), only_nominated ? "" : "x-sum") << "the composed announcement";
+            }
             EXPECT_TRUE(pair.server_owner.resets.empty());
             EXPECT_FALSE(pair.server_owner.close.has_value());
         }

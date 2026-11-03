@@ -3707,18 +3707,18 @@ namespace {
 // GOAWAY wire payload: [last_stream_id:4][error_code:4][debug...].
 [[nodiscard]] std::vector<uint8_t>
 make_goaway_payload(uint32_t last_stream_id, ErrorCode error_code, const std::string &debug = {}) {
-    std::vector<uint8_t> p;
-    p.reserve(8 + debug.size());
-    p.push_back(static_cast<uint8_t>((last_stream_id >> 24) & 0xFF));
-    p.push_back(static_cast<uint8_t>((last_stream_id >> 16) & 0xFF));
-    p.push_back(static_cast<uint8_t>((last_stream_id >> 8) & 0xFF));
-    p.push_back(static_cast<uint8_t>(last_stream_id & 0xFF));
-    const uint32_t ec = static_cast<uint32_t>(error_code);
-    p.push_back(static_cast<uint8_t>((ec >> 24) & 0xFF));
-    p.push_back(static_cast<uint8_t>((ec >> 16) & 0xFF));
-    p.push_back(static_cast<uint8_t>((ec >> 8) & 0xFF));
-    p.push_back(static_cast<uint8_t>(ec & 0xFF));
-    p.insert(p.end(), debug.begin(), debug.end());
+    // Sized once and written by index: no growth path for g++ 14's -Wfree-nonheap-object to misread.
+    std::vector<uint8_t> p(8 + debug.size());
+    const uint32_t       ec = static_cast<uint32_t>(error_code);
+    p[0]                    = static_cast<uint8_t>((last_stream_id >> 24) & 0xFF);
+    p[1]                    = static_cast<uint8_t>((last_stream_id >> 16) & 0xFF);
+    p[2]                    = static_cast<uint8_t>((last_stream_id >> 8) & 0xFF);
+    p[3]                    = static_cast<uint8_t>(last_stream_id & 0xFF);
+    p[4]                    = static_cast<uint8_t>((ec >> 24) & 0xFF);
+    p[5]                    = static_cast<uint8_t>((ec >> 16) & 0xFF);
+    p[6]                    = static_cast<uint8_t>((ec >> 8) & 0xFF);
+    p[7]                    = static_cast<uint8_t>(ec & 0xFF);
+    std::copy(debug.begin(), debug.end(), p.begin() + 8);
     return p;
 }
 
