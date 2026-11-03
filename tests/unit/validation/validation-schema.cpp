@@ -120,15 +120,16 @@ TEST_F(ValidationSchemaTest, PatternHonoursExplicitAnchorsAndEmptyMatches) {
 }
 
 TEST_F(ValidationSchemaTest, PatternByteClassesAgreeWithRegexSearch) {
-    for (const std::string &pattern : std::vector<std::string>{"[a-z]",       "[a-z]+",     "[A-z]+",
-                                                               "[0-9A-Fa-f]", "[ab]+",      "[_.]",
-                                                               "[|+*?()]",    "[a-cb-d]+",  "[0-9]+",
-                                                               "[^a]+",       "[a\\-z]",    "[[:alpha:]]",
-                                                               "[a-z]+$",     "[a-z]{2}",   "[a-z]+?",
-                                                               "[a-z]|x",     "([a-z])\\1", "[a-z][0-9]",
-                                                               "[a-z]*",      "[a-z]?",     "^[a-z]+$",
-                                                               "[a-]",        "[-a]",       std::string("[\0-a]+", 6),
-                                                               "[a-\x7f]+",   "[+]+",       std::string("[") + static_cast<char>(0x80) + "]"}) {
+    for (const std::string &pattern : std::vector<std::string>{"[a-z]",       "[a-z]+",       "[A-z]+",
+                                                               "[0-9A-Fa-f]", "[ab]+",        "[_.]",
+                                                               "[|+*?()]",    "[a-cb-d]+",    "[0-9]+",
+                                                               "[^a]+",       "[a\\-z]",      "[[:alpha:]]",
+                                                               "[a-z]+$",     "[a-z]{2}",     "[a-z]+?",
+                                                               "[a-z]|x",     "([a-z])\\1",   "[a-z][0-9]",
+                                                               "[a-z]*",      "[a-z]?",       "^[a-z]+$",
+                                                               "[a-]",        "[-a]",         std::string("[\0-a]+", 6),
+                                                               "[a-\x7f]+",   "[+]+",         std::string("[") + static_cast<char>(0x80) + "]",
+                                                               "[A-z]",       "[0-9A-Fa-f_]+"}) {
         SCOPED_TRACE(pattern);
         const std::regex oracle(pattern, std::regex_constants::ECMAScript | std::regex_constants::optimize);
         SchemaValidator  validator({{"pattern", pattern}});
@@ -155,10 +156,13 @@ TEST_F(ValidationSchemaTest, PatternByteClassesAgreeWithRegexSearch) {
 }
 
 TEST_F(ValidationSchemaTest, PatternByteClassSearchCoversEveryBlockAndTail) {
+    // Each pattern is one class, with or without +, that holds 'a' and not 0xff: a search finds the 'a' wherever it
+    // stands. The classes' agreement with std::regex is PatternByteClassesAgreeWithRegexSearch's to hold; asking
+    // std::regex here cost p + 1 starts at position p, and took this binary past its ctest timeout under TSan on a
+    // loaded host (Huly QB-1205).
     for (const std::string pattern : {"[a-z]+", "[a-z]", "[A-z]", "[0-9A-Fa-f_]+"}) {
         SCOPED_TRACE(pattern);
-        const std::regex oracle(pattern, std::regex_constants::ECMAScript | std::regex_constants::optimize);
-        SchemaValidator  validator({{"pattern", pattern}});
+        SchemaValidator validator({{"pattern", pattern}});
         for (std::size_t size : {1u, 7u, 15u, 16u, 17u, 31u, 32u, 33u, 63u, 64u, 65u, 255u, 256u, 2048u}) {
             SCOPED_TRACE(size);
             std::string value(size, static_cast<char>(0xff));
@@ -168,7 +172,7 @@ TEST_F(ValidationSchemaTest, PatternByteClassSearchCoversEveryBlockAndTail) {
                 SCOPED_TRACE(pos);
                 value[pos] = 'a';
                 result.clear();
-                EXPECT_EQ(validator.validate(qb::json(value), result), std::regex_search(value, oracle));
+                EXPECT_TRUE(validator.validate(qb::json(value), result));
                 EXPECT_TRUE(result.success());
                 value[pos] = static_cast<char>(0xff);
             }
