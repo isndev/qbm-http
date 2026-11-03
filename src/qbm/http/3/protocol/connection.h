@@ -82,6 +82,38 @@ inline constexpr std::uint64_t max_field_section_size = 64 * 1024;
 /// What RFC 9114 §4.2.2 adds to a field's name and value when it counts the size of a field section.
 inline constexpr std::uint64_t field_line_overhead = 32;
 
+/// The longest field name nghttp3's QPACK decoder takes, and the longest Huffman code of one it takes: 160 octets, of
+/// which 8/5 -- the most a Huffman code can expand, its shortest symbol five bits -- is 256. Past either, a peer's
+/// nghttp3 closes the connection, every stream with it (1.18.0 measured, H3_INTERNAL_ERROR): names of 'a' up to 256
+/// octets, of 'n' up to 213, of 'x' up to 182 are served, one octet more is not; a name its Huffman code would lengthen
+/// (`!`, `~`) is sent as it is, up to 256 (Huly QB-1210).
+inline constexpr std::size_t max_sent_field_name_length  = 256;
+inline constexpr std::size_t max_sent_field_name_huffman = 160;
+
+/**
+ * @brief Whether a field name crosses to a peer's nghttp3: within max_sent_field_name_length, and -- coded by Huffman,
+ *        which the QPACK encoder (nghttp3's own) chooses when the code is shorter (RFC 9204 §4.1.2) -- a code within
+ *        max_sent_field_name_huffman. A request or a response with a name that does not is refused before anything is
+ *        submitted, as one past the other field bounds is: a name of 257 to 1024 bytes -- `MAX_HEADER_NAME_LENGTH` --
+ *        was sent, and so was one of 161 to 256 coded past 160, and the peer closed the connection (Huly QB-1210).
+ *        Measured only past 160 octets, where the cost is a Huffman count.
+ */
+inline bool
+sent_field_name_fits(std::string_view name) noexcept {
+    if (name.size() <= max_sent_field_name_huffman) {
+        return true; // within both bounds whichever way it is coded
+    }
+    if (name.size() > max_sent_field_name_length) {
+        return false;
+    }
+    std::size_t bits = 0; // RFC 7541's code, which QPACK uses (RFC 9204 §4.1.2)
+    for (const unsigned char c : name) {
+        bits += qb::protocol::hpack::huffman::HUFFMAN_TABLE[c].bits;
+    }
+    const auto coded = (bits + 7) / 8;
+    return coded >= name.size() || coded <= max_sent_field_name_huffman;
+}
+
 /**
  * @brief Test whether a header is a connection-specific field banned in HTTP/3.
  * @param name Header name (case-insensitive).
@@ -294,7 +326,7 @@ has_edge_whitespace(std::string_view value) noexcept {
 
 /**
  * @brief Validate an outgoing (regular) header field's name and value.
- * @param name  Field name; must be a non-empty lowercase token within length limits.
+ * @param name  Field name; must be a non-empty lowercase token a peer's nghttp3 decodes (sent_field_name_fits).
  * @param value Field value; must be within limits and free of NUL/CR/LF and
  *              other control characters (TAB allowed), and neither start nor end with SP or TAB
  *              (has_edge_whitespace).
@@ -302,8 +334,8 @@ has_edge_whitespace(std::string_view value) noexcept {
  */
 inline bool
 is_valid_header_field(std::string_view name, std::string_view value) noexcept {
-    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-        || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH || has_edge_whitespace(value)) {
+    if (name.empty() || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH || has_edge_whitespace(value)
+        || !sent_field_name_fits(name)) {
         return false;
     }
 
@@ -401,10 +433,10 @@ request_target(qb::io::uri const &uri) {
  * @param trailers The message's trailer section (qb::http::detail::plan_outgoing_trailers), or
  *               nullptr when it has none: the fields it takes are skipped, and its announcement is
  *               added (Huly QB-1073).
- * @return @c false (leaving @p block partially populated) when the field-count limit is passed, a field name or
- *         value passes @c MAX_HEADER_NAME_LENGTH or @c MAX_HEADER_VALUE_LENGTH, or a response carries a forbidden
- *         field -- a connection-specific one, a @c te -- or an invalid field (its @c host is sent); @c true on
- *         success. A request's fields leave as the HTTP/2 client's do: those
+ * @return @c false (leaving @p block partially populated) when the field-count limit is passed, a field name a
+ *         peer's nghttp3 cannot decode (sent_field_name_fits()) or a value past @c MAX_HEADER_VALUE_LENGTH, or a
+ *         response carries a forbidden field -- a connection-specific one, a @c te -- or an invalid field (its @c host
+ *         is sent); @c true on success. A request's fields leave as the HTTP/2 client's do: those
  *         qb::protocol::http2::HeaderValidator::is_sent_request_field() keeps, less the fields its @c connection
  *         header names (qb::protocol::http2::connection_nominated_fields()); a field either rule leaves out is
  *         dropped, @c host (folded into @c :authority) and @c content-length (make_request_headers writes it from
@@ -421,7 +453,7 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
         // HTTP/3 refused the whole request instead -- `connection: keep-alive` copied from an HTTP/1.1 message, a
         // `te: gzip` --, which HTTP/2 served (Huly QB-1191). A name is lowercase already: the headers map stores it
         // folded, and an uppercase one fails the rule. The field bounds stay a refusal: a peer's nghttp3 takes a field
-        // past its own (a value of 64 KiB) for a connection error, every stream with it.
+        // past its own (a name past sent_field_name_fits(), Huly QB-1210) for a connection error, every stream with it.
         nominated = qb::protocol::http2::connection_nominated_fields(msg);
         for (auto const &[name, values] : msg.headers()) {
             if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) [[unlikely]] {
@@ -434,8 +466,8 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
                 if (!qb::protocol::http2::HeaderValidator::is_sent_request_field(name, value)) [[unlikely]] {
                     continue;
                 }
-                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH
-                    || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH
+                    || !sent_field_name_fits(name)) {
                     return false;
                 }
                 block.add(name, value);
@@ -796,8 +828,8 @@ private:
      *          contract a CONNECTION error, after which only `nghttp3_conn_del` is legal, so
      *          `read_stream()` closes with the H3 code nghttp3 infers. This adapter's validator runs
      *          in the callbacks nghttp3 fires for what it accepted -- the field count, the
-     *          field-value length limit (a name is capped at 256 bytes by nghttp3's QPACK decoder
-     *          first), the request method, the trailer section's own rules -- and
+     *          field-value length limit (a name is capped by nghttp3's QPACK decoder first: 256 bytes, a
+     *          Huffman code of 160), the request method, the trailer section's own rules -- and
      *          every one of those sites used to fail its callback, which fails the read exactly the
      *          same way: every exchange multiplexed on the connection went down with the malformed
      *          one, and behind a gateway that multiplexes several users onto one upstream

@@ -226,6 +226,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3 never sends a field name a peer's nghttp3 cannot decode (Huly QB-1210).** nghttp3's QPACK decoder takes a
+  field name of 256 bytes at most and, coded by Huffman, a code of 160 bytes at most (8/5 of it, the most a code can
+  expand, is 256); past either it closes the CONNECTION with `H3_INTERNAL_ERROR`, every stream multiplexed on it with
+  it. The client sent names up to `MAX_HEADER_NAME_LENGTH` (1024 bytes), and the server too in a response: measured on
+  nghttp3 1.18.0, names of `a` (a five-bit code) are served up to 256 bytes, of `n` up to 213, of `x` up to 182, of
+  `!` (sent raw, its code longer) up to 256 -- one byte more, and the peer closed the connection, a name of 256 `n`
+  included. `detail::sent_field_name_fits()` holds a request, a response and a trailer section to that rule -- a name
+  of 160 bytes or less always fits, one past 256 never, one between them unless the QPACK encoder codes it by Huffman
+  past 160 -- and refuses the message before anything is submitted, as one past the other field bounds is: the client
+  answers the caller `503`, the server resets the stream.
 - **HTTP/3: a response carrying `te` is refused, a message past the peer's field-section bound is never sent, a
   response too large is discarded with `H3_REQUEST_CANCELLED`, and the late end of a refused or answered stream no
   longer closes the connection (Huly QB-1204, points 2 to 5).** Measured on the base, the in-process nghttp3 pair:
