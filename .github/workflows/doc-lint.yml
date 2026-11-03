@@ -14,6 +14,7 @@ on:
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
       - 'scripts/cite-check.py'
+      - 'scripts/check-changelog.py'
       - '.github/workflows/doc-lint.yml'
       # The agent-facing llm/ docs moved into this repo, and scripts/llm-guard.py (driven
       # from doc-lint.sh section 1c) is the only guard that reads them in a STANDALONE
@@ -49,6 +50,7 @@ on:
       - 'CONTRIBUTING.md'
       - 'scripts/doc-lint.sh'
       - 'scripts/cite-check.py'
+      - 'scripts/check-changelog.py'
       - '.github/workflows/doc-lint.yml'
       # The agent-facing llm/ docs moved into this repo, and scripts/llm-guard.py (driven
       # from doc-lint.sh section 1c) is the only guard that reads them in a STANDALONE
