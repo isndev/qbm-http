@@ -5914,6 +5914,20 @@ TEST(HTTP2ServerProtocol, AFrameOnAPushedStreamThatEndedIsIgnored) {
     drive(protocol, io);
     EXPECT_FALSE(protocol.ok()) << "a pushed stream never promised is idle";
     EXPECT_EQ(goaways_sent(), 1u);
+
+    // A RST_STREAM likewise.
+    Http2FakeIO    reset_io;
+    ServerProtocol reset_protocol(reset_io);
+    handshake_push_enabled(reset_protocol, reset_io, 10);
+    open_get_stream_end_stream(reset_protocol, reset_io, 1, "/parent");
+    EXPECT_FALSE(reset_protocol.send_push_promise(1, 2, make_promised_request("https://example.test/a")).has_value());
+    push_frame(reset_io, FrameType::RST_STREAM, 0, 4, {0x00, 0x00, 0x00, 0x08}); // never promised
+    drive(reset_protocol, reset_io);
+    EXPECT_FALSE(reset_protocol.ok()) << "a reset of a pushed stream never promised is a reset of an idle stream";
+    bool goaway = false;
+    for (const auto &f : parse_emitted_frames(reset_io.output))
+        goaway = goaway || f.type == FrameType::GOAWAY;
+    EXPECT_TRUE(goaway);
 }
 
 TEST(HTTP2ServerProtocol, AClientCancellingPushesIsNoRapidReset) {
