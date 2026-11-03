@@ -2189,6 +2189,10 @@ field_section_size(std::vector<std::pair<std::string, std::string>> const &field
 /// default value limit, the whole past nghttp3's reach: it does not enforce the bound it advertises.
 std::vector<std::pair<std::string, std::string>>
 section_of(std::uint64_t size, std::vector<std::pair<std::string, std::string>> fields = request_fields()) {
+    if (field_section_size(fields) + 35 > size) {
+        ADD_FAILURE() << "section_of(" << size << "): the fields it starts from leave no room for the last one";
+        return fields;
+    }
     for (int i = 0; size - field_section_size(fields) > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 35; ++i)
         fields.emplace_back("x-" + std::to_string(i), std::string(6000, 'v'));
     const auto filler = size - field_section_size(fields) - std::string("x-z").size() - 32;
@@ -2244,8 +2248,8 @@ TEST(Http3ConnectionDirect, AFieldSectionPastTheAdvertisedSizeIsAnswered431) {
         expect_answered_raw(pair, 0);
     }
     {
-        // A :path of 40000 bytes, with no target limit, counted with the fields after it (nghttp3 refuses a value from
-        // some 46 KB, so a pseudo-header alone never passes 1 MiB): a byte past the bound, 431; at it, served.
+        // A :path of 40000 bytes, with no target limit, counted with the fields after it (nghttp3 caps a value at 64 KiB,
+        // so pseudo-headers alone never pass 1 MiB): a byte past the bound, 431; at it, served.
         qb::http::request_limits limits = wide_count();
         limits.max_url_length           = 0;
         for (const std::uint64_t size : {advertised + 1, advertised}) {
@@ -2335,7 +2339,7 @@ TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
 
 // The client reads a response under the same bound (Huly QB-1196), which its own field limits keep a response below --
 // `protocol_limits`: 100 fields, a value of 8 KiB, a name nghttp3 decodes. A section of 100 fields of 8000 bytes, some
-// 0.8 MiB, is delivered -- past the 64 KiB advertised until 3.4, it was refused (Huly QB-1203) --, a trailer section
+// 0.8 MiB, is delivered -- past the 64 KiB advertised until Huly QB-1203, it was refused --, a trailer section
 // alike, and a field more refuses the stream, as a response over the limits does. An informational response's section
 // is a section of its own and its fields go with it: three 103s of 400 KB, then a 200 of 400 KB, deliver the 200's
 // fields alone -- they were added to the final response's, unbounded.
@@ -2623,6 +2627,15 @@ TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted
         ClientConnection client{client_owner, 1, ClientConnection::role::client};
         ASSERT_TRUE(client.bind_local_streams());
         EXPECT_TRUE(client.submit_request(0, request_of(advertised + 1))) << "the bound is the peer's, unknown until it says it";
+        // Past this module's own 1 MiB too -- 96 fields of 8000 bytes and an :authority of 300000 bytes --: submitted.
+        qb::http::Request big{qb::http::method::GET, qb::io::uri("https://" + std::string(300000, 'a') + ".test/")};
+        std::vector<std::pair<std::string, std::string>> counted{{":authority", std::string(300000, 'a') + ".test"}};
+        for (int i = 0; i < 96; ++i) {
+            big.add_header("x-" + std::to_string(i), std::string(8000, 'v'));
+            counted.emplace_back("x-" + std::to_string(i), std::string(8000, 'v'));
+        }
+        ASSERT_GT(field_section_size(counted), 1024u * 1024u);
+        EXPECT_TRUE(client.submit_request(4, big)) << "past 1 MiB: no bound known before the peer's SETTINGS";
     }
 }
 
@@ -2997,7 +3010,7 @@ TEST(Http3ConnectionDirect, NeitherSideOffersAQpackDynamicTable) {
  * @test A field section the default limits allow crosses both ways (Huly QB-1203)
  * @brief The section bound is 1 MiB, the bound HTTP/2 puts on a header list (`qb::http2::protocol_limits::
  *        MAX_HEADER_LIST_SIZE`): the default limits -- 100 fields, a value of 8 KiB -- keep a section below it, and
- *        HTTP/2 serves such a section. HTTP/3 bounded it at 64 KiB until 3.4: a request of 90 fields of 8000 bytes,
+ *        HTTP/2 serves such a section. HTTP/3 bounded it at 64 KiB until Huly QB-1203: a request of 90 fields of 8000 bytes,
  *        some 0.7 MiB, was refused by the client, which held itself to the server's 64 KiB, and answered 431 by a
  *        server that read it raw; the response alike, the client refusing it. (The client counts a request's four
  *        pseudo-headers among the 100 fields it sends: 96 regular ones at most.)
