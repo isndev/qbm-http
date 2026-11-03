@@ -247,8 +247,7 @@ struct header_block {
      */
     void
     add_received(std::string name, std::string value) {
-        section_size += name.size() + value.size() + field_line_overhead;
-        storage.emplace_back(std::move(name), std::move(value));
+        storage.emplace_back(std::move(name), std::move(value)); // its size is counted as it arrives (field_section_size)
     }
 
     /**
