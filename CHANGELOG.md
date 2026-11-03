@@ -248,7 +248,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   response on the next stream went out referencing an entry the client never saw, and a 137-octet list encoded under
   100 was sent. The list is now summed uncompressed (each name and value, and 32 octets), only when the client
   advertised a bound, and a response past it is refused before anything is encoded -- `RST_STREAM(INTERNAL_ERROR)`,
-  `send_response()` returning `false`, as before.
+  `send_response()` returning `false`, as before. A bound of 0, which the old comparison skipped, is a bound too: a
+  client advertising it has every response refused.
 - **HTTP/3 never sends a field name a peer's nghttp3 cannot decode (Huly QB-1210).** nghttp3's QPACK decoder takes a
   field name of 256 bytes at most and, coded by Huffman, a code of 160 bytes at most (8/5 of it, the most a code can
   expand, is 256); past either it closes the CONNECTION with `H3_INTERNAL_ERROR`, every stream multiplexed on it with

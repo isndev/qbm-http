@@ -5847,3 +5847,28 @@ TEST(HTTP2ServerProtocol, AResponseThatHasToWaitIsJudgedFirst) {
     EXPECT_FALSE(headers_sent_on(io.output, 6));
     EXPECT_TRUE(protocol.ok());
 }
+
+// ===========================================================================
+// RFC 9113 section 6.5.2 bounds the header list at the client's SETTINGS_MAX_HEADER_LIST_SIZE: a list of exactly that
+// size is within it and sent, a byte more is refused (Huly QB-1235).
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AResponseExactlyAtTheClientsHeaderListBoundIsSent) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}}));
+    drive(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/at");
+    open_get_stream_end_stream(protocol, io, 3, "/past");
+    // :status 200 counts 7 + 3 + 32 = 42 octets, x-c and 23 octets 3 + 23 + 32 = 58: 100 in all.
+    qb::http::Response at;
+    at.status() = qb::http::status::OK;
+    at.set_header("x-c", std::string(23, 'c'));
+    qb::http::Response past = at;
+    past.set_header("x-c", std::string(24, 'c'));
+    EXPECT_FALSE(protocol.send_response(3, past)) << "a byte past the bound";
+    EXPECT_EQ(last_rst_stream_error(io.output, 3), ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(protocol.send_response(1, at)) << "exactly the bound";
+    EXPECT_TRUE(headers_sent_on(io.output, 1));
+    EXPECT_TRUE(protocol.ok());
+}
