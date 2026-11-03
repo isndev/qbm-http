@@ -952,7 +952,7 @@ public:
      * @param connection_id Owning QUIC connection.
      * @param stream_id     Target stream.
      * @param response      Response to encode and send.
-     * @return True if the response was submitted, false if the stream was reset.
+     * @return True if the response was submitted; false if the stream was reset, or the connection is gone.
      */
     bool
     send_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const &response) {

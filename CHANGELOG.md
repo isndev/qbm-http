@@ -257,13 +257,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
-  `submit_response()` refused the response -- a field HTTP/3 cannot carry (`te`, Huly QB-1191), a `content-length` its
-  body contradicts (Huly QB-234), a section past the client's `SETTINGS_MAX_FIELD_SECTION_SIZE` (Huly QB-1204), a name
-  the client's nghttp3 cannot decode (Huly QB-1210): H3_MESSAGE_ERROR tells the client that its own message was
-  malformed, and the request was not. RFC 9114 §4.1.1: "When a server abandons a response after partial processing,
-  it SHOULD abort its response stream with the error code H3_REQUEST_CANCELLED." Read on the wire by the client over a
-  real QUIC loopback, the code was 0x010e for a contradicted `content-length` and for `te`, and is 0x010c now. The
-  module's client settles such an exchange as a `502` whatever the code, and the connection serves on.
+  `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`
+  its body contradicts (Huly QB-234), a section past the client's `SETTINGS_MAX_FIELD_SECTION_SIZE` (Huly QB-1204), a
+  name the client's nghttp3 cannot decode (Huly QB-1210): H3_MESSAGE_ERROR tells the client that its own message was
+  malformed, and the request was not. RFC 9114 §4.1.1: "When a server abandons a response after partial processing, it
+  SHOULD abort its response stream with the error code H3_REQUEST_CANCELLED." Read on the wire by the client over a real
+  QUIC loopback, the code was 0x010e for a contradicted `content-length` and for `te`, and is 0x010c now. The module's
+  client settles such an exchange as a `502` whatever the code, and the connection serves on.
 
 - **The HTTP/2 server ignores a frame on a pushed stream that has ended, and a client that cancels pushes is no Rapid
   Reset (Huly QB-1239).** A pushed stream is erased once it ends, and a WINDOW_UPDATE or a RST_STREAM the client sent
