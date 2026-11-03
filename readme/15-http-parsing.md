@@ -125,7 +125,7 @@ assert(parser.get_parsed_message().header("X-Custom-Header") == "value-part-1par
 | `on_header_field` / `on_header_value` | Accumulate the current name/value pair into owning `std::string`s; on the next field, push the completed pair into `msg.headers()`. Multiple values for one name are stored as a vector. A value ends at its last octet that is no whitespace: llhttp drops the spaces and tabs before it, the parser those after it (RFC 9112 §5, Huly QB-1186), in a header section and a trailer section alike. |
 | `on_headers_complete` | Flushes the last header pair, sets `msg.major_version`/`minor_version`, validates transfer encoding and a request's `Host` field (see below), normalizes the body length, sets `msg.upgrade` and `msg.keep_alive`, then **returns `HPE_PAUSED`**. The parser fills the raw header map only: the typed `content_type()` derives from the raw `Content-Type` header on its first read, on every framing path — the Content-Length, empty, HEAD and close-delimited paths never reach `on_message_complete` — and a message nobody asks never parses it. |
 | `on_body` | Appends body bytes into an internal `qb::allocator::pipe<char>` (`_chunked`), enforcing the chunk and total-body limits. |
-| `on_message_complete` | Moves the accumulated body into `msg.body().raw()` and returns `1`. |
+| `on_message_complete` | Moves the accumulated body into `msg.body()` (the body adopts the buffer, `Body::operator=(pipe<char> &&)`) and returns `1`. |
 
 `msg.keep_alive` is computed here from llhttp's `http_should_keep_alive`; it is the HTTP/1.x persistence decision and is ignored by HTTP/2 and HTTP/3 (those set `stream_id` instead — see `message_base.h`).
 
@@ -165,7 +165,7 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 
 - **Chunked** (`Transfer-Encoding` present): `resume()` the parser and feed the post-header bytes. `HPE_CB_MESSAGE_COMPLETE` means the final chunk arrived — return the full message size. `HPE_OK` means more chunks are pending — advance `body_offset` and return 0. Anything else marks the protocol `not_ok()`.
 - **Content-Length** (the common case): the message is complete once `_io.in().size() >= body_offset + content_length`. When complete, a temporary `string_view` identifies the bytes in the input buffer; assigning it to `Body` **copies** them into the owning pipe before the total size is returned. Otherwise return 0 and keep accumulating.
-<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1187-1197; qbm/http/src/qbm/http/body.cpp:697-700 -->
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1187-1197; qbm/http/src/qbm/http/body.cpp:717-721 -->
 
 When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that many bytes and calls `onMessage()`. If the parser ever marks itself `not_ok()`, the framework disconnects the connection.
 
@@ -295,7 +295,7 @@ The HTTP/1.1 parser handles only the *opening* handshake of a WebSocket connecti
 - **`reset()` before reuse, always.** A `Parser` carries the previous message's state until reset. The framing layer resets after every `onMessage()`; a hand-rolled loop must too. `reset()` is also what makes the parser usable after an error.
 - **`content_length == 0` does not mean "no `Content-Length` header."** For requests with no framing headers, and for `1xx`/`204`/`304` responses, the parser normalizes the length to 0 even when a (misleading) `Content-Length` header was present. Read the body, not the raw header, to know what arrived.
 - **The parsed body owns its bytes before `onMessage`.** Inside `getMessageSize()`, the temporary `string_view` passed to `Body::operator=` is copied into the body's pipe. `onMessage()` moves that owning message to the handler. Do not keep a reference to `get_parsed_message()` across `parse()`, `reset()`, or message delivery.
-<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1192-1197; qbm/http/src/qbm/http/body.cpp:697-700; qbm/http/src/qbm/http/1.1/protocol/server.h:76-95 -->
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1192-1197; qbm/http/src/qbm/http/body.cpp:717-721; qbm/http/src/qbm/http/1.1/protocol/server.h:76-95 -->
 - **The limits are the server's.** `set_request_limits()` (and `set_max_body_size()` for the body alone) is read when each request begins; 0 means none, and the defaults are the `protocol_limits` constants. A Content-Length body is buffered whole, so `QB_MAX_READ_BUFFER_SIZE` (200 MB) still bounds it; the session leaves the transport's generic message cap (`QB_MAX_MESSAGE_SIZE`) to the protocol, which states its bounds and answers a breach -- a body at the default cap plus its header section was past it, and was cut with no answer (Huly QB-168). The HTTP/2 and HTTP/3 layers keep their own framing limits (`qb::http2::protocol_limits`, nghttp3's), and their servers take the same `request_limits` with the same answers (Huly QB-94); a client reads responses under the defaults.
 - **This is HTTP/1.1 only.** Neither `Parser` nor `qb::protocol::http::base` is involved in HTTP/2 (`2/protocol/`) or HTTP/3 (`3/protocol/`) framing; what the three share is `request_limits`, whose defaults are these `protocol_limits` constants. Do not reason about h2/h3 framing from this page.
 

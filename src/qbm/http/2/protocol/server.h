@@ -444,7 +444,7 @@ public:
             this->conditionally_send_connection_window_update();
 
             if (stream.headers_received_main) {
-                if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
                     this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                     return;
                 }
@@ -1955,7 +1955,7 @@ private:
             // malformed (RFC 9113 §8.1.1), whatever the limits -- this check came after the answers below, and such a
             // request beside a field or a :path over them was answered 431 or 414 (Huly QB-1197).
             if (stream.end_stream_received && stream.expected_content_length
-                && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+                && stream.assembled_request.body().size() != *stream.expected_content_length) {
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                 return false;
             }
@@ -2015,7 +2015,7 @@ private:
                 this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Trailers HEADERS block did not end the stream.");
                 return false;
             }
-            if (stream.expected_content_length && stream.assembled_request.body().raw().size() != *stream.expected_content_length) {
+            if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
                 this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                 return false;
             }
@@ -2518,7 +2518,7 @@ private:
 
         // Part 1: Try to send remaining body data if any
         if (stream.has_pending_data_to_send && !body_fully_sent_or_empty) {
-            const auto &body_pipe       = stream.response_to_send.body().raw();
+            const auto &body_pipe       = std::as_const(stream.response_to_send).body().raw(); // a read: creates no pipe
             std::size_t total_body_size = body_pipe.size();
             const char *body_data_ptr   = body_pipe.data();
 

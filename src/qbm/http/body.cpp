@@ -169,6 +169,25 @@ Body::operator=(Body const &rhs) {
     return *this;
 }
 
+qb::allocator::pipe<char> const &
+Body::empty_pipe() noexcept {
+    static const qb::allocator::pipe<char> empty; // one a process, never written: what a body without a pipe reads as
+    return empty;
+}
+
+/**
+ * @brief Adopt a pipe as the body's buffer
+ * @param data The pipe, moved; it is left empty
+ *
+ * The HTTP/1.1 parser accumulates a body in its own buffer and hands it over here at the end of the message:
+ * no pipe is created only to be replaced (Huly QB-1216).
+ */
+template <>
+Body &Body::operator= <qb::allocator::pipe<char>>(qb::allocator::pipe<char> &&data) noexcept {
+    _data = std::move(data);
+    return *this;
+}
+
 namespace internal {
 /**
  * @brief Multipart form-data parser for HTTP (owning `std::string`).
@@ -680,8 +699,9 @@ Body::uncompress(const std::string &encoding) {
  */
 template <>
 Body &Body::operator= <std::string>(std::string &&str) noexcept {
-    _data.clear();
-    _data << str;
+    auto &p = pipe();
+    p.clear();
+    p << str;
     str.clear();
     return *this;
 }
@@ -695,8 +715,9 @@ Body &Body::operator= <std::string>(std::string &&str) noexcept {
  */
 template <>
 Body &Body::operator= <std::string_view>(std::string_view &&str) noexcept {
-    _data.clear();
-    _data << str;
+    auto &p = pipe();
+    p.clear();
+    p << str;
     return *this;
 }
 
@@ -709,8 +730,9 @@ Body &Body::operator= <std::string_view>(std::string_view &&str) noexcept {
  */
 template <>
 Body &Body::operator= <std::string>(std::string const &str) {
-    _data.clear();
-    _data << str;
+    auto &p = pipe();
+    p.clear();
+    p << str;
     return *this;
 }
 
@@ -723,8 +745,9 @@ Body &Body::operator= <std::string>(std::string const &str) {
  */
 template <>
 Body &Body::operator= <std::vector<char>>(std::vector<char> const &rhs) {
-    _data.clear();
-    _data << rhs;
+    auto &p = pipe();
+    p.clear();
+    p << rhs;
     return *this;
 }
 
@@ -738,8 +761,9 @@ Body &Body::operator= <std::vector<char>>(std::vector<char> const &rhs) {
  */
 template <>
 Body &Body::operator= <std::vector<char>>(std::vector<char> &&rhs) noexcept {
-    _data.clear();
-    _data << rhs;
+    auto &p = pipe();
+    p.clear();
+    p << rhs;
     rhs.clear();
     return *this;
 }
@@ -754,8 +778,9 @@ Body &Body::operator= <std::vector<char>>(std::vector<char> &&rhs) noexcept {
  */
 template <>
 Body &Body::operator= <Multipart>(Multipart const &mp) {
-    _data.clear();
-    _data << mp;
+    auto &p = pipe();
+    p.clear();
+    p << mp;
     return *this;
 }
 
@@ -768,11 +793,12 @@ Body &Body::operator= <Multipart>(Multipart const &mp) {
  */
 template <>
 Body &Body::operator= <qb::json>(qb::json const &json) {
-    _data.clear();
+    auto &p = pipe();
+    p.clear();
     try {
-        _data << json;
+        p << json;
     } catch (...) {
-        _data.clear(); // never expose the prefix written before serialization failed
+        p.clear(); // never expose the prefix written before serialization failed
         throw;
     }
     return *this;
@@ -800,7 +826,7 @@ Body &Body::operator= <qb::json>(qb::json &&json) {
 template <>
 std::string_view
 Body::as<std::string_view>() const {
-    return _data.view();
+    return raw().view();
 }
 
 /**
@@ -812,7 +838,7 @@ Body::as<std::string_view>() const {
 template <>
 std::string
 Body::as<std::string>() const {
-    return _data.str();
+    return raw().str();
 }
 
 /**
@@ -824,7 +850,7 @@ Body::as<std::string>() const {
 template <>
 qb::json
 Body::as<qb::json>() const {
-    return qb::json::parse(_data.view());
+    return qb::json::parse(raw().view());
 }
 
 /**
@@ -844,7 +870,7 @@ Body::as<qb::json>() const {
 template <>
 Multipart
 Body::as<Multipart>() const {
-    auto view = _data.view();
+    auto view = raw().view();
     auto pos  = view.find_first_of(qb::http::endl);
     // SECURITY FIX: Changed from pos < 2 to pos <= 2
     // - pos < 2 prevents underflow (pos - 2 would be negative)
@@ -852,7 +878,7 @@ Body::as<Multipart>() const {
     // RFC 2046 requires boundary to be 1-70 characters, so empty is invalid
     if (pos == std::string::npos || pos <= 2)
         throw std::runtime_error("boundary not found or empty");
-    auto boundary = std::string(_data.begin() + 2, pos - 2);
+    auto boundary = std::string(view.data() + 2, pos - 2);
 
     internal::MultipartReader reader(boundary);
     Multipart                 mp(boundary);
@@ -872,7 +898,7 @@ Body::as<Multipart>() const {
     reader.onEnd = [](void *) {
     };
 
-    reader.feed(_data.begin(), _data.size());
+    reader.feed(view.data(), view.size());
     if (reader.hasError())
         throw std::runtime_error("failed to parse multipart: " + std::string(reader.getErrorMessage()));
     // The whole body has been fed, so the document must have ENDED: a reader still inside a part
@@ -894,16 +920,17 @@ Body::as<Multipart>() const {
  */
 template <>
 Body &Body::operator= <Form>(Form const &form) {
-    _data.clear();
+    auto &p = pipe();
+    p.clear();
     bool first_pair = true;
     for (const auto &field_pair : form.fields()) {
         for (const auto &value : field_pair.second) {
             if (!first_pair) {
-                _data << '&';
+                p << '&';
             }
-            _data << qb::io::uri::encode(field_pair.first);
-            _data << '=';
-            _data << qb::io::uri::encode(value);
+            p << qb::io::uri::encode(field_pair.first);
+            p << '=';
+            p << qb::io::uri::encode(value);
             first_pair = false;
         }
     }
@@ -920,16 +947,17 @@ Body &Body::operator= <Form>(Form const &form) {
  */
 template <>
 Body &Body::operator= <Form>(Form &&form) noexcept {
-    _data.clear();
+    auto &p = pipe();
+    p.clear();
     bool first_pair = true;
     for (const auto &field_pair : form.fields()) {
         for (const auto &value : field_pair.second) {
             if (!first_pair) {
-                _data << '&';
+                p << '&';
             }
-            _data << qb::io::uri::encode(field_pair.first);
-            _data << '=';
-            _data << qb::io::uri::encode(value);
+            p << qb::io::uri::encode(field_pair.first);
+            p << '=';
+            p << qb::io::uri::encode(value);
             first_pair = false;
         }
     }
@@ -950,7 +978,7 @@ template <>
 Form
 Body::as<Form>() const {
     Form form_data;
-    auto body_view = _data.view();
+    auto body_view = raw().view();
 
     if (body_view.empty()) {
         return form_data;
@@ -990,18 +1018,19 @@ Body::as<Form>() const {
 // Specialization for const std::string_view&
 template <>
 Body &Body::operator= <std::string_view>(std::string_view const &str) {
-    _data.clear();
-    _data << str;
+    auto &p = pipe();
+    p.clear();
+    p << str;
     return *this;
 }
 
 // Specialization for const char* const&
 template <>
 Body &Body::operator= <const char *>(char const *const &str) {
-    _data.clear();
+    clear();
     if (str) {
         // Check for nullptr before attempting to stream
-        _data << str;
+        pipe() << str;
     }
     return *this;
 }

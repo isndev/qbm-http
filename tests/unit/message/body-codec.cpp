@@ -138,7 +138,7 @@ TEST_F(BodyTest, ChunkSerializationPreservesInternalZeroHexDigits) {
 }
 
 // Body::add_chunk / add_final_chunk are the chunked-transfer convenience wrappers
-// (body.h:225/235). They append a length-prefixed chunk and the terminating
+// (body.h:241/251). They append a length-prefixed chunk and the terminating
 // zero-length chunk respectively. Pin the exact wire bytes deterministically.
 TEST_F(BodyTest, AddChunkThenFinalChunkProducesChunkedWire) {
     Body chunked;
@@ -894,4 +894,45 @@ TEST_F(BodyTest, AsMultipartRejectsAnUnterminatedDocument) {
         EXPECT_EQ(parsed_mp.parts()[0].body, "value-bytes");
         EXPECT_TRUE(body.try_as<Multipart>().has_value());
     }
+}
+
+// A body allocates its pipe at its FIRST write (Huly QB-1216): a default-constructed qb::allocator::pipe allocates 4 KiB up
+// front, and most messages never write a body. An empty body is read through one shared empty pipe; the non-const raw() is a
+// write and creates the body's own.
+TEST(BodyStorage, AnEmptyBodyIsReadWithoutAPipeOfItsOwn) {
+    Body       a;
+    const Body b;
+    EXPECT_TRUE(a.empty());
+    EXPECT_EQ(a.size(), 0u);
+    EXPECT_EQ(std::as_const(a).raw().size(), 0u);
+    EXPECT_EQ(a.as<std::string>(), "");
+    EXPECT_EQ(&std::as_const(a).raw(), &b.raw()) << "two empty bodies read the same shared pipe: neither has one of its own";
+    a.clear();
+    Body copy(a);
+    Body moved(std::move(copy));
+    EXPECT_EQ(&std::as_const(a).raw(), &b.raw()) << "clear() creates no pipe";
+    EXPECT_EQ(&std::as_const(moved).raw(), &b.raw()) << "a copy and a move of an empty body create no pipe";
+
+    a = "x";
+    EXPECT_NE(&std::as_const(a).raw(), &b.raw()) << "a write creates the body's own pipe";
+    EXPECT_EQ(a.as<std::string>(), "x");
+    EXPECT_EQ(b.raw().size(), 0u) << "the shared empty pipe is never written";
+
+    Body c;
+    (void) c.raw(); // the non-const accessor is the way in to the pipe: it creates it
+    EXPECT_NE(&std::as_const(c).raw(), &b.raw());
+    EXPECT_TRUE(c.empty());
+}
+
+// The HTTP/1.1 parser hands the bytes it accumulated to the message's body by moving its buffer in (Huly QB-1216): the body
+// adopts the pipe, and the source is left empty.
+TEST(BodyStorage, ABodyAdoptsAPipeMovedIntoIt) {
+    qb::allocator::pipe<char> bytes;
+    bytes << std::string("payload");
+    const char *const where = bytes.begin();
+    Body              body;
+    body = std::move(bytes);
+    EXPECT_EQ(body.as<std::string>(), "payload");
+    EXPECT_EQ(std::as_const(body).raw().begin(), where) << "the body took the buffer, it did not copy it";
+    EXPECT_EQ(bytes.size(), 0u);
 }

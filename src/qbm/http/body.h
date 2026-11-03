@@ -55,7 +55,22 @@ namespace qb::http {
  * with minimal copying, using move semantics where appropriate for performance.
  */
 class Body {
-    qb::allocator::pipe<char> _data;
+    /// The bytes, in a pipe created at the FIRST write (Huly QB-1216). A default-constructed `qb::allocator::pipe`
+    /// allocates 4 KiB up front, and a message whose body stays empty -- every GET, every bodiless response -- paid two of
+    /// them a request on the HTTP/2 server (8 KiB of the 12 KiB a request asked for) and kept glibc consolidating its fast
+    /// bins on every request. A read of an empty body answers from `empty_pipe()`; a write creates the pipe.
+    std::optional<qb::allocator::pipe<char>> _data;
+
+    /// The pipe, created now if the body has none yet: every write goes through here.
+    [[nodiscard]] qb::allocator::pipe<char> &
+    pipe() {
+        if (!_data) [[unlikely]]
+            _data.emplace();
+        return *_data;
+    }
+
+    /// What an empty body reads as: one empty pipe a process, never written.
+    [[nodiscard]] static qb::allocator::pipe<char> const &empty_pipe() noexcept;
 
 public:
     Body() = default;
@@ -148,7 +163,7 @@ public:
     requires(sizeof...(Args) > 0 && !(sizeof...(Args) == 1 && (std::is_same_v<std::remove_cvref_t<Args>, Body> && ...))
              && (is_body_appendable_v<Args> && ...))
     Body(Args &&...args) {
-        (_data << ... << std::forward<Args>(args));
+        (pipe() << ... << std::forward<Args>(args));
     }
 
     /**
@@ -163,7 +178,7 @@ public:
              && (is_body_appendable_v<Args> && ...))
     Body &
     operator<<(Args &&...args) {
-        (_data << ... << std::forward<Args>(args));
+        (pipe() << ... << std::forward<Args>(args));
         return *this;
     }
 
@@ -211,8 +226,9 @@ public:
     template <std::size_t N>
     Body &
     operator=(const char (&str)[N]) noexcept {
-        _data.clear();
-        _data << str;
+        auto &p = pipe();
+        p.clear();
+        p << str;
         return *this;
     }
 
@@ -223,7 +239,7 @@ public:
      */
     Body &
     add_chunk(Chunk const &c) {
-        _data << c;
+        pipe() << c;
         return *this;
     }
 
@@ -233,7 +249,7 @@ public:
      */
     Body &
     add_final_chunk() {
-        _data << Chunk{};
+        pipe() << Chunk{};
         return *this;
     }
 
@@ -313,20 +329,21 @@ public:
 
     /**
      * @brief Get the raw data buffer
-     * @return Raw data buffer
+     * @return Raw data buffer: the body's pipe, or an empty pipe shared by every body that has none yet
      */
     [[nodiscard]] inline qb::allocator::pipe<char> const &
     raw() const noexcept {
-        return _data;
+        return _data ? *_data : empty_pipe();
     }
 
     /**
      * @brief Get the raw data buffer (non-const)
-     * @return Raw data buffer
+     * @return Raw data buffer, created now if the body had none: this accessor is a write. Read a body you do
+     *         not write through `size()`, `as<>()` or the const overload (`std::as_const(body).raw()`).
      */
     [[nodiscard]] inline qb::allocator::pipe<char> &
-    raw() noexcept {
-        return _data;
+    raw() {
+        return pipe();
     }
 
     /**
@@ -335,7 +352,7 @@ public:
      */
     [[nodiscard]] inline auto
     begin() const {
-        return _data.begin();
+        return raw().begin();
     }
 
     /**
@@ -344,7 +361,7 @@ public:
      */
     [[nodiscard]] inline auto
     end() const {
-        return _data.end();
+        return raw().end();
     }
 
     /**
@@ -353,7 +370,7 @@ public:
      */
     [[nodiscard]] inline std::size_t
     size() const noexcept {
-        return _data.size();
+        return _data ? _data->size() : 0u;
     }
 
     /**
@@ -362,7 +379,7 @@ public:
      */
     [[nodiscard]] inline bool
     empty() const noexcept {
-        return _data.empty();
+        return !_data || _data->empty();
     }
 
 private:
@@ -410,11 +427,12 @@ public:
     }
 
     /**
-     * @brief Clear the body
+     * @brief Clear the body (its buffer, if it has one, is kept for the next write)
      */
     inline void
     clear() noexcept {
-        _data.clear();
+        if (_data)
+            _data->clear();
     }
 };
 
@@ -456,6 +474,10 @@ Body &Body::operator= <std::string_view>(std::string_view const &str);
 
 template <>
 Body &Body::operator= <const char *>(char const *const &str);
+
+/// The body adopts a pipe: what the HTTP/1.1 parser hands over at the end of a message (Huly QB-1216).
+template <>
+Body &Body::operator= <qb::allocator::pipe<char>>(qb::allocator::pipe<char> &&data) noexcept;
 
 template <>
 std::string_view Body::as<std::string_view>() const;

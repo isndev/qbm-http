@@ -47,7 +47,7 @@ So setting `Transfer-Encoding: chunked` on a high-level `Response` changes the *
 If you need true incremental, time-spaced delivery (server-sent events, a long-lived download generated on the fly), begin a stream: `ctx->begin_stream()`, the next section, is the supported way on HTTP/1.1. The other shapes, for comparison:
 
 - **Buffer and send chunked.** Fine when the body is large but bounded and produced quickly. Build the body, set `Transfer-Encoding: chunked`, `complete()`.
-- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/src/qbm/http/body.h:224-238`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)). Write the head with `*session << qb::http::MessageHead{response}` — the status line and header section, nothing after them — then the chunks: `*session << response` writes a COMPLETE message, so an empty chunked body would already carry its terminator. `begin_stream()` does all of this for you, with backpressure.
+- **Write `Chunk`s directly to a long-lived session.** The body-level helpers `body().add_chunk(chunk)` and `body().add_final_chunk()` (`qbm/http/src/qbm/http/body.h:240-254`) append chunk framing into the pipe; combined with direct session writes (`*session << ...`) you can emit chunks across multiple event-loop ticks. This is a low-level pattern: you own the framing, the `Content-Length`/`Transfer-Encoding` headers, and the terminating chunk, and you must call `ctx->suppress_response()` so the context does not also send a response (see [actor composition](#composing-with-qb-actors)). Write the head with `*session << qb::http::MessageHead{response}` — the status line and header section, nothing after them — then the chunks: `*session << response` writes a COMPLETE message, so an empty chunked body would already carry its terminator. `begin_stream()` does all of this for you, with backpressure.
 - **Use a protocol designed for streaming.** HTTP/2 DATA frames (`END_STREAM`) and HTTP/3 give you real multiplexed streaming; WebSocket gives you bidirectional message framing. For genuinely streaming workloads, reach for [HTTP/2](./17-http2-protocol.md) or [WebSocket](./20-websocket.md) rather than HTTP/1.1 chunking. These are feature-gated: HTTP/2 and WebSocket compile only with `QB_HAS_SSL`, and HTTP/3 needs `QBM_HTTP_HAS_HTTP3` (`QB_HAS_SSL` + `QB_HAS_QUIC` + libnghttp3). HTTP/1.1 chunking has no such gate.
 
 > HTTP/2 and HTTP/3 do not use chunked transfer encoding. `Transfer-Encoding` is a hop-by-hop header forbidden in HTTP/2 messages (`qb::http::well_known::is_hop_by_hop`); streaming there is expressed with DATA frames and the `END_STREAM` flag. See [HTTP/2 protocol specifics](./17-http2-protocol.md).
@@ -144,20 +144,20 @@ void on(Protocol::request&& request) {      // HTTP upgrade arrives
 These are the levers that matter, grounded in how the types are built rather than benchmarks.
 
 - **Borrowed reads of owned data.** Parsed header names and values live in owning `std::string` storage; `header()` returns a borrowed `const std::string&`. `Body::as<std::string_view>()` borrows from the body's owning pipe without another body copy. Parsing and assigning a `string_view` to `Body` can still allocate and copy; no allocation-free parsing or measured speedup is implied. See [lifetime](#string_view-and-lifetime).
-<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:697-700,801-804 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:717-721,827-830 -->
 
 - **The body is a `qb::allocator::pipe<char>`.** `qb::http::Body` stores its payload in qb-io's I/O-optimized ring-style allocator (`qbm/http/src/qbm/http/body.h`, [Body deep dive](./02-body-deep-dive.md)). `body.raw()` gives you the pipe directly for custom (de)serialization. Assigning a `std::string` copies its bytes into the pipe even with an rvalue; the rvalue overload then clears the source string:
 
   ```cpp
-  // src: qbm/http/src/qbm/http/body.cpp:682-685 (std::string rvalue assignment)
+  // src: qbm/http/src/qbm/http/body.cpp:701-705 (std::string rvalue assignment)
   std::string payload = build_large_json();
   ctx->response().body() = std::move(payload);   // copies bytes into the pipe, then clears payload
   ```
 
   Assigning `std::string_view` also copies its bytes into the pipe. Moving an entire `Body` instead uses its move assignment for the owned pipe; that is a different operation from moving a string or a view into a `Body`.
-  <!-- src: qbm/http/src/qbm/http/body.h:65-75; qbm/http/src/qbm/http/body.cpp:682-700,992-995 -->
+  <!-- src: qbm/http/src/qbm/http/body.h:80-90; qbm/http/src/qbm/http/body.cpp:701-721,1020-1024 -->
 
-  Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:104-158`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
+  Appendable types are constrained at compile time by `Body::is_body_appendable` (byte-like ranges, `Chunk`/`Multipart`/`qb::json`, or arithmetic which is stringified); other types are rejected by the compiler rather than producing malformed output (`qbm/http/src/qbm/http/body.h:119-173`). `Form` is deliberately not appendable — assign it wholesale (`body = form`), not `body << form`.
 
 - **The router compiles once.** `router().compile()` builds an optimized radix tree for path matching. Call it once, after all routes are defined and before serving; it is not designed to be re-run on a hot path. See [Routing overview](./03-routing-overview.md).
 
@@ -230,7 +230,7 @@ Carrying a `std::shared_ptr<Context<Session>>` inside an event is sound: the con
 ## `string_view` and lifetime
 
 The retired `RequestView`/`ResponseView` types are not part of this API. For a present header, `header()` returns a borrowed `const std::string&` into the owning message's header map; for an absent header, it returns a reference to a process-wide static empty string. `Body::as<std::string_view>()` returns a borrowed view into the owning body's pipe. Neither accessor transfers ownership.
-<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:801-804 -->
+<!-- src: qbm/http/src/qbm/http/headers.h:154-170,372-379; qbm/http/src/qbm/http/body.cpp:827-830 -->
 
 - While the owning message and its storage stay alive and unmodified, using those borrowed values is safe. Mutating a header map or body can invalidate a reference or view even inside one handler call.
 - If data must outlive the message or its storage — stored in an async callback, carried in an event to another actor, cached past the response — **copy it into an owning type** (`std::string`, `std::vector<char>`) or move the owning message/`Body` with the lifetime you need. A borrowed value that outlives its owner is a dangling read and undefined behavior.

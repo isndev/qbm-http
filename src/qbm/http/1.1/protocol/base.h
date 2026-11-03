@@ -680,8 +680,8 @@ private:
      */
     static int
     on_message_complete(http_t *parser) noexcept {
-        auto p              = self_of(parser);
-        p->msg.body().raw() = std::move(p->_chunked);
+        auto p        = self_of(parser);
+        p->msg.body() = std::move(p->_chunked); // the body adopts the buffer: no pipe is created to be replaced (Huly QB-1216)
         return 1;
     }
 

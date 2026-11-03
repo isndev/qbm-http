@@ -391,7 +391,7 @@ public:
 
         if (!data_payload.empty()) {
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
-            const auto body_size = stream.assembled_response.body().raw().size();
+            const auto body_size = stream.assembled_response.body().size();
             if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
                 // send_rst_stream() already closes/erases the stream context.
                 send_rst_stream(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
@@ -426,7 +426,7 @@ public:
 
             if (!stream.trailers_expected) { // Only process if not expecting trailers
                 if (should_enforce_response_content_length(stream) && stream.expected_content_length
-                    && stream.assembled_response.body().raw().size() != *stream.expected_content_length) {
+                    && stream.assembled_response.body().size() != *stream.expected_content_length) {
                     // send_rst_stream() already closes/erases the stream context.
                     send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
                     return;
@@ -1720,7 +1720,7 @@ private:
 
         // Add content-length if body is present and not using trailers
         if (!http_request.body().empty() && !stream_context.client_will_send_trailers) {
-            out_hf_vector.emplace_back("content-length", std::to_string(http_request.body().raw().size()));
+            out_hf_vector.emplace_back("content-length", std::to_string(http_request.body().size()));
         }
         return nullptr;
     }
@@ -1733,7 +1733,7 @@ private:
             return true; // Nothing to send, or body is empty
         }
 
-        const auto &body_pipe     = active_stream.original_request_to_send.body().raw();
+        const auto &body_pipe     = std::as_const(active_stream.original_request_to_send).body().raw(); // a read: creates no pipe
         size_t      body_size     = body_pipe.size();
         const char *body_data_ptr = body_pipe.data();
 
@@ -2112,7 +2112,7 @@ private:
             return;
         }
         if (should_enforce_response_content_length(stream) && stream.expected_content_length
-            && stream.assembled_response.body().raw().size() != *stream.expected_content_length) {
+            && stream.assembled_response.body().size() != *stream.expected_content_length) {
             send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
             return;
         }

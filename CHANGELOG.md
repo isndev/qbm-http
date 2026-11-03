@@ -104,6 +104,26 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **A `Body` creates its pipe at its first write: an empty request or response body allocates nothing, and the HTTP/2
+  request path no longer makes glibc consolidate its fast bins (Huly QB-1216).** A default-constructed
+  `qb::allocator::pipe` allocates 4 KiB up front, and `Body` held one by value, so every `Request` and `Response` paid
+  4 KiB for a body most of them never write -- every GET, every bodiless response, the two messages of an HTTP/2 stream
+  (8 192 of the 12 108 bytes a browser's HTTP/2 request asked for, and two of the allocations past glibc's 1 KiB
+  threshold that made `_int_malloc` run `malloc_consolidate()` on every request); the HTTP/1.1 parser paid it twice a
+  message (the message rebuilt by `reset()`, then replaced by the parser's buffer). The body is now an optional pipe
+  created by the first write (`operator=`, `operator<<`, the variadic constructor, `add_chunk`, the non-const `raw()`);
+  `size()`, `empty()`, `clear()`, `as<>()` and the const `raw()` read an empty body without creating one (one shared
+  empty pipe). **The non-const `raw()` is a write: it creates the pipe and is no longer `noexcept`** -- read a body you do
+  not write through `size()`, `as<>()` or `std::as_const(body).raw()`. The HTTP/1.1 parser hands its buffer over by
+  `Body::operator=(qb::allocator::pipe<char> &&)` (new). Counters (g++ 14): an HTTP/2 request 55 015 -> 48 496
+  instructions, `malloc_consolidate` 1 526 -> 0, 61 -> 59 blocks and 12 108 -> 3 932 bytes; a 2-line HTTP/1.1 parse 6 -> 4
+  blocks. A/B against the tip (3 copies a side, seeded order, pinned P-core): g++ 14 reads the HTTP/2 request 12.5 % / 9.4 %
+  faster (0.875 [0.867, 0.880], 0.906 [0.897, 0.913]; 3 539 -> 3 096 ns), under `-falign-functions=64` 12.4 % / 9.1 %, the
+  2-line HTTP/1.1 parse 19 % / 22 %, the warm HTTP/1.1 loopback 2.0 % / 2.4 %; MSVC 19.51 reads the 2-line HTTP/1.1 parse 15 % faster (338 -> 288 ns) and the HTTP/2 request level-to-faster across three `/FUNCTIONPADMIN` layouts (1.000, 0.997, 0.981), every other cell level. The WebSocket
+  masked-text decode cell reads 7.3 % slower on g++: its per-frame `ws::Message` still allocates a 4 KiB pipe, and with two
+  fewer 4 KiB chunks freed around it that allocation takes a longer path through glibc's bins (`_int_malloc` 142 -> 601
+  instructions a frame in the timed decode; no page fault).
+
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
   (`qbm-http-bench-http2-server-request`, DHAT and callgrind on g++ 14; the P9 finding). Each stream owned a fresh
