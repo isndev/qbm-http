@@ -3696,3 +3696,186 @@ TEST(HTTP2ClientProtocol, PushPromiseWhileNotOkIsIgnored) {
     EXPECT_EQ(io.output.size(), before);
     EXPECT_EQ(io.push_promise_count, 0);
 }
+
+// ===========================================================================
+// A field the request's `connection` header names never leaves in its trailer section either (Huly QB-1202). RFC 9110
+// section 7.6.1: intermediaries "remove any header or trailer field(s) from the message with the same name as the
+// connection-option"; RFC 9113 section 8.2.2: "An intermediary transforming an HTTP/1.x message to HTTP/2 MUST remove
+// connection-specific header fields as discussed in Section 7.6.1 of [HTTP]". QB-1191 dropped them from the header
+// section only. Whether the request sets its trailer fields is read from the section it plans -- never from what is left
+// once they are dropped: a section whose every field is nominated still ends the stream, with an empty block, where a
+// first attempt waited for send_request_trailers() for ever (review R3 of QB-1191). The announcement the client composes
+// for trailers() leaves them out too. Each request then crosses a qbm-http server and is served.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, AFieldTheConnectionHeaderNamesNeverLeavesInTheTrailerSection) {
+    struct Case {
+        const char *what;
+        bool        announced_header; ///< the fields are header fields the `trailer` header announces, else trailers()
+        bool        only_nominated;   ///< every trailer field is nominated
+        uint32_t    window;           ///< the server's initial stream window: 1 blocks the body, the trailers then follow it
+    };
+    const std::vector<Case> cases = {
+        {"announced header fields", true, false, 65535},
+        {"announced header fields, body blocked", true, false, 1},
+        {"trailers()", false, false, 65535},
+        {"trailers(), body blocked", false, false, 1},
+        {"announced header fields, all nominated", true, true, 65535},
+        {"announced header fields, all nominated, body blocked", true, true, 1},
+        {"trailers(), all nominated", false, true, 65535},
+        {"trailers(), all nominated, body blocked", false, true, 1},
+    };
+    for (const auto &c : cases) {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        ASSERT_TRUE(client.explicit_request_trailers()) << "the protocol's default: an unset announced section waits";
+        Http2FakeIO                          server_io;
+        h2::ServerHttp2Protocol<Http2FakeIO> server(server_io);
+        if (c.window != 65535) {
+            client.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, c.window}}));
+            ASSERT_TRUE(client.ok()) << c.what;
+        }
+        const std::size_t before = client_io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/nominated");
+        req.body()   = "ab";
+        req.add_header("Connection", "X-Hop");
+        if (c.announced_header) {
+            req.set_header("trailer", c.only_nominated ? "x-hop" : "x-hop, x-sum");
+            req.set_header("x-hop", "1");
+            if (!c.only_nominated) {
+                req.set_header("x-sum", "2");
+            }
+        } else {
+            req.trailers().set_header("x-hop", "1");
+            if (!c.only_nominated) {
+                req.trailers().set_header("x-sum", "2");
+            }
+        }
+        ASSERT_TRUE(client.send_request(std::move(req), 1)) << c.what;
+        if (c.window != 65535) {
+            client.on(make_window_update_frame(1, 100));
+            client.on(make_window_update_frame(0, 100));
+        }
+        ASSERT_TRUE(client.ok()) << c.what;
+
+        const auto blocks = sent_header_blocks(client_io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 2u) << c.what << ": the leading HEADERS, then the trailer block -- the stream ends";
+        EXPECT_EQ(blocks[0].count("x-hop"), 0u) << c.what;
+        EXPECT_EQ(blocks[0].count("connection"), 0u) << c.what;
+        if (!c.announced_header) {
+            EXPECT_EQ(blocks[0].value("trailer"), c.only_nominated ? "" : "x-sum") << c.what << ": the composed announcement";
+        }
+        EXPECT_TRUE(blocks[1].flags & h2::FLAG_END_STREAM) << c.what;
+        EXPECT_EQ(blocks[1].count("x-hop"), 0u) << c.what << ": a nominated field in the trailer section";
+        EXPECT_EQ(blocks[1].fields.size(), c.only_nominated ? 0u : 1u) << c.what;
+        if (!c.only_nominated) {
+            EXPECT_EQ(blocks[1].value("x-sum"), "2") << c.what;
+        }
+
+        pump(server, server_io, client_io);
+        EXPECT_TRUE(server.ok()) << c.what;
+        ASSERT_EQ(server_io.request_count, 1) << c.what;
+        EXPECT_FALSE(server_io.last_request->has_header("x-hop")) << c.what;
+        EXPECT_EQ(server_io.last_request->body().as<std::string>(), "ab") << c.what;
+    }
+}
+
+// The trailers handed to send_request_trailers() go by the same rule (Huly QB-1202): a field the request's `connection`
+// header names is dropped, the others sent, the stream ended -- with an empty block when nothing is left. Behind a
+// blocked body as at once.
+TEST(HTTP2ClientProtocol, SendRequestTrailersDropsAFieldTheConnectionHeaderNames) {
+    for (const bool body_blocked : {false, true}) {
+        for (const bool only_nominated : {false, true}) {
+            const std::string what = std::string(body_blocked ? "blocked body" : "body out") + (only_nominated ? ", all nominated" : "");
+            Http2ClientFakeIO client_io;
+            h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+            Http2FakeIO                                server_io;
+            h2::ServerHttp2Protocol<Http2FakeIO>       server(server_io);
+            if (body_blocked) {
+                client.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1}}));
+            }
+            const std::size_t before = client_io.output.size();
+
+            qb::http::Request req;
+            req.method() = qb::http::method::POST;
+            req.uri()    = qb::io::uri("https://example.test/explicit");
+            req.body()   = "ab";
+            req.add_header("connection", "x-hop");
+            req.set_header("trailer", "x-hop, x-sum"); // announced, handed over below
+            ASSERT_TRUE(client.send_request(std::move(req), 1)) << what;
+
+            qb::http::headers trailers;
+            trailers.add_header("X-Hop", "1");
+            if (!only_nominated) {
+                trailers.add_header("x-sum", "2");
+            }
+            ASSERT_TRUE(client.send_request_trailers(1, trailers)) << what;
+            if (body_blocked) {
+                client.on(make_window_update_frame(1, 100));
+                client.on(make_window_update_frame(0, 100));
+            }
+            ASSERT_TRUE(client.ok()) << what;
+
+            const auto blocks = sent_header_blocks(client_io.output, 1, before);
+            ASSERT_EQ(blocks.size(), 2u) << what;
+            EXPECT_TRUE(blocks[1].flags & h2::FLAG_END_STREAM) << what;
+            EXPECT_EQ(blocks[1].count("x-hop"), 0u) << what << ": a nominated field in the trailer section";
+            EXPECT_EQ(blocks[1].fields.size(), only_nominated ? 0u : 1u) << what;
+
+            pump(server, server_io, client_io);
+            EXPECT_TRUE(server.ok()) << what;
+            ASSERT_EQ(server_io.request_count, 1) << what;
+            EXPECT_FALSE(server_io.last_request->has_header("x-hop")) << what;
+        }
+    }
+}
+
+// A request that announces trailer fields it does not set waits for send_request_trailers() once its body is out
+// (explicit request trailers, the protocol's default), and a body that waited for flow-control credit changes nothing:
+// it used to end the stream with an empty trailer block as soon as the credit came, and the trailers handed over next
+// were refused (Huly QB-1202, the plan read in both paths). With explicit trailers off the stream ends there.
+TEST(HTTP2ClientProtocol, UnsetAnnouncedTrailersWaitForTheCallerBehindABlockedBodyToo) {
+    for (const bool explicit_trailers : {true, false}) {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        client.set_explicit_request_trailers(explicit_trailers);
+        Http2FakeIO                          server_io;
+        h2::ServerHttp2Protocol<Http2FakeIO> server(server_io);
+        client.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 4}}));
+        const std::size_t before = client_io.output.size();
+
+        qb::http::Request req;
+        req.method() = qb::http::method::POST;
+        req.uri()    = qb::io::uri("https://example.test/later");
+        req.body()   = "0123456789"; // four octets fit, six wait
+        req.set_header("trailer", "x-checksum");
+        ASSERT_TRUE(client.send_request(std::move(req), 1));
+        client.on(make_window_update_frame(1, 100));
+        ASSERT_TRUE(client.ok());
+        EXPECT_EQ(sum_data_payload_for_stream(client_io.output, 1, before), 10u) << "the whole body is out";
+
+        const auto blocks = sent_header_blocks(client_io.output, 1, before);
+        if (!explicit_trailers) {
+            ASSERT_EQ(blocks.size(), 2u) << "the stream ends after the body, with an empty trailer block";
+            EXPECT_TRUE(blocks[1].flags & h2::FLAG_END_STREAM);
+            EXPECT_TRUE(blocks[1].fields.empty());
+            continue;
+        }
+        EXPECT_EQ(blocks.size(), 1u) << "the stream waits for send_request_trailers()";
+        qb::http::headers trailers;
+        trailers.add_header("x-checksum", "cafe");
+        ASSERT_TRUE(client.send_request_trailers(1, trailers)) << "the trailers the caller hands over are sent";
+        const auto after = sent_header_blocks(client_io.output, 1, before);
+        ASSERT_EQ(after.size(), 2u);
+        EXPECT_TRUE(after[1].flags & h2::FLAG_END_STREAM);
+        EXPECT_EQ(after[1].value("x-checksum"), "cafe");
+
+        pump(server, server_io, client_io);
+        EXPECT_TRUE(server.ok());
+        ASSERT_EQ(server_io.request_count, 1);
+        EXPECT_EQ(server_io.last_request->body().as<std::string>(), "0123456789");
+        EXPECT_EQ(server_io.last_request->header("x-checksum"), "cafe");
+    }
+}

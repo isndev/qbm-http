@@ -1251,11 +1251,13 @@ public:
         // server had no reason to send, and the request never ended (Huly QB-1061). A request
         // that announces fields it does not set leaves them to send_request_trailers(), unless
         // the caller never hands trailers over (set_explicit_request_trailers(false)): its stream
-        // then ends here, with an empty trailer block.
+        // then ends here, with an empty trailer block. Which it is, the plan says, never the fields
+        // left once those its `connection` header names are dropped (Huly QB-1202).
         if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
             && !stream_obj.queued_trailer_fields) {
-            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send);
-            if (!trailer_fields.empty() || !_explicit_request_trailers) {
+            bool planned        = false;
+            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send, &planned);
+            if (planned || !_explicit_request_trailers) {
                 // The stream may be closed and erased past this call: nothing below touches it.
                 (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
                 return true;
@@ -1339,7 +1341,9 @@ public:
      *          END_STREAM and always follows the LAST DATA frame of the body: while part of the
      *          body still waits for flow-control credit, the trailers are kept and leave right
      *          after it (Huly QB-521). A block larger than the peer's SETTINGS_MAX_FRAME_SIZE is
-     *          split over CONTINUATION frames (Huly QB-522). Field names are sent lowercase.
+     *          split over CONTINUATION frames (Huly QB-522). Field names are sent lowercase; a field
+     *          the request's `connection` header names is left out, and the block goes out empty
+     *          when nothing is left (Huly QB-1202).
      * @param stream_id Stream ID
      * @param trailers Trailer headers to send
      * @return true if the trailers were sent or queued behind the body; false if the stream is
@@ -1359,7 +1363,9 @@ public:
             return false;
         }
 
-        // Validate trailers
+        // Validate trailers. A field the request's `connection` header names is connection-specific with it, in this
+        // section as in the header section (RFC 9110 §7.6.1): left out (Huly QB-1202).
+        const auto                      nominated = connection_nominated_fields(stream.original_request_to_send);
         std::vector<hpack::HeaderField> trailer_fields;
         for (const auto &header_item : trailers.headers()) {
             if (header_item.first.empty() || header_item.first[0] == ':') {
@@ -1370,6 +1376,9 @@ public:
             std::string name_lower = header_item.first;
             std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(),
                            [](char c) { return qb::http::utility::ascii_to_lower(c); });
+            if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name_lower) != nominated.end()) [[unlikely]] {
+                continue;
+            }
 
             if (qb::http::detail::is_forbidden_trailer_field(name_lower)) {
                 send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + header_item.first);
@@ -2521,13 +2530,19 @@ private:
 
         // All body data (if any) is out. The trailer section, when announced, ends the stream:
         // the fields handed to send_request_trailers() while the body was blocked, else the
-        // request headers the "Trailer" header names.
+        // trailer section the request sets. One it announces and does not set waits for
+        // send_request_trailers() under explicit request trailers, as send_request() waits: it
+        // ended the stream here with an empty block (Huly QB-1202).
         if (active_stream.client_will_send_trailers && !active_stream.end_stream_sent) {
             std::vector<hpack::HeaderField> trailer_fields_to_send;
             if (active_stream.queued_trailer_fields) {
                 trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
             } else {
-                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send);
+                bool planned           = false;
+                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send, &planned);
+                if (!planned && _explicit_request_trailers) {
+                    return;
+                }
             }
             // The stream may be closed and erased past this call: nothing below touches it.
             (void) send_request_trailer_block(active_stream, std::move(trailer_fields_to_send));

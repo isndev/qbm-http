@@ -845,7 +845,7 @@ TEST(HTTP2FramerDrive, InvalidPrefaceBytesAreProtocolError) {
     EXPECT_FALSE(protocol.ok());
 }
 
-// --- zero-payload frame dispatch (2/protocol/base.h:1189-1268) ------------------------
+// --- zero-payload frame dispatch (2/protocol/base.h:1213-1292) ------------------------
 
 TEST(HTTP2FramerDrive, ZeroPayloadHeadersFrameDispatches) {
     Http2FakeIO      io;
