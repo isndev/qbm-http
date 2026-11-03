@@ -196,6 +196,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The HTTP/2 server judges a response against the client's `SETTINGS_MAX_HEADER_LIST_SIZE` before it encodes it,
+  and counts the list as RFC 9113 §6.5.2 does (Huly QB-1235).** `send_response()` encoded the header block, then
+  compared its ENCODED size with the bound and, past it, reset the stream and dropped the block. The HPACK encoder
+  indexes fields as it encodes, so a dropped block left the server's dynamic table ahead of the client's: the next
+  response carrying the same field sent it indexed in one octet, the client could not decode it, and the connection
+  closed with `COMPRESSION_ERROR`, every stream with it (RFC 9113 §4.3). And a list past the bound left whenever its
+  Huffman encoding did not. Measured on the base with a client advertising 100: a 235-octet list was reset, the same
+  response on the next stream went out referencing an entry the client never saw, and a 137-octet list encoded under
+  100 was sent. The list is now summed uncompressed (each name and value, and 32 octets), only when the client
+  advertised a bound, and a response past it is refused before anything is encoded -- `RST_STREAM(INTERNAL_ERROR)`,
+  `send_response()` returning `false`, as before.
 - **HTTP/3 never sends a field name a peer's nghttp3 cannot decode (Huly QB-1210).** nghttp3's QPACK decoder takes a
   field name of 256 bytes at most and, coded by Huffman, a code of 160 bytes at most (8/5 of it, the most a code can
   expand, is 256); past either it closes the CONNECTION with `H3_INTERNAL_ERROR`, every stream multiplexed on it with

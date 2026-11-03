@@ -3768,13 +3768,13 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 }
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
-// when the server's encoded response headers exceed it, the stream is reset
-// with INTERNAL_ERROR (2/protocol/server.h:1288-1293).
+// when the response's header list, counted uncompressed, exceeds it, the stream
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1291-1296).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     push_preface(io);
-    // Tiny MAX_HEADER_LIST_SIZE forces the encoded-size guard to trip.
+    // Tiny MAX_HEADER_LIST_SIZE forces the list-size guard to trip (Huly QB-1235).
     push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1}}));
     drive(protocol, io);
     ASSERT_TRUE(protocol.ok());
@@ -5653,5 +5653,65 @@ TEST(HTTP2ServerProtocol, AWaitingPushedResponseFollowsItsStream) {
         drive(protocol, io);
         EXPECT_TRUE(headers_sent_on(io.output, 2)) << "the room stream 4 left";
         EXPECT_TRUE(protocol.is_stream_closed(4));
+    }
+}
+
+// ===========================================================================
+// RFC 9113 section 6.5.2: SETTINGS_MAX_HEADER_LIST_SIZE "is based on the uncompressed size of field lines, including the
+// length of the name and value in units of octets plus an overhead of 32 octets for each field line". A response the
+// server refuses for the client's bound is refused before it is encoded: the encoder indexes fields as it encodes, so a
+// block encoded and then dropped leaves the server's table ahead of the client's, and the next block that references an
+// entry it added cannot be decoded -- COMPRESSION_ERROR on the client, every stream of the connection with it (RFC 9113
+// section 4.3). The server compared the ENCODED size, after encoding: a response past the bound was reset and its block
+// dropped, and the same field, indexed in one octet, went out on the next response, referencing an entry the client
+// never saw; a response whose list passed the bound but whose encoding did not was sent (Huly QB-1235).
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AResponsePastTheClientsHeaderListBoundIsRefusedBeforeItIsEncoded) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}}));
+    drive(protocol, io);
+    for (const uint32_t id : {1u, 3u, 5u, 7u}) {
+        open_get_stream_end_stream(protocol, io, id, "/r" + std::to_string(id));
+    }
+    ASSERT_TRUE(protocol.ok());
+    const std::size_t before = io.output.size();
+
+    // :status 200 counts 7 + 3 + 32 = 42 octets. x-a: 200 octets of '{' -- a 15-bit Huffman code, so the value stays a
+    // raw literal: 235 octets of list, more than 200 encoded.
+    qb::http::Response wide;
+    wide.status() = qb::http::status::OK;
+    wide.set_header("x-a", std::string(200, '{'));
+    EXPECT_FALSE(protocol.send_response(1, wide)) << "a response past the client's bound is refused";
+    EXPECT_FALSE(protocol.send_response(3, wide)) << "the same response again is refused, not sent indexed";
+    // x-b: 60 octets of 'a' -- 95 octets of list, 137 with :status, past the bound; Huffman-coded, under 100 encoded.
+    qb::http::Response compressible;
+    compressible.status() = qb::http::status::OK;
+    compressible.set_header("x-b", std::string(60, 'a'));
+    EXPECT_FALSE(protocol.send_response(5, compressible)) << "the list counted uncompressed, as RFC 9113 section 6.5.2 counts it";
+    // x-c: 10 octets -- 45, 87 in all: within the bound.
+    qb::http::Response within;
+    within.status() = qb::http::status::OK;
+    within.set_header("x-c", std::string(10, 'c'));
+    EXPECT_TRUE(protocol.send_response(7, within)) << "a response within the bound is sent";
+    EXPECT_TRUE(protocol.ok());
+
+    // Every header block the server sent decodes, in order, with one decoder -- the client's view of the table.
+    qb::protocol::hpack::Decoder decoder;
+    std::vector<uint32_t>        sent_on;
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        if (f.type != FrameType::HEADERS || f.payload_offset < before) {
+            continue;
+        }
+        std::vector<qb::protocol::hpack::HeaderField> fields;
+        bool                                          incomplete = false;
+        EXPECT_TRUE(decoder.decode(emitted_payload(io.output, f), fields, incomplete) && !incomplete)
+            << "the block on stream " << f.stream_id << " references a table the client never saw";
+        sent_on.push_back(f.stream_id);
+    }
+    EXPECT_EQ(sent_on, std::vector<uint32_t>{7u}) << "only the response within the bound left";
+    for (const uint32_t id : {1u, 3u, 5u}) {
+        EXPECT_EQ(last_rst_stream_error(io.output, id), ErrorCode::INTERNAL_ERROR) << id;
     }
 }

@@ -1278,17 +1278,28 @@ public:
             return false;
         }
 
+        // The client's SETTINGS_MAX_HEADER_LIST_SIZE, counted as RFC 9113 §6.5.2 counts it -- each name and value, and
+        // 32 octets -- and judged before the block is encoded: the encoder indexes fields as it encodes, so a block
+        // encoded then dropped left this table ahead of the client's, and the next block that referenced an entry it
+        // added could not be decoded -- COMPRESSION_ERROR, every stream with it (RFC 9113 §4.3). The ENCODED size was
+        // compared, after encoding (Huly QB-1235).
+        if (_peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
+            std::uint64_t list_size = 0;
+            for (const auto &field : hf_vector) {
+                list_size += field.hpack_size();
+            }
+            if (list_size > _peer_max_header_list_size) {
+                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: response header list " << list_size << " exceeds peer's MAX_HEADER_LIST_SIZE "
+                                                                                         << _peer_max_header_list_size);
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
+                return false;
+            }
+        }
+
         std::vector<uint8_t> encoded_headers;
         if (!_hpack_encoder.encode(hf_vector, encoded_headers)) {
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: HPACK encoding failed for response headers");
             this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK encoder failed for response headers.");
-            return false;
-        }
-
-        if (_peer_max_header_list_size > 0 && encoded_headers.size() > _peer_max_header_list_size) {
-            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Encoded headers size "
-                                            << encoded_headers.size() << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
-            send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
             return false;
         }
         uint8_t header_flags = 0;
