@@ -626,7 +626,7 @@ public:
      * with H3_MESSAGE_ERROR against constants until 3.3. The defaults are `qb::http::protocol_limits`'
      * constants, with a body limit of 64 MiB. nghttp3 bounds a field by itself before these: a QPACK-decoded
      * name past 256 bytes is a connection error. A section past the 1 MiB this server advertises is a section
-     * over the limits, answered 431 (Huly QB-1196, QB-1203); the default limits keep a section below it.
+     * over the limits, answered 431 (Huly QB-1196, QB-1203), which a well-formed request within the defaults never reaches.
      * @param limits The limits.
      */
     void
