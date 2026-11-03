@@ -2229,8 +2229,8 @@ wide_count() {
 
 // A field section is bounded by the 1 MiB the connection advertises as SETTINGS_MAX_FIELD_SECTION_SIZE, as HTTP/2 bounds
 // its header list, counted as RFC 9114 section 4.2.2 counts it (Huly QB-1196; 64 KiB until QB-1203): nghttp3 (1.18.0)
-// does not enforce it. The default limits keep a section below it -- 100 fields, a name nghttp3 decodes, a value of
-// 8 KiB -- so the server here counts more fields. Exactly 1 MiB is served; a byte more is a section over the limits --
+// does not enforce it. A well-formed request within the default limits never reaches it -- 100 fields, a name nghttp3
+// decodes, a value of 8 KiB -- so the server here counts more fields. Exactly 1 MiB is served; a byte more is a section over the limits --
 // answered 431 once the request is known well-formed, the fields past it dropped -- the header section as a trailer
 // section, a pseudo-header's bytes counted too.
 TEST(Http3ConnectionDirect, AFieldSectionPastTheAdvertisedSizeIsAnswered431) {
@@ -2339,7 +2339,7 @@ TEST(Http3ConnectionDirect, AMalformedRequestPastTheSectionSizeIsRefused) {
 
 // The client reads a response under the same bound (Huly QB-1196), which its own field limits keep a response below --
 // `protocol_limits`: 100 fields, a value of 8 KiB, a name nghttp3 decodes. A section of 100 fields of 8000 bytes, some
-// 0.8 MiB, is delivered -- past the 64 KiB advertised until Huly QB-1203, it was refused --, a trailer section
+// 0.8 MiB, is delivered -- past the 64 KiB advertised until Huly QB-1203, it was discarded --, a trailer section
 // alike, and a field more refuses the stream, as a response over the limits does. An informational response's section
 // is a section of its own and its fields go with it: three 103s of 400 KB, then a 200 of 400 KB, deliver the 200's
 // fields alone -- they were added to the final response's, unbounded.
@@ -2402,6 +2402,18 @@ TEST(Http3ConnectionDirect, AResponseSectionIsBoundedByTheClientsFieldLimits) {
     ASSERT_EQ(trailed.client_owner.responses.size(), 1u) << "each section is counted on its own";
     EXPECT_EQ(trailed.client_owner.responses.front().trailers().header("t-99").size(), 8000u);
     EXPECT_TRUE(trailed.client_owner.resets.empty());
+
+    // A trailer section over the client's limits -- a field more -- discards the response.
+    Pair over;
+    ASSERT_TRUE(over.client.submit_request(0, get));
+    over.settle();
+    over.client.read_stream(0, h3_headers_frame(0, {{":status", "200"}}), false);
+    over.client.read_stream(0, h3_data_frame("abc"), false);
+    over.client.read_stream(0, h3_headers_frame(0, at_limits({}, most + 1, "t-")), true);
+    EXPECT_TRUE(over.client_owner.responses.empty());
+    ASSERT_EQ(over.client_owner.resets.size(), 1u);
+    EXPECT_EQ(over.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
+    EXPECT_FALSE(over.client_owner.close.has_value());
 
     // An informational response alone ends no response: one that ends the stream, one the stream's end follows, one a
     // header section without :status follows -- nothing is delivered. nghttp3 (1.18.0) closes the connection for each
@@ -2627,7 +2639,8 @@ TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted
         ClientConnection client{client_owner, 1, ClientConnection::role::client};
         ASSERT_TRUE(client.bind_local_streams());
         EXPECT_TRUE(client.submit_request(0, request_of(advertised + 1))) << "the bound is the peer's, unknown until it says it";
-        // Past this module's own 1 MiB too -- 96 fields of 8000 bytes and an :authority of 300000 bytes --: submitted.
+        // Past this module's own 1 MiB too -- 96 fields of 8000 bytes and an :authority of 300000 bytes --: submitted. It
+        // relies on :authority, which no outgoing limit bounds (a peer's nghttp3 refuses a value past 64 KiB).
         qb::http::Request big{qb::http::method::GET, qb::io::uri("https://" + std::string(300000, 'a') + ".test/")};
         std::vector<std::pair<std::string, std::string>> counted{{":authority", std::string(300000, 'a') + ".test"}};
         for (int i = 0; i < 96; ++i) {
@@ -3009,10 +3022,12 @@ TEST(Http3ConnectionDirect, NeitherSideOffersAQpackDynamicTable) {
 /**
  * @test A field section the default limits allow crosses both ways (Huly QB-1203)
  * @brief The section bound is 1 MiB, the bound HTTP/2 puts on a header list (`qb::http2::protocol_limits::
- *        MAX_HEADER_LIST_SIZE`): the default limits -- 100 fields, a value of 8 KiB -- keep a section below it, and
+ *        MAX_HEADER_LIST_SIZE`): a well-formed request within the default limits -- 100 fields, a value of 8 KiB -- never
+ *        reaches it, and
  *        HTTP/2 serves such a section. HTTP/3 bounded it at 64 KiB until Huly QB-1203: a request of 90 fields of 8000 bytes,
  *        some 0.7 MiB, was refused by the client, which held itself to the server's 64 KiB, and answered 431 by a
- *        server that read it raw; the response alike, the client refusing it. (The client counts a request's four
+ *        server that read it raw; the response was never submitted by the server (the client's 64 KiB), and a client that
+ *        read one raw discarded it. (The client counts a request's four
  *        pseudo-headers among the 100 fields it sends: 96 regular ones at most.)
  */
 TEST(Http3ConnectionDirect, ASectionTheDefaultLimitsAllowCrossesBothWays) {
