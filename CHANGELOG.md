@@ -144,6 +144,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   layouts the cell reads 1.023, 0.979 and 0.964 (the sign flips); g++ 14 reads it level in two alignment families (0.998,
   1.004). Absent, duplicate and malformed Host fields are judged as before (RFC 9112 Section 3.2).
 
+- **An HTTP/3 connection copies a received field once, when it keeps it, and keeps a section once (Huly QB-1203, points
+  2 and 3).** `recv_header_cb` copied each field's name and value before judging it -- a field then dropped for the
+  limits included, so the CPU a section cost followed the length the peer chose -- and the section's fields were
+  copied again into the message while the section itself stayed in the stream's state until the stream closed: two
+  copies of every section, up to the 64 KiB bound each, for as long as a body took to come. Fields are now read in
+  place, a kept one copied once and moved into the message, and the section released once read (or refused).
+  Measured on the in-process nghttp3 pair: six dropped values of 9 000 bytes allocated 79 784 bytes on the base and
+  25 736 now (the stream's state and the 431 answer); a request with 56 KB of fields, its body still to come, kept
+  130 KB and now under 84 KB; a browser's 18-field GET read by the server allocates 345 bytes less. The fixed 64 KiB
+  section bound beside the settable request limits (point 1) is a decision left to the maintainer.
 - **The HTTP/2 server's request path allocates 14 blocks and 5 KiB less a request (Huly QB-1215).** A browser's
   18-field request cost the server 75 allocations and 17 385 bytes, and glibc's allocator 27 % of its instructions
   (`qbm-http-bench-http2-server-request`, DHAT and callgrind on g++ 14; the P9 finding). Each stream owned a fresh
