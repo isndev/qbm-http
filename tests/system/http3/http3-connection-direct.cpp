@@ -2881,4 +2881,56 @@ TEST(Http3ConnectionDirect, AReadSectionLeavesNothingBesideItsRequest) {
 #endif
 }
 
+/**
+ * @test Neither side offers its peer a QPACK dynamic table (Huly QB-1204)
+ * @brief shut_refused_read() cancels a stream's QPACK decoding in the middle of a section, and is sound because no
+ *        Section Acknowledgment can follow that cancellation: with a decoder dynamic table capacity of 0, no section
+ *        the peer encodes has a Required Insert Count (RFC 9204 section 4.4.1). The capacity was nghttp3's default,
+ *        which nothing pinned; it is set now, and each side's SETTINGS -- read off its control stream -- advertise no
+ *        SETTINGS_QPACK_MAX_TABLE_CAPACITY (0x01) above 0, beside the SETTINGS_MAX_FIELD_SECTION_SIZE (0x06) of 64 KiB.
+ */
+TEST(Http3ConnectionDirect, NeitherSideOffersAQpackDynamicTable) {
+    const auto settings_of = [](DirectOwnerBase const &owner, std::uint64_t control) {
+        std::string wire;
+        for (auto const &f : owner.outbound)
+            if (f.stream_id == control)
+                wire += f.data;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> settings;
+        std::size_t                                          at     = 0;
+        const auto                                           varint = [&]() {
+            const auto    first = static_cast<unsigned char>(wire.at(at));
+            const auto    n     = std::size_t{1} << (first >> 6);
+            std::uint64_t v     = first & 0x3f;
+            for (std::size_t i = 1; i < n; ++i)
+                v = (v << 8) | static_cast<unsigned char>(wire.at(at + i));
+            at += n;
+            return v;
+        };
+        EXPECT_EQ(varint(), 0x0u) << "a control stream";
+        EXPECT_EQ(varint(), 0x4u) << "SETTINGS first";
+        const auto end = at + varint();
+        while (at < end) {
+            const auto id = varint();
+            settings.emplace_back(id, varint());
+        }
+        return settings;
+    };
+    ClientOwner      client_owner;
+    ClientConnection client{client_owner, 1, ClientConnection::role::client};
+    ServerOwner      server_owner;
+    ServerConnection server{server_owner, 1, ServerConnection::role::server};
+    ASSERT_TRUE(client.bind_local_streams());
+    ASSERT_TRUE(server.bind_local_streams());
+    for (auto const &[side, settings] :
+         {std::pair{"client", settings_of(client_owner, 2)}, std::pair{"server", settings_of(server_owner, 3)}}) {
+        SCOPED_TRACE(side);
+        bool section_bound = false;
+        for (auto const &[id, value] : settings) {
+            EXPECT_FALSE(id == 0x01 && value != 0) << "a QPACK dynamic table of " << value << " bytes offered";
+            section_bound = section_bound || (id == 0x06 && value == 64 * 1024);
+        }
+        EXPECT_TRUE(section_bound) << "the SETTINGS frame was read";
+    }
+}
+
 #endif // QBM_HTTP_HAS_HTTP3
