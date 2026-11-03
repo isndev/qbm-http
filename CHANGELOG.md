@@ -311,7 +311,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   limit set by their peer": `send_response()` on a promised stream sent those HEADERS at once, past a limit the client
   had lowered. A promised response without room now waits, kept, and leaves -- in the order the responses were given
   -- as a pushed stream ends or the client raises its limit (`send_response()` returns `true` for it, `false` for a
-  second response on the stream). A client allowing no pushed stream (a limit of zero) still gets
+  second response on the stream). It is judged first, as any response is: a field HTTP/2 cannot carry, a list past
+  the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, refuse it at once. One that waits as long as the idle sweep's
+  `max_idle` (`cleanup_idle_streams()`, 30 s by default, counted from the promise) is cancelled as an idle stream is.
+  A client's `GOAWAY` cancels every promised stream still reserved, its response waiting or not given yet --
+  `RST_STREAM(CANCEL)`: its HEADERS would open a stream, and "Receivers of a GOAWAY frame MUST NOT open additional
+  streams" (§6.8) --, where one at or below the GOAWAY's last-stream-id was answerable after it, and held the graceful
+  close open until it was. A client allowing no pushed stream (a limit of zero) still gets
   `PEER_CONCURRENCY_LIMIT_REACHED`.
 - **An HTTP/2 or HTTP/3 request whose `:path` holds a byte from 0x80 up in its query is malformed, as the same target
   is on HTTP/1.1 (Huly QB-1187).** HTTP/1.1 reads a target with llhttp built strict, which refuses such a byte in a
