@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -3769,7 +3770,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the response's header list, counted uncompressed, exceeds it, the stream
-// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1293-1298).
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1307-1312).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3797,7 +3798,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1272-1277).
+// (2/protocol/server.h:1286-1291).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3817,7 +3818,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:1246-1249).
+// (2/protocol/server.h:1260-1263).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3837,7 +3838,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:1240-1245).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:1254-1259).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3860,7 +3861,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1032-1037).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1039-1044).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3879,7 +3880,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1039-1057).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1046-1064).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4076,7 +4077,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:373-382).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:379-388).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4099,7 +4100,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:373-377).
+// (qbm/http/src/qbm/http/2/protocol/server.h:379-383).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4116,7 +4117,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1163-1173 else arm).
+// (no stream context to store into; 2/protocol/server.h:1170-1180 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4135,7 +4136,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1070-1082);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1077-1089);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -5767,8 +5768,9 @@ handshake_one_push_no_window(ServerProtocol &protocol, Http2FakeIO &io, std::vec
 // ===========================================================================
 // The idle sweep resets a pushed stream, and the room it leaves sends a response that waited (Huly QB-1202): a 204, its
 // stream ended and erased at once -- the stream the sweep held an iterator to, past the reset, and read next: a
-// use-after-free (ASan's heap-use-after-free). The sweep finds each stream again. The map walks 1, 4, 2 here: stream 4
-// opens, stream 2 waits, so the sweep resets 4 with 2 next.
+// use-after-free (ASan's heap-use-after-free; the map walks 1, 4, 2 with libc++ and libstdc++). The sweep finds each
+// stream again. Stream 2's window update between the sweeps keeps it from being idle itself, so whatever order the map
+// walks, the sweep resets stream 4 and the room sends stream 2.
 // ===========================================================================
 TEST(HTTP2ServerProtocol, TheIdleSweepSurvivesTheResponseItsResetLetsOut) {
     Http2FakeIO    io;
@@ -5785,8 +5787,12 @@ TEST(HTTP2ServerProtocol, TheIdleSweepSurvivesTheResponseItsResetLetsOut) {
 
     EXPECT_EQ(protocol.cleanup_idle_streams(std::chrono::hours(1), std::chrono::hours(1)), 0u) << "nothing idle yet";
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    EXPECT_GE(protocol.cleanup_idle_streams(qb::duration{0}, std::chrono::hours(1)), 2u) << "stream 4 and the request reset";
+    make_window_update_frame(io, 2, 100); // stream 2 progresses: not idle at the next sweep
+    drive(protocol, io);
+    EXPECT_EQ(protocol.cleanup_idle_streams(qb::duration{0}, std::chrono::hours(1)), 2u) << "stream 4 and the request reset";
     EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::CANCEL);
+    EXPECT_TRUE(headers_sent_on(io.output, 2)) << "the room stream 4 left sends the response that waited";
+    EXPECT_FALSE(last_rst_stream_error(io.output, 2).has_value());
     for (const uint32_t id : {1u, 2u, 4u}) {
         EXPECT_TRUE(protocol.is_stream_closed(id)) << id;
     }
@@ -5928,5 +5934,183 @@ TEST(HTTP2ServerProtocol, AClientCancellingPushesIsNoRapidReset) {
     EXPECT_TRUE(protocol.ok()) << pushes << " pushes cancelled by the client counted as a Rapid Reset";
     for (uint32_t i = 1; i <= pushes; ++i) {
         EXPECT_TRUE(protocol.is_stream_closed(2 * i)) << 2 * i;
+    }
+}
+
+namespace qb1202_observer_test {
+
+/// A fake IO whose observers act on the protocol while it notifies them, as an application's may.
+struct ObservingIO : Http2FakeIO {
+    using Http2FakeIO::on;
+    std::function<void(const qb::protocol::http2::Http2StreamErrorEvent &)> on_stream_error;
+    std::function<void(const qb::protocol::http2::Http2GoAwayEvent &)>      on_goaway;
+    void
+    on(const qb::protocol::http2::Http2StreamErrorEvent &event) {
+        Http2FakeIO::on(event);
+        if (on_stream_error)
+            on_stream_error(event);
+    }
+    void
+    on(const qb::protocol::http2::Http2GoAwayEvent &event) {
+        Http2FakeIO::on(event);
+        if (on_goaway)
+            on_goaway(event);
+    }
+};
+using ObservedProtocol = qb::protocol::http2::ServerHttp2Protocol<ObservingIO>;
+
+/// A push-enabled client allowing @p max_concurrent pushed streams and no stream window, its GET on stream 1 complete.
+void
+handshake(ObservedProtocol &protocol, ObservingIO &io, uint32_t max_concurrent) {
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0,
+               encode_settings_payload(
+                   {{Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1},
+                    {Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, max_concurrent},
+                    {Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+    drive(protocol, io);
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers(default_request_headers("/parent")));
+    drive(protocol, io);
+}
+
+} // namespace qb1202_observer_test
+
+// ===========================================================================
+// RFC 9113 section 6.8: "Receivers of a GOAWAY frame MUST NOT open additional streams" -- from an observer of the
+// GOAWAY too (Huly QB-1202, review R2): the handler notified the application before it cancelled the promised streams,
+// and a promised stream answered there opened, its HEADERS sent after the GOAWAY. It is cancelled as the others are.
+// ===========================================================================
+TEST(HTTP2ServerProtocol, APromisedStreamAnsweredFromAGoawayObserverNeverOpens) {
+    using namespace qb1202_observer_test;
+    ObservingIO      io;
+    ObservedProtocol protocol(io);
+    handshake(protocol, io, 2);
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    qb::http::Response empty;
+    empty.status() = qb::http::status::NO_CONTENT;
+    bool answered  = true;
+    io.on_goaway   = [&](const auto &) {
+        answered = protocol.send_response(2, empty);
+    };
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(4, ErrorCode::NO_ERROR));
+    drive(protocol, io);
+    EXPECT_FALSE(answered) << "a promised stream answered after the client's GOAWAY";
+    EXPECT_FALSE(headers_sent_on(io.output, 2)) << "a stream opened after the client's GOAWAY";
+    std::size_t resets_on_2 = 0;
+    for (const auto &f : parse_emitted_frames(io.output))
+        resets_on_2 += (f.type == FrameType::RST_STREAM && f.stream_id == 2) ? 1u : 0u;
+    EXPECT_EQ(resets_on_2, 1u) << "cancelled once";
+    EXPECT_EQ(last_rst_stream_error(io.output, 2), ErrorCode::CANCEL);
+    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::CANCEL);
+    EXPECT_TRUE(protocol.is_stream_closed(2));
+    EXPECT_TRUE(protocol.is_stream_closed(4));
+}
+
+// ===========================================================================
+// Promised responses that wait leave in the order they were given (Huly QB-1202, review R2): one given from an observer
+// of the stream whose close makes room -- before the drain runs -- went out ahead of the one waiting. It waits behind it.
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AResponseGivenFromAnObserverWaitsBehindTheOneWaiting) {
+    using namespace qb1202_observer_test;
+    ObservingIO      io;
+    ObservedProtocol protocol(io);
+    handshake(protocol, io, 1);
+    for (const uint32_t id : {2u, 4u, 6u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    EXPECT_TRUE(protocol.send_response(2, pushed_response("abc"))); // opens stream 2: the limit is full
+    EXPECT_TRUE(protocol.send_response(4, pushed_response("def"))); // waits
+    bool answered      = false;
+    io.on_stream_error = [&](const qb::protocol::http2::Http2StreamErrorEvent &e) {
+        if (e.stream_id == 2)
+            answered = protocol.send_response(6, pushed_response("ghi"));
+    };
+    push_frame(io, FrameType::RST_STREAM, 0, 2, {0x00, 0x00, 0x00, 0x08}); // the client cancels stream 2: room
+    drive(protocol, io);
+    EXPECT_TRUE(answered);
+    EXPECT_TRUE(headers_sent_on(io.output, 4)) << "the response waiting first";
+    EXPECT_FALSE(headers_sent_on(io.output, 6)) << "a response given later went out ahead of the one waiting";
+    EXPECT_TRUE(protocol.ok());
+}
+
+// ===========================================================================
+// A response that waits is judged again when it leaves, by the bounds then in force (Huly QB-1202, review R2): a client
+// that lowered its SETTINGS_MAX_HEADER_LIST_SIZE meanwhile has it refused, its stream reset, nothing encoded.
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AResponseThatWaitedIsJudgedAgainWhenItLeaves) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_one_push_no_window(protocol, io);
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    EXPECT_TRUE(protocol.send_response(2, pushed_response("abc")));
+    qb::http::Response wide = pushed_response("def");
+    wide.set_header("x-b", std::string(60, 'a')); // 95 octets of list, 137 with :status
+    EXPECT_TRUE(protocol.send_response(4, wide)) << "within every bound when given: it waits";
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}}));
+    make_window_update_frame(io, 0, 100);
+    make_window_update_frame(io, 2, 100); // stream 2 ends: stream 4 leaves, under the bound now in force
+    drive(protocol, io);
+    EXPECT_FALSE(headers_sent_on(io.output, 4));
+    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(protocol.is_stream_closed(4));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// ===========================================================================
+// A response that waited leaves whole -- its body, then its trailer section -- sent from the copy its stream keeps,
+// which the stream's close erases as its trailer section ends it (Huly QB-1202, review R2: the path ASan watches).
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AResponseThatWaitedLeavesWithItsBodyAndTrailers) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_one_push_no_window(protocol, io);
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    EXPECT_TRUE(protocol.send_response(2, pushed_response("abc")));
+    qb::http::Response trailed = pushed_response("defgh");
+    trailed.trailers().set_header("x-digest", "sha-256=x");
+    EXPECT_TRUE(protocol.send_response(4, trailed)); // waits
+    make_window_update_frame(io, 0, 100);
+    make_window_update_frame(io, 4, 100); // stream 4's window, while it is reserved
+    make_window_update_frame(io, 2, 100); // stream 2 ends: stream 4 leaves
+    drive(protocol, io);
+    std::size_t headers_on_4 = 0;
+    bool        ended        = false;
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        if (f.stream_id == 4 && f.type == FrameType::HEADERS) {
+            ++headers_on_4;
+            ended = ended || (f.flags & qb::protocol::http2::FLAG_END_STREAM);
+        }
+    }
+    EXPECT_EQ(headers_on_4, 2u) << "the leading block and the trailer section";
+    EXPECT_TRUE(ended) << "the trailer section ends the stream";
+    EXPECT_EQ(sum_data_bytes(io.output, 4), 5u);
+    EXPECT_TRUE(protocol.is_stream_closed(4));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// ===========================================================================
+// RFC 9113 section 6.8, a GOAWAY that carries an error: every stream ends at once and the connection with them; the
+// server sends no RST_STREAM for them, a promised stream at or below the last-stream-id included (Huly QB-1202).
+// ===========================================================================
+TEST(HTTP2ServerProtocol, AnErrorGoawayResetsNoStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io, 10);
+    open_get_stream_end_stream(protocol, io, 1, "/parent");
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    push_frame(io, FrameType::GOAWAY, 0, 0, make_goaway_payload(4, ErrorCode::INTERNAL_ERROR));
+    drive(protocol, io);
+    EXPECT_FALSE(protocol.ok());
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        EXPECT_NE(f.type, FrameType::RST_STREAM) << "a RST_STREAM on stream " << f.stream_id << " after an error GOAWAY";
     }
 }
