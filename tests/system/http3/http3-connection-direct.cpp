@@ -1371,11 +1371,11 @@ TEST(Http3ConnectionDirect, AnOverLongResponseFieldRefusesTheStreamNotTheConnect
     pair.client.read_stream(
         0, h3_headers_frame(0, {{":status", "200"}, {"x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v')}}),
         true);
-    EXPECT_TRUE(pair.client_owner.responses.empty()) << "a malformed response must never reach the owner";
-    EXPECT_FALSE(pair.client_owner.close.has_value()) << "the client's connection must survive a malformed response";
+    EXPECT_TRUE(pair.client_owner.responses.empty()) << "a response past the limits must never reach the owner";
+    EXPECT_FALSE(pair.client_owner.close.has_value()) << "the client's connection must survive a response it discards";
     ASSERT_EQ(pair.client_owner.resets.size(), 1u);
     EXPECT_EQ(pair.client_owner.resets.front().first, 0u);
-    EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED)) << "discarded, not malformed";
     pair.client.close_stream(0, NGHTTP3_H3_MESSAGE_ERROR);
     EXPECT_EQ(pair.client.stream_state_count(), states);
 
@@ -2209,15 +2209,16 @@ TEST(Http3ConnectionDirect, AFieldSectionPastTheAdvertisedSizeIsAnswered431) {
         EXPECT_EQ(pair.server_owner.requests.front().header("x-z").size(), advertised - field_section_size(request_fields()) - 10 * 6035 - 35);
     }
     {
-        // Sent by the client, which writes the same four pseudo-headers: the 431 is decoded.
+        // The client holds itself to the 64 KiB the server advertises (Huly QB-1204): it never submits such a section,
+        // which the server reads raw and answers 431.
         LimitedPair       pair{qb::http::request_limits{}};
         qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/")};
         for (auto const &[name, value] : section_of(advertised + 1))
             if (name.front() != ':')
                 request.add_header(name, value);
-        pair.exchange(0, request);
-        EXPECT_TRUE(pair.server_owner.requests.empty()) << "a section of 64 KiB and a byte is refused";
-        expect_answered(pair, 0, qb::http::status::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        EXPECT_FALSE(pair.client.submit_request(0, request)) << "past the server's SETTINGS_MAX_FIELD_SECTION_SIZE";
+        pair.server.read_stream(0, h3_headers_frame(0, section_of(advertised + 1)), true);
+        expect_answered_raw(pair, 0);
     }
     {
         // A :path that alone passes the section, with no target limit: the pseudo-headers are read all the same, 431.
@@ -2322,7 +2323,7 @@ TEST(Http3ConnectionDirect, AResponseSectionPastTheAdvertisedSizeRefusesTheStrea
         } else {
             EXPECT_TRUE(pair.client_owner.responses.empty()) << "a section of 64 KiB and a byte is refused";
             ASSERT_EQ(pair.client_owner.resets.size(), 1u);
-            EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+            EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
         }
         EXPECT_FALSE(pair.client_owner.close.has_value());
     }
@@ -2359,7 +2360,7 @@ TEST(Http3ConnectionDirect, AResponseSectionPastTheAdvertisedSizeRefusesTheStrea
     trailed.client.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {})), true);
     EXPECT_TRUE(trailed.client_owner.responses.empty());
     ASSERT_EQ(trailed.client_owner.resets.size(), 1u);
-    EXPECT_EQ(trailed.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    EXPECT_EQ(trailed.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
 
     // An informational response alone ends no response: one that ends the stream, one the stream's end follows, one a
     // header section without :status follows -- nothing is delivered. nghttp3 (1.18.0) closes the connection for each
@@ -2387,7 +2388,7 @@ TEST(Http3ConnectionDirect, AResponseSectionPastTheAdvertisedSizeRefusesTheStrea
         big.client.read_stream(0, h3_headers_frame(0, section_of(advertised + 1, {{":status", "103"}})), false);
         EXPECT_TRUE(big.client_owner.responses.empty());
         ASSERT_EQ(big.client_owner.resets.size(), 1u);
-        EXPECT_EQ(big.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+        EXPECT_EQ(big.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
     }
     {
         Pair after;
@@ -2467,6 +2468,149 @@ TEST(Http3ConnectionDirect, AFieldTheConnectionHeaderNamesNeverLeavesInTheTraile
             EXPECT_FALSE(pair.server_owner.close.has_value());
         }
     }
+}
+
+/**
+ * @test A response carrying `te` is refused on its stream (Huly QB-1204)
+ * @brief RFC 9114 section 4.2: "The only exception to this is the TE header field, which MAY be present in an HTTP/3
+ *        request header" -- a response carrying one is malformed, and section 4.1.2: "Clients MUST NOT accept a
+ *        malformed response". nghttp3 (1.18.0) delivered it, and so did this client; the HTTP/2 client refuses it. Its
+ *        stream is reset with H3_MESSAGE_ERROR, the connection serving on; a response without it is delivered, and a
+ *        request's `te: trailers` still reaches the server.
+ */
+TEST(Http3ConnectionDirect, AResponseCarryingTeIsRefusedOnItsStream) {
+    Pair              pair;
+    qb::http::Request get{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+    get.set_header("te", "trailers");
+    ASSERT_TRUE(pair.client.submit_request(0, get));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    EXPECT_EQ(pair.server_owner.requests.front().header("te"), "trailers") << "a request carries it";
+    pair.client.read_stream(0, h3_headers_frame(0, {{":status", "200"}, {"te", "trailers"}}), true);
+    EXPECT_TRUE(pair.client_owner.responses.empty()) << "a response carrying te was accepted";
+    ASSERT_EQ(pair.client_owner.resets.size(), 1u);
+    EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
+    EXPECT_FALSE(pair.client_owner.close.has_value());
+
+    ASSERT_TRUE(pair.client.submit_request(4, get));
+    pair.settle();
+    pair.client.read_stream(4, h3_headers_frame(4, {{":status", "200"}, {"x-ok", "1"}}), true);
+    ASSERT_EQ(pair.client_owner.responses.size(), 1u) << "the connection serves on, a response without te delivered";
+    EXPECT_EQ(pair.client_owner.responses.front().header("x-ok"), "1");
+}
+
+/**
+ * @test A message whose field section passes the peer's SETTINGS_MAX_FIELD_SECTION_SIZE is never submitted (Huly
+ *       QB-1204)
+ * @brief RFC 9114 section 4.2.2: "An implementation that has received this parameter SHOULD NOT send an HTTP message
+ *        header that exceeds the indicated size, as the peer will likely refuse to process it." The size counts each
+ *        field's name and value and 32 bytes. Both sides of the pair advertise 64 KiB: a request and a response of
+ *        exactly 64 KiB cross, a byte more is refused by submit_request() and submit_response() before anything is
+ *        queued -- a trailer section alike --, and the connection serves on. Before the peer's SETTINGS arrive its bound
+ *        is unknown, unlimited (section 7.2.4.1), and the same request is submitted: the bound is the peer's.
+ */
+TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted) {
+    constexpr std::uint64_t advertised = 64 * 1024;
+    const auto              request_of = [](std::uint64_t size) {
+        qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/")};
+        for (auto const &[name, value] : section_of(size))
+            if (name.front() != ':')
+                request.add_header(name, value);
+        return request;
+    };
+    {
+        Pair pair;
+        EXPECT_FALSE(pair.client.submit_request(0, request_of(advertised + 1))) << "a byte past the server's bound";
+        EXPECT_TRUE(pair.client_owner.outbound.empty()) << "nothing was queued";
+        ASSERT_TRUE(pair.client.submit_request(4, request_of(advertised))) << "exactly the bound";
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+        EXPECT_TRUE(pair.server_owner.resets.empty());
+
+        // The response, by the client's bound.
+        qb::http::Response past;
+        past.status() = qb::http::status::OK;
+        for (auto const &[name, value] : section_of(advertised + 1, {{":status", "200"}}))
+            if (name.front() != ':')
+                past.add_header(name, value);
+        EXPECT_FALSE(pair.server.submit_response(4, past)) << "a byte past the client's bound";
+        qb::http::Response at;
+        at.status() = qb::http::status::OK;
+        for (auto const &[name, value] : section_of(advertised, {{":status", "200"}}))
+            if (name.front() != ':')
+                at.add_header(name, value);
+        ASSERT_TRUE(pair.server.submit_response(4, at)) << "exactly the bound";
+        pair.settle();
+        ASSERT_EQ(pair.client_owner.responses.size(), 1u);
+        EXPECT_FALSE(pair.client_owner.close.has_value());
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+    }
+    {
+        // A trailer section is a field section of its own.
+        Pair              pair;
+        qb::http::Request request{qb::http::method::POST, qb::io::uri("https://example.test/upload")};
+        request.body() = "abc";
+        for (auto const &[name, value] : section_of(advertised + 1, {}))
+            request.trailers().add_header(name, value);
+        EXPECT_FALSE(pair.client.submit_request(0, request)) << "a trailer section a byte past the bound";
+        EXPECT_TRUE(pair.client_owner.outbound.empty());
+    }
+    {
+        // Before the server's SETTINGS: no bound known, the request is submitted.
+        ClientOwner      client_owner;
+        ClientConnection client{client_owner, 1, ClientConnection::role::client};
+        ASSERT_TRUE(client.bind_local_streams());
+        EXPECT_TRUE(client.submit_request(0, request_of(advertised + 1))) << "the bound is the peer's, unknown until it says it";
+    }
+}
+
+/**
+ * @test A refused or answered request stream reads nothing more from its peer (Huly QB-1204, the residual of QB-1197)
+ * @brief RFC 9114 section 4.1.2: a `content-length` the DATA frames contradict makes a request malformed, "a stream
+ *        error of type H3_MESSAGE_ERROR". A request answered 431 -- or refused -- before its end arrived kept being read
+ *        by nghttp3, which took the mismatch at the end for a malformed message and closed the CONNECTION, every stream
+ *        with it. The stream's read side is shut once it is refused or answered, and what still arrives is discarded:
+ *        the end in a later read, a body then its end, a refused request's end. What follows in the read that refused
+ *        the stream -- an empty DATA frame or a reserved one, then the end, in one read -- nghttp3 (1.18.0) still reads
+ *        and judges, as it judges any stream it finds malformed: pinned here, documented.
+ */
+TEST(Http3ConnectionDirect, ARefusedOrAnsweredStreamReadsNothingMoreFromItsPeer) {
+    const auto over = [] {
+        auto fields           = request_fields();
+        fields.front().second = "POST";
+        fields.emplace_back("content-length", "5");
+        fields.emplace_back("x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
+        return fields;
+    };
+    for (int shape = 0; shape < 3; ++shape) {
+        SCOPED_TRACE(shape);
+        Pair pair;
+        auto fields = over();
+        if (shape == 2) { // malformed: a host that does not name :authority, refused rather than answered
+            fields.pop_back();
+            fields.emplace_back("host", "other.test");
+        }
+        EXPECT_TRUE(pair.server.read_stream(0, h3_headers_frame(0, fields), false));
+        EXPECT_TRUE(pair.server.read_stream(0, shape == 1 ? h3_data_frame("abc") : std::string{}, true))
+            << "the end of the stream, contradicting content-length, closed the connection";
+        pair.settle();
+        EXPECT_FALSE(pair.server_owner.close.has_value());
+        EXPECT_TRUE(pair.server_owner.requests.empty());
+        if (shape == 2) {
+            EXPECT_TRUE(reset(pair.server_owner, 0)) << "refused";
+        } else {
+            EXPECT_TRUE(stopped_without_error(pair.server_owner, 0)) << "answered";
+        }
+        // The connection serves the next request.
+        ASSERT_TRUE(pair.client.submit_request(4, qb::http::Request{qb::http::method::GET, qb::io::uri("https://example.test/next")}));
+        pair.settle();
+        ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    }
+    // The documented residual: an empty DATA frame, then the end, in the read that answered the stream.
+    Pair pair;
+    EXPECT_FALSE(pair.server.read_stream(0, h3_headers_frame(0, over()) + h3_data_frame(""), true));
+    ASSERT_TRUE(pair.server_owner.close.has_value()) << "nghttp3's own verdict on the read that refused the stream";
+    EXPECT_EQ(pair.server_owner.close->first, static_cast<std::uint64_t>(NGHTTP3_H3_MESSAGE_ERROR));
 }
 
 #endif // QBM_HTTP_HAS_HTTP3

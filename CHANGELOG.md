@@ -226,6 +226,25 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **HTTP/3: a response carrying `te` is refused, a message past the peer's field-section bound is never sent, a
+  response too large is discarded with `H3_REQUEST_CANCELLED`, and the late end of a refused or answered stream no
+  longer closes the connection (Huly QB-1204, points 2 to 5).** Measured on the base, the in-process nghttp3 pair:
+  - a response carrying `te: trailers` was delivered: nghttp3 (1.18.0) accepts it and so did the client, where RFC
+    9114 §4.2 allows `te` in a request alone and §4.1.2 has a client refuse a malformed response; it is refused on its
+    stream with `H3_MESSAGE_ERROR`, as the HTTP/2 client refuses it;
+  - the peer's `SETTINGS_MAX_FIELD_SECTION_SIZE` was ignored: the client sent a section of 64 KiB and a byte to a
+    server advertising 64 KiB (§4.2.2: an implementation "SHOULD NOT send an HTTP message header that exceeds the
+    indicated size"). The connection reads the peer's SETTINGS, and `submit_request()` / `submit_response()` refuse a
+    header or trailer section past the bound before anything is queued -- the client answers `503`, the server resets
+    the stream; the bound is unlimited until the peer's SETTINGS arrive;
+  - a request answered `431`, `414` or `413` -- or refused -- before its end arrived kept being read by nghttp3, and a
+    `content-length` the end contradicted closed the CONNECTION with `H3_MESSAGE_ERROR` (the QB-1197 residual), in
+    the three shapes where the end comes in a later read: its read side is now shut when the stream is refused or
+    answered (`nghttp3_conn_shutdown_stream_read`), and what still arrives is discarded. In the read that refused it,
+    an empty DATA frame or a reserved one then the end are still judged by nghttp3, as any stream it finds malformed;
+  - a response whose field or section passed the client's limits reset its stream with `H3_MESSAGE_ERROR`, the code
+    of a malformed message; it is discarded with `H3_REQUEST_CANCELLED`, the code the client's body cap already sent
+    (§8.1: "The request or its response ... is cancelled").
 - **The HTTP/2 client advertises the header-list bound it enforces, and a response past it fails its request instead of
   closing the connection (Huly QB-1211).** The client's HPACK decoder stops at 1 MiB of decoded list
   (`qb::http2::protocol_limits::MAX_HEADER_LIST_SIZE`), but the client advertised no `SETTINGS_MAX_HEADER_LIST_SIZE`,
