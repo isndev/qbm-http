@@ -3064,4 +3064,60 @@ TEST(Http3ConnectionDirect, ASectionTheDefaultLimitsAllowCrossesBothWays) {
     }
 }
 
+/**
+ * @test A bound the peer announces after a first message holds the next one (Huly QB-1268)
+ * @brief A section is counted when it is submitted, and only against a known, finite SETTINGS_MAX_FIELD_SECTION_SIZE
+ *        (header_block::passes_bound()): before the peer's SETTINGS the bound is unknown, unlimited (RFC 9114 §7.2.4.1),
+ *        and a message past 64 KiB is submitted; once they arrive with 64 KiB on the same connection, the same message
+ *        is refused before anything is queued and one at the bound submitted -- the bound is read when each message is
+ *        sent, never once for the connection. The client's request and the server's response alike.
+ */
+TEST(Http3ConnectionDirect, ABoundThePeerAnnouncesLaterHoldsTheNextMessage) {
+    constexpr std::uint64_t bound      = 64 * 1024;
+    const auto              request_of = [](std::uint64_t size) {
+        qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/")};
+        for (auto const &[name, value] : section_of(size))
+            if (name.front() != ':')
+                request.add_header(name, value);
+        return request;
+    };
+    const auto response_of = [](std::uint64_t size) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        for (auto const &[name, value] : section_of(size, {{":status", "200"}}))
+            if (name.front() != ':')
+                response.add_header(name, value);
+        return response;
+    };
+    // A peer's control stream: its type, then a SETTINGS frame with SETTINGS_MAX_FIELD_SECTION_SIZE (0x06) alone.
+    const auto peer_settings = h3_varint(0x00) + h3_frame(0x4, h3_varint(0x06) + h3_varint(bound));
+    {
+        ClientOwner      client_owner;
+        ClientConnection client{client_owner, 1, ClientConnection::role::client};
+        ASSERT_TRUE(client.bind_local_streams());
+        EXPECT_TRUE(client.submit_request(0, request_of(bound + 1))) << "no bound known yet";
+        ASSERT_TRUE(client.read_stream(3, peer_settings, false)) << "the server's control stream";
+        client_owner.outbound.clear();
+        EXPECT_FALSE(client.submit_request(4, request_of(bound + 1))) << "the bound the server announced since";
+        EXPECT_TRUE(client_owner.outbound.empty()) << "nothing was queued";
+        EXPECT_TRUE(client.submit_request(8, request_of(bound))) << "exactly the bound";
+        EXPECT_FALSE(client_owner.close.has_value());
+    }
+    {
+        ServerOwner      server_owner;
+        ServerConnection server{server_owner, 1, ServerConnection::role::server};
+        ASSERT_TRUE(server.bind_local_streams());
+        for (const std::uint64_t stream_id : {0u, 4u, 8u})
+            server.read_stream(stream_id, h3_headers_frame(stream_id, request_fields()), true);
+        ASSERT_EQ(server_owner.requests.size(), 3u);
+        EXPECT_TRUE(server.submit_response(0, response_of(bound + 1))) << "no bound known yet";
+        ASSERT_TRUE(server.read_stream(2, peer_settings, false)) << "the client's control stream";
+        server_owner.outbound.clear();
+        EXPECT_FALSE(server.submit_response(4, response_of(bound + 1))) << "the bound the client announced since";
+        EXPECT_TRUE(server_owner.outbound.empty()) << "nothing was queued";
+        EXPECT_TRUE(server.submit_response(8, response_of(bound))) << "exactly the bound";
+        EXPECT_FALSE(server_owner.close.has_value());
+    }
+}
+
 #endif // QBM_HTTP_HAS_HTTP3

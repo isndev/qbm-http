@@ -94,15 +94,16 @@ inline constexpr std::size_t max_sent_field_name_huffman = 160;
  * @brief Whether a field name crosses to a peer's nghttp3: within max_sent_field_name_length, and -- coded by Huffman,
  *        which the QPACK encoder (nghttp3's own) chooses when the code is shorter (RFC 9204 §4.1.2) -- a code within
  *        max_sent_field_name_huffman. A request or a response with a name that does not is refused before anything is
- *        submitted, as one past the other field bounds is: a name of 257 to 1024 bytes -- `MAX_HEADER_NAME_LENGTH` --
- *        was sent, and so was one of 161 to 256 coded past 160, and the peer closed the connection (Huly QB-1210).
- *        Measured only past 160 octets, where the cost is a Huffman count.
+ *        submitted: names of 257 to 1024 bytes, and of 161 to 256 coded past 160, were sent, and the peer closed the
+ *        connection (Huly QB-1210). Past 160 octets alone, a Huffman count, out of the builders' line (Huly QB-1268).
  */
+QB_NOINLINE QB_COLD inline bool sent_long_field_name_fits(std::string_view name) noexcept; // past 160 octets: cold, below
 inline bool
 sent_field_name_fits(std::string_view name) noexcept {
-    if (name.size() <= max_sent_field_name_huffman) {
-        return true; // within both bounds whichever way it is coded
-    }
+    return name.size() <= max_sent_field_name_huffman || sent_long_field_name_fits(name); // within both bounds, however coded
+}
+QB_NOINLINE QB_COLD inline bool
+sent_long_field_name_fits(std::string_view name) noexcept {
     if (name.size() > max_sent_field_name_length) {
         return false;
     }
@@ -110,8 +111,7 @@ sent_field_name_fits(std::string_view name) noexcept {
     for (const unsigned char c : name) {
         bits += qb::protocol::hpack::huffman::HUFFMAN_TABLE[c].bits;
     }
-    const auto coded = (bits + 7) / 8;
-    return coded >= name.size() || coded <= max_sent_field_name_huffman;
+    return (bits + 7) / 8 >= name.size() || (bits + 7) / 8 <= max_sent_field_name_huffman;
 }
 
 /**
@@ -219,9 +219,9 @@ declared_content_length(Message const &msg) {
 struct header_block {
     std::deque<std::pair<std::string, std::string>> storage; ///< Owning name/value byte buffers.
     std::vector<nghttp3_nv>                         nva;     ///< nghttp3 field views into @c storage.
-    /// The section's size as RFC 9114 §4.2.2 counts it -- each name and value, and field_line_overhead: what the peer's
-    /// SETTINGS_MAX_FIELD_SECTION_SIZE bounds (Huly QB-1204).
-    std::uint64_t section_size = 0;
+    /// Whether the section passes @p peer_bound, the peer's SETTINGS_MAX_FIELD_SECTION_SIZE (Huly QB-1204): counted as RFC
+    /// 9114 §4.2.2 counts it -- each name and value, and field_line_overhead -- when that bound is finite alone (QB-1268).
+    [[nodiscard]] bool passes_bound(std::uint64_t peer_bound) const noexcept;
 
     /**
      * @brief Append a field, copying ownership into @c storage and adding its view.
@@ -230,7 +230,7 @@ struct header_block {
      */
     void
     add(std::string name, std::string value) {
-        section_size += name.size() + value.size() + field_line_overhead;
+        // Its size is counted when the section is sent to a peer that bounds it (passes_bound(), Huly QB-1268).
         storage.emplace_back(std::move(name), std::move(value));
         auto &[stored_name, stored_value] = storage.back();
         nva.push_back(nghttp3_nv{
@@ -261,7 +261,7 @@ struct header_block {
         storage.shrink_to_fit();
         nva.clear();
         nva.shrink_to_fit();
-        section_size = 0;
+        // Nothing else to reset: passes_bound() counts the views (Huly QB-1268).
     }
 };
 
@@ -1899,7 +1899,7 @@ public:
                 return false;
             }
         }
-        if (headers->section_size > _peer_max_field_section_size || (trailers && trailers->section_size > _peer_max_field_section_size)) {
+        if (headers->passes_bound(_peer_max_field_section_size) || (trailers && trailers->passes_bound(_peer_max_field_section_size))) {
             return false; // past the client's SETTINGS_MAX_FIELD_SECTION_SIZE (Huly QB-1204)
         }
         st.tx_body   = response.body().template as<std::string>();
@@ -1955,7 +1955,7 @@ public:
                 trailers.reset(); // every field nominated by `connection`: no trailer section (Huly QB-1202)
             }
         }
-        if (headers->section_size > _peer_max_field_section_size || (trailers && trailers->section_size > _peer_max_field_section_size)) {
+        if (headers->passes_bound(_peer_max_field_section_size) || (trailers && trailers->passes_bound(_peer_max_field_section_size))) {
             return false; // past the server's SETTINGS_MAX_FIELD_SECTION_SIZE (Huly QB-1204)
         }
         st.request    = request;
@@ -2063,5 +2063,22 @@ public:
         notify_drained();
     }
 };
+
+namespace detail {
+
+// Defined at the file's tail, so that no line a document cites moves (Huly QB-1268).
+inline bool
+header_block::passes_bound(std::uint64_t peer_bound) const noexcept {
+    if (peer_bound == std::numeric_limits<std::uint64_t>::max()) {
+        return false; // no bound known -- none announced yet, unlimited (RFC 9114 §7.2.4.1): nothing to count
+    }
+    std::uint64_t size = 0;
+    for (auto const &field : nva) {
+        size += field.namelen + field.valuelen + field_line_overhead;
+    }
+    return size > peer_bound;
+}
+
+} // namespace detail
 
 } // namespace qb::protocol::http3
