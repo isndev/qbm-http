@@ -554,8 +554,8 @@ public:
 
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-            stream_ptr = &_server_streams.emplace(stream_id, std::move(new_stream)).first->second;
-            ++_client_streams_opened; // what the Rapid Reset guard measures resets against, not the highest id (Huly QB-1244)
+            auto              emp_res        = _server_streams.emplace(stream_id, std::move(new_stream));
+            stream_ptr                       = &emp_res.first->second;
             _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
         } else {
             stream_ptr = &it->second;
@@ -862,23 +862,23 @@ public:
             return;
         }
 
-        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM dispatches the request to the
-        // application yet frees the concurrency slot before it counts, so SETTINGS_MAX_CONCURRENT_STREAMS never bounds the
-        // work — unbounded CPU amplification on the single-threaded core. Count the reset for ANY non-idle stream (id at or
-        // below the highest client-initiated id) WHETHER OR NOT it is still resident: a synchronous-response server erases
-        // the stream inside the HEADERS handler (dispatch → send_response → close) before the paired RST arrives, so gating
-        // the count on the _server_streams.find() below would let that (common) configuration bypass the guard. Measure the
-        // resets against the client streams OPENED: a client may skip ids (RFC 9113 §5.1.1), and the highest id over two let
-        // one that opened 2^30+1 first reset some 2^29 streams before the guard tripped (Huly QB-1244).
-        // Idle streams (id > highest opened) are a protocol error handled further down, not here. A pushed (even)
+        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM dispatches the request yet frees the
+        // concurrency slot before it counts -- unbounded CPU amplification. Count the reset for ANY non-idle stream (id at or
+        // below the highest client id) WHETHER OR NOT it is resident: a synchronous server erases the stream in the HEADERS
+        // handler before the RST arrives. Weigh the resets against the streams the client OPENED -- a request dispatched, or one
+        // it cancelled before it was complete --, never its highest id: ids may be skipped (RFC 9113 §5.1.1), and a client that
+        // opened 2^30+1 first, or whose every other stream the server refused itself (a 4xx, a malformed message), was never
+        // tripped (Huly QB-1244). Idle streams (id > highest opened) are a protocol error handled further down. A pushed (even)
         // stream is the server's work, not the client's: its resets are no Rapid Reset, and one at or below the largest
         // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a
         // window update crossing the end of a push closed the connection (Huly QB-1239).
         const bool pushed = (stream_id & 1u) == 0u;
         if (!pushed && stream_id <= _last_client_initiated_stream_id) {
             ++_rst_stream_count;
-            const std::uint32_t streams_opened = _client_streams_opened; // created: an id skipped is no stream (Huly QB-1244)
-            if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > streams_opened) {
+            // Cancelled before its request was complete -- an upload, say: opened, never dispatched.
+            if (const auto held = _server_streams.find(stream_id); held != _server_streams.end() && !held->second.request_dispatched)
+                ++_client_streams_opened;
+            if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > _client_streams_opened) {
                 this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets (HTTP/2 Rapid Reset)");
                 return;
             }
@@ -2291,9 +2291,9 @@ private:
                 LOG_HTTP_WARN_PA(stream_id, "Failed to parse Cookie header: unknown exception");
             }
 
-            // CRITICAL: Mark as dispatched BEFORE calling _io.on() because it might trigger immediate response
-            // and close the stream, making the 'stream' reference invalid
+            // CRITICAL: dispatched BEFORE _io.on(), which may answer and close the stream, the reference dying with it.
             stream.request_dispatched = true;
+            ++_client_streams_opened; // a request the application serves, which the Rapid Reset guard weighs (Huly QB-1244)
 
             // _io.on() runs the application layer (router, middleware, sync
             // handlers) synchronously. It is reached from the noexcept frame
