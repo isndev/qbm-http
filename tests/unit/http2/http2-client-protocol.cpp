@@ -4182,21 +4182,23 @@ TEST(HTTP2ClientProtocol, AMalformedResponsePastTheBoundStaysAProtocolError) {
 }
 
 // ===========================================================================
-// A response the server cannot send is reset with INTERNAL_ERROR, read by the client off the wire (Huly QB-1265): a
-// `content-length` its body contradicts, and a header list past the client's SETTINGS_MAX_HEADER_LIST_SIZE (Huly
-// QB-1235). The request was well-formed: PROTOCOL_ERROR, which the first used until QB-1265, tells the client that it
-// broke the protocol (RFC 9113 §7) -- the HTTP/2 twin of HTTP/3's H3_REQUEST_CANCELLED (Huly QB-1241). The connection
-// serves on.
+// A response whose body contradicts its `content-length`, and one whose header list passes the client's
+// SETTINGS_MAX_HEADER_LIST_SIZE (Huly QB-1235), are reset with INTERNAL_ERROR, read by the client off the wire (Huly
+// QB-1265): the request was well-formed, and the server met "an unexpected internal error" (RFC 9113 §7) -- the first
+// was reset with PROTOCOL_ERROR. Nothing is sent before the reset, and the same connection serves the next request.
+// The other refusals of an invalid response keep their codes, by decision (HTTP/3 resets every one of them with
+// H3_REQUEST_CANCELLED, Huly QB-1241).
 // ===========================================================================
-TEST(HTTP2ClientProtocol, AResponseTheServerCannotSendIsResetWithInternalError) {
+TEST(HTTP2ClientProtocol, AContradictedContentLengthOrAListPastTheClientBoundIsResetWithInternalError) {
     qb::http::Response contradicted;
     contradicted.status() = qb::http::status::OK;
     contradicted.add_header("content-length", "100");
     contradicted.body() = std::string("short");
     qb::http::Response past_list;
     past_list.status() = qb::http::status::OK;
-    for (int i = 0; i < 140; ++i)
+    for (int i = 0; i < 140; ++i) {
         past_list.add_header("x-" + std::to_string(i), std::string(8000, 'v'));
+    }
     const std::vector<std::pair<std::string, qb::http::Response const *>> shapes{
         {"content-length the body contradicts", &contradicted},
         {"header list past the client's MAX_HEADER_LIST_SIZE", &past_list},
@@ -4217,10 +4219,28 @@ TEST(HTTP2ClientProtocol, AResponseTheServerCannotSendIsResetWithInternalError) 
 
         EXPECT_FALSE(server.send_response(1, *response)) << "refused";
         EXPECT_TRUE(server.ok()) << "a stream error, the connection kept";
+        EXPECT_EQ(find_frame_offset(server_io.output, h2::FrameType::HEADERS), SIZE_MAX) << "nothing sent before the reset";
         pump(client, client_io, server_io);
         EXPECT_TRUE(client.ok());
         EXPECT_EQ(client_io.stream_error_count, 1) << "the stream was reset";
         EXPECT_EQ(client_io.last_stream_error, h2::ErrorCode::INTERNAL_ERROR) << "the code on the wire";
         EXPECT_EQ(client_io.goaway_count, 0);
+
+        // The same connection serves the next request.
+        qb::http::Request next;
+        next.method() = qb::http::method::GET;
+        next.uri()    = qb::io::uri("https://example.test/next");
+        ASSERT_TRUE(client.send_request(std::move(next), 8));
+        pump(server, server_io, client_io);
+        ASSERT_EQ(server_io.request_count, 2);
+        qb::http::Response accepted;
+        accepted.status() = qb::http::status::OK;
+        accepted.body()   = "accepted";
+        ASSERT_TRUE(server.send_response(3, accepted));
+        pump(client, client_io, server_io);
+        EXPECT_EQ(client_io.response_count, 1);
+        EXPECT_EQ(client_io.last_status, 200);
+        EXPECT_EQ(client_io.last_body, std::string("accepted"));
+        EXPECT_EQ(client_io.last_app_id, 8u);
     }
 }
