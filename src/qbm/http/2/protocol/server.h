@@ -866,8 +866,8 @@ public:
         // concurrency slot before it counts -- unbounded CPU amplification. Count the reset for ANY non-idle stream (id at or
         // below the highest client id) WHETHER OR NOT it is resident: a synchronous server erases the stream in the HEADERS
         // handler before the RST arrives. Weigh the resets against the streams the client OPENED -- a request dispatched, or one
-        // it cancelled before it was complete --, never its highest id: ids may be skipped (RFC 9113 §5.1.1), and a client that
-        // opened 2^30+1 first, or whose every other stream the server refused itself (a 4xx, a malformed message), was never
+        // it cancelled before it was complete -- never its highest id: ids may be skipped (RFC 9113 §5.1.1), and a client that
+        // opened 2^30+1 first, or whose every other stream the server refused itself (413, 414, 431, malformed), was never
         // tripped (Huly QB-1244). Idle streams (id > highest opened) are a protocol error handled further down. A pushed (even)
         // stream is the server's work, not the client's: its resets are no Rapid Reset, and one at or below the largest
         // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a

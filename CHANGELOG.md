@@ -259,16 +259,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   QB-1244; CVE-2023-44487).** The guard closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)` once a client has reset
   more than `MAX_RAPID_RESETS` (100) streams and more than half of the streams it opened, and it took the streams opened
   as the highest client id over two. A client may skip ids (RFC 9113 §5.1.1): one that opened stream 2^30+1 first, then
-  sent a HEADERS(END_STREAM) and a RST_STREAM on each id after it, was counted 2^29 streams opened and never tripped the
-  guard -- some 5 x 10^8 requests dispatched then cancelled on one connection, the amplification the guard exists to
-  bound. Counting the streams the server created was not enough: a client that sent, before each pair, a request the
-  server refuses itself -- malformed, or over the field limits and answered `431` -- opened as many streams as it reset.
-  A stream now counts as opened when its request is dispatched to the application, or when the client cancels it before
-  its request is complete (an upload, as before); a stream the server refuses is none, and a protocol reset forgets
-  them. Measured on a server pair of frames: no `GOAWAY` after 400 pairs from stream 2^30+1, nor after 400 pairs each
-  behind a malformed request or a `431`; the 101st reset trips it now, as for a client that starts at stream 1, and
-  after 300 requests served the 301st (more than half of 300 + r). A client that cancels fewer than half of its streams
-  is served as before: 133 of 400 GETs reset, or 3 uploads cancelled in every 8 requests.
+  sent a HEADERS(END_STREAM) and a RST_STREAM on each id after it, was counted more than 2^29 streams opened and never
+  tripped the guard -- some 5 x 10^8 requests dispatched then cancelled on one connection, the amplification the guard
+  exists to bound. A stream now counts as opened when its request is dispatched to the application, whatever the
+  application answers, or when the client cancels it before its request is complete (an upload, as before); a stream the
+  protocol layer refuses itself -- answered 413, 414 or 431, or malformed -- is none, else a client that sent such a
+  request before each pair would open as many streams as it resets; a protocol reset forgets the count. Measured on a
+  client-to-server frame exchange: no `GOAWAY` after 400 pairs from stream 2^30+1, nor after 400 pairs each behind a
+  malformed request or a `431`; the 101st reset trips it now, as for a client that starts at stream 1, and after 300
+  requests served the 301st (more than half of 300 + r). A client that cancels fewer than half of its streams is served
+  as before: 133 of 400 GETs reset, answered later or inside the dispatch, or 3 uploads cancelled in every 8 requests.
 
 - **The HTTP/2 server resets a response whose body contradicts its `content-length` with `INTERNAL_ERROR`, not
   `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with

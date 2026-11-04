@@ -6199,8 +6199,8 @@ TEST(HTTP2ServerProtocol, AHeaderListBoundOfZeroRefusesEveryResponse) {
 
 // The Rapid Reset guard measures resets against the client streams OPENED (Huly QB-1244). A client may skip ids (RFC 9113
 // §5.1.1), and it was measured against the highest id over two: one that opened 2^30+1 first, then a HEADERS(END_STREAM)
-// and a RST_STREAM on each id after it, was counted 2^29 streams opened -- the guard asked for 2^29 resets, more than the
-// ids left, and some 5 x 10^8 requests dispatched then cancelled on one connection were the amplification it bounds. It
+// and a RST_STREAM on each id after it, was counted more than 2^29 streams opened -- the guard asked for more resets than
+// the ids left, and some 5 x 10^8 requests dispatched then cancelled on one connection were the amplification it bounds. It
 // now trips as for a client that starts at 1: past MAX_RAPID_RESETS, resets more than half the streams opened.
 TEST(HTTP2ServerProtocol, RapidResetCountsTheStreamsOpenedNotTheHighestId) {
     Http2FakeIO    io;
@@ -6405,4 +6405,79 @@ TEST(HTTP2ServerProtocol, AClientCancellingSomeUploadsIsServed) {
     EXPECT_EQ(io.goaway_count, 0) << "150 uploads cancelled of 400 streams tripped the guard";
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.request_count, 250);
+}
+
+namespace qb1244_test {
+
+/// A fake IO whose application answers inside the dispatch, as a synchronous handler does -- the stream is gone when the
+/// client's RST_STREAM arrives -- or throws, for the requests @c throws names.
+struct AnsweringIO : Http2FakeIO {
+    using Http2FakeIO::on;
+    std::function<void(uint32_t)> answer;
+    std::function<bool(uint32_t)> throws;
+    void
+    on(qb::http::Request &&request, uint32_t stream_id) {
+        Http2FakeIO::on(std::move(request), stream_id);
+        if (throws && throws(stream_id)) {
+            throw std::runtime_error("the handler failed");
+        }
+        if (answer) {
+            answer(stream_id);
+        }
+    }
+};
+using AnsweringProtocol = qb::protocol::http2::ServerHttp2Protocol<AnsweringIO>;
+
+} // namespace qb1244_test
+
+// A request answered inside its dispatch was opened (Huly QB-1244): its stream is gone when the client's reset arrives,
+// and the reset is counted all the same -- 400 requests answered synchronously, every third then reset (133), served.
+TEST(HTTP2ServerProtocol, AClientCancellingFewerThanHalfOfRequestsAnsweredInTheDispatchIsServed) {
+    qb1244_test::AnsweringIO       io;
+    qb1244_test::AnsweringProtocol protocol(io);
+    io.answer = [&protocol](uint32_t sid) {
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        EXPECT_TRUE(protocol.send_response(sid, answer));
+    };
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, {});
+    drive(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < 400; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        if (i % 3 == 2) {
+            push_frame(io, FrameType::RST_STREAM, 0, sid, {0x00, 0x00, 0x00, 0x08});
+        }
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "133 resets of 400 requests answered in the dispatch tripped the guard";
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 400);
+}
+
+// A request whose handler throws was dispatched, work done: it counts as opened (Huly QB-1244) -- one before each
+// HEADERS + RST_STREAM pair, 400 pairs: 400 resets of 800 streams, never past half.
+TEST(HTTP2ServerProtocol, ARequestWhoseHandlerThrowsCountsAsOpened) {
+    qb1244_test::AnsweringIO       io;
+    qb1244_test::AnsweringProtocol protocol(io);
+    io.throws = [](uint32_t sid) {
+        return sid % 4 == 1;
+    };
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, {});
+    drive(protocol, io);
+    for (uint32_t sid = 1; sid < 1600; sid += 4) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/throws")));
+        drive(protocol, io);
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid + 2,
+                   encode_hpack_headers(default_request_headers("/")));
+        push_frame(io, FrameType::RST_STREAM, 0, sid + 2, {0x00, 0x00, 0x00, 0x08});
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "the requests whose handler threw were not counted opened";
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 800);
 }
