@@ -946,13 +946,13 @@ public:
     /**
      * @brief Encode and submit an HTTP response onto a stream.
      *
-     * On submission failure the stream is reset; on success, graceful shutdown
-     * progress is re-evaluated.
+     * On submission failure the stream is reset with H3_REQUEST_CANCELLED, a response abandoned (RFC 9114 §4.1.1;
+     * H3_MESSAGE_ERROR, a malformed request's code, until Huly QB-1241); on success, graceful shutdown is re-evaluated.
      *
      * @param connection_id Owning QUIC connection.
      * @param stream_id     Target stream.
      * @param response      Response to encode and send.
-     * @return True if the response was submitted, false if the stream was reset.
+     * @return True if the response was submitted; false if the stream was reset, or the connection is gone.
      */
     bool
     send_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const &response) {
@@ -968,7 +968,7 @@ public:
             maybe_finish_graceful_shutdown(connection_id);
             return true;
         }
-        reset_http3_stream(connection_id, stream_id, 0x010e);
+        reset_http3_stream(connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
         return false;
     }
 };
