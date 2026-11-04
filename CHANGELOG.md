@@ -255,6 +255,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **Security: the HTTP/2 server's Rapid Reset guard counts the streams a client opened, not its highest stream id (Huly
+  QB-1244; CVE-2023-44487).** The guard closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)` once a client has reset
+  more than `MAX_RAPID_RESETS` (100) streams and more than half of the streams it opened -- and it took the streams
+  opened as the highest client id over two. A client may skip ids (RFC 9113 §5.1.1): one that opened stream 2^30+1
+  first, then sent a HEADERS(END_STREAM) and a RST_STREAM on each id after it, was counted 2^29 streams opened, and the
+  guard asked for 2^29 resets, more than the ids left -- some 5 x 10^8 requests dispatched then cancelled on one
+  connection, the amplification the guard exists to bound. Measured: no `GOAWAY` after 400 such pairs on the base; the
+  101st reset trips it now, as for a client that starts at stream 1. A client that cancels fewer than half of its
+  streams (133 of 400, from stream 1 or 1001) is served as before, and a protocol reset forgets the streams the last
+  connection opened.
+
 - **The HTTP/2 server resets a response whose body contradicts its `content-length` with `INTERNAL_ERROR`, not
   `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with
   `PROTOCOL_ERROR`, a protocol error the endpoint detected (RFC 9113 §7); the request was well-formed, and the server met

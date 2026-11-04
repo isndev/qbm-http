@@ -5937,7 +5937,7 @@ TEST(HTTP2ServerProtocol, AClientCancellingPushesIsNoRapidReset) {
     ServerProtocol protocol(io);
     handshake_push_enabled(protocol, io);
     open_get_stream_end_stream(protocol, io, 1, "/parent");
-    open_get_stream_end_stream(protocol, io, 401, "/late"); // the client's ids reach 401: 201 streams counted opened
+    open_get_stream_end_stream(protocol, io, 401, "/late"); // ids skipped: two streams opened (Huly QB-1244), no inflation
     ASSERT_TRUE(protocol.ok());
     constexpr uint32_t pushes = ::qb::http2::protocol_limits::MAX_RAPID_RESETS + 10;
     for (uint32_t i = 1; i <= pushes; ++i) {
@@ -6194,4 +6194,92 @@ TEST(HTTP2ServerProtocol, AHeaderListBoundOfZeroRefusesEveryResponse) {
     EXPECT_FALSE(headers_sent_on(io.output, 1));
     EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::INTERNAL_ERROR);
     EXPECT_TRUE(protocol.ok());
+}
+
+// The Rapid Reset guard measures resets against the client streams OPENED (Huly QB-1244). A client may skip ids (RFC 9113
+// §5.1.1), and it was measured against the highest id over two: one that opened 2^30+1 first, then a HEADERS(END_STREAM)
+// and a RST_STREAM on each id after it, was counted 2^29 streams opened -- the guard asked for 2^29 resets, more than the
+// ids left, and some 5 x 10^8 requests dispatched then cancelled on one connection were the amplification it bounds. It
+// now trips as for a client that starts at 1: past MAX_RAPID_RESETS, resets more than half the streams opened.
+TEST(HTTP2ServerProtocol, RapidResetCountsTheStreamsOpenedNotTheHighestId) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // CANCEL
+    uint32_t                   sid = (1u << 30) + 1u;
+    open_get_stream_end_stream(protocol, io, sid, "/high"); // the first id the client uses: none below it opens a stream
+    ASSERT_TRUE(protocol.ok());
+    int pairs = 0;
+    for (sid += 2; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        push_frame(io, FrameType::RST_STREAM, 0, sid, rst_cancel);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "the guard did not trip after " << pairs << " HEADERS + RST_STREAM pairs";
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(pairs, static_cast<int>(::qb::http2::protocol_limits::MAX_RAPID_RESETS) + 1) << "trips at the first reset past the limit";
+}
+
+// The positive control: a client that cancels fewer than half of the streams it opens is served, ids skipped or not --
+// 400 requests, every third one reset (133 resets, past MAX_RAPID_RESETS), from id 1 and from id 1001.
+TEST(HTTP2ServerProtocol, AClientCancellingFewerThanHalfItsStreamsIsServed) {
+    for (const uint32_t first : {1u, 1001u}) {
+        SCOPED_TRACE(first);
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // CANCEL
+        int                        resets = 0;
+        uint32_t                   sid    = first;
+        for (int i = 0; i < 400; ++i, sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/")));
+            if (i % 3 == 2) {
+                push_frame(io, FrameType::RST_STREAM, 0, sid, rst_cancel);
+                ++resets;
+            }
+            drive(protocol, io);
+            if (i % 3 != 2) {
+                qb::http::Response answer; // served: the stream closes, and SETTINGS_MAX_CONCURRENT_STREAMS keeps room
+                answer.status() = qb::http::status::OK;
+                EXPECT_TRUE(protocol.send_response(sid, answer));
+            }
+        }
+        EXPECT_GT(resets, static_cast<int>(::qb::http2::protocol_limits::MAX_RAPID_RESETS));
+        EXPECT_EQ(io.goaway_count, 0) << resets << " resets of 400 streams tripped the guard";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.request_count, 400);
+    }
+}
+
+// A protocol reset starts a new connection: the streams the last one opened no longer dilute its resets (Huly QB-1244).
+TEST(HTTP2ServerProtocol, AProtocolResetForgetsTheStreamsOpened) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    for (uint32_t sid = 1; sid < 800; sid += 2) { // 400 streams opened, each served
+        open_get_stream_end_stream(protocol, io, sid, "/");
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        ASSERT_TRUE(protocol.send_response(sid, answer));
+    }
+    ASSERT_EQ(io.request_count, 400);
+
+    protocol.reset();
+    io.input.reset();
+    io.output.reset();
+    do_handshake(protocol, io);
+    const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // CANCEL
+    int                        pairs = 0;
+    for (uint32_t sid = 1; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        push_frame(io, FrameType::RST_STREAM, 0, sid, rst_cancel);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "the 400 streams of the connection before the reset diluted the resets";
+    EXPECT_EQ(pairs, static_cast<int>(::qb::http2::protocol_limits::MAX_RAPID_RESETS) + 1);
 }

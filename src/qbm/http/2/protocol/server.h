@@ -84,9 +84,9 @@ private:
     qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;                      ///< Active stream contexts
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
-    std::uint32_t                                  _rst_stream_count                = 0; ///< Client RST_STREAMs seen (Rapid Reset guard)
-    std::uint32_t _control_reply_count      = 0; ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
-    std::uint32_t _continuation_frame_count = 0; ///< CONTINUATION frames in the current header block (flood guard)
+    std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client RST_STREAMs, client streams opened (Rapid Reset guard)
+    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
+    std::uint32_t _continuation_frame_count = 0;                     ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
     uint32_t             _current_header_stream_id = 0;     ///< Stream ID for header assembly
@@ -229,13 +229,13 @@ public:
         _current_header_stream_id        = 0;
         _last_client_initiated_stream_id = 0;
         _next_server_initiated_stream_id = 2;
-        _rst_stream_count                = 0;
-        _control_reply_count             = 0;
-        _continuation_frame_count        = 0;
-        _connection_active               = true;
-        _graceful_shutdown_initiated     = false;
-        _shutdown_phase                  = shutdown_phase::none;
-        _initial_settings_sent           = false;
+        _rst_stream_count = _client_streams_opened = 0;
+        _control_reply_count                       = 0;
+        _continuation_frame_count                  = 0;
+        _connection_active                         = true;
+        _graceful_shutdown_initiated               = false;
+        _shutdown_phase                            = shutdown_phase::none;
+        _initial_settings_sent                     = false;
 
         // Re-initialize our settings and derived values
         this->initialize_our_settings_map();
@@ -554,8 +554,8 @@ public:
 
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-            auto              emp_res        = _server_streams.emplace(stream_id, std::move(new_stream));
-            stream_ptr                       = &emp_res.first->second;
+            stream_ptr = &_server_streams.emplace(stream_id, std::move(new_stream)).first->second;
+            ++_client_streams_opened; // what the Rapid Reset guard measures resets against, not the highest id (Huly QB-1244)
             _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
         } else {
             stream_ptr = &it->second;
@@ -862,14 +862,14 @@ public:
             return;
         }
 
-        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM
-        // dispatches the request to the application yet frees the concurrency slot before it
-        // counts, so SETTINGS_MAX_CONCURRENT_STREAMS never bounds the work — unbounded CPU
-        // amplification on the single-threaded core. Count the reset for ANY non-idle stream
-        // (id at or below the highest client-initiated id) WHETHER OR NOT it is still resident:
-        // a synchronous-response server erases the stream inside the HEADERS handler (dispatch →
-        // send_response → close) before the paired RST arrives, so gating the count on the
-        // _server_streams.find() below would let that (common) configuration bypass the guard.
+        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM dispatches the request to the
+        // application yet frees the concurrency slot before it counts, so SETTINGS_MAX_CONCURRENT_STREAMS never bounds the
+        // work — unbounded CPU amplification on the single-threaded core. Count the reset for ANY non-idle stream (id at or
+        // below the highest client-initiated id) WHETHER OR NOT it is still resident: a synchronous-response server erases
+        // the stream inside the HEADERS handler (dispatch → send_response → close) before the paired RST arrives, so gating
+        // the count on the _server_streams.find() below would let that (common) configuration bypass the guard. Measure the
+        // resets against the client streams OPENED: a client may skip ids (RFC 9113 §5.1.1), and the highest id over two let
+        // one that opened 2^30+1 first reset some 2^29 streams before the guard tripped (Huly QB-1244).
         // Idle streams (id > highest opened) are a protocol error handled further down, not here. A pushed (even)
         // stream is the server's work, not the client's: its resets are no Rapid Reset, and one at or below the largest
         // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a
@@ -877,7 +877,7 @@ public:
         const bool pushed = (stream_id & 1u) == 0u;
         if (!pushed && stream_id <= _last_client_initiated_stream_id) {
             ++_rst_stream_count;
-            const std::uint32_t streams_opened = static_cast<std::uint32_t>((_last_client_initiated_stream_id + 1u) / 2u);
+            const std::uint32_t streams_opened = _client_streams_opened; // created: an id skipped is no stream (Huly QB-1244)
             if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > streams_opened) {
                 this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets (HTTP/2 Rapid Reset)");
                 return;
