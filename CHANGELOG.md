@@ -259,7 +259,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with
   `PROTOCOL_ERROR`, a protocol error the endpoint detected (RFC 9113 §7); the request was well-formed, and the server met
   "an unexpected internal error" in the application's response. A header list past the client's
-  `SETTINGS_MAX_HEADER_LIST_SIZE` already used `INTERNAL_ERROR` (Huly QB-1235): both now use it, as decided (HTTP/3
+  `SETTINGS_MAX_HEADER_LIST_SIZE` already used `INTERNAL_ERROR` (3.3.0 did; Huly QB-1235 moved that check before
+  encoding): both now use it, as decided (HTTP/3
   resets the same cases with `H3_REQUEST_CANCELLED`, Huly QB-1241). Read by the client off the wire, on a client/server
   pair: `PROTOCOL_ERROR` for a contradicted `content-length`, `INTERNAL_ERROR` now; nothing is sent before the reset,
   and the same connection serves the next request. The other refusals of an invalid response keep their codes.

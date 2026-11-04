@@ -4243,4 +4243,24 @@ TEST(HTTP2ClientProtocol, AContradictedContentLengthOrAListPastTheClientBoundIsR
         EXPECT_EQ(client_io.last_body, std::string("accepted"));
         EXPECT_EQ(client_io.last_app_id, 8u);
     }
+
+    // The control: the same fields, fewer of them, the list under the client's 1 MiB -- sent and delivered.
+    Http2ClientFakeIO                          client_io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+    Http2PeerFakeIO                            server_io;
+    h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+    qb::http::Request                          req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/under");
+    ASSERT_TRUE(client.send_request(std::move(req), 9));
+    pump(server, server_io, client_io);
+    qb::http::Response under_list;
+    under_list.status() = qb::http::status::OK;
+    for (int i = 0; i < 120; ++i) {
+        under_list.add_header("x-" + std::to_string(i), std::string(8000, 'v'));
+    }
+    ASSERT_TRUE(server.send_response(1, under_list)) << "120 fields of 8000 bytes, some 0.96 MB, within the bound";
+    pump(client, client_io, server_io);
+    EXPECT_EQ(client_io.stream_error_count, 0);
+    EXPECT_EQ(client_io.response_count, 1);
 }
