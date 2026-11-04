@@ -1286,7 +1286,7 @@ public:
         const bool  body_length_must_match =
             !response_to_head && !((status_code >= 100 && status_code < 200) || status_code == 204 || status_code == 304);
         if (declared_content_length && body_length_must_match && body_pipe.size() != *declared_content_length) {
-            this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response content-length mismatch");
+            this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, "HTTP/2 response content-length mismatch");
             return false;
         }
         if (body_pipe.size() > qb::http::protocol_limits::MAX_BODY_SIZE) {

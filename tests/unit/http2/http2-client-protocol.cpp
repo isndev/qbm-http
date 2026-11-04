@@ -4180,3 +4180,47 @@ TEST(HTTP2ClientProtocol, AMalformedResponsePastTheBoundStaysAProtocolError) {
     EXPECT_EQ(io.response_count, 0);
     EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 1), h2::ErrorCode::PROTOCOL_ERROR) << "malformed, whatever its size";
 }
+
+// ===========================================================================
+// A response the server cannot send is reset with INTERNAL_ERROR, read by the client off the wire (Huly QB-1265): a
+// `content-length` its body contradicts, and a header list past the client's SETTINGS_MAX_HEADER_LIST_SIZE (Huly
+// QB-1235). The request was well-formed: PROTOCOL_ERROR, which the first used until QB-1265, tells the client that it
+// broke the protocol (RFC 9113 §7) -- the HTTP/2 twin of HTTP/3's H3_REQUEST_CANCELLED (Huly QB-1241). The connection
+// serves on.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, AResponseTheServerCannotSendIsResetWithInternalError) {
+    qb::http::Response contradicted;
+    contradicted.status() = qb::http::status::OK;
+    contradicted.add_header("content-length", "100");
+    contradicted.body() = std::string("short");
+    qb::http::Response past_list;
+    past_list.status() = qb::http::status::OK;
+    for (int i = 0; i < 140; ++i)
+        past_list.add_header("x-" + std::to_string(i), std::string(8000, 'v'));
+    const std::vector<std::pair<std::string, qb::http::Response const *>> shapes{
+        {"content-length the body contradicts", &contradicted},
+        {"header list past the client's MAX_HEADER_LIST_SIZE", &past_list},
+    };
+    for (auto const &[label, response] : shapes) {
+        SCOPED_TRACE(label);
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        Http2PeerFakeIO                            server_io;
+        h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/refused");
+        ASSERT_TRUE(client.send_request(std::move(req), 7));
+        pump(server, server_io, client_io);
+        ASSERT_EQ(server_io.request_count, 1);
+
+        EXPECT_FALSE(server.send_response(1, *response)) << "refused";
+        EXPECT_TRUE(server.ok()) << "a stream error, the connection kept";
+        pump(client, client_io, server_io);
+        EXPECT_TRUE(client.ok());
+        EXPECT_EQ(client_io.stream_error_count, 1) << "the stream was reset";
+        EXPECT_EQ(client_io.last_stream_error, h2::ErrorCode::INTERNAL_ERROR) << "the code on the wire";
+        EXPECT_EQ(client_io.goaway_count, 0);
+    }
+}

@@ -255,6 +255,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **The HTTP/2 server resets a response whose body contradicts its `content-length` with `INTERNAL_ERROR`, not
+  `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with
+  `PROTOCOL_ERROR`, which tells the client that it broke the protocol (RFC 9113 §7); the request was well-formed, the
+  application's response was not. A header list past the client's `SETTINGS_MAX_HEADER_LIST_SIZE` already used
+  `INTERNAL_ERROR` (Huly QB-1235): both are now the same code, the HTTP/2 twin of HTTP/3's `H3_REQUEST_CANCELLED` (Huly
+  QB-1241). Read by the client off the wire, on a client/server pair: `PROTOCOL_ERROR` for a contradicted
+  `content-length`, `INTERNAL_ERROR` now; the connection serves on.
+
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
   `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`

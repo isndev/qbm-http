@@ -1711,10 +1711,10 @@ TEST(HTTP2ServerProtocol, ResponseWithMismatchedContentLengthIsStreamError) {
     response.body()   = "short"; // 5 bytes
     response.set_header("content-length", "999");
 
-    // body size (5) != declared content-length (999) -> on_stream_error.
+    // body size (5) != declared content-length (999) -> on_stream_error, INTERNAL_ERROR: the response is at fault (QB-1265).
     EXPECT_FALSE(protocol.send_response(1, response));
     EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR);
 }
 
 // ---------------------------------------------------------------------------

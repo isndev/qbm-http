@@ -174,7 +174,7 @@ TEST(HTTP2ServerProtocol, PaddedDataFrameCountsPaddingAgainstFlowControl) {
 
 // ===========================================================================
 // Server: an outgoing response whose body length disagrees with its declared
-// content-length is rejected with a stream error.
+// content-length is rejected with a stream error, INTERNAL_ERROR (Huly QB-1265).
 // ===========================================================================
 TEST(HTTP2ServerProtocol, RejectsOutgoingResponseContentLengthMismatch) {
     Http2FakeIO                          io;
@@ -197,7 +197,7 @@ TEST(HTTP2ServerProtocol, RejectsOutgoingResponseContentLengthMismatch) {
 
     EXPECT_FALSE(protocol.send_response(1, response));
     EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.last_stream_error, h2::ErrorCode::INTERNAL_ERROR);
 }
 
 // ===========================================================================
