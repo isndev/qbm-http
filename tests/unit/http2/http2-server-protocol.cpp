@@ -29,9 +29,11 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "../../shared/http2_fake_io.h"
@@ -6480,4 +6482,223 @@ TEST(HTTP2ServerProtocol, ARequestWhoseHandlerThrowsCountsAsOpened) {
     EXPECT_EQ(io.goaway_count, 0) << "the requests whose handler threw were not counted opened";
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.request_count, 800);
+}
+
+namespace qb1244_test {
+
+/// A frame on @p sid that makes the server reset the request it dispatched there -- the MadeYouReset family
+/// (CVE-2025-8671): the client sends no RST_STREAM, the server resets the stream itself. (A WINDOW_UPDATE of 0 or a short
+/// PRIORITY is none here, the framer ends the connection at the first: AFrameTheFramerRefusesEndsTheConnection.)
+enum class provocation { data_after_end_stream, headers_after_end_stream, window_overflow };
+
+void
+provoke(Http2FakeIO &io, provocation how, uint32_t sid) {
+    switch (how) {
+        case provocation::data_after_end_stream:
+            push_frame(io, FrameType::DATA, 0, sid, {'x'});
+            break;
+        case provocation::headers_after_end_stream:
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers({{"x-trailer", "1"}}));
+            break;
+        case provocation::window_overflow:
+            push_frame(io, FrameType::WINDOW_UPDATE, 0, sid, {0x7f, 0xff, 0xff, 0xff}); // past 2^31-1 with the initial window
+            break;
+    }
+}
+
+} // namespace qb1244_test
+
+// MadeYouReset (CVE-2025-8671): a client that makes the SERVER reset each request it dispatched -- DATA or HEADERS after
+// END_STREAM, a window overflow -- frees the concurrency slot as its own RST_STREAM would, and the application's work goes
+// on. Such a reset counts against the Rapid Reset ceiling as the client's RST_STREAM does (Huly QB-1244): no GOAWAY after
+// 400 such pairs on 3ab1024, GOAWAY(ENHANCE_YOUR_CALM) at the 101st now.
+TEST(HTTP2ServerProtocol, AResetTheClientProvokesCountsAgainstTheRapidResetCeiling) {
+    using qb1244_test::provocation;
+    for (const auto how : {provocation::data_after_end_stream, provocation::headers_after_end_stream, provocation::window_overflow}) {
+        SCOPED_TRACE(static_cast<int>(how));
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        int      pairs = 0;
+        uint32_t sid   = 1;
+        for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/")));
+            drive(protocol, io);
+            qb1244_test::provoke(io, how, sid);
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 1) << "the resets the client provoked were never counted";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(pairs, qb1244_test::max_resets + 1);
+        EXPECT_EQ(io.request_count, pairs) << "each provoked reset cancelled a dispatched request";
+    }
+}
+
+// The server's own resets are not the client's (Huly QB-1244): 400 requests whose handler throws (INTERNAL_ERROR), and
+// 400 answered with a field HTTP/2 cannot carry (PROTOCOL_ERROR, the application's fault), close no connection.
+TEST(HTTP2ServerProtocol, TheServersOwnResetsAreNotCountedAgainstTheClient) {
+    {
+        qb1244_test::AnsweringIO       io;
+        qb1244_test::AnsweringProtocol protocol(io);
+        io.throws = [](uint32_t) {
+            return true;
+        };
+        push_preface(io);
+        push_frame(io, FrameType::SETTINGS, 0, 0, {});
+        drive(protocol, io);
+        for (uint32_t sid = 1; sid < 800; sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/throws")));
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "the server's INTERNAL_ERROR resets were counted against the client";
+        EXPECT_EQ(io.request_count, 400);
+    }
+    {
+        qb1244_test::AnsweringIO       io;
+        qb1244_test::AnsweringProtocol protocol(io);
+        io.answer = [&protocol](uint32_t sid) {
+            qb::http::Response invalid;
+            invalid.status() = qb::http::status::OK;
+            invalid.add_header("connection", "close"); // connection-specific: refused, PROTOCOL_ERROR
+            EXPECT_FALSE(protocol.send_response(sid, invalid));
+        };
+        push_preface(io);
+        push_frame(io, FrameType::SETTINGS, 0, 0, {});
+        drive(protocol, io);
+        for (uint32_t sid = 1; sid < 800; sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/invalid")));
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "the server's PROTOCOL_ERROR resets of the application's responses were counted";
+        EXPECT_EQ(io.request_count, 400);
+        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    }
+}
+
+// The browser pattern stays GOAWAY-free (Huly QB-1244): 400 requests with WINDOW_UPDATEs of their streams, every third
+// cancelled by a RST_STREAM, the others answered -- no reset is provoked, 133 are the client's, of 400 streams.
+TEST(HTTP2ServerProtocol, ABrowserReadingAndCancellingIsServed) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < 400; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        push_frame(io, FrameType::WINDOW_UPDATE, 0, sid, {0x00, 0x01, 0x00, 0x00}); // 65536 more octets
+        drive(protocol, io);
+        if (i % 3 == 2) {
+            push_frame(io, FrameType::RST_STREAM, 0, sid, {0x00, 0x00, 0x00, 0x08});
+            drive(protocol, io);
+        } else {
+            qb::http::Response answer;
+            answer.status() = qb::http::status::OK;
+            answer.body()   = "ok";
+            ASSERT_TRUE(protocol.send_response(sid, answer));
+        }
+    }
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 400);
+}
+
+// Two frames of the MadeYouReset family never reach the stream: the framer refuses a WINDOW_UPDATE of 0 and a PRIORITY
+// that is not 5 octets, resets that stream and ends the connection (Huly QB-1244) -- the request dispatched before it is the
+// only one, and what follows is never read. A client provokes one such reset per connection.
+TEST(HTTP2ServerProtocol, AFrameTheFramerRefusesEndsTheConnection) {
+    const std::vector<std::tuple<std::string, FrameType, std::vector<uint8_t>, ErrorCode>> frames{
+        {"WINDOW_UPDATE of 0", FrameType::WINDOW_UPDATE, {0x00, 0x00, 0x00, 0x00}, ErrorCode::PROTOCOL_ERROR},
+        {"PRIORITY of 4 octets", FrameType::PRIORITY, {0x00, 0x00, 0x00, 0x00}, ErrorCode::FRAME_SIZE_ERROR},
+    };
+    for (auto const &[label, type, payload, error] : frames) {
+        SCOPED_TRACE(label);
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        for (uint32_t sid = 1; sid < 20; sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/")));
+            push_frame(io, type, 0, sid, payload);
+            drive(protocol, io);
+        }
+        EXPECT_FALSE(protocol.ok()) << "the connection is over";
+        EXPECT_EQ(io.request_count, 1) << "nothing after the first refused frame is read";
+        EXPECT_EQ(last_rst_stream_error(io.output, 1), error);
+    }
+}
+
+// A PRIORITY naming its own stream is ignored, not reset (Huly QB-1244): the requests stay in flight and hold their
+// slots -- the 51st stream is refused -- so it frees no concurrency slot.
+TEST(HTTP2ServerProtocol, APriorityOnItsOwnStreamResetsNothing) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < 51; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        push_frame(io, FrameType::PRIORITY, 0, sid,
+                   {static_cast<uint8_t>(sid >> 24), static_cast<uint8_t>(sid >> 16), static_cast<uint8_t>(sid >> 8), static_cast<uint8_t>(sid),
+                    0x10});
+        drive(protocol, io);
+    }
+    EXPECT_FALSE(last_rst_stream_error(io.output, 1).has_value()) << "a PRIORITY on its own stream reset it";
+    EXPECT_EQ(io.request_count, 50);
+    EXPECT_EQ(last_rst_stream_error(io.output, 101), ErrorCode::REFUSED_STREAM) << "the 50 requests in flight hold the slots";
+    EXPECT_EQ(io.goaway_count, 0);
+}
+
+// A provoked reset is weighed as the client's own RST_STREAM is (Huly QB-1244): 300 requests served, then HEADERS(END_STREAM)
+// + DATA pairs -- r provoked resets of 300 + r requests pass half at the 301st, not at the 101st.
+TEST(HTTP2ServerProtocol, AProvokedResetIsWeighedAgainstHalfTheStreamsOpened) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < 300; ++i, sid += 2) {
+        open_get_stream_end_stream(protocol, io, sid, "/");
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        ASSERT_TRUE(protocol.send_response(sid, answer));
+    }
+    int pairs = 0;
+    for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/")));
+        drive(protocol, io);
+        qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, sid);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(pairs, 301) << "300 + r requests, r provoked resets: past half at r = 301";
+}
+
+// A reset the client provokes before its request is dispatched -- a window overflow on an upload still open -- stops no
+// application work: it is not counted (Huly QB-1244), as a stream the protocol layer refuses is not. 400 such streams,
+// no GOAWAY.
+TEST(HTTP2ServerProtocol, AResetProvokedBeforeTheRequestIsDispatchedIsNotCounted) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    auto post = default_request_headers("/upload");
+    for (auto &field : post) {
+        if (field.name == ":method") {
+            field.value = "POST";
+        }
+    }
+    uint32_t sid = 1;
+    for (int i = 0; i < 400; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, encode_hpack_headers(post));
+        qb1244_test::provoke(io, qb1244_test::provocation::window_overflow, sid);
+        drive(protocol, io);
+        ASSERT_EQ(last_rst_stream_error(io.output, sid), ErrorCode::FLOW_CONTROL_ERROR);
+    }
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_count, 0);
 }

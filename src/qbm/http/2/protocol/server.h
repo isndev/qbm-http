@@ -400,8 +400,8 @@ public:
             return;
         }
         if (stream.end_stream_received) {
-            // this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
-            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
+            // Provoked by the client's frame: counted against the Rapid Reset ceiling (MadeYouReset, Huly QB-1244).
+            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.", true, /*provoked=*/true);
             this->_connection_receive_window -= data_payload_size;
             this->conditionally_send_connection_window_update();
             return;
@@ -577,8 +577,8 @@ public:
             // The client ended its side (END_STREAM): a trailer section would have had to come
             // before it, and nothing but WINDOW_UPDATE, PRIORITY or RST_STREAM may follow -- a
             // stream error of type STREAM_CLOSED (RFC 9113 §5.1). It used to be PROTOCOL_ERROR
-            // (Huly QB-1058).
-            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS frame after the client ended the stream");
+            // (Huly QB-1058). Provoked: counted against the Rapid Reset ceiling (Huly QB-1244).
+            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS frame after the client ended the stream", true, true);
             this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
@@ -1091,7 +1091,7 @@ public:
 
             if (stream.peer_window_size > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
                 this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR,
-                                      "Stream WINDOW_UPDATE causes flow control window to exceed maximum.");
+                                      "Stream WINDOW_UPDATE causes flow control window to exceed maximum.", true, /*provoked=*/true);
                 return;
             }
 
@@ -1597,59 +1597,59 @@ public:
     }
 
     /**
-     * @brief Send RST_STREAM frame
-     *
-     * Sends a stream reset frame and marks the stream as closed.
-     * This method is public to allow the session layer to send RST_STREAM
-     * when routing fails or other application-level errors occur.
-     *
-     * @param stream_id Stream identifier
-     * @param error_code Error code for the reset
-     * @param context_msg Debug context message
+     * @brief Send RST_STREAM frame and mark the stream closed; public, so that the session layer resets a stream when
+     *        routing fails or another application-level error occurs.
+     * @param stream_id     Stream identifier
+     * @param error_code    Error code for the reset
+     * @param context_msg   Debug context message
+     * @param close_context false from deep inside a frame handler that still holds a reference to this stream: erasing
+     *                      its context would dangle that reference, and the caller reclaims it.
+     * @param provoked      the client's own frame provoked the reset of a request in flight: counted against the Rapid
+     *                      Reset ceiling as its RST_STREAM would be (MadeYouReset, CVE-2025-8671; Huly QB-1244).
      */
     void
-    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg = "", bool close_context = true) noexcept {
-        if (!_connection_active
-            && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
+    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg = "", bool close_context = true,
+                    bool provoked = false) noexcept {
+        if (!_connection_active && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
             return;
         }
-        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM with error code " << static_cast<uint32_t>(error_code)
-                                                                                                << ". Context: " << context_msg);
-
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Sending RST_STREAM " << static_cast<uint32_t>(error_code) << ": " << context_msg);
         Http2FrameData<RstStreamFrame> rst_frame_data;
         rst_frame_data.payload.error_code = error_code;
-
         FrameHeader header;
         header.type  = static_cast<uint8_t>(FrameType::RST_STREAM);
         header.flags = 0;
         header.set_stream_id(stream_id);
-
         rst_frame_data.header = header;
         this->_io << rst_frame_data;
 
-        auto it = _server_streams.find(stream_id);
+        bool past_ceiling = false; // a reset the client provoked took it past the Rapid Reset ceiling
+        auto it           = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
-            it->second.state           = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
-            it->second.rst_stream_sent = true;
-            it->second.error_code      = error_code;
-            LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
+            auto &stream = it->second;
+            if (provoked && (stream_id & 1u) != 0u && stream.request_dispatched && !stream.end_stream_sent && !stream.rst_stream_sent) {
+                past_ceiling = ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS
+                               && _rst_stream_count * 2u > _client_streams_opened; // as a client RST_STREAM is (QB-1244)
+            }
+            stream.state           = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
+            stream.rst_stream_sent = true;
+            stream.error_code      = error_code;
 
             // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
-            if ((!it->second.request_dispatched || !it->second.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
+            if ((!stream.request_dispatched || !stream.end_stream_sent) && error_code != ErrorCode::NO_ERROR) {
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
                 if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
                 }
             }
-            // close_context is false when RST is sent from deep inside a frame
-            // handler that still holds a reference to this stream: erasing the
-            // context now would dangle that reference. The caller reclaims it.
             if (close_context) {
                 this->try_close_stream_context(stream_id); // Attempt to clean up if conditions met
             }
         }
-        LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: RST_STREAM sent successfully");
+        if (past_ceiling) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets provoked (HTTP/2 MadeYouReset)");
+        }
     }
 
 private:

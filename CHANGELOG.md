@@ -255,8 +255,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
-- **Security: the HTTP/2 server's Rapid Reset guard counts the streams a client opened, not its highest stream id (Huly
-  QB-1244; CVE-2023-44487).** The guard closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)` once a client has reset
+- **Security: the HTTP/2 server's Rapid Reset guard counts the streams a client opened, not its highest stream id, and
+  the resets it provokes (Huly QB-1244; CVE-2023-44487, CVE-2025-8671).** The guard closes the connection with
+  `GOAWAY(ENHANCE_YOUR_CALM)` once a client has reset
   more than `MAX_RAPID_RESETS` (100) streams and more than half of the streams it opened, and it took the streams opened
   as the highest client id over two. A client may skip ids (RFC 9113 §5.1.1): one that opened stream 2^30+1 first, then
   sent a HEADERS(END_STREAM) and a RST_STREAM on each id after it, was counted more than 2^29 streams opened and never
@@ -269,6 +270,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   malformed request or a `431`; the 101st reset trips it now, as for a client that starts at stream 1, and after 300
   requests served the 301st (more than half of 300 + r). A client that cancels fewer than half of its streams is served
   as before: 133 of 400 GETs reset, answered later or inside the dispatch, or 3 uploads cancelled in every 8 requests.
+  The guard now also counts the resets a client makes the server send (MadeYouReset, CVE-2025-8671). DATA or HEADERS
+  after the client's END_STREAM, or a WINDOW_UPDATE that takes a stream's window past 2^31-1, on a request dispatched
+  and not yet answered, makes the server reset the stream: the concurrency slot is freed as the client's own RST_STREAM
+  would free it, the application's work goes on, and the reset was never counted. It counts now as the client's
+  RST_STREAM does; the server's own resets -- a handler that throws, a response HTTP/2 cannot carry -- are not the
+  client's and never count. Measured on the same exchange: no `GOAWAY` after 400 such pairs for each of the three frames
+  on the base, `GOAWAY(ENHANCE_YOUR_CALM)` at the 101st now, and for DATA at the 301st after 300 requests served; 400
+  requests whose handler throws, 400 answered with a field HTTP/2 cannot carry, and a client that sends a WINDOW_UPDATE
+  on each of 400 streams and cancels one in three are served. A WINDOW_UPDATE of 0 on a stream already ends the connection (the
+  frame layer refuses it), so a client provokes one such reset at most.
 
 - **The HTTP/2 server resets a response whose body contradicts its `content-length` with `INTERNAL_ERROR`, not
   `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with
