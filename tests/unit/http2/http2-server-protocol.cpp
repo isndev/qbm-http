@@ -6510,8 +6510,8 @@ provoke(Http2FakeIO &io, provocation how, uint32_t sid) {
 } // namespace qb1244_test
 
 // MadeYouReset (CVE-2025-8671): a client that makes the SERVER reset each request it dispatched -- DATA or HEADERS after
-// END_STREAM, a window overflow -- frees the concurrency slot as its own RST_STREAM would, and the application's work goes
-// on. Such a reset counts against the Rapid Reset ceiling as the client's RST_STREAM does (Huly QB-1244): no GOAWAY after
+// END_STREAM, a window overflow -- frees the concurrency slot as its own RST_STREAM would, and the application's work may
+// go on. Such a reset counts against the Rapid Reset ceiling as the client's RST_STREAM does (Huly QB-1244): no GOAWAY after
 // 400 such pairs on 3ab1024, GOAWAY(ENHANCE_YOUR_CALM) at the 101st now.
 TEST(HTTP2ServerProtocol, AResetTheClientProvokesCountsAgainstTheRapidResetCeiling) {
     using qb1244_test::provocation;

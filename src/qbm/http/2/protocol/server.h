@@ -1031,7 +1031,7 @@ public:
             if (stream_id == 0) {
                 this->on_connection_error(ErrorCode::PROTOCOL_ERROR, "Received WINDOW_UPDATE with 0 increment on stream 0.");
             } else {
-                this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Received WINDOW_UPDATE with 0 increment.");
+                this->send_provoked_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "Received WINDOW_UPDATE with 0 increment.");
             }
             return;
         }
@@ -2935,14 +2935,14 @@ private:
     }
 
     /**
-     * @brief Reset a stream because the client's own frame provoked it (MadeYouReset, CVE-2025-8671; Huly QB-1244).
-     *        DATA or HEADERS after its END_STREAM and a WINDOW_UPDATE past 2^31-1 reset a request in flight --
-     *        dispatched, not yet answered, reset by neither side -- and free its slot as a client RST_STREAM would while
-     *        the application's work may go on: such a reset counts against the same Rapid Reset ceiling
-     *        (on(RstStreamFrame)). The resets provoked before dispatch -- DATA over the window, a body against its
-     *        content-length, trailers without END_STREAM -- stop no application work and are not counted. A stream the
-     *        server reset itself (a handler that threw) can stay resident, half-closed: it is not counted then. The
-     *        server's own resets never come here.
+     * @brief Reset a stream because the client's own frame provoked it (MadeYouReset, CVE-2025-8671; Huly QB-1244): DATA
+     *        or HEADERS after its END_STREAM, a WINDOW_UPDATE past 2^31-1 on a request in flight -- dispatched, unanswered,
+     *        reset by neither side -- free its slot as a client RST_STREAM would while the application's work may go on,
+     *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)). Resets provoked before dispatch
+     *        (DATA over the window, a body against its content-length, trailers without END_STREAM) are not counted; a
+     *        WINDOW_UPDATE of 0 comes here too, though the framer refuses it first. A stream the server reset itself (a
+     *        handler that threw) may stay resident, half-closed: not counted again. A client RST_STREAM on an id whose
+     *        reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling only.
      */
     void
     send_provoked_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
