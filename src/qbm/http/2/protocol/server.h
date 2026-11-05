@@ -408,7 +408,7 @@ public:
         }
 
         if (static_cast<int64_t>(data_payload_size) > stream.local_window_size && data_payload_size > 0) {
-            this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control window exceeded.");
+            this->send_provoked_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control window exceeded.");
             this->_connection_receive_window -= data_payload_size;
             this->conditionally_send_connection_window_update();
             return;
@@ -429,7 +429,7 @@ public:
         // A body past its declared content-length is malformed (RFC 9113 §8.1.1) whatever the body limit: judged first,
         // before the frame is appended. It was answered 413 when the overrun passed the limit too (Huly QB-1197).
         if (stream.expected_content_length && body_pipe.size() + data_event.payload.data_payload.size() > *stream.expected_content_length) {
-            this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
+            this->send_provoked_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request body exceeds content-length");
             this->conditionally_send_connection_window_update(); // its connection credit comes back, as on the 413 path
             return;
         }
@@ -457,7 +457,7 @@ public:
 
             if (stream.headers_received_main) {
                 if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
-                    this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                    this->send_provoked_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                     return;
                 }
                 this->dispatch_complete_request(stream_id, stream);
@@ -1167,7 +1167,7 @@ public:
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PRIORITY frame on stream 0 from client");
             return;
         }
-        // PRIORITY frames can be received for any stream state.
+        // Any stream state; a self-dependency is ignored -- reset, it would be provoked (send_provoked_rst_stream).
         // Store it in stream context if stream exists.
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
@@ -2090,7 +2090,7 @@ private:
             // As per RFC 9113, a trailer section's final frame MUST contain END_STREAM.
             // stream.end_stream_received should have been set by the on(HeadersFrame/ContinuationFrame) that had END_HEADERS and END_STREAM.
             if (!stream.end_stream_received) {
-                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Trailers HEADERS block did not end the stream.");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Trailers HEADERS block did not end the stream.");
                 return false;
             }
             if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
@@ -2935,12 +2935,14 @@ private:
     }
 
     /**
-     * @brief Reset a stream because the client's own frame provoked it -- DATA or HEADERS after its END_STREAM, a
-     *        WINDOW_UPDATE past 2^31-1 (MadeYouReset, CVE-2025-8671; Huly QB-1244). A request in flight -- dispatched,
-     *        not yet answered, reset by neither side -- is freed as a client RST_STREAM would free it, while the
-     *        application's work goes on: it counts against the same Rapid Reset ceiling (on(RstStreamFrame)). A reset
-     *        before dispatch stops no application work and is not counted. The answered and reset conditions are
-     *        defensive: every caller diverts a closed stream first. The server's own resets never come here.
+     * @brief Reset a stream because the client's own frame provoked it (MadeYouReset, CVE-2025-8671; Huly QB-1244).
+     *        DATA or HEADERS after its END_STREAM and a WINDOW_UPDATE past 2^31-1 reset a request in flight --
+     *        dispatched, not yet answered, reset by neither side -- and free its slot as a client RST_STREAM would while
+     *        the application's work may go on: such a reset counts against the same Rapid Reset ceiling
+     *        (on(RstStreamFrame)). The resets provoked before dispatch -- DATA over the window, a body against its
+     *        content-length, trailers without END_STREAM -- stop no application work and are not counted. A stream the
+     *        server reset itself (a handler that threw) can stay resident, half-closed: it is not counted then. The
+     *        server's own resets never come here.
      */
     void
     send_provoked_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {

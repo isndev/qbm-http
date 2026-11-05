@@ -6702,3 +6702,56 @@ TEST(HTTP2ServerProtocol, AResetProvokedBeforeTheRequestIsDispatchedIsNotCounted
     EXPECT_TRUE(protocol.ok());
     EXPECT_EQ(io.request_count, 0);
 }
+
+// A stream the server reset itself stays resident when its handler threw inside the DATA that completed the request, and
+// the DATA handler leaves it half-closed (remote): a window overflow there resets it again and is not counted (Huly
+// QB-1244) -- 400 uploads whose handler throws, each then overflowed, no GOAWAY.
+TEST(HTTP2ServerProtocol, AProvokedResetOfAStreamTheServerResetIsNotCounted) {
+    qb1244_test::AnsweringIO       io;
+    qb1244_test::AnsweringProtocol protocol(io);
+    io.throws = [](uint32_t) {
+        return true;
+    };
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, {});
+    drive(protocol, io);
+    auto post = default_request_headers("/throws");
+    for (auto &field : post) {
+        if (field.name == ":method") {
+            field.value = "POST";
+        }
+    }
+    for (uint32_t sid = 1; sid < 800; sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, encode_hpack_headers(post));
+        push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, sid, std::vector<uint8_t>(16, 'x'));
+        qb1244_test::provoke(io, qb1244_test::provocation::window_overflow, sid);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "a stream the server had reset was counted when the client provoked a second reset";
+    EXPECT_EQ(io.request_count, 400);
+    EXPECT_TRUE(protocol.ok());
+}
+
+// The client's resets and the ones it provokes share one ceiling (Huly QB-1244): RST_STREAM pairs and DATA-after-END_STREAM
+// pairs in turn trip at the 101st reset of either kind, not at the 101st of each.
+TEST(HTTP2ServerProtocol, TheClientsAndTheProvokedResetsShareOneCeiling) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    int      pairs = 0;
+    uint32_t sid   = 1;
+    for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        if (pairs % 2 == 0) {
+            qb1244_test::reset_pair(io, protocol, sid);
+        } else {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/")));
+            drive(protocol, io);
+            qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, sid);
+            drive(protocol, io);
+        }
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(pairs, qb1244_test::max_resets + 1) << "51 client resets and 50 provoked, one ceiling";
+}

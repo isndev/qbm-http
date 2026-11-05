@@ -272,7 +272,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   inside the dispatch, or 3 uploads cancelled in every 8 requests. The guard now also counts the resets a client makes
   the server send (MadeYouReset, CVE-2025-8671). DATA or HEADERS after the client's END_STREAM, or a WINDOW_UPDATE
   that takes a stream's window past 2^31-1, on a request dispatched and not yet answered, makes the server reset the
-  stream: the concurrency slot is freed as the client's own RST_STREAM would free it, the application's work goes on,
+  stream: the concurrency slot is freed as the client's own RST_STREAM would free it, the application's work may go on,
   and the reset was never counted. It counts now as the client's RST_STREAM does; the server's own resets -- a handler
   that throws, a response HTTP/2 cannot carry -- are not the client's and never count. Measured on the same exchange:
   no `GOAWAY` after 400 such pairs for each of the three frames on the base, `GOAWAY(ENHANCE_YOUR_CALM)` at the 101st
