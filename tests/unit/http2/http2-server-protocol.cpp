@@ -6679,8 +6679,8 @@ TEST(HTTP2ServerProtocol, AProvokedResetIsWeighedAgainstHalfTheStreamsOpened) {
 }
 
 // A reset the client provokes before its request is dispatched -- a window overflow on an upload still open -- stops no
-// application work: it is not counted (Huly QB-1244), as a stream the protocol layer refuses is not. 400 such streams,
-// no GOAWAY.
+// application work: it is not counted (Huly QB-1244), as a stream the protocol layer refuses is not, where the client's
+// own RST_STREAM of that upload counts a reset and a stream opened. 400 such streams, no GOAWAY.
 TEST(HTTP2ServerProtocol, AResetProvokedBeforeTheRequestIsDispatchedIsNotCounted) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);

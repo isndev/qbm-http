@@ -96,10 +96,10 @@ constexpr std::size_t MAX_CONCURRENT_STREAMS = 1000;
 /** @brief Maximum connection idle time before GOAWAY (seconds) */
 constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
 
-/** @brief Absolute floor of client RST_STREAMs tolerated before the Rapid Reset
- *  (CVE-2023-44487) guard can trip. A legitimate client resets very few streams, so the
- *  guard only fires once resets ALSO outnumber half the streams opened — see the check in
- *  ServerHttp2Protocol::on(RstStreamFrame). */
+/** @brief Absolute floor of stream resets tolerated before the Rapid Reset guard can trip: the client's RST_STREAMs
+ *  (CVE-2023-44487) and the resets it provokes (CVE-2025-8671). A legitimate client resets very few streams, so the
+ *  guard only fires once resets ALSO outnumber half the streams opened — see ServerHttp2Protocol::on(RstStreamFrame)
+ *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
 
 /** @brief Cap on unacknowledged peer-triggered control-frame replies (PING PONGs +
