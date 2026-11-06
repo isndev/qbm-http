@@ -326,6 +326,11 @@ struct Http2ClientStream : public Http2StreamBase {
 struct Http2StreamedBody {
     qb::allocator::pipe<char>                     buffer;
     std::vector<qb::protocol::hpack::HeaderField> trailer_fields;
+    /// The connection output's running count of bytes (`appended_total()` of the session) at the end of this body's
+    /// last DATA frame: against what the socket has taken since, the frame's distance from leaving -- the stream's
+    /// share of the shared output, as a FIFO bound, for its stall watch (`streamed_body_waiting()`, Huly QB-1212).
+    /// 0 before a frame left the stream.
+    std::uint64_t end_pos = 0;
 };
 
 struct Http2ServerStream : public Http2StreamBase {

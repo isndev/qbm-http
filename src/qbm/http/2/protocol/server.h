@@ -29,6 +29,7 @@
 #include <utility>
 #include <algorithm> // std::min over the windows, the frame size and the socket's room (Huly QB-86)
 #include <cstring>   // std::memcpy: a streamed body's piece into its stream's buffer (Huly QB-86)
+#include <concepts>  // std::convertible_to: counts_appended_output (Huly QB-1212)
 
 #include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
 #include "./base.h"       // For qb::protocol::http2::Http2Protocol and frame types
@@ -75,6 +76,14 @@ is_hop_by_hop(const std::string &header_name) {
 #endif
 
 namespace qb::protocol::http2 {
+
+/// An IO handler that counts every byte it ever appended to its output (`appended_total()`): the streamed responses
+/// mark the end of each DATA frame on that count for their stall watch (Huly QB-1212); a handler without it, such as
+/// the unit tests' fakes, leaves the mark at 0.
+template <typename IO>
+concept counts_appended_output = requires(IO const &io) {
+    { io.appended_total() } -> std::convertible_to<std::uint64_t>;
+};
 
 namespace detail {
 /// Whether the io exposes its write-buffer cap (`max_write_buffer_size()`): a test harness does, the real session's
@@ -1543,6 +1552,20 @@ public:
     streamed_body_pending(uint32_t stream_id) const noexcept {
         const auto it = _server_streams.find(stream_id);
         return it != _server_streams.end() && it->second.streaming ? it->second.streamed->buffer.size() : 0;
+    }
+
+    /// What of this stream's streamed body the socket has not taken, as far as the connection can tell (Huly QB-1212):
+    /// the pieces its windows hold back, and the distance of its last DATA frame from leaving the connection's output
+    /// -- shared with every other stream, drained in order: `drained_total` is what the socket took of it, ever, and
+    /// the frame's end was marked on the same count. A FIFO bound that falls at every drain, whichever stream's frames
+    /// sit around it, and reaches 0 once the frame has left. 0 for any other stream.
+    [[nodiscard]] std::size_t
+    streamed_body_waiting(uint32_t stream_id, std::uint64_t drained_total) const noexcept {
+        const auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || !it->second.streaming)
+            return 0;
+        auto const &body = *it->second.streamed;
+        return body.buffer.size() + static_cast<std::size_t>(body.end_pos > drained_total ? body.end_pos - drained_total : 0);
     }
 
     /**
@@ -3066,6 +3089,8 @@ private:
                 stream.has_pending_data_to_send = true;
                 return;
             }
+            if constexpr (counts_appended_output<IO_Handler>)
+                stream.streamed->end_pos = this->_io.appended_total(); // the stall watch's FIFO mark (Huly QB-1212)
             buffer.free_front(chunk);
             stream.peer_window_size -= chunk;
             _connection_send_window -= chunk;

@@ -32,6 +32,9 @@
 #ifndef QB_MODULE_HTTP_ROUTING_RESPONSE_STREAM_H
 #define QB_MODULE_HTTP_ROUTING_RESPONSE_STREAM_H
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
@@ -43,7 +46,9 @@
 
 #include <qb/io/async/coroutine/scheduler.h> // qb::io::async::schedule_via_current
 #include <qb/io/async/coroutine/tracking.h>  // qb::io::async::track_suspension
+#include <qb/io/async/io.h>                  // qb::io::async::with_timeout: the stall watch's timer (Huly QB-1212)
 #include <qb/io/async/listener.h>            // qb::io::async::defer
+#include <qb/system/time.h>                  // qb::duration, qb::mono_now
 
 #include "../1.1/protocol/base.h" // qb::http::protocol_limits::MAX_BODY_SIZE (a buffered body's bound)
 #include "../chunk.h"
@@ -113,6 +118,14 @@ concept streaming_session = requires(S &s, Context<S> &ctx, ResponseStream<S> co
     { s.stream_write_cap() } -> std::convertible_to<std::size_t>;
     s.stream_end(stream, chunked);
     s.stream_abort(stream);
+};
+
+/// A session whose output is shared by many streams keeps, per stream, what the peer has not taken of THAT stream's
+/// bytes (HTTP/2: the pieces its windows hold back and its share of the output as a FIFO bound): the stall watch reads
+/// it instead of the shared report, so another stream's traffic is never this one's acceptance (Huly QB-1212).
+template <typename S>
+concept per_stream_waiting = requires(S &s, ResponseStream<S> const &stream) {
+    { s.stream_waiting(stream) } -> std::convertible_to<std::size_t>;
 };
 
 /**
@@ -277,7 +290,9 @@ public:
     ResponseStream &operator=(ResponseStream &&)      = delete;
 
     /// The producer dropped its handle: a message still open cannot be completed, so it is aborted. A drain callback
-    /// still registered is released without running: the stream it would report on is gone.
+    /// still registered is released without running: the stream it would report on is gone. Dropped on the session's
+    /// loop thread, as every use of the stream is made there: the abort reaches the session, and the stall watch's
+    /// timer belongs to that loop.
     ~ResponseStream() {
         _on_drain = nullptr;
         if (!_ended && !_cancelled)
@@ -309,6 +324,7 @@ public:
         auto session = _session.lock();
         if (!session) {
             _cancelled = true;
+            stop_watch();
             return write_result::closed;
         }
         if constexpr (streaming_session<SessionType>) {
@@ -330,6 +346,11 @@ public:
                 session->stream_write(*this, Chunk{bytes.data(), bytes.size()});
             else
                 session->stream_write(*this, bytes);
+            if (_watching) {
+                if (_last_pending == 0)
+                    _progress_at = qb::mono_now(); // nothing waited until now: the wait for the socket starts here
+                _last_pending = waiting_now(*session, session->stream_pending(*this));
+            }
         }
         _written += bytes.size();
         return write_result::taken;
@@ -353,6 +374,7 @@ public:
             return;
         if (_cancelled || _head_only) {
             _ended = true;
+            stop_watch();
             drop_waiters();
             return;
         }
@@ -361,6 +383,7 @@ public:
             return;
         }
         _ended = true;
+        stop_watch();
         if (_framing != stream_framing::buffered) {
             if (auto session = _session.lock()) {
                 if constexpr (streaming_session<SessionType>)
@@ -386,6 +409,7 @@ public:
             return;
         _ended   = true;
         _aborted = true;
+        stop_watch();
         drop_waiters();
         if (_head_only)
             return;
@@ -506,6 +530,75 @@ public:
     low_watermark() const noexcept {
         return _low_watermark;
     }
+    /**
+     * @brief The longest the stream may wait for the socket -- the peer, on HTTP/2 and HTTP/3 -- to accept a byte of
+     *        what it holds (Huly QB-1212): an IDLE deadline between two acceptances, not a total one, counted only while
+     *        bytes wait. Past it the stream is aborted: `abort()`'s outcome, the producer released with what it holds
+     *        (a static file's descriptor), the stream reset on HTTP/2 and HTTP/3, the connection closed on HTTP/1.1.
+     *        `qb::duration::zero()` disables it (the default here; the static files middleware sets 60 s, nginx's
+     *        `send_timeout`). Settable at any time, per stream, as `set_watermarks()` is: a change takes effect at once,
+     *        armed or not, and restarts the clock (the same value again changes nothing). Acceptance is what the
+     *        session reports to the stream at its write passes (`notify_drain()`; on HTTP/2 what it keeps for THIS
+     *        stream, the connection's output being shared): a watched stream pays a clock read per report and one
+     *        timer, an unwatched one a flag test at each write and report. The watch runs while the stream is open:
+     *        once `end()` was called, what still waits in the output -- a body of at most the high watermark leaves in
+     *        one go -- is the session's inactivity timeout's, the producer released already.
+     */
+    void
+    set_idle_deadline(qb::duration deadline) noexcept {
+        const auto wanted = deadline > qb::duration::zero() ? deadline : qb::duration::zero();
+        if (wanted == _idle_deadline && _watching)
+            return; // the same deadline again: the clock runs on
+        _idle_deadline = wanted;
+        update_watch();
+    }
+    [[nodiscard]] qb::duration
+    idle_deadline() const noexcept {
+        return _idle_deadline;
+    }
+
+    /**
+     * @brief A floor under the rate at which the socket accepts the stream's bytes, in bytes per second over a SLIDING
+     *        window of `window` (Huly QB-1212): a peer that reads an octet a minute never idles for the deadline, and
+     *        this is for the deployments that refuse it. Sampled every eighth of the window while bytes wait, judged
+     *        once the samples span a whole window (the burst that fills the socket's buffers never counts against the
+     *        peer); under the floor the stream is aborted as at the idle deadline. The floor is a download's: a
+     *        producer that writes less than it itself, with bytes waiting at every sample, is cut as a slow peer is.
+     *        0 disables it (the default, the static files middleware's too); `window` is at least 10 ms.
+     */
+    void
+    set_min_rate(std::size_t bytes_per_second, qb::duration window = std::chrono::seconds(10)) noexcept {
+        const auto wanted_window = std::max<qb::duration>(window, std::chrono::milliseconds(10));
+        if (bytes_per_second == _min_rate && wanted_window == _rate_window && _watching)
+            return; // the same floor again: the window runs on
+        _min_rate    = bytes_per_second;
+        _rate_window = wanted_window;
+        if (_min_rate != 0 && !_rate) {
+            try {
+                _rate = std::make_unique<RateRing>();
+            } catch (...) {
+                _min_rate = 0; // no window: no floor, as if none had been asked
+            }
+        }
+        if (_min_rate == 0)
+            _rate.reset();
+        update_watch();
+    }
+    [[nodiscard]] std::size_t
+    min_rate() const noexcept {
+        return _min_rate;
+    }
+    [[nodiscard]] qb::duration
+    min_rate_window() const noexcept {
+        return _rate_window;
+    }
+    /// The bytes the socket (the peer, on HTTP/2 and HTTP/3) accepted so far, as the session reported them to the
+    /// stream; counted while a deadline or a rate floor is set, 0 otherwise.
+    [[nodiscard]] std::uint64_t
+    accepted() const noexcept {
+        return _accepted;
+    }
+
     /// Both marks at once (0 for `high` is the default, 1 MiB). The high one is clamped to half the session's hard
     /// output cap, the low one under the high one (half of it when `low` is not below it): a producer that waits for
     /// `drain()` then always has room for any piece `write()` does not call `too_large`.
@@ -535,6 +628,14 @@ public:
     notify_drain(std::size_t remaining) noexcept {
         if (_ended || _cancelled)
             return;
+        if (_watching) {
+            const std::size_t waiting = waiting_for_watch(remaining);
+            if (waiting < _last_pending) { // the socket, or the peer, took bytes of this stream since the last report
+                _accepted += _last_pending - waiting;
+                _progress_at = qb::mono_now();
+            }
+            _last_pending = waiting;
+        }
         if (remaining <= _low_watermark)
             drop_waiters();
     }
@@ -545,6 +646,7 @@ public:
         if (_cancelled)
             return;
         _cancelled = true;
+        stop_watch();
         drop_waiters();
     }
 
@@ -558,6 +660,7 @@ public:
         if (_cancelled || _ended)
             return;
         _cancelled = true;
+        stop_watch();
         if (_framing != stream_framing::buffered && !_head_only) {
             _aborted = true;
             if (auto session = _session.lock()) {
@@ -583,7 +686,8 @@ private:
     write_buffered(std::string_view bytes) {
         auto ctx = _ctx.lock();
         if (!ctx || ctx->is_completed() || ctx->is_cancelled()) {
-            _cancelled = true; // the response is over: what would gather now would never be sent
+            _cancelled = true;
+            stop_watch(); // the response is over: what would gather now would never be sent
             drop_waiters();
             return write_result::closed;
         }
@@ -612,6 +716,162 @@ private:
         }
     }
 
+    // --- the stall watch (Huly QB-1212) ---------------------------------------------------------------------
+
+    /// The watch's timer: a `with_timeout` the stream owns, created at its first setting and destroyed when the watch
+    /// stops -- `stop_watch()` cancels it at once, so an ended stream leaves no timer behind and the loop nothing to wait
+    /// for. Its tick is the stream's (`on_watch_tick()`), which holds the stream for its length; the tick may end the
+    /// watch, and this object with it, so nothing here touches `this` once the owner was told.
+    struct Watch final : qb::io::async::with_timeout<Watch> {
+        ResponseStream *owner;
+        explicit Watch(ResponseStream *stream) // may throw: the loop registers the timer (update_watch() catches)
+            : qb::io::async::with_timeout<Watch>(qb::duration::zero())
+            , owner(stream) {}
+        void
+        on(qb::io::async::event::timer const &) {
+            owner->on_watch_tick();
+        }
+    };
+
+    /// The rate floor's sliding window: eight samples of (when, bytes accepted so far), one every eighth of the window
+    /// while bytes wait, the rate read against the oldest once they span the window. Allocated by `set_min_rate()` alone.
+    struct RateRing {
+        std::array<std::pair<qb::mono_time, std::uint64_t>, 8> samples{};
+        std::uint8_t                                           count = 0;
+        std::uint8_t                                           head  = 0; ///< the next slot written: the oldest while full
+        qb::mono_time                                          last_sample{};
+    };
+
+    /// What waits for the socket of THIS stream's bytes, for the watch: what the session keeps per stream where its
+    /// output is shared (`stream_waiting()` -- HTTP/2: the pieces the windows hold back and the frames of this stream
+    /// a FIFO output of its size can still hold, never another stream's traffic), else what it reports for the stream.
+    [[nodiscard]] std::size_t
+    waiting_now(SessionType &session, std::size_t reported) const noexcept {
+        if constexpr (per_stream_waiting<SessionType>)
+            return session.stream_waiting(*this);
+        else
+            return reported;
+    }
+
+    /// `waiting_now()` at a session's report, the session locked only where it keeps a count per stream.
+    [[nodiscard]] std::size_t
+    waiting_for_watch(std::size_t reported) const noexcept {
+        if constexpr (per_stream_waiting<SessionType>) {
+            if (auto session = _session.lock())
+                return session->stream_waiting(*this);
+        }
+        return reported;
+    }
+
+    void
+    stop_watch() noexcept {
+        _watching = false;
+        _watch.reset(); // the timer goes with it, at once
+    }
+
+    /// Start, re-arm or stop the watch as the settings say; a change made while armed is armed anew, so it takes effect
+    /// now. Nothing is watched where nothing can wait: a buffered stream, a HEAD's, a session without the hooks.
+    void
+    update_watch() noexcept {
+        if constexpr (!streaming_session<SessionType>) {
+            return;
+        } else {
+            const bool wanted = (_idle_deadline > qb::duration::zero() || _min_rate != 0) && !_ended && !_cancelled && !_head_only
+                                && _framing != stream_framing::buffered;
+            if (!wanted) {
+                stop_watch();
+                return;
+            }
+            _progress_at  = qb::mono_now();
+            _last_pending = 0;
+            if (auto session = _session.lock())
+                _last_pending = waiting_now(*session, session->stream_pending(*this));
+            if (_rate)
+                _rate->count = 0;
+            if (!_watch) {
+                try {
+                    _watch = std::make_unique<Watch>(this);
+                } catch (...) {
+                    _watching = false; // no timer: the stream runs unwatched, as without a setting
+                    return;
+                }
+            }
+            _watching = true;
+            _watch->setTimeout(next_tick());
+        }
+    }
+
+    /// The next tick: the idle deadline's remainder, or the rate window's next sample, whichever comes first, 1 ms at least.
+    [[nodiscard]] qb::duration
+    next_tick() const noexcept {
+        const auto now  = qb::mono_now();
+        auto       tick = qb::duration::max();
+        if (_idle_deadline > qb::duration::zero()) {
+            const auto idle = now - _progress_at;
+            tick            = idle < _idle_deadline ? _idle_deadline - idle : qb::duration::zero();
+        }
+        if (_min_rate != 0 && _rate) {
+            // The next sample a step away: from the last one, or from now when the window is empty (nothing waited, or
+            // the floor was just set) -- never sooner, so a stream with nothing waiting ticks once a step, not once a ms.
+            const auto step  = _rate_window / 8;
+            const auto since = _rate->count == 0 ? qb::duration::zero() : now - _rate->last_sample;
+            tick             = std::min<qb::duration>(tick, since < step ? step - since : qb::duration::zero());
+        }
+        return std::max<qb::duration>(tick, std::chrono::milliseconds(1));
+    }
+
+    /// The timer's tick: the stream holds itself for its length (an abort may drop every other reference), looks at
+    /// the stall, and re-arms unless the watch stopped under it.
+    void
+    on_watch_tick() noexcept {
+        auto self = this->weak_from_this().lock();
+        if (!self || !_watching)
+            return;
+        if (watch_tick() && _watching && _watch)
+            _watch->setTimeout(next_tick());
+    }
+
+    /// One look at the stall: `false` once the stream was aborted for it. Nothing waiting is no stall: the clock and
+    /// the rate window restart when bytes wait again.
+    [[nodiscard]] bool
+    watch_tick() noexcept {
+        const auto now = qb::mono_now();
+        if (_last_pending == 0) {
+            _progress_at = now;
+            if (_rate)
+                _rate->count = 0;
+            return true;
+        }
+        if (_idle_deadline > qb::duration::zero() && now - _progress_at >= _idle_deadline) {
+            abort();
+            return false;
+        }
+        if (_min_rate != 0 && _rate) {
+            auto &ring = *_rate;
+            // The verdict first, against the oldest sample once the eight span the window; then the sample, one every
+            // eighth of the window (a tick may come sooner, for the deadline): the window is the window whatever the
+            // deadline, and the burst that fills the socket's buffers at the start is never read against the peer.
+            if (ring.count == ring.samples.size()) {
+                const auto &oldest = ring.samples[ring.head];
+                if (now - oldest.first >= _rate_window) {
+                    const auto elapsed = std::chrono::duration<double>(now - oldest.first).count();
+                    if (elapsed > 0 && static_cast<double>(_accepted - oldest.second) / elapsed < static_cast<double>(_min_rate)) {
+                        abort();
+                        return false;
+                    }
+                }
+            }
+            if (ring.count == 0 || now - ring.last_sample >= _rate_window / 8) {
+                ring.samples[ring.head] = {now, _accepted};
+                ring.last_sample        = now;
+                ring.head               = static_cast<std::uint8_t>((ring.head + 1) % ring.samples.size());
+                if (ring.count < ring.samples.size())
+                    ++ring.count;
+            }
+        }
+        return true;
+    }
+
     std::weak_ptr<context_type> _ctx;
     std::weak_ptr<SessionType>  _session;
     stream_framing              _framing;
@@ -627,6 +887,16 @@ private:
     drain_awaiter              *_waiter{nullptr};
     std::function<void()>       _on_drain;
     std::uint64_t               _stream_id{0};
+    // The stall watch (Huly QB-1212): the settings, what waits and when it last fell, the timer, the rate's window.
+    qb::duration              _idle_deadline{qb::duration::zero()};
+    std::size_t               _min_rate{0};
+    qb::duration              _rate_window{std::chrono::seconds(10)};
+    std::uint64_t             _accepted{0};
+    std::size_t               _last_pending{0};
+    qb::mono_time             _progress_at{};
+    bool                      _watching{false};
+    std::unique_ptr<Watch>    _watch;
+    std::unique_ptr<RateRing> _rate;
 };
 
 namespace sse {
