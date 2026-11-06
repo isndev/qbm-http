@@ -314,6 +314,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `listen()` offers a second protocol. Measured on a loopback with a raw QUIC peer that negotiates `hq-interop`: the
   server closed with `0x010c`, it closes with `0x0101` now; an `h3` peer of the same server is served.
 
+- **The HTTP/3 client sends as many regular fields as a server reads, and holds `:authority` to the value bound (Huly
+  QB-1266).** A server of this module reads `MAX_HEADERS_COUNT` (100) regular fields, the pseudo-headers aside, as
+  HTTP/1.1 and HTTP/2 count them; `make_request_headers()` counted a request's four pseudo-headers among them and
+  `make_response_headers()` a response's `:status`, so the client refused to send a request of 97 to 100 fields that
+  the server would serve, and the server a response of 100. Both count the regular fields alone now. `:authority` had
+  no bound at all where `:path` and every regular field have one: a request whose host was 300 000 bytes was
+  submitted, and a peer's nghttp3 closes the connection past 64 KiB a value, every stream with it. It is held to
+  `MAX_HEADER_VALUE_LENGTH`, the bound of the `host` field that may stand for it, and refused before anything is
+  queued. Measured on a client/server connection pair: 100 regular fields were refused both ways and are submitted and
+  delivered now, 101 refused; an authority of 8193 bytes was submitted and is refused now, one of 8192 served.
+
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
   `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`

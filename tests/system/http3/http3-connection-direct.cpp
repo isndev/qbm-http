@@ -2639,16 +2639,20 @@ TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted
         ClientConnection client{client_owner, 1, ClientConnection::role::client};
         ASSERT_TRUE(client.bind_local_streams());
         EXPECT_TRUE(client.submit_request(0, request_of(advertised + 1))) << "the bound is the peer's, unknown until it says it";
-        // Past this module's own 1 MiB too -- 96 fields of 8000 bytes and an :authority of 300000 bytes --: submitted. It
-        // relies on :authority, which no outgoing limit bounds (a peer's nghttp3 refuses a value past 64 KiB).
-        qb::http::Request big{qb::http::method::GET, qb::io::uri("https://" + std::string(300000, 'a') + ".test/")};
-        std::vector<std::pair<std::string, std::string>> counted{{":authority", std::string(300000, 'a') + ".test"}};
-        for (int i = 0; i < 96; ++i) {
-            big.add_header("x-" + std::to_string(i), std::string(8000, 'v'));
-            counted.emplace_back("x-" + std::to_string(i), std::string(8000, 'v'));
+        // The largest request the outgoing limits allow -- 100 regular fields of 8 KiB, :path and :authority at theirs --
+        // stays within this module's 1 MiB and is submitted. It passed it through :authority, unbounded until Huly QB-1266.
+        const std::string host = std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH - 5, 'a') + ".test";
+        const std::string path = "/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 1, 'p');
+        qb::http::Request big{qb::http::method::GET, qb::io::uri("https://" + host + path)};
+        std::vector<std::pair<std::string, std::string>> counted{
+            {":method", "GET"}, {":scheme", "https"}, {":authority", host}, {":path", path}
+        };
+        for (std::size_t i = 0; i < qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
+            big.add_header("x-" + std::to_string(i), std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
+            counted.emplace_back("x-" + std::to_string(i), std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
         }
-        ASSERT_GT(field_section_size(counted), 1024u * 1024u);
-        EXPECT_TRUE(client.submit_request(4, big)) << "past 1 MiB: no bound known before the peer's SETTINGS";
+        ASSERT_LT(field_section_size(counted), 1024u * 1024u);
+        EXPECT_TRUE(client.submit_request(4, big)) << "the largest request the outgoing limits allow, no bound known yet";
     }
 }
 
@@ -3027,8 +3031,8 @@ TEST(Http3ConnectionDirect, NeitherSideOffersAQpackDynamicTable) {
  *        HTTP/2 serves such a section. HTTP/3 bounded it at 64 KiB until Huly QB-1203: a request of 90 fields of 8000 bytes,
  *        some 0.7 MiB, was refused by the client, which held itself to the server's 64 KiB, and answered 431 by a
  *        server that read it raw; the response was never submitted by the server (the client's 64 KiB), and a client that
- *        read one raw discarded it. (The client counts a request's four
- *        pseudo-headers among the 100 fields it sends: 96 regular ones at most.)
+ *        read one raw discarded it. (The client counted a request's four pseudo-headers
+ *        among the 100 fields it sends, 96 regular ones at most, until Huly QB-1266: 100 now, as a server reads.)
  */
 TEST(Http3ConnectionDirect, ASectionTheDefaultLimitsAllowCrossesBothWays) {
     constexpr std::size_t                            count = 90;
@@ -3062,6 +3066,82 @@ TEST(Http3ConnectionDirect, ASectionTheDefaultLimitsAllowCrossesBothWays) {
         ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "served";
         EXPECT_TRUE(pair.server_owner.stops.empty()) << "not answered 431, its read side left open";
     }
+}
+
+/**
+ * @test The client sends as many regular fields as a server reads, and so does the server (Huly QB-1266)
+ * @brief A server of this module reads MAX_HEADERS_COUNT regular fields (`request_limits::max_headers_count`), the
+ *        pseudo-headers aside, as HTTP/1.1 and HTTP/2 count them. The client counted a request's four pseudo-headers
+ *        among them -- 96 regular fields at most --, the server a response's `:status` -- 99 --: a request of 97 to 100
+ *        fields a server of this module serves was never sent. Exactly MAX_HEADERS_COUNT regular fields are submitted
+ *        both ways and delivered, one more is refused before anything is queued.
+ */
+TEST(Http3ConnectionDirect, AMessageCarriesAsManyRegularFieldsAsAPeerReads) {
+    constexpr std::size_t most    = qb::http::protocol_limits::MAX_HEADERS_COUNT;
+    const auto            request = [](std::size_t n) {
+        qb::http::Request r{qb::http::method::GET, qb::io::uri("https://example.test/fields")};
+        for (std::size_t i = 0; i < n; ++i)
+            r.add_header("x-" + std::to_string(i), "v");
+        return r;
+    };
+    const auto response = [](std::size_t n) {
+        qb::http::Response r;
+        r.status() = qb::http::status::OK;
+        for (std::size_t i = 0; i < n; ++i)
+            r.add_header("x-" + std::to_string(i), "v");
+        return r;
+    };
+    Pair answered; // the response first, on a pair of its own: the request half stops at its first ASSERT
+    ASSERT_TRUE(answered.client.submit_request(0, request(1)));
+    answered.settle();
+    ASSERT_EQ(answered.server_owner.requests.size(), 1u);
+    answered.server_owner.outbound.clear();
+    EXPECT_FALSE(answered.server.submit_response(0, response(most + 1))) << "a field past the count";
+    EXPECT_TRUE(answered.server_owner.outbound.empty()) << "nothing was queued";
+    ASSERT_TRUE(answered.server.submit_response(0, response(most))) << "the count a client reads";
+    answered.settle();
+    ASSERT_EQ(answered.client_owner.responses.size(), 1u) << "delivered";
+    EXPECT_EQ(answered.client_owner.responses.front().header("x-99"), "v");
+    EXPECT_TRUE(answered.client_owner.resets.empty());
+
+    Pair pair;
+    pair.client_owner.outbound.clear();
+    EXPECT_FALSE(pair.client.submit_request(0, request(most + 1))) << "a field past the count";
+    EXPECT_TRUE(pair.client_owner.outbound.empty()) << "nothing was queued";
+    ASSERT_TRUE(pair.client.submit_request(4, request(most))) << "the count a server reads";
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "served";
+    EXPECT_EQ(pair.server_owner.requests.front().header("x-99"), "v");
+    EXPECT_TRUE(pair.server_owner.stops.empty()) << "not answered 431";
+}
+
+/**
+ * @test An :authority past MAX_HEADER_VALUE_LENGTH is never submitted (Huly QB-1266)
+ * @brief make_request_headers() bounded `:path` (MAX_URL_LENGTH) and every regular field, not the authority: a request
+ *        whose host was 300 000 bytes was submitted, and a peer's nghttp3 closes the connection past 64 KiB a value,
+ *        every stream with it (the class of Huly QB-1210). The authority is held to the bound of a value, as the `host`
+ *        field that may stand for it is: one of exactly MAX_HEADER_VALUE_LENGTH bytes is submitted and served, one more
+ *        refused before anything is queued, the connection kept.
+ */
+TEST(Http3ConnectionDirect, AnAuthorityPastTheValueLimitIsNeverSubmitted) {
+    constexpr std::size_t most      = qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH;
+    const auto            authority = [](std::size_t n) {
+        return std::string(n - 5, 'a') + ".test";
+    };
+    const auto request = [&](std::size_t n) {
+        return qb::http::Request{qb::http::method::GET, qb::io::uri("https://" + authority(n) + "/")};
+    };
+    ASSERT_EQ(qb::http::origin::authority(request(most).uri()).size(), most);
+    Pair pair;
+    pair.client_owner.outbound.clear();
+    EXPECT_FALSE(pair.client.submit_request(0, request(most + 1))) << "a byte past the bound";
+    EXPECT_TRUE(pair.client_owner.outbound.empty()) << "nothing was queued";
+    EXPECT_FALSE(pair.client_owner.close.has_value());
+    ASSERT_TRUE(pair.client.submit_request(4, request(most))) << "exactly the bound";
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u) << "served";
+    EXPECT_EQ(pair.server_owner.requests.front().uri().host(), authority(most));
+    EXPECT_FALSE(pair.server_owner.close.has_value());
 }
 
 #endif // QBM_HTTP_HAS_HTTP3

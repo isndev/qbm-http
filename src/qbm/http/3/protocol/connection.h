@@ -583,13 +583,13 @@ plan_trailers(Message const &msg) {
  * @param request Request to serialize.
  * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
  *        announcement added.
- * @return The field block, or @c std::nullopt if the target exceeds
- *         @c MAX_URL_LENGTH, the field count passes @c MAX_HEADERS_COUNT, or @c trailers() carries a field
- *         a trailer section must not. The regular fields are those add_regular_headers() keeps -- the HTTP/2
- *         client's rule, a field it leaves out dropped (Huly QB-1191) -- and the @c content-length is the body's,
- *         written when the body is non-empty, as the HTTP/2 client writes it: a declared one is left out (it was
- *         sent, and a request whose body contradicted it refused). @c :authority is
- *         qb::http::origin::authority, the authority every protocol writes (Huly QB-1064).
+ * @return The field block, or @c std::nullopt if the target exceeds @c MAX_URL_LENGTH, @c :authority
+ *         (qb::http::origin::authority, Huly QB-1064) @c MAX_HEADER_VALUE_LENGTH as a `host` field does -- a peer's
+ *         nghttp3 closes the connection past 64 KiB --, the regular fields @c MAX_HEADERS_COUNT, the pseudo-headers
+ *         aside as a server reads them (both Huly QB-1266), or @c trailers() carries a field a trailer section must
+ *         not. The regular fields are those add_regular_headers() keeps -- the HTTP/2 client's rule (Huly QB-1191) --
+ *         and @c content-length is the body's, written when the body is non-empty, as the HTTP/2 client writes it: a
+ *         declared one is left out (it was sent, and a request whose body contradicted it refused).
  */
 inline std::optional<header_block>
 make_request_headers(qb::http::Request const &request, std::optional<qb::http::detail::outgoing_trailers> const &trailers) {
@@ -597,14 +597,14 @@ make_request_headers(qb::http::Request const &request, std::optional<qb::http::d
         return std::nullopt;
     }
     header_block block;
-    std::size_t  fields = 4;
-    auto         target = request_target(request.uri());
-    if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH) {
+    std::size_t  fields = 0; // regular fields, as a server reads them: the four pseudo-headers counted (Huly QB-1266)
+    auto         target = request_target(request.uri()), authority = qb::http::origin::authority(request.uri());
+    if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return std::nullopt;
     }
     block.add(":method", std::string(request.method()));
     block.add(":scheme", request.uri().scheme().empty() ? "https" : std::string(request.uri().scheme()));
-    block.add(":authority", qb::http::origin::authority(request.uri()));
+    block.add(":authority", std::move(authority));
     block.add(":path", std::move(target));
     if (!add_regular_headers(block, request, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;
@@ -657,7 +657,7 @@ make_response_headers(qb::http::Response const &response, std::optional<qb::http
         return std::nullopt;
     }
     header_block block;
-    std::size_t  fields = 1;
+    std::size_t  fields = 0; // regular fields, as a client reads them: :status counted (Huly QB-1266)
     block.add(":status", std::to_string(response.status().code()));
     if (!add_regular_headers(block, response, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;
