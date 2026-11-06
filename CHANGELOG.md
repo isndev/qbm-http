@@ -104,6 +104,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **The WebSocket frame decoder allocates nothing per frame (Huly QB-1247).** `onMessage()` built a local
+  `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed it at the end of the frame --
+  an allocation and a free for a 16-byte text frame or an empty Ping. The frame's payload lands in a buffer the
+  protocol keeps now, reset between frames; each frame writes its own `_expected_size` bytes, so nothing of a longer
+  frame is read after a shorter one, and the reassembled message stays a buffer of its own. Counted with a replaced
+  `operator new` on 64 decoded frames of each shape (a 16-byte masked text, an empty Ping and a 125-octet one
+  answered by their Pong, an empty text): 64 allocations before, 0 now. The buffer is the connection's: 4 KiB from
+  the handshake on, and the capacity of its largest frame, as the reassembly buffer keeps its own. The unmasked copy
+  is guarded too: an empty frame on a null buffer was `memcpy(nullptr, src, 0)`, undefined, reachable only with a
+  moved buffer.
+
 - **The HTTP/2 server moves a regular field's NAME into the request beside its value (Huly QB-1216).** The value moved
   since QB-1215; the name was still copied and folded by qb's `string_to_lower::convert()`, which took only a const
   string -- three allocations a browser's request (the names past 15 octets). With qb's new `convert(std::string &&)`

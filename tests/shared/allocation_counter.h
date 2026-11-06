@@ -33,6 +33,8 @@
 namespace {
 std::atomic<bool>        g_counting{false};
 std::atomic<std::size_t> g_bytes{0};
+/// The allocations C++ made while counting, every form: a COUNT, where g_bytes is a sum (Huly QB-1247).
+std::atomic<std::size_t> g_count{0};
 /// The bytes C++ allocated minus those it freed while counting, each block by the size the allocator gave it -- what
 /// a measured call keeps (Huly QB-1203). The allocator's own statistics count blocks a thread cache holds as in use.
 /// A block allocated before the scope and freed in it counts against it; every thread counts; a nested AllocScope
@@ -43,6 +45,7 @@ std::atomic<long long> g_live{0};
 struct AllocScope {
     AllocScope() {
         g_bytes.store(0, std::memory_order_relaxed);
+        g_count.store(0, std::memory_order_relaxed);
         g_live.store(0, std::memory_order_relaxed);
         g_counting.store(true, std::memory_order_relaxed);
     }
@@ -52,6 +55,11 @@ struct AllocScope {
     [[nodiscard]] static std::size_t
     bytes() {
         return g_bytes.load(std::memory_order_relaxed);
+    }
+    /// How many allocations C++ made while counting.
+    [[nodiscard]] static std::size_t
+    count() {
+        return g_count.load(std::memory_order_relaxed);
     }
     /// The bytes still allocated of what C++ allocated while counting, less what it freed then, the aligned forms
     /// left out; 0 where the allocator does not say a block's size (allocation_counter_tracks_live_bytes()).
@@ -122,6 +130,7 @@ tracked_alloc_nothrow(std::size_t n) noexcept {
     void *p = std::malloc(n ? n : 1);
     if (g_counting.load(std::memory_order_relaxed)) {
         g_bytes.fetch_add(n, std::memory_order_relaxed);
+        g_count.fetch_add(1, std::memory_order_relaxed);
         if (p)
             g_live.fetch_add(static_cast<long long>(allocated_block_size(p)), std::memory_order_relaxed);
     }
@@ -175,8 +184,10 @@ tracked_alloc_aligned_nothrow(std::size_t n, std::align_val_t a) noexcept {
     // aligned_alloc requires a size that is a multiple of the alignment (harmless for
     // _aligned_malloc, which does not).
     const std::size_t size = ((n ? n : 1) + align - 1) / align * align;
-    if (g_counting.load(std::memory_order_relaxed))
+    if (g_counting.load(std::memory_order_relaxed)) {
         g_bytes.fetch_add(size, std::memory_order_relaxed);
+        g_count.fetch_add(1, std::memory_order_relaxed);
+    }
     return qb_aligned_alloc(align, size);
 }
 

@@ -437,7 +437,7 @@ class base
     unsigned char           _fin_rsv_opcode  = 0; /**< Current frame's FIN, RSV, and opcode bits */
     unsigned char           _data_opcode     = 0; /**< Opcode for the current fragmented data message */
     bool                    _server_draining = false;
-    ::qb::http::ws::Message _message; /**< Current message being assembled */
+    ::qb::http::ws::Message _message, _frame; /**< The message being assembled; the current frame's payload, reused (QB-1247) */
     // Secure default: bound the reassembled message size so a peer streaming
     // unbounded continuation fragments cannot exhaust server memory. Apps may
     // raise it or set 0 (unlimited) explicitly via set_max_payload_size().
@@ -809,9 +809,9 @@ public:
             const auto frame_opcode   = _fin_rsv_opcode & rfc::OPCODE_MASK;
             const bool is_final_frame = (_fin_rsv_opcode & rfc::FIN_BIT_MASK) != 0;
 
-            // Create a temporary message to hold the current frame's payload
-            // This avoids corrupting the main reassembly buffer (_message) with control frames.
-            ::qb::http::ws::Message current_frame_message;
+            // The frame's own buffer, not the reassembly one (_message), reused: a local Message allocated 4 KiB a frame (QB-1247).
+            ::qb::http::ws::Message &current_frame_message = _frame;
+            current_frame_message.reset(); // nothing of the last frame is read: each frame writes its _expected_size bytes
             current_frame_message.masked = _message.masked;
 
             if (current_frame_message.masked) {
@@ -824,7 +824,7 @@ public:
                 // narrowing is wrong regardless).
                 for (std::size_t i = 0; i < _expected_size; ++i)
                     begin_data[i] = begin_buffer_data[i] ^ mask[i % 4];
-            } else {
+            } else if (_expected_size) { // an empty frame on a null pipe: memcpy(nullptr, src, 0) is undefined (QB-1247)
                 std::memcpy(current_frame_message._data.allocate_back(_expected_size), buffer.begin() + _parsed, _expected_size);
             }
 

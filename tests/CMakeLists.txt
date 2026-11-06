@@ -195,6 +195,7 @@ qhttp_test(unit http2-client-coverage-deep unit/http2/http2-client-coverage-deep
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
 qhttp_test(unit ws-close-frame-negative   unit/ws/ws-close-frame-negative.cpp   REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-frame-encode-validation unit/ws/ws-frame-encode-validation.cpp REQUIRES ssl EXTRA_LABELS ws)
+qhttp_test(unit ws-frame-allocation       unit/ws/ws-frame-allocation.cpp       REQUIRES ssl EXTRA_LABELS ws)
 qhttp_test(unit ws-key-crypto             unit/ws/ws-key-crypto.cpp             REQUIRES ssl EXTRA_LABELS ws)
 
 # =============================================================================
