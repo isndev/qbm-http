@@ -1303,11 +1303,11 @@ public:
             send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
             return false;
         }
-        // The trailer section, a field section of its own, is held to the same bound here, before anything is sent (Huly
-        // QB-1240: the client had the leading block and the body, then a reset, and true was returned) and again when it
-        // leaves, by the bound then in force (try_send_pending_data_for_stream). A response to HEAD sends none.
+        // The trailer section, a field section of its own, is held to the same bound here, before anything is sent, and
+        // again when it leaves, by the bound then in force (try_send_pending_data_for_stream); it was sent past the bound
+        // (Huly QB-1240). Its size is counted from its plan, no field copied. A response to HEAD sends none.
         if (trailed && !response_to_head && _peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE
-            && !this->fits_peer_header_list(stream_id, outgoing_trailer_fields(http_response))) {
+            && !this->fits_peer_list_size(stream_id, trailer_section_size(http_response))) {
             send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
             return false;
         }
@@ -2976,12 +2976,36 @@ private:
         for (const auto &field : fields) {
             list_size += field.hpack_size();
         }
+        return fits_peer_list_size(stream_id, list_size);
+    }
+
+    /// @brief Whether a field section of @p list_size octets, counted as RFC 9113 §6.5.2 counts it, fits the client's
+    ///        SETTINGS_MAX_HEADER_LIST_SIZE; one that does not is logged (Huly QB-1240).
+    [[nodiscard]] bool
+    fits_peer_list_size(uint32_t stream_id, std::uint64_t list_size) const {
         if (list_size <= _peer_max_header_list_size) {
             return true;
         }
         LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: field section " << list_size << " exceeds peer's MAX_HEADER_LIST_SIZE "
                                                                           << _peer_max_header_list_size);
         return false;
+    }
+
+    /**
+     * @brief The size RFC 9113 §6.5.2 counts of the trailer section a response sends, from its plan, no field copied:
+     *        the fields outgoing_trailer_fields() keeps -- a response carries no `connection` header (send_response()
+     *        refuses one), so none is nominated -- each name and value, and 32 octets (Huly QB-1240).
+     */
+    [[nodiscard]] static std::uint64_t
+    trailer_section_size(const qb::http::Response &response) {
+        const auto    plan = qb::http::detail::plan_outgoing_trailers(response, response.has_trailers() ? &response.trailers() : nullptr);
+        std::uint64_t size = 0;
+        for (const auto &[name, value] : plan.fields) {
+            if (HeaderValidator::is_valid_header_field(name, value)) {
+                size += name.size() + value.size() + ::qb::protocol::hpack::HPACK_ENTRY_OVERHEAD;
+            }
+        }
+        return size;
     }
 
 }; // class ServerHttp2Protocol

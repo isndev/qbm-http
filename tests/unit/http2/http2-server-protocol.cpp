@@ -6980,3 +6980,46 @@ TEST(HTTP2ServerProtocol, ATrailerSectionIsJudgedByTheBoundInForceWhenItLeaves) 
     EXPECT_EQ(blocks[1].value("x-c"), "c") << "a field of the refused section, decoded as the client saw the table";
     EXPECT_TRUE(protocol.ok());
 }
+
+// A response to HEAD sends no trailer section (RFC 9110 §9.3.2): its trailers() are not judged against the client's
+// bound, and the HEADERS end the stream (Huly QB-1240, review R2: no test held the HEAD exemption).
+TEST(HTTP2ServerProtocol, AResponseToHeadIsNotJudgedByATrailerSectionItNeverSends) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}}));
+    drive(protocol, io);
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers({{":method", "HEAD"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/head"}}));
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.send_response(1, qb1240_test::trailed_response(66))) << "a trailer section a HEAD response never sends";
+    EXPECT_FALSE(last_rst_stream_error(io.output, 1).has_value());
+    const auto blocks = qb1240_test::sent_blocks_decoded(io.output);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(blocks[0].value(":status"), "200");
+    bool ended = false;
+    for (const auto &f : parse_emitted_frames(io.output))
+        ended = ended || (f.type == FrameType::HEADERS && f.stream_id == 1 && (f.flags & qb::protocol::http2::FLAG_END_STREAM));
+    EXPECT_TRUE(ended) << "the HEADERS end the stream";
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A pushed response that has to wait for room is judged first, its trailer section included (Huly QB-1202, QB-1240):
+// past the client's bound it is refused at once, its stream reset, and nothing goes out on it once there is room.
+TEST(HTTP2ServerProtocol, AWaitingResponsesTrailerSectionIsJudgedFirst) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    // 200 octets: a promise's list, 179, fits it; a trailer section of x-c and 170 octets, 205, does not.
+    handshake_one_push_no_window(protocol, io, {{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 200}});
+    for (const uint32_t id : {2u, 4u}) {
+        EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
+    }
+    EXPECT_TRUE(protocol.send_response(2, pushed_response("abc"))); // opens stream 2: the limit is full
+    EXPECT_FALSE(protocol.send_response(4, qb1240_test::trailed_response(170, "def"))) << "refused at once, not kept";
+    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::INTERNAL_ERROR);
+    make_window_update_frame(io, 0, 100);
+    make_window_update_frame(io, 2, 100); // stream 2 ends: room
+    drive(protocol, io);
+    EXPECT_FALSE(headers_sent_on(io.output, 4)) << "nothing goes out on a refused stream";
+    EXPECT_TRUE(protocol.ok());
+}
