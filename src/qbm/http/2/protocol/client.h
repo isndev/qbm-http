@@ -1173,8 +1173,8 @@ public:
 
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
-        if (const char *refused = prepare_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
-            // Nothing was sent: a request whose trailers() a trailer section cannot carry (Huly QB-1073).
+        if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
+            // Nothing was sent: trailers() a trailer section cannot carry (Huly QB-1073), past the server's bound (QB-1274).
             LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
             _client_streams.erase(iter);
             return false;
@@ -2497,9 +2497,9 @@ private:
     send_request_trailer_block(Http2ClientStream &stream, std::vector<hpack::HeaderField> &&trailer_fields) noexcept {
         const uint32_t       stream_id = stream.id;
         std::vector<uint8_t> encoded_trailers;
-        if (!trailer_fields.empty() && !_hpack_encoder.encode(trailer_fields, encoded_trailers)) {
-            // send_rst_stream() closes/erases the stream context.
-            send_rst_stream(stream_id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
+        if (!encode_trailer_section(stream_id, trailer_fields, encoded_trailers)) {
+            // Reset there -- INTERNAL_ERROR past the server's SETTINGS_MAX_HEADER_LIST_SIZE in force as it leaves (Huly
+            // QB-1274), COMPRESSION_ERROR on a failed encoding -- and send_rst_stream() closed/erased the stream context.
             return false;
         }
         if (!this->send_headers_with_continuation(stream_id, FLAG_END_STREAM, std::move(encoded_trailers))) {
@@ -2640,6 +2640,67 @@ private:
         }
         // If this is a PING response (ACK flag set), we can ignore it or handle it
         // For now, we just ignore PING responses
+    }
+
+    /**
+     * @brief prepare_request_headers(), then the server's SETTINGS_MAX_HEADER_LIST_SIZE (RFC 9113 §6.5.2): the leading
+     *        block and the trailer section the request sets are each judged against it before anything is encoded or
+     *        sent, as the server judges a response's (Huly QB-1235, QB-1240), so the HPACK table never runs ahead of the
+     *        server's. The bound was stored and never read: both left past it (Huly QB-1274).
+     * @return nullptr, or why the request is refused.
+     */
+    [[nodiscard]] const char *
+    prepare_bounded_request_headers(const qb::http::Request &request, std::vector<hpack::HeaderField> &fields, Http2ClientStream &stream) {
+        if (const char *refused = prepare_request_headers(request, fields, stream)) {
+            return refused;
+        }
+        if (_peer_max_header_list_size >= DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
+            return nullptr;
+        }
+        if (!fits_peer_header_list(stream.id, fields)) {
+            return "header list past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
+        }
+        if (stream.client_will_send_trailers && !fits_peer_header_list(stream.id, outgoing_trailer_fields(request))) {
+            return "trailer section past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
+        }
+        return nullptr;
+    }
+
+    /**
+     * @brief Encode a request's trailer section, judged first by the server's SETTINGS_MAX_HEADER_LIST_SIZE in force as
+     *        it leaves: past it the stream is reset with INTERNAL_ERROR, the section never encoded (Huly QB-1274); a
+     *        failed encoding resets it with COMPRESSION_ERROR. send_rst_stream() closes and erases the stream context.
+     */
+    [[nodiscard]] bool
+    encode_trailer_section(uint32_t stream_id, const std::vector<hpack::HeaderField> &fields, std::vector<uint8_t> &encoded) noexcept {
+        if (!fits_peer_header_list(stream_id, fields)) {
+            send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "Trailer section past the server's SETTINGS_MAX_HEADER_LIST_SIZE");
+            return false;
+        }
+        if (!fields.empty() && !_hpack_encoder.encode(fields, encoded)) {
+            send_rst_stream(stream_id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
+            return false;
+        }
+        return true;
+    }
+
+    /// @brief Whether a field section fits the server's SETTINGS_MAX_HEADER_LIST_SIZE, counted as RFC 9113 §6.5.2 counts
+    ///        it -- each name and value, and 32 octets; one that does not is logged (Huly QB-1274).
+    [[nodiscard]] bool
+    fits_peer_header_list(uint32_t stream_id, const std::vector<hpack::HeaderField> &fields) const {
+        if (_peer_max_header_list_size >= DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
+            return true;
+        }
+        std::uint64_t list_size = 0;
+        for (const auto &field : fields) {
+            list_size += field.hpack_size();
+        }
+        if (list_size <= _peer_max_header_list_size) {
+            return true;
+        }
+        LOG_HTTP_WARN_PA(stream_id,
+                         "Client: field section " << list_size << " exceeds the server's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
+        return false;
     }
 
 }; // class ClientHttp2Protocol

@@ -283,6 +283,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   flight: a client that sends a request answered at once beside each one it resets stays at half and is not closed,
   one request cancelled for each one served.
 
+- **The HTTP/2 client holds a request to the server's `SETTINGS_MAX_HEADER_LIST_SIZE` (Huly QB-1274).**
+  `ClientHttp2Protocol` stored the bound the server announced and never read it: a request whose header list or
+  trailer section passed it left anyway, and a server held to its own bound answered `431` or reset the stream. The
+  client judges both now as the server judges a response (Huly QB-1235, QB-1240), counted as RFC 9113 §6.5.2 counts
+  it -- each name and value, and 32 octets -- before the block is encoded, so the HPACK table never runs ahead of the
+  server's: past it `send_request()` returns `false` with nothing written (`qb::http2::Client` answers the caller
+  `503`), and a trailer section is judged again when it leaves, by the bound then in force -- one handed to
+  `send_request_trailers()`, or one whose body waited for credit while the server lowered its bound, resets the
+  stream with `INTERNAL_ERROR`, the section never sent. Read on a client against an 8 KiB bound: a request one octet
+  past it left; it is refused now with zero bytes on the socket, and one of exactly 8192 octets leaves.
+
 - **The HTTP/2 server resets every response it refuses itself with `INTERNAL_ERROR` (Huly QB-1273; the maintainer's
   decision of 2026-11-06).** `send_response()` reset a response carrying a forbidden or an invalid field, an invalid
   or conflicting `content-length`, or a refused trailer section with `PROTOCOL_ERROR` -- which says the client

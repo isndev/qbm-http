@@ -4332,3 +4332,127 @@ TEST(HTTP2ClientProtocol, EveryInvalidResponseTheServerRefusesIsResetWithInterna
         EXPECT_EQ(client_io.last_body, std::string("accepted"));
     }
 }
+
+// ===========================================================================
+// RFC 9113 section 6.5.2: SETTINGS_MAX_HEADER_LIST_SIZE announces "the maximum size of field section that the sender is
+// prepared to accept". The client stored the server's and never read it: a request, or its trailer section, left past it,
+// and a server held to its own bound answered 431 or reset the stream (Huly QB-1274). The client judges both now as the
+// server judges a response (Huly QB-1240): the leading block and the trailer section the request plans before anything
+// is sent -- send_request() returns false, zero bytes on the socket -- and a trailer section again when it leaves, by the
+// bound then in force: past it the stream is reset (INTERNAL_ERROR), the section never encoded.
+// ===========================================================================
+namespace qb1274_test {
+
+/// A request of @p method on /big with an `x-pad` field of @p octets octets, and @p body.
+[[nodiscard]] qb::http::Request
+padded(std::size_t octets, qb::http::Method method = qb::http::method::GET, std::string body = {}) {
+    qb::http::Request request;
+    request.method() = method;
+    request.uri()    = qb::io::uri("https://example.test/big");
+    request.set_header("x-pad", std::string(octets, 'p'));
+    request.body() = std::move(body);
+    return request;
+}
+
+/// The size RFC 9113 section 6.5.2 counts of a header block the client sent.
+[[nodiscard]] std::size_t
+list_size(const SentHeaderBlock &block) {
+    std::size_t size = 0;
+    for (const auto &f : block.fields) {
+        size += f.hpack_size();
+    }
+    return size;
+}
+
+/// The leading block the client sends for @p request, read off the wire of a client with no bound: its size less the
+/// `x-pad` field's, the fixed part a bound is measured against.
+[[nodiscard]] std::size_t
+fixed_part(qb::http::Request request) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    const std::size_t                          before = io.output.size();
+    const std::size_t                          pad    = request.header("x-pad").size();
+    EXPECT_TRUE(protocol.send_request(std::move(request), 1));
+    const auto blocks = sent_header_blocks(io.output, 1, before);
+    EXPECT_FALSE(blocks.empty());
+    return blocks.empty() ? 0 : list_size(blocks.front()) - (5 + pad + 32);
+}
+
+} // namespace qb1274_test
+
+// The leading block: exactly the server's bound leaves, a byte more is refused with nothing written, and the client's
+// HPACK table stays in step -- the request that follows decodes. The bound is 8 KiB, as a server may advertise it.
+TEST(HTTP2ClientProtocol, ARequestPastTheServersHeaderListBoundIsRefusedWithNothingSent) {
+    constexpr std::size_t                      bound = 8192;
+    const std::size_t                          pad   = bound - qb1274_test::fixed_part(qb1274_test::padded(0)) - (5 + 32);
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, static_cast<uint32_t>(bound)}}));
+    const std::size_t before = io.output.size();
+    EXPECT_FALSE(protocol.send_request(qb1274_test::padded(pad + 1), 1)) << "a byte past the server's bound left";
+    EXPECT_EQ(io.output.size(), before) << "zero bytes on the socket";
+    EXPECT_TRUE(protocol.ok());
+    ASSERT_TRUE(protocol.send_request(qb1274_test::padded(pad), 2)) << "exactly the bound";
+    const auto blocks = sent_header_blocks(io.output, 3, before); // the refused request used stream 1
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(qb1274_test::list_size(blocks.front()), bound);
+    EXPECT_EQ(blocks.front().value("x-pad").size(), pad);
+}
+
+// The trailer section the request plans is judged with its leading block, before anything is sent: past the bound the
+// request is refused, nothing written; at the bound it leaves after the body and ends the stream.
+TEST(HTTP2ClientProtocol, ARequestsTrailerSectionPastTheServersBoundIsRefusedWithNothingSent) {
+    constexpr uint32_t bound   = 1000;
+    const auto         trailed = [](std::size_t octets) {
+        auto request = qb1274_test::padded(0, qb::http::method::POST, "abc");
+        request.trailers().set_header("x-c", std::string(octets, 'c')); // 3 + octets + 32
+        return request;
+    };
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, bound}}));
+    const std::size_t before = io.output.size();
+    EXPECT_FALSE(protocol.send_request(trailed(bound - 35 + 1), 1)) << "a trailer section a byte past the bound";
+    EXPECT_EQ(io.output.size(), before) << "zero bytes on the socket";
+    ASSERT_TRUE(protocol.send_request(trailed(bound - 35), 2)) << "exactly the bound";
+    const auto blocks = sent_header_blocks(io.output, 3, before);
+    ASSERT_EQ(blocks.size(), 2u) << "the leading block, then the trailer section";
+    EXPECT_EQ(qb1274_test::list_size(blocks[1]), bound);
+    EXPECT_TRUE(blocks[1].flags & h2::FLAG_END_STREAM);
+}
+
+// A trailer section handed over later -- send_request_trailers() -- or one whose body waited for credit while the server
+// lowered its bound is judged when it leaves, by the bound then in force: the stream is reset with INTERNAL_ERROR, the
+// section never sent.
+TEST(HTTP2ClientProtocol, ATrailerSectionIsJudgedByTheServersBoundInForceWhenItLeaves) {
+    {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1000}}));
+        auto request = qb1274_test::padded(0, qb::http::method::POST, "body");
+        request.set_header("trailer", "x-checksum");
+        ASSERT_TRUE(protocol.send_request(std::move(request), 1)) << "announced, not set: handed over later";
+        const std::size_t before = io.output.size();
+        qb::http::headers trailers;
+        trailers.add_header("x-checksum", std::string(1000, 'd'));
+        EXPECT_FALSE(protocol.send_request_trailers(1, trailers)) << "past the bound";
+        EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 1), h2::ErrorCode::INTERNAL_ERROR);
+        EXPECT_EQ(find_frame_offset(io.output, h2::FrameType::HEADERS, before), SIZE_MAX) << "the section was sent";
+        EXPECT_TRUE(protocol.ok());
+    }
+    {
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+        auto request = qb1274_test::padded(0, qb::http::method::POST, "abc");
+        request.trailers().set_header("x-c", std::string(50, 'c')); // 3 + 50 + 32 = 85
+        ASSERT_TRUE(protocol.send_request(std::move(request), 1)) << "no bound yet; the body waits for credit";
+        const std::size_t before = io.output.size();
+        protocol.on(make_settings_frame(
+            {{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 84},
+             {h2::Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 100}}));
+        EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 3u) << "the body left";
+        EXPECT_EQ(qb1211_test::last_rst_stream_error(io.output, 1), h2::ErrorCode::INTERNAL_ERROR) << "judged by the bound in force";
+        EXPECT_EQ(find_frame_offset(io.output, h2::FrameType::HEADERS, before), SIZE_MAX) << "the section was sent";
+    }
+}
