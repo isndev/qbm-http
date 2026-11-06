@@ -91,6 +91,45 @@ All notable changes to the qbm-http module are documented here. The format is ba
   equivalent (the HTTP/3 session cancels its live stream before the context's cancel, which `_stream_gone` already
   keeps from resetting a stream the peer ended).
 
+- **A streamed static download its client stops taking is ended at an idle deadline, 60 s by default, and under a
+  minimum rate when one is set (Huly QB-1212).** Since QB-101 a download over `stream_threshold` held its file and its
+  connection for as long as the client took: a client reading 64 KiB a minute held a 16 MiB file for hours, and
+  staggered connections made that permanent. `ResponseStream` now carries a stall watch.
+  `set_idle_deadline(qb::duration)` is the longest the stream may wait, while bytes wait in the session's output (on
+  HTTP/2 the pieces the stream's windows hold back too, on HTTP/3 the bytes the peer has not acknowledged), for the
+  socket -- the peer, on HTTP/2 and HTTP/3 -- to accept one more: an IDLE deadline between two acceptances, never a
+  total one, so a slow but steady client finishes however large the file, and a slow producer with nothing waiting is
+  never cut. `set_min_rate(bytes_per_second, window = 10 s)` adds a floor under the rate at which the socket accepts
+  the stream's bytes, over a sliding window -- sampled every eighth of it while bytes wait, judged once the samples
+  span a whole window -- for the deployments that refuse a client reading an octet a minute; off by default (a
+  download's floor: a producer that writes less than it itself, with bytes waiting at every sample, is cut as a slow
+  peer is). Past either the stream is aborted exactly as `abort()` does it: the producer released with what it holds
+  (a static file's descriptor), the connection closed on HTTP/1.1, the stream alone reset on HTTP/2 (`RST_STREAM`
+  `INTERNAL_ERROR`) and HTTP/3 (`H3_REQUEST_CANCELLED`) while the connection serves on, the context cancelled (the
+  observers read it). `qb::duration::zero()` disables the deadline and 0 the floor; `idle_deadline()`, `min_rate()`,
+  `min_rate_window()` and `accepted()` read them back; both are settable at any time, per stream, as
+  `set_watermarks()` is, a change taking effect at once, armed or not. The watch is one timer the stream owns, created
+  at its first setting and gone with the watch (an ended stream leaves none behind), never on a buffered or a HEAD's
+  stream; acceptance is what the session reports to the stream at its write passes -- on HTTP/2 this stream's own
+  bytes, kept apart from its siblings' on the shared output (the pieces its windows hold back, and its last DATA
+  frame's distance from leaving the output, drained in order), so another stream's traffic is not this one's
+  acceptance and a producer idle beside a busy sibling is not a stalled peer -- and an unwatched stream pays a flag
+  test at each write and report; setting the same value again changes nothing, a new one restarts the clock.
+  `StaticFilesOptions::stream_idle_deadline` (60 s, nginx's `send_timeout`; `with_stream_idle_deadline()`) and
+  `stream_min_rate` with `stream_min_rate_window` (0: none; `with_stream_min_rate()`) are set on every download the
+  middleware streams, before its producer runs, so an earlier middleware may set a stream's own once its `next()`
+  returns. Proofs (`qbm-http-test-system-static-files-stream`, `-http2-response-stream`, `-http3-response-stream`,
+  `-response-stream`): a client that stops reading is cut within the deadline after the socket's last acceptance on
+  HTTP/1.1, after the stream window filled on HTTP/2 (a window that never grows) and HTTP/3 (credit never returned),
+  its file closed, its stream released, the connection closed on HTTP/1.1 and serving on on the others; a peer that
+  stops reading the HTTP/2 connection under a wide-open window is cut too; a stalled download beside a sibling stream
+  whose bytes keep leaving the shared output is cut all the same, while a producer idle beside that sibling is never
+  cut; a healthy reader taking its HTTP/2 download in bursts, and an HTTP/3 peer crediting its window in bursts,
+  finish under the deadline; a client taking 256 KiB then pausing 100 ms under a 1 s deadline, bytes waiting the whole
+  way, finishes 16 MiB; a client taking 128 KiB every 100 ms is cut under a 4 MiB/s floor while it still takes bytes
+  -- with no deadline, and under the 60 s default -- and finishes over a 64 KiB/s one; zero disables and reaches the
+  stream as zero; a stream's own shorter deadline set on one already armed at the middleware's cuts at once; a
+  producer writing every 700 ms under a 250 ms deadline, to a client that reads, is never cut.
 - **Cross-site request forgery protection: `qb::http::CsrfMiddleware` and `qb::http::CsrfOptions` (Huly QB-95).** The
   module had none: a browser attaches a site's cookies to every request sent to it, whichever page sent it, and every
   application authenticated by a cookie had to build its own defence. `router().use(qb::http::csrf_middleware<S>())`
@@ -336,6 +375,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-unit-middleware-static-files`; 11 of the first 13 fail on the base. 44 mutants on the final code: 38 caught, 6 equivalent or unreachable, each explained in the commit.
 
 ### Fixed
+
+- **An HTTP/2 session no longer reads its protocol after a hook cleared it (Huly QB-86, a residual found by QB-1212's
+  sanitizer run).** The second lot of QB-86 made the session's write pass and end of stream resume the streams held
+  back for the socket through its protocol pointer, which a drain's `POST_RESPONSE_SEND` hook calling
+  `clear_protocols()` (the lifecycle suite does) or the io's own disconnect had freed: a heap use-after-free under
+  ASan in `Http2ServerLifecycle.DrainPostCanClearTheActiveProtocolBeforeAnotherCandidate`. The session now reads the
+  protocol only while the io still runs it (`live_http2_protocol()`), as its other paths already did.
 
 - **Security: the HTTP/2 server's Rapid Reset guard counts the streams a client opened, not its highest stream id, and
   the resets it provokes (Huly QB-1244; CVE-2023-44487, CVE-2025-8671).** The guard closes the connection with

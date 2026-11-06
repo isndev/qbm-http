@@ -310,7 +310,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,362,603,817-841; qbm/http/src/qbm/http/routing/router_core.h:379-386,487; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:129-184,695-731 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,362,603,817-841; qbm/http/src/qbm/http/routing/router_core.h:379-386,487; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:156-211,742-778 -->
 
 ## Lifecycle in order
 

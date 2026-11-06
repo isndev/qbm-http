@@ -30,6 +30,7 @@
 #include <qb/io/async/listener.h> // qb::io::async::defer (a streamed file gives a turn back, Huly QB-101)
 #include <qb/io/system/file.h>    // qb::io::sys::resolve_resource (working-dir-independent root)
 #include <qb/system/container/unordered_map.h>
+#include <qb/system/time.h> // qb::duration: the stall watch's settings (Huly QB-1212)
 #include "../date.h"
 #include "../request.h"
 #include "../response.h"
@@ -69,12 +70,30 @@ public:
     /// stream's high watermark (1 MiB by default) and a piece in the
     /// session's output, and a piece of its own, whatever the file's
     /// size. A body of at most this many bytes, and every body on a
-    /// session that cannot stream (HTTP/2, HTTP/3), is read whole into
+    /// session that cannot stream (an HTTP/1.1 connection an HTTP/2
+    /// server took through ALPN fallback), is read whole into
     /// the response, as before: `max_file_size` bounds it, and the
     /// `PRE_RESPONSE_SEND` hooks (compression) see it -- a streamed body
     /// leaves uncompressed. Defaults to 1 MiB, the default high
     /// watermark; `0` streams every non-empty body, `SIZE_MAX` none.
     std::size_t stream_threshold = default_stream_high_watermark;
+    /// The longest a streamed download may go without the socket -- the peer,
+    /// on HTTP/2 and HTTP/3 -- accepting a byte of it while bytes wait (Huly
+    /// QB-1212): an IDLE deadline between two acceptances, not a total one,
+    /// so a slow but steady client finishes however large the file. Past it
+    /// the stream is aborted: the file released, the stream reset on HTTP/2
+    /// and HTTP/3 (never the connection), the connection closed on HTTP/1.1.
+    /// 60 s by default, nginx's `send_timeout`; `qb::duration::zero()`
+    /// disables it. Set per stream too, with `ResponseStream::set_idle_deadline()`.
+    qb::duration stream_idle_deadline = std::chrono::seconds(60);
+    /// A floor under the rate at which the socket accepts a streamed
+    /// download, in bytes per second over `stream_min_rate_window` (sliding;
+    /// judged once a whole window has passed), for the deployments that
+    /// refuse a client reading an octet a minute: under it the download is
+    /// aborted as at the deadline. 0, the default, sets none.
+    std::size_t stream_min_rate = 0;
+    /// The sliding window `stream_min_rate` is read over, sampled at every eighth of it; 10 ms at least.
+    qb::duration stream_min_rate_window = std::chrono::seconds(10);
     /// If `true`, requests whose final path component is a symbolic link
     /// are rejected with `403 Forbidden`, even when the link resolves
     /// inside the root directory. Matches `O_NOFOLLOW` semantics for
@@ -178,6 +197,21 @@ public:
     StaticFilesOptions &
     with_reject_symlinks(bool reject) noexcept {
         reject_symlinks = reject;
+        return *this;
+    }
+
+    /// Fluent setter for `stream_idle_deadline`. See the member for semantics; zero disables.
+    StaticFilesOptions &
+    with_stream_idle_deadline(qb::duration deadline) noexcept {
+        stream_idle_deadline = deadline;
+        return *this;
+    }
+
+    /// Fluent setter for `stream_min_rate` and its window. See the members for semantics; 0 sets no floor.
+    StaticFilesOptions &
+    with_stream_min_rate(std::size_t bytes_per_second, qb::duration window = std::chrono::seconds(10)) noexcept {
+        stream_min_rate        = bytes_per_second;
+        stream_min_rate_window = window;
         return *this;
     }
 };
@@ -1031,6 +1065,13 @@ private:
                 stream->end(); // buffered: the response leaves whole, through the ordinary completion
                 return;
             }
+            // The stall watch (Huly QB-1212): a client that stops taking bytes frees the file and the stream at the
+            // idle deadline; a rate floor, when one is set, cuts one that takes too few. A stream's own setting, made
+            // by an earlier middleware once its next() returns (nothing runs behind this one for a streamed file),
+            // replaces these: armed already, the watch takes a change at once.
+            stream->set_idle_deadline(_options.stream_idle_deadline);
+            if (_options.stream_min_rate != 0)
+                stream->set_min_rate(_options.stream_min_rate, _options.stream_min_rate_window);
             std::make_shared<internal::StaticFileStreamer<SessionType>>(std::move(stream), std::move(file), length)->run();
         }
     }

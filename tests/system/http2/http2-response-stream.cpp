@@ -42,6 +42,10 @@
 #include <thread>
 #include <vector>
 
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <qb/uuid.h>
 #include <gtest/gtest.h>
 
 #include "../../shared/http2_raw_client.h"
@@ -50,6 +54,7 @@
 
 #include <qb/io/async/coroutine.h>
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/static_files.h>
 
 using namespace std::chrono_literals;
 using qb::http::test::Http2RawClient;
@@ -107,8 +112,10 @@ struct Responded {
     bool        cancelled = false;
 };
 inline std::mutex                        g_responded_mutex;
-inline std::map<std::string, Responded>  g_responded; ///< by path: what the observer read at the end
-inline std::vector<std::shared_ptr<Ctx>> g_held;      ///< the requests `/hold` keeps unanswered (server thread only)
+inline std::map<std::string, Responded>  g_responded;   ///< by path: what the observer read at the end
+inline std::vector<std::shared_ptr<Ctx>> g_held;        ///< the requests `/hold` keeps unanswered (server thread only)
+inline std::filesystem::path             g_static_root; ///< a directory with big.bin for the static files' deadline cases (Huly QB-1212)
+inline constexpr std::size_t             kBigFile = std::size_t{16} * 1024 * 1024; ///< big.bin's size
 
 struct Observer : qb::http::IRequestObserver<WireSession> {
     void
@@ -143,6 +150,36 @@ pieces(std::shared_ptr<Stream> stream, int i, int n, int hold_at) {
     qb::io::async::callback([stream, i, n, hold_at] { pieces(stream, i + 1, n, hold_at); }, 1ms);
 }
 
+/// A producer that never ends: 64 KiB pieces while the stream takes them, parked on on_drain() above the high mark, so
+/// the connection's output stays between the marks for as long as the peer reads -- what a sibling is measured against.
+void
+bulk(std::shared_ptr<Stream> stream) {
+    static const std::string piece(64 * 1024, 'b');
+    while (!stream->cancelled() && !stream->needs_drain()) {
+        if (stream->write(piece) != Stream::write_result::taken)
+            return;
+    }
+    if (!stream->cancelled())
+        stream->on_drain([stream] { bulk(stream); });
+}
+
+/// One cycle of a client that reads a bulk sibling in SIPS: at least `bytes` of stream `b` (a read pass takes up to 64 KiB
+/// more), the windows re-credited so `b` never runs dry, then `pause`. Returns how much `b` grew in the cycle -- the
+/// output held between the marks and drained a sip at a time is what the sibling cases are measured against.
+template <typename Stop>
+std::size_t
+sip(Http2RawClient &c, std::uint32_t b, std::size_t bytes, std::chrono::milliseconds pause, std::uint64_t &credited, Stop &&stop) {
+    const auto before = c.stream(b).data_bytes;
+    c.read_until([&] { return c.stream(b).data_bytes >= before + bytes || stop() || c.eof; }, 500ms);
+    if (c.stream(b).data_bytes + (std::uint64_t{4} << 20) > credited) {
+        (void) c.window_update(0, 8u << 20);
+        (void) c.window_update(b, 8u << 20);
+        credited += 8u << 20;
+    }
+    std::this_thread::sleep_for(pause);
+    return c.stream(b).data_bytes - before;
+}
+
 /// A tick every 5 ms until the stream is closed under it.
 void
 forever(std::shared_ptr<Stream> stream) {
@@ -170,6 +207,11 @@ class WireServer : public qb::http2::use<WireServer>::server<WireSession> {
 public:
     WireServer() {
         router().add_observer(std::make_shared<Observer>());
+        if (!g_static_root.empty()) // /static/big.bin streams, and a client that stops taking bytes is cut at 500 ms
+            router().use(qb::http::static_files_middleware<WireSession>(qb::http::StaticFilesOptions(g_static_root)
+                                                                            .with_path_prefix_to_strip("/static")
+                                                                            .with_stream_threshold(std::size_t{64} * 1024)
+                                                                            .with_stream_idle_deadline(500ms)));
 
         const auto pieces_route = [](std::shared_ptr<Ctx> ctx) {
             ctx->response().status() = qb::http::status::OK;
@@ -236,6 +278,10 @@ public:
             ctx->response().status() = qb::http::status::OK;
             forever(ctx->begin_stream());
         });
+        router().get("/bulk", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            bulk(ctx->begin_stream());
+        });
 
         router().get("/chunked-said", [](std::shared_ptr<Ctx> ctx) { // a handler written for HTTP/1.1
             ctx->response().status() = qb::http::status::OK;
@@ -293,6 +339,20 @@ public:
         });
 
         router().get("/plain", [](std::shared_ptr<Ctx> ctx) { ctx->text("still served"); });
+        // A producer slower than its own idle deadline (a piece, then one more and the end 700 ms later, under 250 ms):
+        // nothing of ITS waits between the pieces, whatever its siblings put through the connection (Huly QB-1212).
+        router().get("/slow-producer", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            stream->set_idle_deadline(250ms);
+            (void) stream->write("first;");
+            qb::io::async::callback(
+                [stream] {
+                    (void) stream->write("second;");
+                    stream->end();
+                },
+                700ms);
+        });
         router().compile();
     }
 };
@@ -301,6 +361,31 @@ class Http2StreamWireTest : public ::testing::Test {
 protected:
     std::uint16_t                             port{0};
     std::unique_ptr<ServerThread<WireServer>> server;
+
+    /// A directory with big.bin, 16 MiB of pseudo-random bytes (more than any loopback socket buffers hold, whatever the
+    /// host's TCP tuning), for the static files' deadline cases (Huly QB-1212): written once for the suite, mounted by
+    /// every WireServer under /static.
+    static void
+    SetUpTestSuite() {
+        g_static_root = std::filesystem::temp_directory_path() / ("qbm-h2-deadline-" + uuids::to_string(qb::generate_random_uuid()));
+        std::filesystem::create_directories(g_static_root);
+        std::string   big(kBigFile, '\0');
+        std::uint32_t x = 7u;
+        for (auto &ch : big) {
+            x  = x * 1664525u + 1013904223u;
+            ch = static_cast<char>(x >> 24);
+        }
+        std::ofstream out(g_static_root / "big.bin", std::ios::binary);
+        out.write(big.data(), static_cast<std::streamsize>(big.size()));
+        out.close();
+        ASSERT_TRUE(out.good()) << "big.bin was not written under " << g_static_root;
+    }
+    static void
+    TearDownTestSuite() {
+        std::error_code ec;
+        std::filesystem::remove_all(g_static_root, ec);
+        g_static_root.clear();
+    }
 
     void
     SetUp() override {
@@ -502,6 +587,166 @@ TEST_F(Http2StreamWireTest, ADeclaredLengthStreamsIdentityAndEndsOnItsLastByte) 
         if (f.type == Http2RawClient::DATA && f.stream_id == id && (f.flags & Http2RawClient::END_STREAM))
             end_on_last = f.payload.empty();
     EXPECT_TRUE(end_on_last) << "END_STREAM on the empty frame, on no other";
+    c.close();
+}
+
+TEST_F(Http2StreamWireTest, AStaticDownloadWhosePeerStopsTakingBytesIsResetAtTheIdleDeadline) {
+    // The peer's window takes the first 16 KiB and never grows: no byte is accepted past them. The static files'
+    // idle deadline (500 ms here) aborts the stream -- RST_STREAM(INTERNAL_ERROR), the file released -- and the
+    // connection serves on (Huly QB-1212).
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 16384}}));
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto id = c.request("/static/big.bin");
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(id).data_bytes >= 16384; }));
+    const auto parked = std::chrono::steady_clock::now();
+    EXPECT_EQ(c.stream(id).status(), 200);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(id).reset; }, 3s)) << "the stalled download was never cut";
+    const auto now      = std::chrono::steady_clock::now();
+    const auto cut      = std::chrono::duration_cast<std::chrono::milliseconds>(now - parked);
+    const auto since_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+    std::cout << "[  cut   ] HTTP/2 stalled download reset " << cut.count() << " ms after the window filled (deadline 500 ms)\n";
+    EXPECT_GE(since_t0, 500ms) << "not before the deadline has passed since the request: " << since_t0.count() << " ms";
+    EXPECT_LE(cut, 900ms) << "within the deadline and 400 ms of loop latency (twice it: a whole deadline re-armed): " << cut.count() << " ms";
+    EXPECT_EQ(c.stream(id).reset_code, 0x2u) << "INTERNAL_ERROR: the stream was aborted";
+    EXPECT_EQ(c.stream(id).data_bytes, 16384u) << "nothing past the window";
+    EXPECT_FALSE(c.eof) << "the stream, never the connection";
+    const auto next = c.request("/plain");
+    ASSERT_TRUE(c.read_until([&] { return c.stream(next).end_stream; })) << "the connection serves on";
+    EXPECT_EQ(c.stream(next).body(), "still served");
+    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").cancelled; })) << "the context was cancelled";
+    EXPECT_LT(responded("/static/big.bin").streamed, kBigFile);
+    c.close();
+}
+
+TEST_F(Http2StreamWireTest, APeerThatStopsReadingTheConnectionUnderAWideWindowIsCutAtTheIdleDeadline) {
+    // The other stall of HTTP/2: the windows are wide open, so every piece leaves the stream for the connection's output,
+    // and the peer stops reading the SOCKET -- the output stays full, nothing of the stream leaves it. The stream's
+    // own share of the output is what the watch reads (Huly QB-1212): the download is reset at the deadline, and the
+    // reset reaches the peer once it reads again, behind the data.
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 1u << 24}}));
+    ASSERT_TRUE(c.window_update(0, 1u << 24));
+    const auto id = c.request("/static/big.bin");
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(id).data_bytes >= 64 * 1024; }));
+    std::this_thread::sleep_for(1500ms); // nothing read: the socket's buffers fill and stay full for three deadlines
+    ASSERT_TRUE(c.read_until([&] { return c.stream(id).reset; }, 5s)) << "the download whose peer stopped reading was never cut";
+    EXPECT_EQ(c.stream(id).reset_code, 0x2u) << "INTERNAL_ERROR: the stream was aborted";
+    EXPECT_LT(c.stream(id).data_bytes, kBigFile) << "the file did not go whole";
+    EXPECT_FALSE(c.eof) << "the stream, never the connection";
+    const auto next = c.request("/plain");
+    ASSERT_TRUE(c.read_until([&] { return c.stream(next).end_stream; })) << "the connection serves on";
+    EXPECT_EQ(c.stream(next).body(), "still served");
+    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").cancelled; })) << "the context was cancelled";
+    c.close();
+}
+
+TEST_F(Http2StreamWireTest, AStalledDownloadIsCutWhileASiblingStreamKeepsTheConnectionBusy) {
+    // The connection's output is shared: a sibling stream flowing on it must not count as the stalled stream's
+    // acceptance (Huly QB-1212). Stream A: the static file behind a 16 KiB window never updated. Stream B: a bulk
+    // producer, its windows re-credited as it goes, read in sips of 256 KiB with 50 ms between them, so the output
+    // holds B's pieces between the marks and every write pass reports less of it -- what a shared count would read as
+    // A's progress. A is reset at its deadline all the same, B flowing to the last cycle; B is untouched.
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 16384}}));
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto a  = c.request("/static/big.bin");
+    ASSERT_NE(a, 0u);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(a).data_bytes >= 16384; }));
+    const auto parked = std::chrono::steady_clock::now();
+    const auto b      = c.request("/bulk");
+    ASSERT_NE(b, 0u);
+    std::uint64_t credited = 16384;
+    ASSERT_TRUE(c.window_update(0, 8u << 20));
+    ASSERT_TRUE(c.window_update(b, 8u << 20));
+    credited += 8u << 20;
+    ASSERT_TRUE(c.read_until([&] { return c.stream(b).data_bytes >= 64 * 1024; })) << "the sibling flows";
+    const auto  give_up      = std::chrono::steady_clock::now() + 4s;
+    std::size_t last_growth  = 0;
+    std::size_t prior_growth = 0;
+    while (!c.stream(a).reset && !c.eof && std::chrono::steady_clock::now() < give_up) {
+        prior_growth = last_growth;
+        last_growth  = sip(c, b, 256 * 1024, 50ms, credited, [&] { return c.stream(a).reset; });
+    }
+    ASSERT_TRUE(c.stream(a).reset) << "the stalled download was never cut beside a flowing sibling";
+    const auto now      = std::chrono::steady_clock::now();
+    const auto cut      = std::chrono::duration_cast<std::chrono::milliseconds>(now - parked);
+    const auto since_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+    std::cout << "[  cut   ] HTTP/2 stalled download beside a flowing sibling reset " << cut.count()
+              << " ms after its window filled (deadline 500 ms), B at " << c.stream(b).data_bytes << " bytes\n";
+    EXPECT_GE(since_t0, 500ms) << since_t0.count() << " ms since the request";
+    EXPECT_LE(cut, 1500ms) << cut.count() << " ms (the reset waits its turn behind B's frames in the output, sipped)";
+    EXPECT_EQ(c.stream(a).reset_code, 0x2u) << "INTERNAL_ERROR: the stream was aborted";
+    EXPECT_EQ(c.stream(a).data_bytes, 16384u) << "nothing past the window";
+    EXPECT_GT(prior_growth + last_growth, 0u) << "the sibling flowed in the cycle A was cut in";
+    EXPECT_GT(c.stream(b).data_bytes, std::size_t{2} << 20) << "the sibling flowed all along: " << c.stream(b).data_bytes;
+    EXPECT_FALSE(c.stream(b).reset) << "the sibling is untouched";
+    EXPECT_FALSE(c.eof) << "the stream, never the connection";
+    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").cancelled; })) << "the context was cancelled";
+    c.close();
+}
+
+TEST_F(Http2StreamWireTest, AHealthyReaderTakingItsDownloadInBurstsFinishesUnderTheDeadline) {
+    // The positive control of the HTTP/2 share (Huly QB-1212): windows wide open, the client takes 1 MiB then pauses
+    // 100 ms, for 16 MiB -- several deadlines long, bytes of the stream waiting in the output at every pause -- and
+    // the download ends with END_STREAM, never reset: each burst drains the stream's own frames from the output.
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 1u << 24}}));
+    ASSERT_TRUE(c.window_update(0, 1u << 24));
+    const auto started = std::chrono::steady_clock::now();
+    const auto id      = c.request("/static/big.bin");
+    ASSERT_NE(id, 0u);
+    int bursts = 0;
+    while (!c.stream(id).end_stream && !c.stream(id).reset && !c.eof) {
+        const auto before = c.stream(id).data_bytes;
+        ASSERT_TRUE(
+            c.read_until([&] { return c.stream(id).data_bytes >= before + (1u << 20) || c.stream(id).end_stream || c.stream(id).reset; }, 5s))
+            << "burst " << bursts << " never came";
+        if (c.stream(id).end_stream || c.stream(id).reset)
+            break;
+        std::this_thread::sleep_for(100ms);
+        ++bursts;
+    }
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    EXPECT_FALSE(c.stream(id).reset) << "a healthy reader is not a stalled peer";
+    EXPECT_TRUE(c.stream(id).end_stream);
+    EXPECT_EQ(c.stream(id).data_bytes, kBigFile);
+    EXPECT_GE(bursts, 8) << "the client did pause on the way";
+    EXPECT_GT(took, 1s) << "several deadlines long: " << took.count() << " ms";
+    EXPECT_FALSE(c.eof);
+    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").streamed == kBigFile; }));
+    EXPECT_FALSE(responded("/static/big.bin").cancelled);
+    c.close();
+}
+
+TEST_F(Http2StreamWireTest, AnIdleProducerBesideABusySiblingIsNeverCut) {
+    // The mirror of the sibling case (Huly QB-1212): the same bulk sibling B holds the output between the marks, read in
+    // sips, while stream A's producer writes a piece, pauses 700 ms under a 250 ms deadline, writes again and ends.
+    // Nothing of A's waits once its frame has left the output -- B's bytes behind it are B's -- so A is never cut: its
+    // share of the output is its last frame's distance from leaving, which reaches 0, not a count pinned by B's.
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 1u << 24}}));
+    std::uint64_t credited = 65535;
+    ASSERT_TRUE(c.window_update(0, 8u << 20));
+    credited += 8u << 20;
+    const auto b = c.request("/bulk");
+    ASSERT_NE(b, 0u);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(b).data_bytes >= 64 * 1024; })) << "the sibling flows";
+    const auto a = c.request("/slow-producer");
+    ASSERT_NE(a, 0u);
+    const auto  give_up     = std::chrono::steady_clock::now() + 5s;
+    std::size_t last_growth = 0;
+    while (!c.stream(a).end_stream && !c.stream(a).reset && !c.eof && std::chrono::steady_clock::now() < give_up)
+        last_growth = sip(c, b, 256 * 1024, 50ms, credited, [&] { return c.stream(a).end_stream || c.stream(a).reset; });
+    EXPECT_FALSE(c.stream(a).reset) << "an idle producer is not a stalled peer";
+    EXPECT_TRUE(c.stream(a).end_stream) << "A never ended";
+    EXPECT_EQ(c.stream(a).body(), "first;second;");
+    EXPECT_GT(c.stream(b).data_bytes, std::size_t{2} << 20) << "the sibling flowed all along: " << c.stream(b).data_bytes;
+    EXPECT_FALSE(c.stream(b).reset);
+    EXPECT_FALSE(c.eof);
+    (void) last_growth;
     c.close();
 }
 

@@ -105,6 +105,8 @@ struct Observed {
     std::atomic<bool>        helper_saw_parked{false};     ///< the second drain() ran while the first was parked
     std::atomic<int>         post_handler_saw_ended{-1};   ///< POST_HANDLER_EXECUTION ran with the stream ended (1) or open (0)
     std::atomic<int>         post_send_status{0};          ///< the status a POST_RESPONSE_SEND hook read
+    std::atomic<bool>        deadline_set{false};          ///< /slow-producer read back the idle deadline it set (Huly QB-1212)
+    std::atomic<int>         last_verdict{0};              ///< /slow-producer's last write: write_result + 1
     std::atomic<int>         verdicts[8]{};                ///< write verdicts a route records, in order (int + 1; 0 = none)
     std::atomic<std::size_t> high{0};                      ///< a stream's high watermark, as it kept it
     std::atomic<std::size_t> low{0};                       ///< its low watermark
@@ -145,6 +147,8 @@ struct Observed {
         refused_stream        = -1;
         dropped_callback_ran  = false;
         dropped_callback_set  = false;
+        deadline_set          = false;
+        last_verdict          = 0;
     }
 };
 inline Observed g_seen;
@@ -434,6 +438,29 @@ public:
             (void) stream->write("two;");
             (void) stream->write("three;");
             stream->end();
+        });
+
+        // A producer slower than the stream's idle deadline (a piece every 700 ms under 250 ms), with a client that reads:
+        // nothing waits in the socket between the pieces, so the deadline -- between two acceptances of bytes that
+        // WAIT -- never runs (Huly QB-1212).
+        router().get("/slow-producer", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            record(ctx, stream);
+            stream->set_idle_deadline(250ms);
+            g_seen.deadline_set = stream->idle_deadline() == 250ms;
+            (void) stream->write("first;");
+            qb::io::async::callback(
+                [stream] {
+                    (void) stream->write("second;");
+                    qb::io::async::callback(
+                        [stream] {
+                            g_seen.last_verdict = static_cast<int>(stream->write("third;")) + 1;
+                            stream->end();
+                        },
+                        700ms);
+                },
+                700ms);
         });
 
         // Backpressure: 256 MiB declared and streamed in 64 KiB pieces, watermarks 256 / 128 KiB -- far above what any
@@ -1281,6 +1308,24 @@ TEST_F(ResponseStreamTest, ASynchronousHandlerStreamsInsteadOfBuffering) {
     EXPECT_EQ(r.body, "one;two;three;");
     EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::chunked));
     EXPECT_TRUE(g_seen.streaming.load());
+}
+
+TEST_F(ResponseStreamTest, AProducerSlowerThanTheIdleDeadlineIsNeverCutWhileNothingWaits) {
+    // The idle deadline (Huly QB-1212) runs between two acceptances of bytes that WAIT for the socket: a producer that
+    // writes a piece every 700 ms under a 250 ms deadline, to a client that reads, is never cut -- nothing waits
+    // between its pieces -- and its body arrives whole.
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/slow-producer")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete || c.eof; }, 5s)) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_TRUE(r.complete) << "the producer was cut: " << c.buffer;
+    EXPECT_EQ(r.body, "first;second;third;");
+    EXPECT_EQ(r.chunks, 3);
+    EXPECT_FALSE(c.eof) << "the connection stays";
+    EXPECT_TRUE(g_seen.deadline_set.load());
+    EXPECT_EQ(g_seen.last_verdict.load(), static_cast<int>(Stream::write_result::taken) + 1) << "the last piece was taken";
+    EXPECT_FALSE(g_seen.cancelled.load());
 }
 
 TEST_F(ResponseStreamTest, AClientThatDoesNotReadBoundsTheServerOutputAndTheProducerWaits) {

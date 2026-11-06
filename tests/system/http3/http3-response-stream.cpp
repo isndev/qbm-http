@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/static_files.h>
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 
@@ -45,7 +46,13 @@
 #include <utility>
 #include <vector>
 
+#include <qb/io/async/quic/endpoint.h>
 #include <qb/system/container/unordered_map.h>
+#include <qb/uuid.h>
+
+#include <filesystem>
+#include <fstream>
+#include <iostream>
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
@@ -373,8 +380,204 @@ struct Loopback {
     std::size_t               written_at_close    = 0;
     bool                      drain_verdict_false = false;
     int                       forbidden_outcome   = 0; ///< /trailers-forbidden at REQUEST_COMPLETE: 1 cancelled, 2 completed
+    // What the router's observer read when the static download ended (Huly QB-1212).
+    bool        responded_seen      = false;
+    bool        responded_cancelled = false;
+    std::size_t responded_streamed  = 0;
 };
-inline Loopback g;
+inline Loopback              g;
+inline std::filesystem::path g_static_root; ///< a directory with big.bin: the static files are mounted when set (Huly QB-1212)
+
+/// The observer the static files' deadline case reads: cancelled or not, and the bytes streamed, at the end of /static/big.bin.
+struct Observer : qb::http::IRequestObserver<H3Session> {
+    void
+    on_response(H3Ctx const &ctx, qb::http::RequestEnd const &) noexcept override {
+        if (ctx.request().uri().path() != "/static/big.bin")
+            return;
+        g.responded_seen      = true;
+        g.responded_cancelled = ctx.is_cancelled();
+        g.responded_streamed  = ctx.streamed_bytes();
+    }
+};
+
+/// A bare QUIC peer speaking just enough HTTP/3 to ask for one file and then take no more of it than its 16 KiB
+/// stream window: it never returns credit, so the server's stream stalls at the window exactly as it does behind a
+/// client that stopped reading. A second request on a new stream shows the connection served on (Huly QB-1212).
+class StallingH3Peer : public qb::io::async::quic::endpoint {
+    std::uint16_t _port;
+
+    static qb::io::quic::settings
+    window() {
+        qb::io::quic::settings s;
+        s.stream_recv_window          = 16 * 1024;
+        s.connection_recv_window      = 64 * 1024;
+        s.max_stream_data_bidi_local  = 16 * 1024;
+        s.max_stream_data_bidi_remote = 16 * 1024;
+        s.max_stream_data_uni         = 16 * 1024;
+        return s;
+    }
+    static bool
+    read_varint(std::string const &bytes, std::size_t &at, std::uint64_t &value) {
+        if (at >= bytes.size())
+            return false;
+        const auto        first  = static_cast<std::uint8_t>(bytes[at]);
+        const std::size_t length = std::size_t{1} << (first >> 6);
+        if (at + length > bytes.size())
+            return false;
+        value = first & 0x3Fu;
+        for (std::size_t i = 1; i < length; ++i)
+            value = (value << 8) | static_cast<std::uint8_t>(bytes[at + i]);
+        at += length;
+        return true;
+    }
+    static void
+    varint(std::string &out, std::uint64_t v) {
+        if (v < 64) {
+            out.push_back(static_cast<char>(v));
+        } else if (v < 16384) {
+            out.push_back(static_cast<char>(0x40 | (v >> 8)));
+            out.push_back(static_cast<char>(v & 0xFF));
+        } else {
+            out.push_back(static_cast<char>(0x80 | (v >> 24)));
+            out.push_back(static_cast<char>((v >> 16) & 0xFF));
+            out.push_back(static_cast<char>((v >> 8) & 0xFF));
+            out.push_back(static_cast<char>(v & 0xFF));
+        }
+    }
+    /// A QPACK literal field line whose name is a static-table entry (RFC 9204 section 4.5.4), value under 127 bytes, not Huffman-coded.
+    static void
+    literal(std::string &out, std::uint8_t static_index, std::string_view value) {
+        out.push_back(static_cast<char>(0x50 | static_index));
+        out.push_back(static_cast<char>(value.size()));
+        out.append(value);
+    }
+    /// A HEADERS frame asking GET `path`: the static table alone (:method GET = 17, :scheme https = 23, :authority = 0, :path = 1).
+    std::string
+    request_frame(std::string_view path) const {
+        std::string block;
+        block.append("\x00\x00", 2); // required insert count 0, base 0: no dynamic table
+        block.push_back(static_cast<char>(0xD1));
+        block.push_back(static_cast<char>(0xD7));
+        literal(block, 0, "127.0.0.1:" + std::to_string(_port));
+        literal(block, 1, path);
+        std::string frame;
+        varint(frame, 0x01);
+        varint(frame, block.size());
+        return frame + block;
+    }
+
+protected:
+    void
+    dispatch(qb::io::async::quic::event::connected const &) override {
+        connected = true;
+        send_stream_data(open_unidirectional_stream().id(), std::string("\x00\x04\x00", 3)); // control stream: an empty SETTINGS
+        send_stream_data(open_unidirectional_stream().id(), std::string("\x02", 1));         // QPACK encoder stream
+        send_stream_data(open_unidirectional_stream().id(), std::string("\x03", 1));         // QPACK decoder stream
+        first = open_bidirectional_stream().id();
+        send_stream_data(first, request_frame("/static/big.bin"), true);
+    }
+    void
+    dispatch(qb::io::async::quic::event::stream_data const &ev) override {
+        if (ev.id == first) {
+            connection = ev.connection_id;
+            first_bytes += ev.payload.size(); // not credited back here: the window is all this peer takes unless the test credits it
+            if (ev.fin)
+                first_fin = true;
+        } else if (ev.id == second) {
+            second_payload.append(ev.payload.data(), ev.payload.size());
+            if (ev.fin)
+                second_fin = true;
+            extend_stream_credit(ev.connection_id, ev.id, ev.payload.size());
+        }
+    }
+    void
+    dispatch(qb::io::async::quic::event::stream_closed const &ev) override {
+        if (ev.id == first && ev.reason != qb::io::quic::stream_close_reason::finished) {
+            first_reset        = true;
+            first_reset_reason = ev.reason;
+            first_reset_code   = ev.error_code;
+        }
+    }
+    void
+    dispatch(qb::io::async::quic::event::connection_closed const &) override {
+        connection_closed = true;
+    }
+
+public:
+    bool                              connected          = false;
+    bool                              connection_closed  = false;
+    std::uint64_t                     first              = ~std::uint64_t{0}; ///< the stalled download's stream
+    std::size_t                       first_bytes        = 0;
+    bool                              first_reset        = false;
+    std::uint64_t                     first_reset_code   = 0;
+    std::uint64_t                     connection         = 0;
+    bool                              first_fin          = false;
+    qb::io::quic::stream_close_reason first_reset_reason = qb::io::quic::stream_close_reason::none;
+    std::uint64_t                     second             = ~std::uint64_t{0}; ///< the request made once the first was cut
+    std::string                       second_payload;
+    bool                              second_fin = false;
+
+    explicit StallingH3Peer(std::uint16_t port)
+        : endpoint(window())
+        , _port(port) {}
+
+    bool
+    open() {
+        qb::io::quic::tls_config tls;
+        tls.verify_peer = false;
+        return connect(qb::io::uri("https://127.0.0.1:" + std::to_string(_port)), tls, {"h3"});
+    }
+    /// The test's hand on the window: `bytes` more of the first stream may come.
+    void
+    credit(std::size_t bytes) {
+        extend_stream_credit(connection, first, bytes);
+    }
+    void
+    ask_again(std::string_view path) {
+        second = open_bidirectional_stream().id();
+        send_stream_data(second, request_frame(path), true);
+    }
+    /// 200 when the second response's HEADERS frame opens, after a prefix of no dynamic table (0x00 0x00), with the
+    /// static table's `:status: 200` indexed (entry 25, 0xD9, RFC 9204 Appendix A); 0 when the frame is not there or the
+    /// server encoded its status another way.
+    [[nodiscard]] int
+    second_status() const {
+        std::size_t   at   = 0;
+        std::uint64_t type = 0, length = 0;
+        if (!read_varint(second_payload, at, type) || type != 0x01 || !read_varint(second_payload, at, length)
+            || at + 3 > second_payload.size())
+            return 0;
+        if (second_payload[at] != 0 || second_payload[at + 1] != 0)
+            return 0;
+        return static_cast<std::uint8_t>(second_payload[at + 2]) == 0xD9 ? 200 : 0;
+    }
+};
+
+/// A directory holding big.bin, 4 MiB of pseudo-random bytes, removed with its scope; `ok` says the file was written.
+struct StaticRoot {
+    std::filesystem::path path;
+    bool                  ok = false;
+    StaticRoot() {
+        path = std::filesystem::temp_directory_path() / ("qbm-h3-deadline-" + uuids::to_string(qb::generate_random_uuid()));
+        std::filesystem::create_directories(path);
+        std::string   big(std::size_t{4} * 1024 * 1024, '\0');
+        std::uint32_t x = 11u;
+        for (auto &ch : big) {
+            x  = x * 1664525u + 1013904223u;
+            ch = static_cast<char>(x >> 24);
+        }
+        std::ofstream out(path / "big.bin", std::ios::binary);
+        out.write(big.data(), static_cast<std::streamsize>(big.size()));
+        out.close();
+        ok            = out.good();
+        g_static_root = path;
+    }
+    ~StaticRoot() {
+        g_static_root.clear();
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
 
 class Http3ResponseStreamTest : public ::testing::Test {
 protected:
@@ -402,6 +605,15 @@ protected:
                 std::this_thread::sleep_for(1ms);
         }
         return true;
+    }
+
+    /// The loop run for `window`, whatever happens in it.
+    static void
+    pump_for(std::chrono::milliseconds window) {
+        const auto until = std::chrono::steady_clock::now() + window;
+        while (std::chrono::steady_clock::now() < until)
+            if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT))
+                std::this_thread::sleep_for(1ms);
     }
 
     /// A server with the routes of this suite, listening on `port`.
@@ -495,6 +707,12 @@ protected:
             stream->end();
         });
         r.get("/plain", [](std::shared_ptr<H3Ctx> ctx) { ctx->text("still served"); });
+        r.add_observer(std::make_shared<Observer>());
+        if (!g_static_root.empty()) // /static/big.bin streams, and a peer that stops taking bytes is cut at 500 ms (Huly QB-1212)
+            r.use(qb::http::static_files_middleware<H3Session>(qb::http::StaticFilesOptions(g_static_root)
+                                                                   .with_path_prefix_to_strip("/static")
+                                                                   .with_stream_threshold(std::size_t{64} * 1024)
+                                                                   .with_stream_idle_deadline(500ms)));
         r.compile();
         EXPECT_TRUE(server->listen(qb::io::uri(origin(port)), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
         return server;
@@ -622,6 +840,79 @@ TEST_F(Http3ResponseStreamTest, ATrailerSectionTheStreamRefusesResetsItAndCancel
     ASSERT_TRUE(next.has_value());
     EXPECT_EQ(next->status(), qb::http::status::OK) << "the connection serves on";
     client->disconnect();
+    server->close();
+}
+
+TEST_F(Http3ResponseStreamTest, AStaticDownloadWhosePeerStopsTakingBytesIsResetAtTheIdleDeadline) {
+    // The peer's 16 KiB stream window never grows: the server's stream stalls at it, nothing past it is acknowledged,
+    // and the static files' idle deadline (500 ms here) aborts the stream -- RESET_STREAM H3_REQUEST_CANCELLED, the
+    // context cancelled, the file released -- while the connection serves the next request (Huly QB-1212).
+    const auto port = qb::http::test::ephemeral_udp_port();
+    StaticRoot root;
+    ASSERT_TRUE(root.ok) << "big.bin was not written under " << root.path;
+    auto           server = make_server(port);
+    StallingH3Peer peer(port);
+    const auto     t0 = std::chrono::steady_clock::now();
+    ASSERT_TRUE(peer.open());
+    ASSERT_TRUE(pump([&] { return peer.connected; }));
+    ASSERT_TRUE(pump([&] { return peer.first_bytes >= 16 * 1024; })) << "the window should fill: " << peer.first_bytes;
+    const auto parked = std::chrono::steady_clock::now();
+    ASSERT_TRUE(pump([&] { return peer.first_reset; }, 3s)) << "the stalled download was never cut";
+    const auto now      = std::chrono::steady_clock::now();
+    const auto cut      = std::chrono::duration_cast<std::chrono::milliseconds>(now - parked);
+    const auto since_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+    std::cout << "[  cut   ] HTTP/3 stalled download reset " << cut.count() << " ms after the window filled (deadline 500 ms)\n";
+    EXPECT_GE(since_t0, 500ms) << "not before the deadline has passed since the request: " << since_t0.count() << " ms";
+    EXPECT_LE(cut, 900ms) << "within the deadline and 400 ms of loop latency (twice it: a whole deadline re-armed): " << cut.count() << " ms";
+    EXPECT_TRUE(peer.first_reset_reason == qb::io::quic::stream_close_reason::reset
+                || peer.first_reset_reason == qb::io::quic::stream_close_reason::stop_sending)
+        << "the server shut the stream down (RESET_STREAM and STOP_SENDING, either first): " << static_cast<int>(peer.first_reset_reason);
+    EXPECT_EQ(peer.first_reset_code, 0x10Cu) << "H3_REQUEST_CANCELLED";
+    EXPECT_LE(peer.first_bytes, std::size_t{16} * 1024) << "nothing past the window";
+    EXPECT_FALSE(peer.connection_closed) << "the stream, never the connection";
+    ASSERT_TRUE(pump([&] { return g.responded_seen; }));
+    EXPECT_TRUE(g.responded_cancelled) << "the context was cancelled";
+    EXPECT_LT(g.responded_streamed, std::size_t{4} * 1024 * 1024);
+    peer.ask_again("/plain");
+    ASSERT_TRUE(pump([&] { return peer.second_fin; })) << "the connection serves on";
+    EXPECT_EQ(peer.second_status(), 200);
+    EXPECT_NE(peer.second_payload.find("still served"), std::string::npos);
+    peer.close();
+    server->close();
+}
+
+TEST_F(Http3ResponseStreamTest, APeerThatCreditsItsWindowInBurstsFinishesUnderTheDeadline) {
+    // The positive control of the HTTP/3 watch (Huly QB-1212): the same peer, crediting 256 KiB every 100 ms once its
+    // first window filled -- the server's stream stalls at every window and is acknowledged again at every credit, for
+    // 4 MiB over several deadlines -- gets the whole file and its FIN, never a reset.
+    const auto port = qb::http::test::ephemeral_udp_port();
+    StaticRoot root;
+    ASSERT_TRUE(root.ok) << "big.bin was not written under " << root.path;
+    auto           server = make_server(port);
+    StallingH3Peer peer(port);
+    const auto     started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(peer.open());
+    ASSERT_TRUE(pump([&] { return peer.first_bytes >= 16 * 1024; }));
+    int credits = 0;
+    while (!peer.first_fin && !peer.first_reset && credits < 64) {
+        pump_for(100ms);
+        peer.credit(256 * 1024);
+        ++credits;
+        ASSERT_TRUE(pump(
+            [&] { return peer.first_fin || peer.first_reset || peer.first_bytes >= 16 * 1024 + std::size_t{256} * 1024 * credits - 1024; }, 5s))
+            << "credit " << credits << " brought nothing";
+    }
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    EXPECT_FALSE(peer.first_reset) << "a peer that keeps crediting is not a stalled one";
+    EXPECT_TRUE(peer.first_fin) << "the download never ended (" << credits << " credits, " << peer.first_bytes << " bytes)";
+    EXPECT_GE(peer.first_bytes, std::size_t{4} * 1024 * 1024);
+    EXPECT_GE(credits, 16);
+    EXPECT_GT(took, 1s) << "several deadlines long: " << took.count() << " ms";
+    EXPECT_FALSE(peer.connection_closed);
+    ASSERT_TRUE(pump([&] { return g.responded_seen; }));
+    EXPECT_FALSE(g.responded_cancelled);
+    EXPECT_EQ(g.responded_streamed, std::size_t{4} * 1024 * 1024);
+    peer.close();
     server->close();
 }
 

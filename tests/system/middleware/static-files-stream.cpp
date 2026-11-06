@@ -33,7 +33,12 @@
  *     503 that declares no body on a connection that serves on; compression leaves a streamed body alone and still
  *     compresses one read whole;
  *   - over TLS, the same stream, every byte.
- * HTTP/2 and HTTP/3 keep the buffered path: their cases are in the http2-client and http3-loopback suites.
+ *   - the stall watch (Huly QB-1212): a client that stops reading is cut at the idle deadline, measured, its file,
+ *     stream and connection released; one that keeps taking bytes under the deadline finishes 16 MiB though bytes
+ *     wait the whole way; one pace against two floors, with and without the deadline, cuts under the floor and spares
+ *     over it; zero reaches the stream as zero, and a stream's own deadline replaces an armed one at once.
+ * HTTP/2 and HTTP/3 stream since QB-86's second lot: their cases are in the http2-response-stream, http3-loopback and
+ * http3-response-stream suites.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -47,6 +52,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -143,6 +149,7 @@ public:
 /// The peak of the session's output as its streams read it, and the high watermark the next session takes (0: the
 /// session's default).
 inline std::atomic<std::size_t> g_max_pending{0};
+inline std::atomic<long long>   g_deadline_seen_ns{-1}; ///< the idle deadline a case's stream read back, in ns (Huly QB-1212)
 inline std::atomic<std::size_t> g_high_mark{0};
 
 class FileServer;
@@ -375,6 +382,7 @@ protected:
             std::lock_guard lock(g_mutex);
             g_records.clear();
             g_streams.clear();
+            g_deadline_seen_ns = -1;
         }
         g_max_pending = 0;
         g_high_mark   = 0;
@@ -476,6 +484,25 @@ park_download(RawClient &c, std::uint16_t port, std::string const &probe) {
     ASSERT_TRUE(wait_for([] { return g_max_pending.load() >= kHighMark; })) << "the output never reached the mark";
     ASSERT_TRUE(wait_for([&] { return stream_seen(probe); })) << "the download did not stream";
     EXPECT_FALSE(stream_released(probe)) << "the producer must hold its stream while the download is parked";
+}
+
+/// A client that takes at least `bytes` of its download (a read pass takes up to 64 KiB more), then pauses `pause`,
+/// until the response is whole, the connection is over or `budget` has passed: a steady reader between bytes / pause
+/// and (bytes + 64 KiB) / pause once the socket's buffers are full, the socket stalling at every pause. Returns the
+/// pauses made.
+inline int
+take_paced(RawClient &c, std::size_t bytes, std::chrono::milliseconds pause, std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    int        pauses   = 0;
+    while (std::chrono::steady_clock::now() < deadline && !c.eof && !parse_response(c.buffer, false).complete) {
+        const auto before = c.buffer.size();
+        c.read_until([&] { return c.buffer.size() >= before + bytes || c.eof || parse_response(c.buffer, false).complete; }, 2s);
+        if (c.eof || parse_response(c.buffer, false).complete)
+            break;
+        std::this_thread::sleep_for(pause);
+        ++pauses;
+    }
+    return pauses;
 }
 
 #ifdef __linux__
@@ -874,6 +901,160 @@ TEST_F(StaticFilesStreamTest, AnAbortMidBodyReleasesTheProducerItsStreamAndTheFi
 #endif
     c.read_until([] { return false; }, 5s);
     EXPECT_TRUE(c.eof) << "an aborted download closes its connection";
+}
+
+// ------------------------------------------------------------------------------------------------ the idle deadline (QB-1212)
+TEST_F(StaticFilesStreamTest, AClientThatStopsReadingIsCutAtTheIdleDeadlineAndTheFileIsReleased) {
+    EXPECT_EQ(qb::http::StaticFilesOptions(root).stream_idle_deadline, std::chrono::seconds(60)) << "nginx's send_timeout by default";
+    EXPECT_EQ(qb::http::StaticFilesOptions(root).stream_min_rate, 0u) << "no rate floor by default";
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto file   = std::filesystem::canonical(root / "huge.bin");
+    auto       server = serve(options().with_stream_idle_deadline(500ms), [](Router &router) { watch_stream(router); });
+    ASSERT_TRUE(server->ready());
+    RawClient  c;
+    const auto t0 = std::chrono::steady_clock::now();
+    ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "stalled"));
+    const auto parked = std::chrono::steady_clock::now();
+#ifdef __linux__
+    EXPECT_EQ(open_descriptors_on(file), 1) << "the download in flight holds the file open";
+#endif
+    ASSERT_TRUE(wait_for([] { return record_of("stalled").has_value(); }, 3s)) << "the stalled download was never cut";
+    const auto now      = std::chrono::steady_clock::now();
+    const auto cut      = std::chrono::duration_cast<std::chrono::milliseconds>(now - parked);
+    const auto since_t0 = std::chrono::duration_cast<std::chrono::milliseconds>(now - t0);
+    std::cout << "[  cut   ] HTTP/1.1 stalled download cut " << cut.count() << " ms after the park (deadline 500 ms)\n";
+    // Not before the deadline has passed since the request (no byte was accepted before it), and within the deadline
+    // past the park plus 400 ms of loop latency: a watch re-arming the whole deadline instead of its remainder cuts
+    // near twice it.
+    EXPECT_GE(since_t0, 500ms) << since_t0.count() << " ms since the request";
+    EXPECT_LE(cut, 900ms) << cut.count() << " ms";
+    EXPECT_TRUE(record_of("stalled")->cancelled);
+    EXPECT_LT(record_of("stalled")->streamed, kHuge);
+    EXPECT_TRUE(wait_for([] { return stream_released("stalled"); })) << "the producer and its stream outlived the deadline";
+#ifdef __linux__
+    EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the deadline";
+#endif
+    c.read_until([] { return false; }, 5s);
+    EXPECT_TRUE(c.eof) << "HTTP/1.1: the aborted download closes its connection";
+}
+
+TEST_F(StaticFilesStreamTest, AClientThatKeepsTakingBytesUnderTheDeadlineFinishesThoughBytesAlwaysWait) {
+    // The deadline runs between two acceptances, never over the download (Huly QB-1212): a client taking 256 KiB then
+    // pausing 100 ms, under a 1 s deadline, leaves bytes waiting the whole way -- the output refills to the high mark
+    // inside each burst -- and still gets all 16 MiB over several seconds, each burst an acceptance that restarts the
+    // clock; a clock set at the first write alone would cut it at the first second.
+    g_high_mark = kHighMark;
+    write_huge();
+    auto server = serve(options().with_stream_idle_deadline(1s));
+    ASSERT_TRUE(server->ready());
+    RawClient  c;
+    const auto started = std::chrono::steady_clock::now();
+    ASSERT_TRUE(c.connect(server->port(), kClientRcv));
+    ASSERT_TRUE(c.send(request("/static/huge.bin", "steady")));
+    const auto pauses = take_paced(c, 256 * 1024, 100ms, 60s);
+    const auto took   = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    const auto p      = parse_response(c.buffer, false);
+    ASSERT_TRUE(p.complete) << "the download was cut after " << pauses << " pauses, " << took.count() << " ms";
+    EXPECT_EQ(p.status, 200);
+    EXPECT_EQ(p.body.size(), kHuge);
+    EXPECT_GE(pauses, 32) << "the client did pause on the way";
+    EXPECT_GT(took, 3s) << "several deadlines long: " << took.count() << " ms";
+    EXPECT_FALSE(c.eof) << "the connection stays";
+    ASSERT_TRUE(wait_for([] { return record_of("steady").has_value(); }));
+    EXPECT_FALSE(record_of("steady")->cancelled);
+    EXPECT_EQ(record_of("steady")->streamed, kHuge);
+}
+
+TEST_F(StaticFilesStreamTest, AMinimumRateCutsAClientUnderItAndSparesTheSameClientOverIt) {
+    // One client pace, two floors (Huly QB-1212): 128 KiB taken then a 100 ms pause is between 1 and 2 MiB/s once the
+    // socket's buffers are full (a read pass takes up to 64 KiB, so a burst is 128 KiB and under 192). Under a 4 MiB/s
+    // floor over a 500 ms window the download is cut WHILE the client still takes bytes -- with no idle deadline at
+    // all (the floor alone arms the watch), then under the 60 s default (the floor set after the deadline is armed
+    // takes effect at once); under a 64 KiB/s floor the same client gets the whole file. The pair is the proof that
+    // the floor is read: a floor never judged would spare all three.
+    g_high_mark = kHighMark;
+    write_huge();
+    const auto cut_leg = [&](qb::http::StaticFilesOptions opts, char const *probe) {
+        auto server = serve(std::move(opts), [](Router &router) { watch_stream(router); });
+        ASSERT_TRUE(server->ready());
+        RawClient c;
+        ASSERT_TRUE(c.connect(server->port(), kClientRcv));
+        ASSERT_TRUE(c.send(request("/static/huge.bin", probe)));
+        const auto started = std::chrono::steady_clock::now();
+        const auto pauses  = take_paced(c, 128 * 1024, 100ms, 8s);
+        const auto seen    = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+        EXPECT_TRUE(c.eof) << probe << ": the client under the floor was not cut while it still took bytes (" << pauses << " pauses, "
+                           << seen.count() << " ms)";
+        std::cout << "[  cut   ] HTTP/1.1 client taking 128 KiB per 100 ms (" << probe << ") saw its connection closed " << seen.count()
+                  << " ms after its request under a 4 MiB/s floor over 500 ms\n";
+        ASSERT_TRUE(wait_for([&] { return record_of(probe).has_value(); }));
+        EXPECT_TRUE(record_of(probe)->cancelled);
+        EXPECT_LT(record_of(probe)->streamed, kHuge);
+        EXPECT_TRUE(wait_for([&] { return stream_released(probe); })) << "the producer and its stream outlived the cut";
+    };
+    ASSERT_NO_FATAL_FAILURE(
+        cut_leg(options().with_stream_idle_deadline(qb::duration::zero()).with_stream_min_rate(4 * 1024 * 1024, 500ms), "floor-alone"));
+    ASSERT_NO_FATAL_FAILURE(cut_leg(options().with_stream_min_rate(4 * 1024 * 1024, 500ms), "floor-under-default"));
+    {
+        auto server = serve(options().with_stream_min_rate(64 * 1024, 500ms));
+        ASSERT_TRUE(server->ready());
+        RawClient c;
+        ASSERT_TRUE(c.connect(server->port(), kClientRcv));
+        ASSERT_TRUE(c.send(request("/static/big.bin", "paced")));
+        const auto pauses = take_paced(c, 128 * 1024, 100ms, 30s);
+        const auto p      = parse_response(c.buffer, false);
+        ASSERT_TRUE(p.complete) << "the same client over the floor was cut after " << pauses << " pauses";
+        EXPECT_TRUE(p.body == big);
+        EXPECT_GE(pauses, 16) << "enough pauses for the window to be judged many times over";
+        EXPECT_FALSE(c.eof);
+        ASSERT_TRUE(wait_for([] { return record_of("paced").has_value(); }));
+        EXPECT_FALSE(record_of("paced")->cancelled);
+        EXPECT_EQ(record_of("paced")->streamed, kBig);
+    }
+}
+
+TEST_F(StaticFilesStreamTest, ZeroDisablesTheDeadlineAndAStreamMaySetItsOwn) {
+    g_high_mark = kHighMark;
+    write_huge();
+    {
+        auto server = serve(options().with_stream_idle_deadline(qb::duration::zero()), [](Router &router) {
+            watch_stream(router, [](std::shared_ptr<qb::http::Context<FileSession>> const &, std::shared_ptr<FileStream> const &stream) {
+                g_deadline_seen_ns = stream->idle_deadline().count();
+            });
+        });
+        ASSERT_TRUE(server->ready());
+        RawClient c;
+        ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "held"));
+        ASSERT_TRUE(wait_for([] { return g_deadline_seen_ns.load() >= 0; }));
+        EXPECT_EQ(g_deadline_seen_ns.load(), 0) << "zero reached the stream as zero, not as the default";
+        std::this_thread::sleep_for(700ms);
+        EXPECT_FALSE(record_of("held").has_value()) << "no deadline: the stalled download is still held";
+        EXPECT_FALSE(stream_released("held"));
+        c.close();
+        ASSERT_TRUE(wait_for([] { return record_of("held").has_value(); }));
+        EXPECT_TRUE(record_of("held")->cancelled) << "the peer leaving ends it, as before";
+    }
+    g_deadline_seen_ns = -1; // block 1's reading and park must not stand for block 2's
+    g_max_pending      = 0;
+    {
+        // The stream's own setting, made ahead of the middleware once its next() returned, replaces the middleware's
+        // 60 s default -- armed already: the shorter deadline takes effect at once, not at the first tick of the longer.
+        auto server = serve(options(), [](Router &router) {
+            watch_stream(router, [](std::shared_ptr<qb::http::Context<FileSession>> const &, std::shared_ptr<FileStream> const &stream) {
+                g_deadline_seen_ns = stream->idle_deadline().count();
+                stream->set_idle_deadline(200ms);
+            });
+        });
+        ASSERT_TRUE(server->ready());
+        RawClient c;
+        ASSERT_NO_FATAL_FAILURE(park_download(c, server->port(), "own"));
+        ASSERT_TRUE(wait_for([] { return g_deadline_seen_ns.load() >= 0; }));
+        EXPECT_EQ(g_deadline_seen_ns.load(), std::chrono::nanoseconds(60s).count()) << "the middleware's default reached the stream first";
+        ASSERT_TRUE(wait_for([] { return record_of("own").has_value(); }, 3s)) << "the stream's own deadline never cut it";
+        EXPECT_TRUE(record_of("own")->cancelled);
+        EXPECT_TRUE(wait_for([] { return stream_released("own"); }));
+    }
 }
 
 TEST_F(StaticFilesStreamTest, AnHttp10RequestStreamsUnderItsLengthThenTheConnectionCloses) {

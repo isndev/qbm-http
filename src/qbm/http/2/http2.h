@@ -96,10 +96,36 @@ class session
     , public qb::io::use<session<Derived, Handler>>::timeout
     , public std::enable_shared_from_this<Derived> {
 public:
+    using IoBase        = qb::io::async::tcp::client<session<Derived, Handler>, qb::io::transport::stcp, Handler>;
     using Http1Protocol = qb::protocol::http::server<session<Derived, Handler>>;
     using Http2Protocol = server_protocol<session<Derived, Handler>>;
-    using ContextType   = qb::http::Context<Derived>;
-    using Router        = typename qb::http::Router<Derived>;
+
+    /// Every frame the HTTP/2 protocol writes goes through here (`_io << frame`): the bytes the output ever took are
+    /// counted, so that with `out().size()` the session knows what the socket has taken so far -- the mark a streamed
+    /// response's DATA frame is measured against by its stall watch (Huly QB-1212). The HTTP/1.1 fallback's own writes
+    /// name `io<session>::operator<<` and skip the count: ALPN fixes the protocol per connection, so a session that
+    /// speaks HTTP/1.1 never runs the protocol the count is read for.
+    template <typename T>
+    session &
+    operator<<(T &&data) {
+        const auto before = this->out().size();
+        IoBase::operator<<(std::forward<T>(data));
+        if (const auto after = this->out().size(); after > before)
+            _appended_total += after - before;
+        return *this;
+    }
+    /// The bytes the output ever took, and the bytes the socket took of them.
+    [[nodiscard]] std::uint64_t
+    appended_total() const noexcept {
+        return _appended_total;
+    }
+    [[nodiscard]] std::uint64_t
+    drained_total() noexcept { // out() is not const in qb-io
+        const auto queued = this->out().size();
+        return _appended_total > queued ? _appended_total - queued : 0;
+    }
+    using ContextType = qb::http::Context<Derived>;
+    using Router      = typename qb::http::Router<Derived>;
 
 private:
     friend qb::io::async::io<session<Derived, Handler>>;
@@ -115,8 +141,9 @@ private:
     qb::unordered_map<uint32_t, std::weak_ptr<qb::http::ResponseStream<Derived>>> _streams;
     std::size_t _stream_high_watermark{qb::http::default_stream_high_watermark}; ///< stream_high_watermark()
 
-    Http1Protocol *_http1_protocol; ///< HTTP/1.1 protocol handler
-    Http2Protocol *_http2_protocol; ///< HTTP/2 protocol handler
+    Http1Protocol *_http1_protocol;     ///< HTTP/1.1 protocol handler
+    Http2Protocol *_http2_protocol;     ///< HTTP/2 protocol handler
+    std::uint64_t  _appended_total = 0; ///< the bytes the output ever took (operator<<): the socket's drain mark (Huly QB-1212)
 
     std::chrono::steady_clock::time_point _last_stream_cleanup; ///< Last time we cleaned up idle streams
     bool                                  _reclaiming_completed_contexts{false};
@@ -209,17 +236,27 @@ private:
     /// The socket took some of the output (`pending_write`, or `eos` with 0): every live response stream reads what
     /// its peer has not taken -- the socket's remainder and the pieces its windows hold back -- and a producer parked
     /// on `drain()` under the low mark is resumed, at the end of the turn; a stream gone with its producer is forgotten.
+    /// The HTTP/2 protocol while the io still runs it, else null: a hook may clear the protocols under a drain (the
+    /// drain's POST hook, as its test does) and the io's own disconnect clears them too, leaving `_http2_protocol` a
+    /// freed object -- a later write pass or end of stream must not read it (ASan under QB-86's `notify_streams(0)`,
+    /// found in QB-1212's lot).
+    [[nodiscard]] Http2Protocol *
+    live_http2_protocol() noexcept {
+        return _http2_protocol && this->protocol() == _http2_protocol ? _http2_protocol : nullptr;
+    }
+
     void
     notify_streams(std::size_t socket_pending) noexcept {
+        auto *const protocol = live_http2_protocol();
         // The pieces the socket's write cap held back leave first -- before the map is consulted: stream_end() forgets
         // its stream before the flush that may stop for room, so the map can be empty while a tail still waits.
-        if (_http2_protocol && _http2_protocol->streams_wait_for_socket())
-            _http2_protocol->resume_streamed_responses();
+        if (protocol && protocol->streams_wait_for_socket())
+            protocol->resume_streamed_responses();
         if (_streams.empty())
             return;
         for (auto it = _streams.begin(); it != _streams.end();) {
             if (auto stream = it->second.lock()) {
-                stream->notify_drain(socket_pending + (_http2_protocol ? _http2_protocol->streamed_body_pending(it->first) : 0));
+                stream->notify_drain(socket_pending + (protocol ? protocol->streamed_body_pending(it->first) : 0));
                 ++it;
             } else {
                 it = _streams.erase(it);
@@ -464,7 +501,17 @@ public:
     /// connection, and the pieces this stream's windows hold back.
     [[nodiscard]] std::size_t
     stream_pending(qb::http::ResponseStream<Derived> const &stream) noexcept {
-        return this->out().size() + (_http2_protocol ? _http2_protocol->streamed_body_pending(static_cast<uint32_t>(stream.stream_id())) : 0);
+        auto *const protocol = live_http2_protocol();
+        return this->out().size() + (protocol ? protocol->streamed_body_pending(static_cast<uint32_t>(stream.stream_id())) : 0);
+    }
+
+    /// What the peer has not taken of THIS stream's bytes alone, for the stream's stall watch (Huly QB-1212): the
+    /// output is shared, so another stream's traffic leaving it must not count as this stream's acceptance -- the
+    /// pieces its windows hold back, and its last DATA frame's distance from leaving the output (a FIFO bound).
+    [[nodiscard]] std::size_t
+    stream_waiting(qb::http::ResponseStream<Derived> const &stream) noexcept {
+        auto *const protocol = live_http2_protocol();
+        return protocol ? protocol->streamed_body_waiting(static_cast<uint32_t>(stream.stream_id()), drained_total()) : this->out().size();
     }
 
     /// The hard cap of the output: qb-io's write-buffer cap, which `publish()` enforces by disconnecting. A stream's own
