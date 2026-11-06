@@ -726,6 +726,18 @@ private:
         /// Set once a body buffer has been handed to nghttp3; @c tx_body must
         /// never be reassigned afterwards (see @c read_data_cb).
         bool body_submitted = false;
+        /// A streamed response (Huly QB-86): the pieces written so far, each a string that stays where it is until the
+        /// peer acknowledges it -- nghttp3 keeps the vectors `read_data_cb` hands out until then -- the next piece to
+        /// hand out, the offset in the body of the deque's front piece, the bytes written and acknowledged, and whether
+        /// the end was written. `read_data_cb` answers WOULDBLOCK with nothing to hand out; write_streamed_body() and
+        /// end_streamed_response() resume the stream.
+        bool                    tx_streaming    = false;
+        bool                    tx_streamed_eof = false;
+        std::deque<std::string> tx_pieces;
+        std::size_t             tx_next_piece     = 0;
+        std::uint64_t           tx_front_offset   = 0;
+        std::uint64_t           tx_streamed_total = 0;
+        std::uint64_t           tx_streamed_acked = 0;
         /// Set when this side refused the stream (a body over the owner's limit, a malformed
         /// message): it has been reset, what still arrives on it is dropped, and the message is
         /// never handed to the owner.
@@ -1014,6 +1026,26 @@ private:
             auto *me = self(conn_user_data);
             auto *state =
                 stream_user_data ? static_cast<stream_state *>(stream_user_data) : &me->state_for(static_cast<std::uint64_t>(stream_id));
+            if (state->tx_streaming) {
+                // A streamed response (Huly QB-86): the pieces written since the last call, whole -- nghttp3 cuts them
+                // to the QUIC stream's credit itself -- EOF once the end was written and every piece is handed out,
+                // WOULDBLOCK when nothing is: the stream is then suspended until write_streamed_body() resumes it.
+                if (veccnt == 0) {
+                    return NGHTTP3_ERR_WOULDBLOCK;
+                }
+                std::size_t handed = 0;
+                while (handed < veccnt && state->tx_next_piece < state->tx_pieces.size()) {
+                    auto &piece      = state->tx_pieces[state->tx_next_piece++];
+                    vec[handed].base = reinterpret_cast<uint8_t *>(piece.data());
+                    vec[handed].len  = piece.size();
+                    ++handed;
+                }
+                if (state->tx_streamed_eof && state->tx_next_piece == state->tx_pieces.size()) {
+                    *pflags = NGHTTP3_DATA_FLAG_EOF;
+                    return static_cast<nghttp3_ssize>(handed);
+                }
+                return handed == 0 ? NGHTTP3_ERR_WOULDBLOCK : static_cast<nghttp3_ssize>(handed);
+            }
             if (state->tx_offset >= state->tx_body.size()) {
                 *pflags = NGHTTP3_DATA_FLAG_EOF;
                 return 0;
@@ -1032,7 +1064,27 @@ private:
     static int
     acked_stream_data_cb(nghttp3_conn *, int64_t stream_id, uint64_t datalen, void *conn_user_data, void *) {
         return guard_callback([&]() -> int {
-            self(conn_user_data)->_owner.on_http3_stream_acked(static_cast<std::uint64_t>(stream_id), datalen);
+            auto      *me  = self(conn_user_data);
+            const auto sid = static_cast<std::uint64_t>(stream_id);
+            // A streamed response's pieces the peer acknowledged whole are released (Huly QB-86): nothing nghttp3 handed
+            // out points into them any more. A piece handed out and acknowledged in part stays.
+            if (auto it = me->_streams.find(sid); it != me->_streams.end() && it->second->tx_streaming) {
+                auto &st = *it->second;
+                st.tx_streamed_acked += datalen;
+                while (st.tx_next_piece > 0 && !st.tx_pieces.empty()
+                       && st.tx_front_offset + st.tx_pieces.front().size() <= st.tx_streamed_acked) {
+                    st.tx_front_offset += st.tx_pieces.front().size();
+                    st.tx_pieces.pop_front();
+                    --st.tx_next_piece;
+                }
+            }
+            if constexpr (requires(Owner &owner, std::uint64_t connection_id, std::uint64_t s, std::uint64_t bytes) {
+                              owner.on_http3_stream_acked(connection_id, s, bytes);
+                          }) {
+                me->_owner.on_http3_stream_acked(me->_connection_id, sid, datalen); // the server: a producer may resume
+            } else {
+                me->_owner.on_http3_stream_acked(sid, datalen);
+            }
             return 0;
         });
     }
@@ -1918,6 +1970,144 @@ public:
         (void) nghttp3_conn_set_stream_user_data(_conn, static_cast<int64_t>(stream_id), &st);
         drain();
         return true;
+    }
+
+    /**
+     * @brief Begin a streamed response (server role, Huly QB-86): the header section of `response` is submitted now with
+     *        a data reader over the pieces write_streamed_body() will append -- `response`'s own body is not read -- and
+     *        the stream ends at end_streamed_response(), after the trailer section the response carries by then. The
+     *        head is judged as submit_response() judges one: a malformed `content-length`, a section that cannot be
+     *        built or that passes the peer's SETTINGS_MAX_FIELD_SECTION_SIZE, a second response on the stream refuse it,
+     *        nothing submitted; a declared `content-length` is compared to no body (the stream counts the pieces).
+     * @return @c true once the head is submitted and the output drained; @c false when it was refused.
+     */
+    bool
+    begin_streamed_response(std::uint64_t stream_id, qb::http::Response const &response) {
+        auto &st = state_for(stream_id);
+        if (st.body_submitted) {
+            return false; // a second response on one stream (RFC 9114 section 4.1)
+        }
+        if (!detail::declared_content_length(response).ok) {
+            return false;
+        }
+        // The fields a trailer section the head already carries takes leave the head and are announced; the section
+        // itself is submitted at the end, with what the producer set by then.
+        const auto plan    = detail::plan_trailers(response);
+        auto       headers = detail::make_response_headers(response, plan);
+        if (!headers || headers->section_size > _peer_max_field_section_size) {
+            return false;
+        }
+        st.tx_streaming      = true;
+        st.tx_streamed_eof   = false;
+        st.tx_next_piece     = 0;
+        st.tx_front_offset   = 0;
+        st.tx_streamed_total = 0;
+        st.tx_streamed_acked = 0;
+        st.tx_pieces.clear();
+        const auto rv =
+            nghttp3_conn_submit_response(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(), &st.reader);
+        if (rv != 0) {
+            st.tx_streaming = false;
+            return false;
+        }
+        st.body_submitted = true;
+        (void) nghttp3_conn_set_stream_user_data(_conn, static_cast<int64_t>(stream_id), &st);
+        drain();
+        return true;
+    }
+
+    /**
+     * @brief Append a piece to a streamed response (Huly QB-86) and resume the stream: nghttp3 reads it through the
+     *        data reader as the QUIC stream's credit allows. An empty piece changes nothing.
+     * @return @c false when the stream carries no streamed response, or its end was written.
+     */
+    bool
+    write_streamed_body(std::uint64_t stream_id, std::string_view bytes) {
+        auto it = _streams.find(stream_id);
+        if (it == _streams.end() || !it->second->tx_streaming || it->second->tx_streamed_eof) {
+            return false;
+        }
+        auto &st = *it->second;
+        if (!bytes.empty()) {
+            st.tx_pieces.emplace_back(bytes);
+            st.tx_streamed_total += bytes.size();
+        }
+        (void) nghttp3_conn_resume_stream(_conn, static_cast<int64_t>(stream_id));
+        drain();
+        return true;
+    }
+
+    /**
+     * @brief The last piece of a streamed response was written (Huly QB-86): its trailer section -- the fields
+     *        `final_response` carries at the end (`trailers()`, and what its `trailer` header announces), when any --
+     *        is submitted, then the data reader reports EOF after the pieces still waiting and the stream ends (FIN).
+     * @param final_response The response as it stands at the end, for its trailers; `nullptr` sends none.
+     * @return @c false when the stream carries no streamed response, its end was written already, or the trailer section
+     *         is refused (a field a trailer section must not carry, a block that cannot be built or that passes the
+     *         peer's section bound): the caller then resets the stream, since the message cannot be completed as asked.
+     */
+    bool
+    end_streamed_response(std::uint64_t stream_id, qb::http::Response const *final_response) {
+        auto it = _streams.find(stream_id);
+        if (it == _streams.end() || !it->second->tx_streaming || it->second->tx_streamed_eof) {
+            return false;
+        }
+        auto &st = *it->second;
+        if (final_response) {
+            // A trailer section the stream cannot carry ends the response as abandon_streamed_response() does: the
+            // stream is over for the producer (nothing more is handed out), and the caller resets it.
+            const auto plan = detail::plan_trailers(*final_response);
+            if (plan && !plan->forbidden.empty()) {
+                (void) abandon_streamed_response(stream_id);
+                return false;
+            }
+            if (plan && !plan->fields.empty()) {
+                auto trailers = detail::make_trailer_block(*plan);
+                if (!trailers || trailers->section_size > _peer_max_field_section_size) {
+                    (void) abandon_streamed_response(stream_id);
+                    return false;
+                }
+                if (nghttp3_conn_submit_trailers(_conn, static_cast<int64_t>(stream_id), trailers->nva.data(), trailers->nva.size()) != 0) {
+                    (void) abandon_streamed_response(stream_id);
+                    return false;
+                }
+            }
+        }
+        st.tx_streamed_eof = true;
+        (void) nghttp3_conn_resume_stream(_conn, static_cast<int64_t>(stream_id));
+        drain();
+        return true;
+    }
+
+    /**
+     * @brief Give up a streamed response (Huly QB-86): no further write is handed to nghttp3; the pieces it may still
+     *        point into stay until the stream's state goes with the stream. The caller resets the QUIC stream.
+     * @return Whether the stream carried a streamed response whose end had not been written.
+     */
+    bool
+    abandon_streamed_response(std::uint64_t stream_id) noexcept {
+        auto it = _streams.find(stream_id);
+        if (it == _streams.end() || !it->second->tx_streaming || it->second->tx_streamed_eof) {
+            return false;
+        }
+        it->second->tx_streaming    = false;
+        it->second->tx_streamed_eof = true;
+        nghttp3_conn_shutdown_stream_write(_conn, static_cast<int64_t>(stream_id));
+        return true;
+    }
+
+    /// The bytes of a streamed response written and not yet acknowledged by the peer (Huly QB-86); 0 for any other stream.
+    [[nodiscard]] std::uint64_t
+    streamed_body_pending(std::uint64_t stream_id) const noexcept {
+        const auto it = _streams.find(stream_id);
+        return it != _streams.end() && it->second->tx_streaming ? it->second->tx_streamed_total - it->second->tx_streamed_acked : 0;
+    }
+
+    /// Whether `stream_id` carries a streamed response whose end has not been written (Huly QB-86).
+    [[nodiscard]] bool
+    is_streaming_response(std::uint64_t stream_id) const noexcept {
+        const auto it = _streams.find(stream_id);
+        return it != _streams.end() && it->second->tx_streaming && !it->second->tx_streamed_eof;
     }
 
     /**

@@ -12,7 +12,7 @@ TLS is not bolted onto qbm-http; it is the qb-io secure transport layer (`qb::io
 
 HTTPS, secure WebSocket (`wss://`), the HTTP/2 client/server transports, HTTP/3, and JWT/auth require an **OpenSSL-enabled framework**. The HTTP/2 wire codec is still compiled without SSL for protocol tests; it provides no plaintext h2c endpoint. The build derives `QB_HAS_SSL` from OpenSSL detection upstream and propagates it `PUBLIC` to your target, so the `#ifdef QB_HAS_SSL` gates inside `<qbm/http/http.h>` resolve the same way in your code as in the module.
 
-<!-- src: qbm/http/CMakeLists.txt:79-88,100-111,131-144; qbm/http/src/qbm/http/http.h:45-48 -->
+<!-- src: qbm/http/CMakeLists.txt:79-88,100-111,131-144; qbm/http/src/qbm/http/http.h:46-49 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -92,7 +92,7 @@ The caller owns the returned raw `SSL_CTX`. Handing one to `listener::init(SSL_C
 
 The secure HTTP/1.1 server is `qb::http::ssl::Server<Session>`, defaulting to `qb::http::ssl::DefaultSecureSession`. Use the `qb::http::ssl::make_server()` factory and the server's `listen(uri, cert, key)` overload — that one call builds a `qb::io::ssl::Context` from the cert and key with ALPN `{"http/1.1"}` folded in, installs it on the `saccept` transport, and starts listening.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1163-1169 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1177-1183 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -132,7 +132,7 @@ int main(int argc, char *argv[]) {
 
 `listen` returns `false` if the certificate or key fails to load, so check the result. Under the hood it does exactly this for a secure transport:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1186-1190 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1200-1204 -->
 ```cpp
 using tpt = std::decay_t<decltype(this->transport())>;
 if constexpr (tpt::is_secure()) {
@@ -147,11 +147,11 @@ then publishes the new context through `reload_context`. A failed certificate lo
 the serving context in place. The `if constexpr (tpt::is_secure())` keeps this operation
 out of plaintext listeners, which only bind the socket.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1214-1217,1228-1232; qbm/http/src/qbm/http/detail/server_tls.cpp:11-36; qb/src/qb/io/tcp/ssl/context.h:178,253,255 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1228-1231,1242-1246; qbm/http/src/qbm/http/detail/server_tls.cpp:11-36; qb/src/qb/io/tcp/ssl/context.h:178,253,255 -->
 
 The SSL-off build takes the `#else` arm, which discards `cert_file`/`key_file` and only listens.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1182,1191-1195 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1196,1205-1209 -->
 
 ### Tuning the context before listening
 
@@ -180,7 +180,7 @@ if (!server->listen(qb::io::uri("tcp://0.0.0.0:8443"), std::move(ctx))) { /* han
 
 Use `listen_no_start(uri, context)` to bind while deferring accepts until `start()`. Both overloads require an explicitly typed `Context`; the historical path overload `listen(uri,{})` remains unambiguous. These APIs are absent on plaintext servers and SSL-off builds.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1214,1238,1249; qbm/http/src/qbm/http/2/http2.h:939,958,969 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1228,1252,1263; qbm/http/src/qbm/http/2/http2.h:1138,1157,1168 -->
 
 ### Rotating certificates and policy
 
@@ -188,7 +188,7 @@ Call `server->reload_certificates(new_cert, new_key)` on the server's owner thre
 
 This convenience method replaces the **entire configuration with `Context::server` defaults**: it does not preserve custom mTLS policy, cipher lists, callbacks, SNI selection, session caches or ticket configuration. To retain a custom policy, construct a complete fresh context and call `set_tls_context(std::move(context))`. The new context has independent session state; resumption across rotation is not guaranteed. File loading can be prepared off the event loop, but installation must happen on its owner thread.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1214,1228; qbm/http/src/qbm/http/2/http2.h:939,950 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1228,1242; qbm/http/src/qbm/http/2/http2.h:1138,1149 -->
 
 **Copies of `Context` share `SSL_CTX`; copying does not clone configuration.** The HTTP setter changes the supplied context's ALPN before installation. Supply an unpublished context, never a copy of one serving another listener or accepted sockets. After publication, treat it as immutable. Rotation swaps the listener's reference to a new context rather than modifying the old object. There is no cross-thread synchronization added by these methods.
 
@@ -198,7 +198,7 @@ Fresh raw contexts wrapped through `Context::adopt` or `Context::share` are supp
 
 For SNI, configure every child context with `{"http/1.1"}` for HTTPS or `{"h2", "http/1.1"}` for HTTP/2 before publishing it. The setter retains `on_sni` but cannot rewrite the contexts its callback chooses. For an SNI rotation, build a new root and a new table of child contexts, captured by value in its callback; returning an empty context keeps the root for an unknown host. Already accepted connections retain the old root and its table. HTTP/3 and dual-stack rotation are outside this operation's scope.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.h:197-198,211-212,236; qbm/http/src/qbm/http/2/http2.h:939 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.h:197-198,211-212,236; qbm/http/src/qbm/http/2/http2.h:1138 -->
 
 `Context` also covers curves, DH parameters, server session caching and timeout, and typed callbacks for keylog, custom verification, and SNI routing (`on_sni` returns the `Context` to switch to). `native()` borrows the raw `SSL_CTX` for anything it does not wrap.
 
@@ -214,7 +214,7 @@ The same secure HTTP/1.1 transport carries secure WebSocket (`wss://`): the conn
 
 HTTP/2 in qbm-http is **TLS-only with ALPN** — there is no plaintext `h2c`. `qb::http2::Server::listen` mirrors the HTTP/1.1 overload but advertises `{"h2", "http/1.1"}`, so a client that negotiates `h2` gets HTTP/2 and one that does not falls back to HTTP/1.1 on the same port.
 
-<!-- src: qbm/http/src/qbm/http/2/http2.h:899-905 -->
+<!-- src: qbm/http/src/qbm/http/2/http2.h:1098-1104 -->
 ```cpp
 #include <qbm/http/http.h>   // pulls in <qbm/http/2/http2.h> under QB_HAS_SSL
 #include <qb/io/async.h>
@@ -243,7 +243,7 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically, ignoring ASCII case. A mixed-case HTTPS URI routes through the secure `async::HTTPS` session (`stcp` transport); HTTP routes through plaintext. Qb-io supplies the default port when a mixed-case URI omits one. Unsupported schemes are rejected before connecting, and a build without SSL support rejects HTTPS with 503 instead of using TCP. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1574-1601,1545-1548,1504-1505 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1588-1615,1559-1562,1518-1519 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -258,7 +258,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1581 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1595 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -305,7 +305,7 @@ client->connect([client](bool connected, const std::string &/*err*/) {
 
 ALPN is a TLS extension where the client advertises the application protocols it supports and the server picks one during the handshake. qbm-http wires it for you: an HTTP/1.1 secure server selects from `{"http/1.1"}`, an HTTP/2 server selects from `{"h2", "http/1.1"}` and switches the session based on what was selected, the HTTP/2 client advertises `{"h2"}` only, and HTTP/3 negotiates `"h3"` over QUIC (a separate transport — see [HTTP/3 protocol](./19-http3-protocol.md)). Both server `listen` forms and rotation pin the appropriate list through the shared server helper. Prepare any SNI-selected child with the same list before publication; for raw contexts without qb server-role state, use `qb::io::ssl::set_alpn_protos_server` explicitly.
 
-<!-- src: qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/1.1/http.h:1214-1217; qbm/http/src/qbm/http/2/http2.h:939-941 -->
+<!-- src: qbm/http/src/qbm/http/detail/server_tls.cpp:27-36; qbm/http/src/qbm/http/1.1/http.h:1228-1231; qbm/http/src/qbm/http/2/http2.h:1138-1140 -->
 
 ## Peer verification and trust
 

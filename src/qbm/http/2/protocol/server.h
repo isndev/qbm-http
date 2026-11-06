@@ -24,6 +24,12 @@
  */
 #pragma once
 
+#include <type_traits> // std::void_t, std::declval: the io's write-cap trait (Huly QB-86)
+#include <memory>      // std::unique_ptr: a streamed response's buffer, allocated when it begins (Huly QB-86)
+#include <utility>
+#include <algorithm> // std::min over the windows, the frame size and the socket's room (Huly QB-86)
+#include <cstring>   // std::memcpy: a streamed body's piece into its stream's buffer (Huly QB-86)
+
 #include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
 #include "./base.h"       // For qb::protocol::http2::Http2Protocol and frame types
 
@@ -60,7 +66,25 @@ is_hop_by_hop(const std::string &header_name) {
 }
 } // namespace qb::http::well_known
 
+/// The head collection shared by send_response() and begin_streamed_response() is inlined into both, as it was when it
+/// lived inside send_response() alone: a call with three out-parameters measured on a plain GET (Huly QB-86).
+#if defined(_MSC_VER) && !defined(__clang__)
+#define QB_HTTP2_FORCEINLINE __forceinline
+#else
+#define QB_HTTP2_FORCEINLINE [[gnu::always_inline]] inline
+#endif
+
 namespace qb::protocol::http2 {
+
+namespace detail {
+/// Whether the io exposes its write-buffer cap (`max_write_buffer_size()`): a test harness does, the real session's
+/// is its transport's, a private base, so the protocol then reads qb-io's default (Huly QB-86). A trait, not a
+/// requires-expression on the class's parameter: an access failure there is a hard error once instantiated.
+template <typename IO, typename = void>
+struct io_has_write_cap : std::false_type {};
+template <typename IO>
+struct io_has_write_cap<IO, std::void_t<decltype(std::declval<IO const &>().max_write_buffer_size())>> : std::true_type {};
+} // namespace detail
 
 /// HTTP/2 ":status" response pseudo-header name.
 constexpr std::string_view STATUS_HEADER_NAME_SV = ":status";
@@ -108,8 +132,9 @@ private:
         }
     };
 
-    int64_t              _connection_send_window;                                                    ///< Connection-level send window
-    int64_t              _connection_receive_window          = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
+    int64_t              _connection_send_window;            ///< Connection-level send window
+    bool                 _streams_wait_for_socket   = false; ///< A streamed response's flush stopped at the socket's write cap (Huly QB-86)
+    int64_t              _connection_receive_window = DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE; ///< Connection-level receive window
     static constexpr int CONNECTION_WINDOW_THRESHOLD_DIVISOR = 2;
 
     // Peer (Client) Settings
@@ -1233,51 +1258,10 @@ public:
         // response, where a fresh vector grew with each (Huly QB-1215).
         std::vector<qb::protocol::hpack::HeaderField> &hf_vector = _response_header_fields;
         const ClearedOnExit                            response_fields_cleared{hf_vector};
-        hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
-        std::optional<std::uint64_t> declared_content_length;
-        bool                         announces_trailers = false;
-        // A name is lowercase already: the headers map stores it folded, and is_valid_header_field() refuses an
-        // uppercase one. It was copied and folded before the field's own copy (Huly QB-1191).
-        for (const auto &header_item : http_response.headers()) {
-            const std::string &name_lower = header_item.first;
-            if (name_lower.empty() || name_lower[0] == ':' || HeaderValidator::is_forbidden_response_header(name_lower)) {
-                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
-                                      "Forbidden or invalid HTTP/2 response header: " + header_item.first);
-                return false;
-            }
-            for (const auto &value :
-                 header_item.second) { // Assuming header_item.second is iterable (e.g. vector of strings for multi-value headers)
-                if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
-                    this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response header field: " + header_item.first);
-                    return false;
-                }
-                if (name_lower == "content-length") {
-                    const auto parsed = HeaderValidator::parse_content_length(value);
-                    if (!parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response content-length");
-                        return false;
-                    }
-                    if (declared_content_length && *declared_content_length != *parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Conflicting HTTP/2 response content-length headers");
-                        return false;
-                    }
-                    declared_content_length = *parsed;
-                }
-                hf_vector.emplace_back(name_lower, value);
-            }
-            announces_trailers = announces_trailers || name_lower == qb::http::well_known::TRAILER_SV;
-        }
-        // The trailer section -- the fields the `trailer` header announces, then trailers() -- leaves
-        // after the body (try_send_pending_data_for_stream), not here: announced fields used to be
-        // sent in this block, and the trailer block then went out empty (Huly QB-1058). A field of
-        // trailers() a trailer section must not carry refuses the response before anything is sent
-        // (Huly QB-1073). Same contract as HTTP/1.1 and HTTP/3.
-        const bool trailed = announces_trailers || http_response.has_trailers();
-        if (trailed) {
-            if (const char *refused = prepare_trailed_header_block(hf_vector, http_response)) {
-                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, refused);
-                return false;
-            }
+        std::optional<std::uint64_t>                   declared_content_length;
+        bool                                           trailed = false;
+        if (!collect_response_head(stream_id, http_response, hf_vector, declared_content_length, trailed)) {
+            return false; // refused, and the stream reset: a forbidden or invalid field, a malformed length, a forbidden trailer
         }
 
         const auto &body_pipe        = http_response.body().raw();
@@ -1392,6 +1376,228 @@ public:
 
         LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Response sent successfully");
         return this->ok();
+    }
+
+    /**
+     * @brief Whether `stream_id` can take a streamed response now (Huly QB-86): a dispatched request on a stream open
+     *        to a response (OPEN or half-closed remote), neither reset nor answered, no stream begun on it. A promised
+     *        (pushed) stream cannot: its response goes whole, through send_response().
+     */
+    [[nodiscard]] bool
+    can_begin_streamed_response(uint32_t stream_id) const noexcept {
+        const auto it = _server_streams.find(stream_id);
+        return it != _server_streams.end() && can_begin_streamed_response(it->second);
+    }
+
+    /**
+     * @brief Begin a streamed response (Huly QB-86): the HEADERS of `http_response` leave now -- without END_STREAM, or
+     *        with it when `head_only` (a HEAD's response is whole at its head) -- and the body follows piece by piece
+     *        through write_streamed_body(): each piece goes as DATA frames within the stream's and the connection's
+     *        send windows and the peer's frame size, the rest waits in the stream for a WINDOW_UPDATE
+     *        (try_send_pending_data_for_stream), and end_streamed_response() sends END_STREAM, after the response's
+     *        trailer section when it has one. The head is judged as send_response() judges one -- a field HTTP/2
+     *        forbids, an invalid field, a malformed `content-length`, a trailer field a section must not carry refuse
+     *        it (RST_STREAM PROTOCOL_ERROR), a block past the peer's SETTINGS_MAX_HEADER_LIST_SIZE too (INTERNAL_ERROR),
+     *        nothing sent -- except that a `content-length` is compared to no body: the stream counts the pieces
+     *        against it. The body of `http_response` is not read.
+     * @return `true` when the HEADERS left; `false` when the stream cannot take a streamed response
+     *         (can_begin_streamed_response()) or the head was refused, the stream then reset.
+     */
+    [[nodiscard]] bool
+    begin_streamed_response(uint32_t stream_id, qb::http::Response const &http_response, bool head_only) {
+        auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || !can_begin_streamed_response(it->second)) {
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to begin a streamed response on a stream that cannot take one");
+            return false;
+        }
+        Http2ServerStream                             &stream    = it->second;
+        std::vector<qb::protocol::hpack::HeaderField> &hf_vector = _response_header_fields;
+        const ClearedOnExit                            response_fields_cleared{hf_vector};
+        std::optional<std::uint64_t>                   declared_content_length;
+        bool                                           trailed = false;
+        if (!collect_response_head(stream_id, http_response, hf_vector, declared_content_length, trailed)) {
+            return false;
+        }
+        // The client's SETTINGS_MAX_HEADER_LIST_SIZE, judged before the block is encoded, as send_response() judges it
+        // (Huly QB-1235).
+        if (_peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
+            std::uint64_t list_size = 0;
+            for (const auto &field : hf_vector) {
+                list_size += field.hpack_size();
+            }
+            if (list_size > _peer_max_header_list_size) {
+                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: streamed response header list "
+                                                << list_size << " exceeds peer's MAX_HEADER_LIST_SIZE " << _peer_max_header_list_size);
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
+                return false;
+            }
+        }
+        std::vector<uint8_t> encoded_headers;
+        if (!_hpack_encoder.encode(hf_vector, encoded_headers)) {
+            LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: HPACK encoding failed for streamed response headers");
+            this->on_connection_error(ErrorCode::COMPRESSION_ERROR, "HPACK encoder failed for response headers.");
+            return false;
+        }
+        // The head's fields are kept for the trailer section (end_streamed_response reads the announcement there); the
+        // body stays empty: the pieces live in `streamed->buffer`.
+        stream.response_to_send    = http_response;
+        stream.send_buffer_offset  = 0;
+        const uint8_t header_flags = head_only ? FLAG_END_STREAM : 0;
+        if (!this->send_headers_with_continuation(stream_id, header_flags, std::move(encoded_headers))) {
+            LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send streamed response HEADERS");
+            return false;
+        }
+        stream.progressed_since_idle_sweep = true;
+        stream.response_sent               = true;
+        if (head_only) {
+            // The response to HEAD carries no content (RFC 9110 §9.3.2): its HEADERS end the stream (Huly QB-527).
+            stream.end_stream_sent = true;
+            if (stream.state == Http2StreamConcreteState::OPEN) {
+                stream.state = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+            } else if (stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE) {
+                stream.state = Http2StreamConcreteState::CLOSED;
+                this->try_close_stream_context(stream_id); // `stream` dangles past it
+            }
+            return this->ok();
+        }
+        stream.streamed     = std::make_unique<Http2StreamedBody>(); // the one allocation a streamed response adds: not a HEAD's
+        stream.streaming    = true;
+        stream.stream_ended = false;
+        stream.is_trailers  = trailed;
+        LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: streamed response begun");
+        return this->ok();
+    }
+
+    /**
+     * @brief Append a piece of a streamed body (Huly QB-86): what the stream's and the connection's send windows allow
+     *        leaves now as DATA frames of at most the peer's frame size, the rest waits in the stream until a
+     *        WINDOW_UPDATE lets it go. An empty piece changes nothing.
+     * @return `false` when the stream takes no piece: not a streamed response, ended, or closed.
+     */
+    bool
+    write_streamed_body(uint32_t stream_id, std::string_view bytes) {
+        auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || !it->second.streaming || it->second.stream_ended || it->second.is_closed() || !this->ok()
+            || !_connection_active) {
+            return false; // a connection that is closing takes nothing more: the producer reads `closed`
+        }
+        Http2ServerStream &stream = it->second;
+        if (!bytes.empty()) {
+            std::memcpy(stream.streamed->buffer.allocate_back(bytes.size()), bytes.data(), bytes.size());
+        }
+        flush_streamed_response(stream_id, stream); // `stream` may dangle past it: a last piece can close the stream
+        return true;
+    }
+
+    /**
+     * @brief The last piece of a streamed body was written (Huly QB-86): END_STREAM follows the pieces still waiting
+     *        -- on an empty DATA frame when none is left -- after the trailer section when there is one: the fields
+     *        `final_response` carries at the end (its `trailers()`, and the fields its `trailer` header announces),
+     *        as HTTP/2 sends a trailer section (outgoing_trailer_fields); a section the head announced and the end
+     *        leaves empty is sent empty. A trailer field a section must not carry aborts the stream (RST_STREAM
+     *        INTERNAL_ERROR): the message cannot be completed as the producer asked.
+     * @param final_response The response as it stands at the end, for its trailers; `nullptr` sends the head's.
+     * @return `false` when the stream has no streamed response to end (not streaming, ended already, closed).
+     */
+    bool
+    end_streamed_response(uint32_t stream_id, qb::http::Response const *final_response) {
+        auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || !it->second.streaming || it->second.stream_ended || it->second.is_closed()) {
+            return false;
+        }
+        Http2ServerStream        &stream = it->second;
+        qb::http::Response const &source = final_response ? *final_response : stream.response_to_send;
+        if (source.has_trailers() || source.has_header(qb::http::well_known::TRAILER_SV)) {
+            const auto plan = qb::http::detail::plan_outgoing_trailers(source, source.has_trailers() ? &source.trailers() : nullptr);
+            if (!plan.forbidden.empty()) {
+                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: a streamed response's trailers() carries a field a trailer section must not: "
+                                                << plan.forbidden);
+                stream.streamed.reset();
+                stream.streaming = false;
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "streamed response trailers refused");
+                return false;
+            }
+            stream.streamed->trailer_fields = outgoing_trailer_fields(source);
+            stream.is_trailers              = true;
+        }
+        stream.stream_ended = true;
+        flush_streamed_response(stream_id, stream); // `stream` may dangle past it
+        return true;
+    }
+
+    /**
+     * @brief Give up a streamed response that cannot be completed (Huly QB-86; the producer aborted it, the context was
+     *        cancelled): the pieces still waiting are dropped and the stream is reset, RST_STREAM INTERNAL_ERROR --
+     *        the stream alone, the connection serves on. Nothing happens on a stream that is not streaming, has sent
+     *        its END_STREAM or is closed already (a peer's reset reached it first).
+     * @return Whether a RST_STREAM was sent.
+     */
+    bool
+    abandon_streamed_response(uint32_t stream_id) noexcept {
+        auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || !it->second.streaming || it->second.end_stream_sent || it->second.is_closed()) {
+            return false;
+        }
+        Http2ServerStream &stream = it->second;
+        stream.streamed.reset();
+        stream.streaming                = false;
+        stream.has_pending_data_to_send = false;
+        send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "streamed response aborted");
+        return true;
+    }
+
+    /// The bytes of a streamed body the stream still holds for the windows (Huly QB-86); 0 for any other stream.
+    [[nodiscard]] std::size_t
+    streamed_body_pending(uint32_t stream_id) const noexcept {
+        const auto it = _server_streams.find(stream_id);
+        return it != _server_streams.end() && it->second.streaming ? it->second.streamed->buffer.size() : 0;
+    }
+
+    /**
+     * @brief Whether a streamed response holds pieces back for the SOCKET: its flush stopped at the io's write-buffer
+     *        cap (`max_write_buffer_size()`, which `publish()` enforces by disconnecting), not at a window. The session
+     *        calls resume_streamed_responses() on its next write pass when this is true (Huly QB-86).
+     */
+    [[nodiscard]] bool
+    streams_wait_for_socket() const noexcept {
+        return _streams_wait_for_socket;
+    }
+
+    /// What a streamed flush keeps free under the io's write-buffer cap: the connection's own frames -- a PING or
+    /// SETTINGS ACK, another stream's HEADERS or RST_STREAM -- must still find room there, since `publish()`
+    /// disconnects at the cap and a flush that filled it exactly would make the next frame the one that kills the
+    /// connection (Huly QB-86).
+    static constexpr std::size_t streamed_socket_headroom = 64 * 1024;
+
+    /**
+     * @brief Flush again every streamed response that waited for the socket's room: called by the session from its
+     *        write pass once bytes left the socket. Snapshots the ids first (a flush can close and erase a stream).
+     */
+    void
+    resume_streamed_responses() noexcept {
+        if (!_streams_wait_for_socket || !this->ok() || !_connection_active) {
+            return;
+        }
+        _streams_wait_for_socket = false;
+        std::vector<uint32_t> ids;
+        for (const auto &[stream_id, stream] : _server_streams) {
+            if (stream.streaming && stream.has_pending_data_to_send && !stream.is_closed()) {
+                ids.push_back(stream_id);
+            }
+        }
+        for (const uint32_t stream_id : ids) {
+            const auto it = _server_streams.find(stream_id);
+            if (it != _server_streams.end() && it->second.streaming && it->second.has_pending_data_to_send && !it->second.is_closed()) {
+                flush_streamed_response(stream_id, it->second); // `it` may be erased past it
+            }
+        }
+    }
+
+    /// Whether `stream_id` carries a streamed response whose END_STREAM has not left (Huly QB-86).
+    [[nodiscard]] bool
+    is_streaming_response(uint32_t stream_id) const noexcept {
+        const auto it = _server_streams.find(stream_id);
+        return it != _server_streams.end() && it->second.streaming && !it->second.end_stream_sent;
     }
 
     /**
@@ -2597,6 +2803,11 @@ private:
             return;
         }
 
+        if (stream.streaming) {
+            flush_streamed_response(stream_id_param, stream); // a streamed response: its pieces, then END_STREAM once ended (Huly QB-86)
+            return;
+        }
+
         bool body_fully_sent_or_empty = (stream.send_buffer_offset == stream.response_to_send.body().size());
 
         // Part 1: Try to send remaining body data if any
@@ -2735,6 +2946,198 @@ private:
             }
             try_close_stream_context(stream_id_param);
         }
+    }
+
+    /// can_begin_streamed_response(), on the stream itself.
+    [[nodiscard]] static bool
+    can_begin_streamed_response(Http2ServerStream const &stream) noexcept {
+        return stream.request_dispatched && !stream.rst_stream_sent && !stream.rst_stream_received && !stream.end_stream_sent
+               && !stream.streaming && !stream.response_sent
+               && (stream.state == Http2StreamConcreteState::OPEN || stream.state == Http2StreamConcreteState::HALF_CLOSED_REMOTE);
+    }
+
+    /**
+     * @brief The leading header block of a response as `http_response`'s fields give it, for send_response() and
+     *        begin_streamed_response(): `:status` first, then every field -- a name is lowercase already, the headers
+     *        map stores it folded (Huly QB-1191) -- each validated, one `content-length` at most, parsed into
+     *        `declared_content_length`; then, for a response with a trailer section (`trailed`: a `trailer` header, or
+     *        `trailers()`), the fields the section takes leave the block and `trailers()` is announced
+     *        (prepare_trailed_header_block, Huly QB-1058, QB-1073). The trailer section itself leaves after the body
+     *        (try_send_pending_data_for_stream), the same contract as HTTP/1.1 and HTTP/3.
+     * @return `false` when the response is refused -- a field HTTP/2 forbids or cannot carry, a malformed or a
+     *         conflicting `content-length`, a trailer field a section must not carry -- the stream then reset
+     *         (on_stream_error, PROTOCOL_ERROR) and nothing sent.
+     */
+    [[nodiscard]] QB_HTTP2_FORCEINLINE bool
+    collect_response_head(uint32_t stream_id, qb::http::Response const &http_response, std::vector<qb::protocol::hpack::HeaderField> &hf_vector,
+                          std::optional<std::uint64_t> &declared_content_length, bool &trailed) {
+        hf_vector.emplace_back(":status", std::to_string(http_response.status().code()));
+        bool announces_trailers = false;
+        for (const auto &header_item : http_response.headers()) {
+            const std::string &name_lower = header_item.first;
+            if (name_lower.empty() || name_lower[0] == ':' || HeaderValidator::is_forbidden_response_header(name_lower)) {
+                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
+                                      "Forbidden or invalid HTTP/2 response header: " + header_item.first);
+                return false;
+            }
+            for (const auto &value :
+                 header_item.second) { // Assuming header_item.second is iterable (e.g. vector of strings for multi-value headers)
+                if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
+                    this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response header field: " + header_item.first);
+                    return false;
+                }
+                if (name_lower == "content-length") {
+                    const auto parsed = HeaderValidator::parse_content_length(value);
+                    if (!parsed) {
+                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response content-length");
+                        return false;
+                    }
+                    if (declared_content_length && *declared_content_length != *parsed) {
+                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Conflicting HTTP/2 response content-length headers");
+                        return false;
+                    }
+                    declared_content_length = *parsed;
+                }
+                hf_vector.emplace_back(name_lower, value);
+            }
+            announces_trailers = announces_trailers || name_lower == qb::http::well_known::TRAILER_SV;
+        }
+        trailed = announces_trailers || http_response.has_trailers();
+        if (trailed) {
+            if (const char *refused = prepare_trailed_header_block(hf_vector, http_response)) {
+                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, refused);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The room the socket has left for a frame: the io's write-buffer cap (`max_write_buffer_size()` when the io has
+    /// one, qb-io's default otherwise; SIZE_MAX means no cap) less the bytes it already queues (Huly QB-86).
+    [[nodiscard]] std::size_t
+    streamed_socket_room() const noexcept {
+        std::size_t cap = QB_MAX_WRITE_BUFFER_SIZE;
+        if constexpr (detail::io_has_write_cap<IO_Handler>::value) {
+            cap = static_cast<std::size_t>(this->_io.max_write_buffer_size());
+        }
+        if (cap == static_cast<std::size_t>(-1)) {
+            return cap;
+        }
+        const std::size_t queued = this->_io.out().size() + std::min(streamed_socket_headroom, cap / 4); // a small cap keeps a quarter
+        return cap > queued ? cap - queued : 0;
+    }
+
+    /**
+     * @brief Send what a streamed response can send now (Huly QB-86): the pieces `streamed->buffer` holds, as DATA frames
+     *        of at most the peer's frame size, as far as the stream's and the connection's send windows go -- the rest
+     *        waits for a WINDOW_UPDATE, which calls again through try_send_pending_data_for_stream() -- then, once
+     *        end_streamed_response() ran and the last piece left, END_STREAM: on the last DATA frame, or on an empty
+     *        one, or on the trailer section's HEADERS when the response has one (split over CONTINUATION frames past
+     *        the peer's frame size, Huly QB-522). `stream` may be erased by the time this returns (a closed stream is
+     *        reclaimed): callers read nothing through it afterwards.
+     */
+    void
+    flush_streamed_response(uint32_t stream_id, Http2ServerStream &stream) noexcept {
+        auto &buffer = stream.streamed->buffer; // begin_streamed_response() allocated it: `streaming` says so
+        while (buffer.size() > 0) {
+            if (stream.peer_window_size <= 0 || _connection_send_window <= 0) {
+                stream.has_pending_data_to_send = true; // the next WINDOW_UPDATE comes back here
+                return;
+            }
+            // The socket's room: the io's write-buffer cap less what the socket already queues. A stream's own write()
+            // is admitted against that cap with its own held pieces alone; the pieces every stream held back for a
+            // window would flush together past it on one WINDOW_UPDATE, and publish() disconnects past the cap.
+            const std::size_t socket_room = streamed_socket_room();
+            if (socket_room <= FRAME_HEADER_SIZE) {
+                stream.has_pending_data_to_send = true; // the next write pass comes back here (resume_streamed_responses)
+                _streams_wait_for_socket        = true;
+                return;
+            }
+            const auto     window = std::min<int64_t>(stream.peer_window_size, _connection_send_window);
+            const uint32_t room   = std::min<uint32_t>(
+                {static_cast<uint32_t>(std::min<int64_t>(window, 0x7FFFFFFF)), this->FramerBase::get_peer_max_frame_size(),
+                 static_cast<uint32_t>(std::min<std::size_t>(socket_room - FRAME_HEADER_SIZE, 0x7FFFFFFF))});
+            const uint32_t chunk = static_cast<uint32_t>(std::min<std::size_t>(buffer.size(), room));
+            if (chunk == 0) {
+                stream.has_pending_data_to_send = true;
+                return;
+            }
+            const bool                last = stream.stream_ended && chunk == buffer.size() && !stream.is_trailers;
+            Http2FrameData<DataFrame> frame;
+            frame.header.type  = static_cast<uint8_t>(FrameType::DATA);
+            frame.header.flags = last ? FLAG_END_STREAM : 0;
+            frame.header.set_stream_id(stream_id);
+            frame.payload.data_payload.assign(buffer.begin(), buffer.begin() + chunk);
+            this->_io << frame;
+            if (!this->ok()) {
+                stream.has_pending_data_to_send = true;
+                return;
+            }
+            buffer.free_front(chunk);
+            stream.peer_window_size -= chunk;
+            _connection_send_window -= chunk;
+            stream.progressed_since_idle_sweep = true;
+            if (last) {
+                buffer.reset();
+                stream.has_pending_data_to_send = false;
+                stream.end_stream_sent          = true;
+                stream.streaming                = false;
+                stream.state = stream.end_stream_received ? Http2StreamConcreteState::CLOSED : Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+                try_close_stream_context(stream_id); // `stream` dangles past it
+                return;
+            }
+        }
+        buffer.reset(); // every piece left: the pipe's room is kept, its cursor returns to the front
+        stream.has_pending_data_to_send = false;
+        if (!stream.stream_ended || stream.end_stream_sent) {
+            return; // more pieces may come, or the end left already
+        }
+        if (stream.is_trailers) {
+            // The room first, on a bound of the section's encoded size: encoding advances the HPACK encoder's dynamic
+            // table, so a block encoded and then held back would leave the peer's table behind on the retry. A field's
+            // literal form is under its name, its value and 32 octets (HPACK's own size of an entry); a frame header per
+            // frame of the peer's size, one more for the remainder.
+            std::size_t bound = 0;
+            for (const auto &field : stream.streamed->trailer_fields) {
+                bound += field.name.size() + field.value.size() + 32;
+            }
+            const std::size_t frames = bound / std::max<std::size_t>(this->FramerBase::get_peer_max_frame_size(), 1) + 1;
+            if (streamed_socket_room() <= bound + frames * FRAME_HEADER_SIZE) {
+                stream.has_pending_data_to_send = true; // the trailer section waits for the socket's room, unencoded
+                _streams_wait_for_socket        = true;
+                return;
+            }
+            std::vector<uint8_t> encoded_trailers;
+            if (!stream.streamed->trailer_fields.empty() && !_hpack_encoder.encode(stream.streamed->trailer_fields, encoded_trailers)) {
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
+                return;
+            }
+            if (!this->send_headers_with_continuation(stream_id, FLAG_END_STREAM, std::move(encoded_trailers))) {
+                stream.has_pending_data_to_send = true; // tried again at the next write pass
+                return;
+            }
+            stream.is_trailers = false;
+        } else {
+            if (streamed_socket_room() <= FRAME_HEADER_SIZE) {
+                stream.has_pending_data_to_send = true; // the empty END_STREAM frame waits for the socket's room
+                _streams_wait_for_socket        = true;
+                return;
+            }
+            Http2FrameData<DataFrame> frame;
+            frame.header.type  = static_cast<uint8_t>(FrameType::DATA);
+            frame.header.flags = FLAG_END_STREAM;
+            frame.header.set_stream_id(stream_id);
+            this->_io << frame;
+            if (!this->ok()) {
+                stream.has_pending_data_to_send = true;
+                return;
+            }
+        }
+        stream.progressed_since_idle_sweep = true;
+        stream.end_stream_sent             = true;
+        stream.streaming                   = false;
+        stream.state = stream.end_stream_received ? Http2StreamConcreteState::CLOSED : Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+        try_close_stream_context(stream_id); // `stream` dangles past it
     }
 
     /**

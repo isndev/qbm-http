@@ -586,6 +586,13 @@ public:
         return this->protocol() == _http_protocol;
     }
 
+    /// Whether the server drains this session (http1_begin_drain()): its next answer closes the connection. Public
+    /// because the SSE helper reads it through a requires-expression (Huly QB-86).
+    [[nodiscard]] bool
+    http1_draining() const noexcept {
+        return _draining;
+    }
+
     /**
      * @brief Server hook (Huly QB-167): the server drains. An idle session -- no request being answered, none
      *        queued, no byte of one buffered -- closes now, gracefully: its sending side shut down, what the
@@ -696,8 +703,14 @@ public:
 
     /// The request being answered is a HEAD: a streamed response sends its head alone.
     [[nodiscard]] bool
-    stream_request_is_head() const noexcept {
+    stream_request_is_head(ContextType const &) const noexcept {
         return _active_request_method == qb::http::method::HEAD;
+    }
+
+    /// HTTP/1.1 delimits a message by its framing header, never by the end of its stream: a stream is chunked.
+    [[nodiscard]] static constexpr bool
+    stream_delimits_messages() noexcept {
+        return false;
     }
 
     /// Write the head of `ctx.response()` now -- the keep-alive and HEAD rules of any response applied -- adopting
@@ -736,16 +749,17 @@ public:
         return false;
     }
 
-    /// Append a piece of a streamed body. Each piece refreshes the inactivity timeout.
+    /// Append a piece of a streamed body. Each piece refreshes the inactivity timeout. One stream at a time on a
+    /// connection: the stream handed in is the live one, and is not read.
     void
-    stream_write(std::string_view bytes) {
+    stream_write(ResponseStream<Derived> const &, std::string_view bytes) {
         if (!_stream_live)
             return;
         *this << bytes;
         this->updateTimeout();
     }
     void
-    stream_write(Chunk const &chunk) {
+    stream_write(ResponseStream<Derived> const &, Chunk const &chunk) {
         if (!_stream_live)
             return;
         *this << chunk;
@@ -755,7 +769,7 @@ public:
     /// The bytes queued for the socket, not yet written: the session's output buffer (what `pendingWrite()` reads --
     /// the transport is a private base of the tcp client, `out()` is the part of it a session sees).
     [[nodiscard]] std::size_t
-    stream_pending() noexcept {
+    stream_pending(ResponseStream<Derived> const &) noexcept {
         return this->out().size();
     }
 
@@ -784,7 +798,7 @@ public:
     /// nothing to send and reports eos, on every transport (qb-io's stream::write() hands TLS no empty write, Huly
     /// QB-1176), the outcome http1_begin_drain()'s empty arm relies on too.
     void
-    stream_end(bool chunked) {
+    stream_end(ResponseStream<Derived> const &, bool chunked) {
         if (!_stream_live)
             return;
         if (chunked)
@@ -803,7 +817,7 @@ public:
 
     /// A streamed body cannot be completed correctly: the context ends now and the connection is closed.
     void
-    stream_abort() noexcept {
+    stream_abort(ResponseStream<Derived> const &) noexcept {
         if (!_stream_live)
             return;
         _stream_live = false;

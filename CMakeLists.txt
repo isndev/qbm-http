@@ -148,6 +148,7 @@ qb_register_module(
         src/qbm/http/utility.cpp
         src/qbm/http/origin.cpp
         src/qbm/http/detail/redirect.cpp
+        src/qbm/http/sse.cpp
         # Auth
         src/qbm/http/auth/options.cpp
         src/qbm/http/auth/user.cpp

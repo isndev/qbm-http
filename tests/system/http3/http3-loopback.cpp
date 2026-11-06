@@ -3330,9 +3330,9 @@ TEST_F(Http3LoopbackTest, BodiesCrossSeveralSmallReceiveWindows) {
 }
 
 // ---------------------------------------------------------------------------
-// Static files over HTTP/3 keep the buffered path (Huly QB-101). The HTTP/3 session offers no streaming hooks, so a
-// body over StaticFilesOptions::stream_threshold is read whole, as every body was, and max_file_size still bounds it;
-// HTTP/1.1 streams the same body (system/middleware/static-files-stream.cpp).
+// Static files over HTTP/3 stream (Huly QB-101, QB-86). The HTTP/3 session offers the streaming hooks since train 6, so a
+// body over StaticFilesOptions::stream_threshold is served through a stream, never materialised, and max_file_size --
+// the bound of a body read whole -- no longer bounds it, exactly as on HTTP/1.1 (system/middleware/static-files-stream.cpp).
 // ---------------------------------------------------------------------------
 namespace {
 /// A temporary directory removed with its scope, an early failure included.
@@ -3350,8 +3350,8 @@ struct TempRoot {
 };
 } // namespace
 
-TEST_F(Http3LoopbackTest, StaticFilesReadABodyOverTheStreamThresholdWholeAndTheCapStillBoundsIt) {
-    static_assert(!qb::http::streaming_session<qb::http3::DefaultSession>, "HTTP/3 is expected to buffer streams for now");
+TEST_F(Http3LoopbackTest, StaticFilesStreamABodyOverTheStreamThresholdAndMaxFileSizeNoLongerBoundsIt) {
+    static_assert(qb::http::streaming_session<qb::http3::DefaultSession>, "the HTTP/3 session streams since Huly QB-86's train-6 lot");
     const TempRoot temp("qbm-h3-static-");
     const auto    &root = temp.path;
     ASSERT_TRUE(std::filesystem::is_directory(root));
@@ -3382,9 +3382,11 @@ TEST_F(Http3LoopbackTest, StaticFilesReadABodyOverTheStreamThresholdWholeAndTheC
     };
     const auto served = get("/whole.bin");
     EXPECT_EQ(served.status(), qb::http::status::OK);
-    EXPECT_EQ(served.header("Content-Length"), std::to_string(whole.size()));
-    EXPECT_TRUE(served.body().as<std::string>() == whole) << "the body read whole differs from the file's";
-    EXPECT_EQ(get("/over.bin").status(), qb::http::status::PAYLOAD_TOO_LARGE) << "a body read whole stays bounded by max_file_size";
+    EXPECT_EQ(served.header("Content-Length"), std::to_string(whole.size())) << "the file's length is declared: identity framing";
+    EXPECT_TRUE(served.body().as<std::string>() == whole) << "the streamed body differs from the file's";
+    const auto over = get("/over.bin");
+    EXPECT_EQ(over.status(), qb::http::status::OK) << "a streamed body is never materialised: max_file_size does not bound it (as on HTTP/1.1)";
+    EXPECT_EQ(over.body().size(), std::size_t{2} * 1024 * 1024);
 
     client->disconnect();
     server->close();

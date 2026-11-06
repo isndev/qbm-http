@@ -1,0 +1,357 @@
+/**
+ * @file qbm/http/tests/shared/http2_raw_client.h
+ * @brief A raw HTTP/2 client over TLS for the qbm-http system suites: frames in, frames out, nothing hidden (Huly QB-86).
+ *
+ * The module's `qb::http2::Client` delivers a response whole, at its END_STREAM, and advertises the windows it wants.
+ * The streaming suites need the opposite: to see each DATA frame as it arrives -- before the stream ends -- to choose
+ * the initial window the server may fill, to withhold or grant WINDOW_UPDATE, to reset a stream or send a GOAWAY in the
+ * middle of a body. This client is that: a blocking-connect TLS socket negotiating ALPN `h2`, the connection preface
+ * and a SETTINGS frame of the test's choosing, requests as HPACK-encoded HEADERS, and a frame reader that keeps, per
+ * stream, the decoded header blocks, every DATA payload in order, the END_STREAM, a RST_STREAM's code and a trailer
+ * block. It answers SETTINGS with an ACK and PING with a PONG, and ignores the rest. No padding is expected from the
+ * server (it sends none).
+ *
+ * Header-only, test-only. Contains no TEST()/main().
+ *
+ * @author qb - C++ Actor Framework
+ * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
+ * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+ * @ingroup Http
+ */
+#ifndef QBM_HTTP_TESTS_SHARED_HTTP2_RAW_CLIENT_H
+#define QBM_HTTP_TESTS_SHARED_HTTP2_RAW_CLIENT_H
+
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <map>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <qb/io/tcp/ssl/context.h>
+#include <qb/io/tcp/ssl/socket.h>
+
+#include <qbm/http/2/protocol/base.h>
+#include <qbm/http/2/protocol/hpack.h>
+
+namespace qb::http::test {
+
+/// One HTTP/2 frame as read from the wire.
+struct RawFrame {
+    std::uint8_t         type      = 0;
+    std::uint8_t         flags     = 0;
+    std::uint32_t        stream_id = 0;
+    std::vector<uint8_t> payload;
+};
+
+/// What the client saw of one stream.
+struct RawStream {
+    std::vector<qb::protocol::hpack::HeaderField> headers;  ///< the first header block (the response head)
+    std::vector<qb::protocol::hpack::HeaderField> trailers; ///< a second block, if one came (the trailer section)
+    int                                           header_blocks = 0;
+    std::vector<std::string>                      data; ///< every DATA payload, in order (empty payloads included)
+    std::size_t                                   data_bytes = 0;
+    bool                                          end_stream = false;
+    bool                                          reset      = false;
+    std::uint32_t                                 reset_code = 0;
+
+    [[nodiscard]] std::string
+    body() const {
+        std::string out;
+        for (auto const &piece : data)
+            out += piece;
+        return out;
+    }
+    [[nodiscard]] std::string
+    header(std::string_view name) const {
+        for (auto const &field : headers)
+            if (field.name == name)
+                return field.value;
+        return {};
+    }
+    [[nodiscard]] std::string
+    trailer(std::string_view name) const {
+        for (auto const &field : trailers)
+            if (field.name == name)
+                return field.value;
+        return {};
+    }
+    [[nodiscard]] int
+    status() const {
+        const auto s = header(":status");
+        return s.empty() ? 0 : std::atoi(s.c_str());
+    }
+};
+
+class Http2RawClient {
+public:
+    static constexpr std::uint8_t  DATA = 0x0, HEADERS = 0x1, RST_STREAM = 0x3, SETTINGS = 0x4, PING = 0x6, GOAWAY = 0x7, WINDOW_UPDATE = 0x8,
+                                   CONTINUATION = 0x9;
+    static constexpr std::uint8_t  END_STREAM = 0x1, ACK = 0x1, END_HEADERS = 0x4;
+    static constexpr std::uint16_t SETTINGS_INITIAL_WINDOW_SIZE = 0x4, SETTINGS_MAX_FRAME_SIZE = 0x5, SETTINGS_MAX_CONCURRENT_STREAMS = 0x3;
+
+    std::map<std::uint32_t, RawStream> streams;
+    std::vector<RawFrame>              frames;                     ///< every frame read, in order
+    bool                               eof                = false; ///< the connection is over (read -1)
+    bool                               settings_acked     = false; ///< the server acknowledged our SETTINGS
+    std::uint32_t                      goaway_last_stream = 0;
+    bool                               goaway_seen        = false;
+    std::uint32_t                      goaway_code        = 0;
+
+    /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
+    /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
+    bool
+    connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {}) {
+        _sock = qb::io::tcp::ssl::socket{qb::io::ssl::Context::client().alpn({"h2"})};
+        _sock.set_insecure();
+        if (_sock.connect_v4("127.0.0.1", port) != 0)
+            return false;
+        if (_sock.get_alpn_selected_protocol() != "h2")
+            return false;
+        if (_sock.set_nonblocking(true) != 0)
+            return false;
+        std::vector<uint8_t> out(HTTP2_CONNECTION_PREFACE.begin(), HTTP2_CONNECTION_PREFACE.end());
+        std::vector<uint8_t> payload;
+        for (auto const &[id, value] : settings) {
+            payload.push_back(static_cast<uint8_t>(id >> 8));
+            payload.push_back(static_cast<uint8_t>(id));
+            payload.push_back(static_cast<uint8_t>(value >> 24));
+            payload.push_back(static_cast<uint8_t>(value >> 16));
+            payload.push_back(static_cast<uint8_t>(value >> 8));
+            payload.push_back(static_cast<uint8_t>(value));
+        }
+        append_frame(out, SETTINGS, 0, 0, payload);
+        return write_all(out);
+    }
+
+    /// Send a request as one HEADERS frame with END_STREAM (no body); returns its stream id (1, 3, 5, ...).
+    std::uint32_t
+    request(std::string_view path, std::string_view method = "GET", std::vector<std::pair<std::string, std::string>> const &extra = {}) {
+        const std::uint32_t stream_id = _next_stream_id;
+        _next_stream_id += 2;
+        std::vector<qb::protocol::hpack::HeaderField> fields = {
+            {":method", std::string(method)}, {":scheme", "https"}, {":authority", "localhost"}, {":path", std::string(path)}
+        };
+        for (auto const &[name, value] : extra)
+            fields.emplace_back(name, value);
+        std::vector<uint8_t> block;
+        if (!_encoder.encode(fields, block))
+            return 0;
+        std::vector<uint8_t> out;
+        append_frame(out, HEADERS, END_STREAM | END_HEADERS, stream_id, block);
+        return write_all(out) ? stream_id : 0;
+    }
+
+    bool
+    window_update(std::uint32_t stream_id, std::uint32_t increment) {
+        std::vector<uint8_t> out;
+        append_frame(out, WINDOW_UPDATE, 0, stream_id,
+                     {static_cast<uint8_t>(increment >> 24), static_cast<uint8_t>(increment >> 16), static_cast<uint8_t>(increment >> 8),
+                      static_cast<uint8_t>(increment)});
+        return write_all(out);
+    }
+
+    bool
+    rst_stream(std::uint32_t stream_id, std::uint32_t code) {
+        std::vector<uint8_t> out;
+        append_frame(
+            out, RST_STREAM, 0, stream_id,
+            {static_cast<uint8_t>(code >> 24), static_cast<uint8_t>(code >> 16), static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code)});
+        return write_all(out);
+    }
+
+    bool
+    goaway(std::uint32_t last_stream_id, std::uint32_t code) {
+        std::vector<uint8_t> out;
+        append_frame(out, GOAWAY, 0, 0,
+                     {static_cast<uint8_t>(last_stream_id >> 24), static_cast<uint8_t>(last_stream_id >> 16),
+                      static_cast<uint8_t>(last_stream_id >> 8), static_cast<uint8_t>(last_stream_id), static_cast<uint8_t>(code >> 24),
+                      static_cast<uint8_t>(code >> 16), static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code)});
+        return write_all(out);
+    }
+
+    /// Read frames until `pred()` holds, the connection ends, or `budget` elapses; `pred()` at the end.
+    template <typename Pred>
+    bool
+    read_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (!pred()) {
+            if (eof || std::chrono::steady_clock::now() >= deadline)
+                return pred();
+            if (!read_some())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
+
+    /// Read whatever comes for `window`, then stop: what the server sent while the test held something back.
+    void
+    read_for(std::chrono::milliseconds window) {
+        const auto deadline = std::chrono::steady_clock::now() + window;
+        while (!eof && std::chrono::steady_clock::now() < deadline) {
+            if (!read_some())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    [[nodiscard]] RawStream const &
+    stream(std::uint32_t stream_id) {
+        return streams[stream_id];
+    }
+
+    void
+    close() {
+        _sock.disconnect();
+    }
+
+private:
+    static void
+    append_frame(std::vector<uint8_t> &out, std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id,
+                 std::vector<uint8_t> const &payload) {
+        const auto length = static_cast<std::uint32_t>(payload.size());
+        out.push_back(static_cast<uint8_t>(length >> 16));
+        out.push_back(static_cast<uint8_t>(length >> 8));
+        out.push_back(static_cast<uint8_t>(length));
+        out.push_back(type);
+        out.push_back(flags);
+        out.push_back(static_cast<uint8_t>((stream_id >> 24) & 0x7F));
+        out.push_back(static_cast<uint8_t>(stream_id >> 16));
+        out.push_back(static_cast<uint8_t>(stream_id >> 8));
+        out.push_back(static_cast<uint8_t>(stream_id));
+        out.insert(out.end(), payload.begin(), payload.end());
+    }
+
+    bool
+    write_all(std::vector<uint8_t> const &bytes, std::chrono::milliseconds budget = std::chrono::seconds(2)) {
+        const auto  deadline = std::chrono::steady_clock::now() + budget;
+        std::size_t sent     = 0;
+        while (sent < bytes.size()) {
+            const int n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
+            if (n > 0) {
+                sent += static_cast<std::size_t>(n);
+                continue;
+            }
+            if (n < 0 || std::chrono::steady_clock::now() >= deadline)
+                return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
+
+    /// One read; the frames it completes are dispatched. `true` when bytes came.
+    bool
+    read_some() {
+        char      tmp[64 * 1024];
+        const int n = _sock.read(tmp, sizeof tmp);
+        if (n < 0) {
+            eof = true; // the TLS socket reports the end of the connection as -1, and "nothing yet" as 0
+            return false;
+        }
+        if (n == 0)
+            return false;
+        _in.insert(_in.end(), tmp, tmp + n);
+        while (_in.size() >= 9) {
+            const std::size_t length = (std::size_t{_in[0]} << 16) | (std::size_t{_in[1]} << 8) | _in[2];
+            if (_in.size() < 9 + length)
+                break;
+            RawFrame f;
+            f.type      = _in[3];
+            f.flags     = _in[4];
+            f.stream_id = ((std::uint32_t{_in[5]} << 24) | (std::uint32_t{_in[6]} << 16) | (std::uint32_t{_in[7]} << 8) | _in[8]) & 0x7FFFFFFFu;
+            f.payload.assign(_in.begin() + 9, _in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+            _in.erase(_in.begin(), _in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+            dispatch(f);
+            frames.push_back(std::move(f));
+        }
+        return true;
+    }
+
+    void
+    dispatch(RawFrame const &f) {
+        switch (f.type) {
+            case SETTINGS:
+                if (f.flags & ACK) {
+                    settings_acked = true;
+                } else {
+                    std::vector<uint8_t> out;
+                    append_frame(out, SETTINGS, ACK, 0, {});
+                    (void) write_all(out);
+                }
+                break;
+            case PING:
+                if (!(f.flags & ACK)) {
+                    std::vector<uint8_t> out;
+                    append_frame(out, PING, ACK, 0, f.payload);
+                    (void) write_all(out);
+                }
+                break;
+            case GOAWAY:
+                goaway_seen = true;
+                if (f.payload.size() >= 8) {
+                    goaway_last_stream = ((std::uint32_t{f.payload[0]} << 24) | (std::uint32_t{f.payload[1]} << 16)
+                                          | (std::uint32_t{f.payload[2]} << 8) | f.payload[3])
+                                         & 0x7FFFFFFFu;
+                    goaway_code = (std::uint32_t{f.payload[4]} << 24) | (std::uint32_t{f.payload[5]} << 16) | (std::uint32_t{f.payload[6]} << 8)
+                                  | f.payload[7];
+                }
+                break;
+            case DATA: {
+                auto &s = streams[f.stream_id];
+                s.data.emplace_back(f.payload.begin(), f.payload.end());
+                s.data_bytes += f.payload.size();
+                if (f.flags & END_STREAM)
+                    s.end_stream = true;
+                break;
+            }
+            case HEADERS:
+            case CONTINUATION: {
+                auto &s = streams[f.stream_id];
+                if (f.type == HEADERS) {
+                    _block.clear();
+                    _block_stream     = f.stream_id;
+                    _block_end_stream = (f.flags & END_STREAM) != 0;
+                }
+                _block.insert(_block.end(), f.payload.begin(), f.payload.end());
+                if (f.flags & END_HEADERS) {
+                    std::vector<qb::protocol::hpack::HeaderField> fields;
+                    bool                                          incomplete = false;
+                    (void) _decoder.decode(_block, fields, incomplete);
+                    if (s.header_blocks == 0)
+                        s.headers = std::move(fields);
+                    else
+                        s.trailers = std::move(fields);
+                    ++s.header_blocks;
+                    if (_block_end_stream)
+                        s.end_stream = true;
+                }
+                break;
+            }
+            case RST_STREAM: {
+                auto &s = streams[f.stream_id];
+                s.reset = true;
+                if (f.payload.size() >= 4)
+                    s.reset_code = (std::uint32_t{f.payload[0]} << 24) | (std::uint32_t{f.payload[1]} << 16)
+                                   | (std::uint32_t{f.payload[2]} << 8) | f.payload[3];
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    qb::io::tcp::ssl::socket     _sock;
+    std::vector<uint8_t>         _in;
+    std::vector<uint8_t>         _block;
+    std::uint32_t                _block_stream     = 0;
+    bool                         _block_end_stream = false;
+    std::uint32_t                _next_stream_id   = 1;
+    qb::protocol::hpack::Encoder _encoder;
+    qb::protocol::hpack::Decoder _decoder;
+};
+
+} // namespace qb::http::test
+
+#endif // QBM_HTTP_TESTS_SHARED_HTTP2_RAW_CLIENT_H

@@ -75,7 +75,7 @@ Three lines carry more than they look like they do:
   method bound *without* starting, so a missing `start()` left the socket bound, the actor active, and nothing ever
   accepted — a silent failure that cost a debugging session every time it was met. Calling `start()` yourself
   afterwards is still harmless if you have code that does.
-  <!-- src: qbm/http/src/qbm/http/1.1/http.h:1163-1169 (bind then start), :1180-1195 (the bind-only opt-out) -->
+  <!-- src: qbm/http/src/qbm/http/1.1/http.h:1177-1183 (bind then start), :1194-1209 (the bind-only opt-out) -->
 - **`addActor<…>(0)` picks the core.** The accept watcher, every session it creates, the router, and every coroutine a
   handler spawns all live on that one `VirtualCore` thread. That is the whole concurrency model of the module, and the
   next section is what follows from it.
@@ -261,8 +261,8 @@ It is set in exactly the places the session knows the response can no longer be 
 | The head of a streamed response cannot be written | `Context::begin_stream()`: the session closed the connection, the context is cancelled |
 | Your own code | `ctx->cancel()`; under a streamed head, the connection closes too |
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1121-1135 (the server runs it when a session class's own on() hides it); qbm/http/src/qbm/http/2/http2.h:537-546 (HTTP/2 extracted: the watcher stops, every stream's context cancelled), :855-870 (the HTTP/2 server runs it when a session class's own on() hides it) -->
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :806-814 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1574-1580 (begin_stream: a head the session cannot write cancels), :1443-1444 (cancel: a streamed head keeps its status) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:514-517 (disconnected: cancel only when ByUser and incomplete), :464 (extracted: the watcher stops), :466-469 (extracted: cancel then reset), :133-134 (the detector befriended whole, for the probe on the concrete session), :1135-1149 (the server runs it when a session class's own on() hides it); qbm/http/src/qbm/http/2/http2.h:733-743 (HTTP/2 extracted: the watcher stops, every stream's context cancelled), :1054-1069 (the HTTP/2 server runs it when a session class's own on() hides it) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:507-513 (disconnected under a live stream: cancel whatever the reason), :465 (extracted: a live stream cancelled), :820-828 (stream_abort: cancel, then disconnect); qbm/http/src/qbm/http/routing/context.h:1585-1591 (begin_stream: a head the session cannot write cancels), :1443-1444 (cancel: a streamed head keeps its status) -->
 
 Note what is **not** in that table, outside a streamed response: an explicit local `disconnect()` and a session
 inactivity timeout. qb-io's default local reason, `disconnect_reason::user_initiated`, has integer value `1`; an
@@ -296,7 +296,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1707-1711 (REQUEST: qb::duration timeout = zero), :1714-1717 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1721-1725 (REQUEST: qb::duration timeout = zero), :1728-1731 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.

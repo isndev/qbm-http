@@ -3347,12 +3347,13 @@ TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
 } // namespace http2_client_trailers_test
 
 // ===========================================================================
-// A response stream on HTTP/2 (Huly QB-86). The HTTP/2 session offers no streaming hooks yet, so begin_stream()
-// gives a BUFFERED stream with the interface of a streamed one -- the pieces gather and leave whole at end() -- and a
-// handler written for HTTP/1.1 runs unchanged. The stream owns the completion here too: a coroutine handler that hands
-// its stream to a timer chain and returns is not answered under it (it used to be, with its first piece alone and a
-// content-length of that piece). A buffered abort answers 500 with an empty body, without the Content-Length the
-// handler had declared (kept, the server reset the stream for a length mismatch instead).
+// A response stream on HTTP/2 through the module's own client (Huly QB-86). The HTTP/2 session offers the streaming
+// hooks since train 6: begin_stream() sends the HEADERS at once and each piece as DATA frames (`end_of_stream`
+// framing: no Transfer-Encoding, END_STREAM at end()), and a handler written for HTTP/1.1 runs unchanged. The stream
+// owns the completion here too: a coroutine handler that hands its stream to a timer chain and returns is not answered
+// under it. An application cancel() or an abort() under a streamed head resets THE STREAM (RST_STREAM INTERNAL_ERROR),
+// which this client reports as 502 -- never the connection, which serves the next request. The frame-level witnesses
+// (arrival before end(), windows, RST_STREAM, GOAWAY, HEAD, trailers) are system/http2/http2-response-stream.cpp's.
 // ===========================================================================
 namespace http2_response_stream_test {
 
@@ -3367,7 +3368,7 @@ public:
 using StreamCtx = qb::http::Context<StreamH2Session>;
 using H2Stream  = qb::http::ResponseStream<StreamH2Session>;
 
-static_assert(!qb::http::streaming_session<StreamH2Session>, "the HTTP/2 session is expected to buffer streams for now");
+static_assert(qb::http::streaming_session<StreamH2Session>, "the HTTP/2 session streams since Huly QB-86's train-6 lot");
 
 inline std::atomic<int> g_h2_framing{-1};
 
@@ -3412,6 +3413,7 @@ public:
             (void) stream->write("never whole");
             stream->abort();
         });
+        router().get("/plain", [](std::shared_ptr<StreamCtx> ctx) { ctx->text("still served"); });
         router().compile();
     }
 };
@@ -3445,54 +3447,65 @@ protected:
         _server.reset();
     }
 
-    [[nodiscard]] qb::http::Response
-    get(std::string const &path) const {
+    /// `first`, then `second` on the same connection once `first` is answered: the connection outlives a reset stream.
+    [[nodiscard]] std::pair<qb::http::Response, qb::http::Response>
+    get_twice(std::string const &first, std::string const &second) const {
         auto client = qb::http2::make_client("https://localhost:" + std::to_string(_port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
-        std::optional<qb::http::Response> response;
+        std::optional<qb::http::Response> r1, r2;
         qb::http::Request                 request;
         request.method() = qb::http::Method::GET;
-        request.uri()    = qb::io::uri(path);
-        EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
+        request.uri()    = qb::io::uri(first);
+        EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { r1 = std::move(r); }));
         client->connect(nullptr);
-        EXPECT_TRUE(qb::http::test::ServerThread<StreamH2Server>::pump_until([&] { return response.has_value(); }));
+        EXPECT_TRUE(qb::http::test::ServerThread<StreamH2Server>::pump_until([&] { return r1.has_value(); }));
+        if (!second.empty()) {
+            request.uri() = qb::io::uri(second);
+            EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { r2 = std::move(r); }));
+            EXPECT_TRUE(qb::http::test::ServerThread<StreamH2Server>::pump_until([&] { return r2.has_value(); }));
+        }
         client->disconnect();
-        return response.value_or(qb::http::Response{});
+        return {r1.value_or(qb::http::Response{}), r2.value_or(qb::http::Response{})};
+    }
+
+    [[nodiscard]] qb::http::Response
+    get(std::string const &path) const {
+        return get_twice(path, "").first;
     }
 };
 
-TEST_F(Http2ResponseStreamTest, AStreamIsBufferedWholeAndOwnsItsCompletion) {
+TEST_F(Http2ResponseStreamTest, AStreamIsSentAsDataFramesAndOwnsItsCompletion) {
     const auto response = get("/stream/handoff");
-    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::end_of_stream));
     EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_TRUE(response.header("Transfer-Encoding").empty()) << "no coding on HTTP/2: " << response.header("Transfer-Encoding");
+    EXPECT_TRUE(response.header("Content-Length").empty()) << "no length: the end of the stream delimits the body";
     EXPECT_EQ(response.body().template as<std::string>(), "piece-0;piece-1;piece-2;piece-3;")
-        << "the response left when the handler returned, not at end()";
+        << "the response ended at end(), not when the handler returned";
 }
 
-TEST_F(Http2ResponseStreamTest, ACancelledBufferedStreamAnswers503WithoutItsBodyLengthOrCoding) {
-    const auto response = get("/stream/cancel");
-    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_TRUE(response.body().empty()) << response.body().template as<std::string>();
-    EXPECT_TRUE(response.header("Content-Encoding").empty()) << "the coding of a body the 503 does not carry (Huly QB-101)";
-    EXPECT_TRUE(response.header("Content-Type").empty()) << response.header("Content-Type");
-    EXPECT_NE(response.header("Content-Length"), "64");
+TEST_F(Http2ResponseStreamTest, ACancelledStreamResetsItsStreamAndTheConnectionServesOn) {
+    const auto [cancelled, next] = get_twice("/stream/cancel", "/plain");
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::content_length));
+    EXPECT_EQ(cancelled.status(), qb::http::status::BAD_GATEWAY) << "the head left, the stream was reset (RST_STREAM), not the connection";
+    EXPECT_EQ(next.status(), qb::http::status::OK);
+    EXPECT_EQ(next.body().template as<std::string>(), "still served");
 }
 
-TEST_F(Http2ResponseStreamTest, ABufferedAbortAnswers500WithoutTheDeclaredLength) {
-    const auto response = get("/stream/abort");
-    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
-    EXPECT_EQ(response.status(), qb::http::status::INTERNAL_SERVER_ERROR);
-    EXPECT_TRUE(response.body().empty()) << "not the server's 500: " << response.body().template as<std::string>();
+TEST_F(Http2ResponseStreamTest, AnAbortedStreamResetsItsStreamAndTheConnectionServesOn) {
+    const auto [aborted, next] = get_twice("/stream/abort", "/plain");
+    EXPECT_EQ(g_h2_framing.load(), static_cast<int>(qb::http::stream_framing::content_length));
+    EXPECT_EQ(aborted.status(), qb::http::status::BAD_GATEWAY) << "a declared length never reached: the stream is reset";
+    EXPECT_EQ(next.status(), qb::http::status::OK);
 }
 
 } // namespace http2_response_stream_test
 
 // ===========================================================================
-// Static files over HTTP/2 keep the buffered path (Huly QB-101). The HTTP/2 session offers no streaming hooks, so a
-// body over StaticFilesOptions::stream_threshold is read whole, as every body was, and max_file_size still bounds it;
-// HTTP/1.1 streams the same body (system/middleware/static-files-stream.cpp).
+// Static files over HTTP/2 stream (Huly QB-101, QB-86): the HTTP/2 session offers the streaming hooks since train 6, so a
+// body over StaticFilesOptions::stream_threshold is served through a stream, never materialised, and max_file_size --
+// the bound of a body read whole -- no longer bounds it, exactly as on HTTP/1.1 (system/middleware/static-files-stream.cpp).
 // ===========================================================================
 namespace http2_static_files_test {
 
@@ -3506,7 +3519,7 @@ public:
 
 class StaticH2Server : public qb::http2::use<StaticH2Server>::server<StaticH2Session> {};
 
-static_assert(!qb::http::streaming_session<StaticH2Session>, "the HTTP/2 session is expected to buffer streams for now");
+static_assert(qb::http::streaming_session<StaticH2Session>, "the HTTP/2 session streams since Huly QB-86's train-6 lot");
 
 /// A temporary directory removed with its scope, an early failure included.
 struct TempRoot {
@@ -3522,7 +3535,7 @@ struct TempRoot {
     }
 };
 
-TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdIsReadWholeAndTheCapStillBoundsIt) {
+TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdStreamsAndMaxFileSizeNoLongerBoundsIt) {
     ASSERT_TRUE(qb::http::test::certs_available()) << "Missing TLS test certificates (" << qb::http::test::ssl_cert_path() << ")";
     qb::io::async::init();
     const TempRoot temp("qbm-h2-static-");
@@ -3567,8 +3580,10 @@ TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdIsReadWholeAndTheCapStillB
     };
     const auto served = get("/whole.bin");
     EXPECT_EQ(served.status(), qb::http::status::OK);
-    EXPECT_TRUE(served.body().template as<std::string>() == whole) << "the body read whole differs from the file's";
-    EXPECT_EQ(get("/over.bin").status(), qb::http::status::PAYLOAD_TOO_LARGE) << "a body read whole stays bounded by max_file_size";
+    EXPECT_TRUE(served.body().template as<std::string>() == whole) << "the streamed body differs from the file's";
+    const auto over = get("/over.bin");
+    EXPECT_EQ(over.status(), qb::http::status::OK) << "a streamed body is never materialised: max_file_size does not bound it (as on HTTP/1.1)";
+    EXPECT_EQ(over.body().size(), std::size_t{2} * 1024 * 1024);
 
     server.reset();
 }

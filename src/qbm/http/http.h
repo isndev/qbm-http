@@ -42,6 +42,7 @@
 #define QB_MODULE_HTTP_H_
 #include "./1.1/client.h"
 #include "./1.1/http.h"
+#include "./sse.h" // Server-Sent Events over a response stream, on every protocol (Huly QB-86)
 #ifdef QB_HAS_SSL
 #include "./2/http2.h"
 #include "./ws/ws.h"
