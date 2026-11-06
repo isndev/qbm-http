@@ -338,7 +338,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   nghttp3 deprecated `recv_settings` in 1.14 ("New settings will not be notified"); the connection reads
   `SETTINGS_MAX_FIELD_SECTION_SIZE` through `recv_settings2` where it exists, and through `recv_settings` on the
   module's floor, 1.12; `is_drained()` likewise reads `nghttp3_conn_is_drained2` from 1.16 and the deprecated
-  `nghttp3_conn_is_drained` below (review R1).
+  `nghttp3_conn_is_drained` below.
 
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when

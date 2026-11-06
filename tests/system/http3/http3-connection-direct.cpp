@@ -1587,9 +1587,10 @@ TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsControlStreamAndItsAcknowled
 }
 
 /**
- * @test A started shutdown is drained only once its request streams are (Huly QB-1242, review R1)
- * @brief is_drained() reads nghttp3_conn_is_drained2 from 1.16, nghttp3_conn_is_drained -- deprecated since -- below:
- *        a server connection that shuts down with a request in flight is not drained until that stream closes.
+ * @test A started shutdown is drained only once its request streams are (Huly QB-1242)
+ * @brief A regression guard of is_drained(), which reads nghttp3_conn_is_drained2 from 1.16 (nghttp3_conn_is_drained,
+ *        deprecated since, below; the two agree, so this test cannot tell them apart): a server connection that shuts
+ *        down with a request in flight is not drained until that stream closes.
  */
 TEST(Http3ConnectionDirect, AShutdownIsDrainedOnlyOnceItsStreamsAre) {
     Pair              pair;

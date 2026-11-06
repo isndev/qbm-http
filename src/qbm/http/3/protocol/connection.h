@@ -1570,9 +1570,9 @@ private:
         cb.reset_stream      = reset_stream_cb;
         cb.shutdown          = shutdown_cb;
 #if NGHTTP3_VERSION_NUM >= 0x010e00 // `recv_settings2` (1.14): "New settings will not be notified" to `recv_settings`
-        cb.recv_settings2                                  = recv_settings_cb;
-        [[maybe_unused]] const nghttp3_recv_settings floor = recv_settings_cb; // the 1.12 instantiation, type-checked here
-#else                                                                          // the module's floor, 1.12 (Huly QB-1242)
+        cb.recv_settings2 = recv_settings_cb;
+        [[maybe_unused]] int (*const settings_floor_cb)(nghttp3_conn *, const nghttp3_settings *, void *){recv_settings_cb};
+#else // the module's floor, 1.12, whose instantiation the line above type-checks on every build (Huly QB-1242)
         cb.recv_settings = recv_settings_cb;
 #endif
         cb.rand = rand_cb;
@@ -1849,7 +1849,7 @@ public:
     /// @brief Whether a started shutdown has drained: ::shutdown was called and nghttp3 says so (safe to close the transport).
     [[nodiscard]] bool
     is_drained() const noexcept {
-#if NGHTTP3_VERSION_NUM >= 0x011000 // `nghttp3_conn_is_drained` is deprecated since 1.16 (Huly QB-1242, review R1)
+#if NGHTTP3_VERSION_NUM >= 0x011000 // `nghttp3_conn_is_drained` is deprecated since 1.16 (Huly QB-1242)
         return _shutdown_started && nghttp3_conn_is_drained2(_conn) != 0;
 #else
         return _shutdown_started && nghttp3_conn_is_drained(_conn) != 0;
