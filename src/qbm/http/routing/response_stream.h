@@ -57,13 +57,12 @@ class Context;
 template <typename SessionType>
 class ResponseStream;
 
-/**
- * @brief How the body of a streamed response reaches the wire (Huly QB-86).
- */
+/// How the body of a streamed response reaches the wire (Huly QB-86).
 enum class stream_framing : std::uint8_t {
     buffered,       ///< not streamed: the pieces gather in the body and leave whole at `end()`, through the ordinary completion
     content_length, ///< a `Content-Length` was declared: the pieces go as they are, counted against it
-    chunked         ///< `Transfer-Encoding: chunked`: every piece a chunk, `end()` the last-chunk
+    chunked,        ///< `Transfer-Encoding: chunked`: every piece a chunk, `end()` the last-chunk
+    end_of_stream   ///< HTTP/2, HTTP/3: the pieces go as DATA frames as they are, the end of the stream (END_STREAM, FIN) ends them
 };
 
 /// The bytes a producer may leave queued in the session's output before it should wait for `drain()`.
@@ -79,36 +78,42 @@ status_carries_no_body(int code) noexcept {
 } // namespace detail
 
 /**
- * @brief The hooks a session offers a `ResponseStream` (the HTTP/1.1 server session does; `Context::begin_stream()`
- *        probes them and gives a buffered stream on a session without them).
+ * @brief The hooks a session offers a `ResponseStream` (the HTTP/1.1, HTTP/2 and HTTP/3 server sessions do;
+ *        `Context::begin_stream()` probes them and gives a buffered stream on a session without them). A hook about
+ *        one stream takes it: an HTTP/2 or HTTP/3 session serves many at once, told apart by `stream_id()`.
  *
- * - `stream_can_answer(ctx)`: whether the session can stream the response to `ctx` now -- it is the context the
+ * - `stream_can_answer(ctx)`: whether the session can stream the response to `ctx` now -- it is a context the
  *   session answers, or the one being routed for it, and no stream is live on it. A query: nothing changes.
- * - `stream_request_is_head()`: the request being answered is a HEAD: the head goes out, the body never does.
+ * - `stream_request_is_head(ctx)`: the request being answered is a HEAD: the head goes out, the body never does.
+ * - `stream_delimits_messages()`: the protocol ends a message itself (HTTP/2 END_STREAM, HTTP/3 FIN): a head with no
+ *   framing header streams as `stream_framing::end_of_stream`, and no `Transfer-Encoding` (hop-by-hop) is added.
  * - `stream_head(ctx, stream)`: writes the head of `ctx.response()` now -- adopting `ctx` when it is the context
  *   being routed for the session -- and keeps a WEAK reference to `stream` to notify it, except for a HEAD, whose
- *   exchange ends at its head; `false` when the head could not be written (the session then closes the connection).
- * - `stream_write(bytes)` / `stream_write(chunk)`: appends to the session's output.
- * - `stream_pending()`: the bytes queued in the session's output, not yet written to the socket.
+ *   exchange ends at its head; `false` when the head could not be written (the session then ends the exchange).
+ * - `stream_write(stream, bytes)` / `stream_write(stream, chunk)`: appends to the session's output.
+ * - `stream_pending(stream)`: the bytes queued for the peer that it has not taken -- the socket's output; on HTTP/2
+ *   the pieces the stream's windows hold back too; on HTTP/3 the bytes the peer has not acknowledged.
  * - `stream_high_watermark()`: the bytes a producer may queue before it should wait for `drain()`.
  * - `stream_write_cap()`: the hard cap of the output (qb-io's write-buffer cap: `publish()` DISCONNECTS past it).
- * - `stream_end(chunked)`: the terminator when chunked, then what follows any response's last byte.
- * - `stream_abort()`: the message cannot be completed correctly any more: the connection closes.
+ * - `stream_end(stream, chunked)`: the terminator when chunked, then what follows any response's last byte.
+ * - `stream_abort(stream)`: the message cannot be completed correctly any more: the connection closes (HTTP/1.1),
+ *   the stream is reset (HTTP/2, HTTP/3).
  */
 template <typename S>
-concept streaming_session =
-    requires(S &s, Context<S> &ctx, std::shared_ptr<ResponseStream<S>> stream, std::string_view bytes, Chunk const &chunk, bool chunked) {
-        { s.stream_can_answer(ctx) } -> std::convertible_to<bool>;
-        { s.stream_request_is_head() } -> std::convertible_to<bool>;
-        { s.stream_head(ctx, stream) } -> std::convertible_to<bool>;
-        s.stream_write(bytes);
-        s.stream_write(chunk);
-        { s.stream_pending() } -> std::convertible_to<std::size_t>;
-        { s.stream_high_watermark() } -> std::convertible_to<std::size_t>;
-        { s.stream_write_cap() } -> std::convertible_to<std::size_t>;
-        s.stream_end(chunked);
-        s.stream_abort();
-    };
+concept streaming_session = requires(S &s, Context<S> &ctx, ResponseStream<S> const &stream, std::shared_ptr<ResponseStream<S>> handle,
+                                     std::string_view bytes, Chunk const &chunk, bool chunked) {
+    { s.stream_can_answer(ctx) } -> std::convertible_to<bool>;
+    { s.stream_request_is_head(ctx) } -> std::convertible_to<bool>;
+    { s.stream_delimits_messages() } -> std::convertible_to<bool>;
+    { s.stream_head(ctx, handle) } -> std::convertible_to<bool>;
+    s.stream_write(stream, bytes);
+    s.stream_write(stream, chunk);
+    { s.stream_pending(stream) } -> std::convertible_to<std::size_t>;
+    { s.stream_high_watermark() } -> std::convertible_to<std::size_t>;
+    { s.stream_write_cap() } -> std::convertible_to<std::size_t>;
+    s.stream_end(stream, chunked);
+    s.stream_abort(stream);
+};
 
 /**
  * @brief A response body written piece by piece, with backpressure (Huly QB-86).
@@ -116,9 +121,9 @@ concept streaming_session =
  *
  * Obtained from `Context::begin_stream()`, never constructed by hand. THE PRODUCER OWNS IT: `begin_stream()`
  * hands out the only strong reference, the context and the session keep weak ones. A producer that drops its
- * handle without `end()` ends the message the only correct way left -- it is aborted: on the wire the connection is
- * closed, so a peer never waits for bytes that will not come and a pipelined request never queues behind a dead
- * stream; buffered, the context answers 500. The stream holds nothing strongly: producer -> stream (shared); stream ->
+ * handle without `end()` ends the message the only correct way left -- it is aborted: on the wire the exchange ends
+ * (HTTP/1.1 closes the connection, HTTP/2 and HTTP/3 reset the stream), so a peer never waits for bytes that will not
+ * come; buffered, the context answers 500. The stream holds nothing strongly: producer -> stream (shared); stream ->
  * context and session (weak); context -> stream (weak); session -> context (shared, until the response is delivered).
  * A producer that waits through `on_drain()` with a callback that owns it -- the static files' streamer does -- makes a
  * cycle, stream -> callback -> producer -> stream, which the stream breaks on every way out: the callback is run, or
@@ -140,10 +145,14 @@ concept streaming_session =
  *    again -- after a drain it always fits); `too_large` (the piece alone cannot fit even into a drained output,
  *    or, buffered, the gathered body would pass `protocol_limits::MAX_BODY_SIZE`: split it, or end the response);
  *    `closed` (the peer is gone, the context is over, or the stream is -- a piece that would exceed a declared
- *    `Content-Length` ends the stream too, by closing the connection: a message cannot be lengthened). The framing
- *    bytes of a chunk count against the caps with its payload, and the last-chunk's room is kept for `end()`.
- * 2. Backpressure: when `needs_drain()` -- the session holds `high_watermark()` bytes or more that the socket has
- *    not taken yet -- the producer waits: `co_await drain()` in a coroutine, `on_drain(fn)` otherwise. Both resume
+ *    `Content-Length` ends the stream too, by aborting it: a message cannot be lengthened). The framing bytes of a
+ *    chunk count against the caps with its payload, and the last-chunk's room is kept for `end()`. On HTTP/2 a piece
+ *    wider than the peer's frame size is split into frames, and what the stream's or the connection's window cannot
+ *    take yet waits in the session, counted by `pending()`, until a WINDOW_UPDATE lets it go; nothing is refused for
+ *    a window. On HTTP/3 the pieces wait the same way for the QUIC transport and `pending()` counts what the peer
+ *    has not acknowledged.
+ * 2. Backpressure: when `needs_drain()` -- the session holds `high_watermark()` bytes or more that the peer has not
+ *    taken yet -- the producer waits: `co_await drain()` in a coroutine, `on_drain(fn)` otherwise. Both resume
  *    once the session's output falls to `low_watermark()` (half the high one by default), or when the stream is
  *    cancelled or ended -- the coroutine form says which through its `bool`, the callback reads `cancelled()` /
  *    `ended()`. The callback always runs at the end of an event-loop turn (`qb::io::async::defer`), never inside the
@@ -151,24 +160,27 @@ concept streaming_session =
  *    without running (capture the stream weakly, or own it). ONE producer at a time: a second `drain()` while one
  *    is parked resumes the newcomer at once with `false`. The marks stay under the session's hard output cap: the
  *    high one at most half of it, the low one under the high one.
- * 3. `end()` closes the message -- the last-chunk when chunked; a declared length not reached closes the
- *    CONNECTION instead, since the message cannot be completed -- and completes the context.
- * 4. The peer may go away at any time: the session cancels the stream, a parked `drain()` resumes with `false`, the
- *    next `write()` returns `closed`, and the context is cancelled; the producer's only duty is to stop. A
- *    `ctx->cancel()` -- or a `complete(AsyncTaskResult::CANCELLED)`, a middleware's after `next()` included (Huly
- *    QB-101) -- does the same from the application's side, and closes the connection under a streamed head; a
+ * 3. `end()` closes the message -- the last-chunk when chunked, END_STREAM (with the response's `trailers()` as a
+ *    trailing HEADERS when it has any) on HTTP/2, FIN on HTTP/3; a declared length not reached ABORTS the exchange
+ *    instead, since the message cannot be completed -- and completes the context.
+ * 4. The peer may go away at any time -- the connection, or on HTTP/2 and HTTP/3 its stream alone (RST_STREAM, a
+ *    GOAWAY that ends it, a QUIC stream reset): the session cancels the stream, a parked `drain()` resumes with
+ *    `false`, the next `write()` returns `closed`, and the context is cancelled; the producer's only duty is to stop.
+ *    A `ctx->cancel()` -- or a `complete(AsyncTaskResult::CANCELLED)`, a middleware's after `next()` included (Huly
+ *    QB-101) -- does the same from the application's side, and aborts the exchange under a streamed head (the
+ *    connection closes on HTTP/1.1, the stream is reset on HTTP/2 and HTTP/3, never the connection); a
  *    buffered stream, or one a `PRE_RESPONSE_SEND` hook cancels inside `begin_stream()`, answers 503 with no body and
  *    without the representation headers its head declared -- type, framing, coding, range, validators, caching
  *    (Huly QB-101).
  *
  * Framing (`framing()`) is decided by `begin_stream()` from the head as the `PRE_RESPONSE_SEND` hooks leave it: a
- * valid `Content-Length` is honoured and enforced; a `Transfer-Encoding` whose only coding is `chunked`, or none at
- * all, gives chunked framing (never to HTTP/1.0). A body already in `response()` when the stream begins is its first
- * piece, on every path. The response to a HEAD request streams its head alone: the pieces are counted and
- * discarded, never faulted against a length. A response that cannot be streamed gets a BUFFERED stream: same
- * interface, the body leaves whole at `end()` through the ordinary completion, `pending()` reads 0 and `drain()`
- * never waits. `PRE_RESPONSE_SEND` hooks run once: at `begin_stream()` when the response may stream -- they see the
- * head that leaves and an empty body, so a body-rewriting hook (compression) leaves a streamed body alone -- and at
+ * valid `Content-Length` is honoured and enforced on every protocol; a `Transfer-Encoding` whose only coding is
+ * `chunked`, or none at all, gives chunked framing on HTTP/1.1 (never to HTTP/1.0) and `end_of_stream` framing on a
+ * session that delimits its messages (HTTP/2, HTTP/3: DATA frames, no coding). A body already in `response()` when the stream begins is its
+ * first piece, on every path. The response to a HEAD request streams its head alone: the pieces are counted and discarded, never faulted
+ * against a length. A response that cannot be streamed gets a BUFFERED stream: same interface, the body leaves whole at `end()` through the
+ * ordinary completion, `pending()` reads 0 and `drain()` never waits. `PRE_RESPONSE_SEND` hooks run once: at `begin_stream()` when the response
+ * may stream -- they see the head that leaves and an empty body, so a body-rewriting hook (compression) leaves a streamed body alone -- and at
  * the ordinary completion when the response is buffered from the start, so compression, logging and timing see
  * the body they are owed. `POST_RESPONSE_SEND` runs when the last byte is delivered, as for any response. A session
  * whose inactivity timeout runs while a producer writes nothing ends the stream like a peer that left: a stream of
@@ -246,9 +258,9 @@ public:
     };
 
     /// Built by `Context::begin_stream()` only. `write_cap` is the session's hard output cap (none when buffered); the
-    /// watermarks are clamped under it.
+    /// watermarks are clamped under it. `stream_id` is the request's (0 on HTTP/1.1, the stream on HTTP/2 and HTTP/3).
     ResponseStream(std::weak_ptr<context_type> ctx, std::weak_ptr<SessionType> session, stream_framing framing, std::size_t declared_length,
-                   bool head_only, std::size_t high_watermark, std::size_t write_cap) noexcept
+                   bool head_only, std::size_t high_watermark, std::size_t write_cap, std::uint64_t stream_id = 0) noexcept
         : _ctx(std::move(ctx))
         , _session(std::move(session))
         , _framing(framing)
@@ -256,7 +268,8 @@ public:
         , _head_only(head_only)
         , _write_cap(write_cap)
         , _high_watermark(clamped_high(high_watermark))
-        , _low_watermark(_high_watermark / 2) {}
+        , _low_watermark(_high_watermark / 2)
+        , _stream_id(stream_id) {}
 
     ResponseStream(const ResponseStream &)            = delete;
     ResponseStream &operator=(const ResponseStream &) = delete;
@@ -310,13 +323,13 @@ public:
                 const std::size_t room = _write_cap - _high_watermark > reserve ? _write_cap - _high_watermark - reserve : 0;
                 if (framed > room)
                     return write_result::too_large;
-                if (session->stream_pending() > _write_cap - reserve - framed)
+                if (session->stream_pending(*this) > _write_cap - reserve - framed)
                     return write_result::wait; // publish() would disconnect the peer for the producer's haste
             }
             if (chunked)
-                session->stream_write(Chunk{bytes.data(), bytes.size()});
+                session->stream_write(*this, Chunk{bytes.data(), bytes.size()});
             else
-                session->stream_write(bytes);
+                session->stream_write(*this, bytes);
         }
         _written += bytes.size();
         return write_result::taken;
@@ -329,10 +342,10 @@ public:
 
     /**
      * @brief Close the message and complete the context. Idempotent.
-     * @details Chunked: the last-chunk goes out. Declared length: reached, nothing more is needed; NOT reached, the
-     *          connection is closed instead (`abort()`), since the peer would wait for bytes that never come.
-     *          Buffered: the whole body leaves now through the ordinary completion. HEAD: nothing -- its response was
-     *          complete at its head.
+     * @details Chunked: the last-chunk goes out; `end_of_stream`: END_STREAM or FIN, after the response's `trailers()`
+     *          when it has any. Declared length: reached, nothing more is needed; NOT reached, the exchange is aborted
+     *          instead (`abort()`), since the peer would wait for bytes that never come. Buffered: the whole body
+     *          leaves now through the ordinary completion. HEAD: nothing -- its response was complete at its head.
      */
     void
     end() {
@@ -351,7 +364,7 @@ public:
         if (_framing != stream_framing::buffered) {
             if (auto session = _session.lock()) {
                 if constexpr (streaming_session<SessionType>)
-                    session->stream_end(_framing == stream_framing::chunked);
+                    session->stream_end(*this, _framing == stream_framing::chunked);
             }
         }
         drop_waiters();
@@ -361,10 +374,11 @@ public:
 
     /**
      * @brief The message cannot be completed correctly (a source that failed mid-body, a declared length that will
-     *        not be reached, a producer gone): close the connection rather than deliver a message the peer would
-     *        take for whole. Buffered: nothing has left, the context answers 500 -- an empty body, its framing and
-     *        content-coding headers dropped -- unless it is already over (cancelled). HEAD: nothing to undo, its
-     *        response was complete at its head. Idempotent.
+     *        not be reached, a producer gone): end the exchange -- the connection closes on HTTP/1.1, the stream is
+     *        reset on HTTP/2 and HTTP/3 -- rather than deliver a message the peer would take for whole. Buffered:
+     *        nothing has left, the context answers 500 -- an empty body, its framing and content-coding headers
+     *        dropped -- unless it is already over (cancelled). HEAD: nothing to undo, its response was complete at
+     *        its head. Idempotent.
      */
     void
     abort() {
@@ -394,7 +408,7 @@ public:
             ctx->_streamed_bytes = _written;
         if (auto session = _session.lock()) {
             if constexpr (streaming_session<SessionType>)
-                session->stream_abort(); // cancels the context, then disconnects
+                session->stream_abort(*this); // cancels the context, then ends the exchange
         }
         if (ctx && !ctx->is_completed())
             ctx->cancel("the streamed response was aborted"); // the session was already gone
@@ -431,14 +445,14 @@ public:
         _on_drain = std::move(fn);
     }
 
-    /// The bytes the session holds for the socket, not yet written (0 when buffered, and for a HEAD response).
+    /// The bytes the session holds for the peer, not yet taken (0 when buffered, and for a HEAD response).
     [[nodiscard]] std::size_t
     pending() const noexcept {
         if (_framing == stream_framing::buffered || _head_only)
             return 0;
         if constexpr (streaming_session<SessionType>) {
             if (auto session = _session.lock())
-                return session->stream_pending();
+                return session->stream_pending(*this);
         }
         return 0;
     }
@@ -473,6 +487,16 @@ public:
     [[nodiscard]] std::size_t
     declared_length() const noexcept {
         return _declared;
+    }
+    /// The stream this response answers: the request's `stream_id` -- 0 on HTTP/1.1, the HTTP/2 stream, the QUIC stream.
+    [[nodiscard]] std::uint64_t
+    stream_id() const noexcept {
+        return _stream_id;
+    }
+    /// The context this stream answers, while it lives (a session reads the response's trailers at the end there).
+    [[nodiscard]] std::shared_ptr<context_type>
+    context() const noexcept {
+        return _ctx.lock();
     }
     [[nodiscard]] std::size_t
     high_watermark() const noexcept {
@@ -527,7 +551,7 @@ public:
     /**
      * @brief The context was cancelled while the stream was open (`Context::cancel()`): every wait ends, every later
      *        `write()` is refused, and a stream whose head is on the wire is aborted -- the message cannot be completed,
-     *        so the connection closes rather than leave the peer waiting for the rest of it.
+     *        so the exchange ends (the connection closes, or the stream is reset) rather than leave the peer waiting.
      */
     void
     context_cancelled() noexcept {
@@ -538,7 +562,7 @@ public:
             _aborted = true;
             if (auto session = _session.lock()) {
                 if constexpr (streaming_session<SessionType>)
-                    session->stream_abort(); // the context is already cancelling: its own cancel() returns at once
+                    session->stream_abort(*this); // the context is already cancelling: its own cancel() returns at once
             }
         }
         drop_waiters();
@@ -602,7 +626,15 @@ private:
     bool                        _aborted{false};
     drain_awaiter              *_waiter{nullptr};
     std::function<void()>       _on_drain;
+    std::uint64_t               _stream_id{0};
 };
+
+namespace sse {
+/// An event stream over a ResponseStream (sse.h, Huly QB-86): declared here for `Context::begin_sse()`.
+template <typename SessionType>
+class Stream;
+struct Options;
+} // namespace sse
 
 } // namespace qb::http
 

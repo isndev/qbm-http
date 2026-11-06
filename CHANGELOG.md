@@ -9,6 +9,88 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Added
 
+- **A response body streams on HTTP/2 and HTTP/3 too, and `qb::http::sse` writes Server-Sent Events over the stream
+  on every protocol (Huly QB-86, second lot).** The HTTP/2 and HTTP/3 server sessions offer the `streaming_session`
+  hooks: `Context::begin_stream()` sends the HEADERS (the header section) at once and each `write()` as DATA frames,
+  `end()` as END_STREAM (FIN on HTTP/3), after the response's `trailers()` as a trailing header block when it has any
+  by then; a head with neither `Content-Length` nor `Transfer-Encoding` is the new `stream_framing::end_of_stream`,
+  with no coding header added (`Transfer-Encoding` is hop-by-hop there); a declared `Content-Length` keeps its
+  framing and its enforcement. The hooks take the stream they concern (`ResponseStream::stream_id()`, the request's):
+  one connection serves many. On HTTP/2 a piece wider than the peer's `SETTINGS_MAX_FRAME_SIZE` is split into frames,
+  never refused, and what the stream's or the connection's send window cannot take yet waits in the protocol's stream
+  state: `pending()` counts it with the socket's output, `needs_drain()` holds at the high mark, and the
+  `WINDOW_UPDATE` that lets the pieces go resumes `drain()`; `write()` answers `wait` at the hard cap alone, as on
+  HTTP/1.1, and a flush is bounded by the socket's room under that cap too (what every stream held back for a window
+  would otherwise leave together on one `WINDOW_UPDATE`, past the cap `publish()` disconnects at), the session's next
+  write pass sending the rest; a `Transfer-Encoding: chunked` a handler written for HTTP/1.1 said is dropped, not
+  refused. On HTTP/3 the pieces are handed to nghttp3 through a data reader that answers `NGHTTP3_ERR_WOULDBLOCK`
+  with nothing to hand out and is resumed by each write (`nghttp3_conn_resume_stream`), each piece kept until the peer
+  acknowledges it; `pending()` is what the peer has not acknowledged, and the acknowledgements resume the drain
+  (the connection calls a three-argument `on_http3_stream_acked(connection_id, stream_id, bytes)` where the owner has
+  one). The peer ending the stream alone -- a `RST_STREAM`, a `GOAWAY` that ends the connection, a QUIC stream reset or
+  `STOP_SENDING` -- cancels the stream exactly as the peer leaving does on HTTP/1.1 (a parked `drain()` resumes `false`,
+  `write()` answers `closed`, the context is cancelled, the observers read the bytes streamed); an application
+  `cancel()`, an `abort()`, a dropped handle or a declared length not reached reset THE STREAM -- `RST_STREAM`
+  `INTERNAL_ERROR`, `H3_REQUEST_CANCELLED` -- never the connection, which serves its other streams and the next
+  request; a trailer section the stream cannot carry at `end()` resets it and cancels the context on both. A HEAD's
+  response is its HEADERS with END_STREAM, the producer counted. A streamed stream holds its concurrency slot
+  (`SETTINGS_MAX_CONCURRENT_STREAMS`), is seen by the idle sweep (a stream that sends no frame for 30 s is reset
+  `CANCEL`, whatever its window: an event stream's heartbeat is for that) and by the Rapid Reset accounting of QB-1244
+  as any open stream is, until its END_STREAM or a reset; the session's inactivity timeout ends a producer whose peer
+  never updates its window. `POST_RESPONSE_SEND` runs once per streamed response on HTTP/3 as on the others (the
+  context is not adopted while it is being routed). The HTTP/1.1 path is byte-identical (its suite is the oracle); the HTTP/1.1
+  fallback of an HTTP/2 server still buffers. `StaticFilesMiddleware` therefore streams a body over its
+  `stream_threshold` on HTTP/2 and HTTP/3 too, where it read it whole under `max_file_size`, which no longer bounds a
+  streamed body there (QB-101's rule, on every protocol). The SSE helper: `ctx->begin_sse(sse::Options)` (or
+  `qb::http::sse::begin(ctx, options)`) sets the head of an event stream -- `Content-Type: text/event-stream;
+  charset=utf-8`, `Cache-Control: no-cache`, `Connection: keep-alive` on HTTP/1.1 alone (hop-by-hop elsewhere) and
+  only when the request keeps the connection (the parser's verdict) and the session is not draining, `X-Accel-Buffering: no` on request -- begins the stream and returns an
+  `sse::Stream<S>`, or `nullptr` where the stream would be buffered (an HTTP/1.0 request, the HTTP/1.1 fallback of an
+  HTTP/2 server): an event stream buffered until its end is none, so the request is answered 500 and the handler is
+  told. `send(sse::Event{name, data, id, retry})` writes one event (`event:`, `id:`, `retry:` in milliseconds, one
+  `data:` line per line of the data -- LF, CR or CRLF, a trailing one giving an empty last line so the data arrives as
+  sent -- and one at least, since a client dispatches nothing without it; nothing escaped, a CR or LF inside `name`,
+  `id` or a comment dropped since it would start another field; a blank line ends it) with the stream's verdict, `comment(text)` the `: text` line a client ignores, `co_await send_async(event)` for a
+  coroutine (it writes again after a drain on `wait` and waits for one when the stream asks), `heartbeat(interval)` a
+  comment line at that interval on a `qb::io::async::callback` timer holding the stream weakly -- it stops by itself
+  at its next tick once the stream is gone, ended or cancelled, a dropped handle's timer firing once more and stopping -- `end()`, `abort()`;
+  `sse::last_event_id(request)` is the `Last-Event-ID` a reconnecting client sends, `sse::format`, `comment_line`,
+  `retry_line` the wire forms. Proven by `qbm-http-test-unit-http2-server-stream` (19 cases on the socket-less
+  harness: the head without END_STREAM, the split at the peer's frame size, the stream and the connection windows and
+  the WINDOW_UPDATE that lets the pieces go, a write refused between `end()` and the END_STREAM a window holds back, two streams' held pieces flushed under the socket's write cap and the
+  rest on the next pass, a trailer section waiting unencoded for the socket's room (the HPACK table advanced once), the idle sweep resetting a silent stream and sparing one that wrote, END_STREAM on the last
+  piece or an empty frame, trailers after the held pieces, a forbidden trailer field, HEAD, abandon, a peer reset, a
+  forbidden header, the 51st stream refused while a streamed one is open and accepted once it ended, the
+  whole-response path beside it), `qbm-http-test-system-http2-response-stream` (13 cases over a raw TLS HTTP/2 client
+  that reads the frames: arrival before the end, a 16 KiB window and the drain it parks, a peer RST_STREAM under that
+  parked drain, the inactivity timeout under a window never updated, RST_STREAM, two GOAWAY shapes, HEAD, trailers, a
+  declared length kept and one cut short, the chunked coding a handler said dropped, the concurrency slot),
+  `qbm-http-test-system-http3-response-stream` (15 cases: the nghttp3 adapter driven directly -- the head, a piece
+  before the end, WOULDBLOCK and the resume, the acknowledgements and the three-argument hook, trailers, a forbidden
+  trailer field (the stream abandoned), abandon, a second response -- then the real server and client over QUIC
+  loopback: the pieces acknowledged before `end()`, HEAD, a cancel, a short length and a refused trailer section reset the
+  stream -- the context cancelled -- and the connection serves on, a declared length, trailers, the client leaving), `qbm-http-test-unit-sse-format` (18 cases,
+  one per field, the data split and its empty last line, a lone CR, the line breaks dropped from a name, an id and a comment (a value of line breaks alone no field),
+  the comment and retry lines, `Last-Event-ID`), `qbm-http-test-system-sse-stream` (14 cases on HTTP/1.1, HTTP/2 and
+  HTTP/3: the head, three events read before the end -- unacknowledged then acknowledged on HTTP/3, the framing
+  `end_of_stream` --, `Last-Event-ID`, the heartbeat while idle and its silence after the end, a dropped stream and
+  its reset on each protocol (its timer's death on HTTP/1.1), `send_async`, a buffered stream refused with 500 and
+  the whole head taken off (HTTP/1.0), the same connection serving on after a stream, no keep-alive under a
+  `Connection: close` token, a HEAD's ended stream, the response-sent hook once per response -- from a synchronous
+  and from a coroutine handler, GET and HEAD -- on each protocol), the HTTP/2
+  and HTTP/3 static-file cases turned to the streamed truth, and the example `examples/06-modules/http/16-sse.cpp`. Performance, A/B
+  against the base (its own libraries, 3 copies a side, seeded order, under the bench marker): HTTP/1.1 and the HTTP/2
+  client neutral; the HTTP/2 server's plain GET read +2.1 % until the per-stream pipe -- 4 KiB at construction, paid by
+  every stream for a buffer only a streamed response fills -- became lazy, then +0.4 to +1.0 % over four more windows
+  against A/A spreads of 0.2 to 1.4 % between copies, the per-request protocol code otherwise identical to the base
+  (the head collection inlined back into its callers, 16 bytes of per-stream state). Mutants: 36 planted one at a time
+  in the flush, the windows and the room, the END_STREAM and trailer paths, the HTTP/3 data reader and its
+  acknowledgements, the hooks' context ownership and the SSE formatter and head -- 34 caught by the suites above after
+  a green control; one survives for want of a knob (the session's write pass resuming the streams the socket held
+  back before it consults its map needs qb-io's write cap, a private base of the session, lowered in a test), one is
+  equivalent (the HTTP/3 session cancels its live stream before the context's cancel, which `_stream_gone` already
+  keeps from resetting a stream the peer ended).
+
 - **Cross-site request forgery protection: `qb::http::CsrfMiddleware` and `qb::http::CsrfOptions` (Huly QB-95).** The
   module had none: a browser attaches a site's cookies to every request sent to it, whichever page sent it, and every
   application authenticated by a cookie had to build its own defence. `router().use(qb::http::csrf_middleware<S>())`
@@ -77,8 +159,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   timeout cancels it: a parked `drain()` resumes with `false`, `write()` returns `closed`, the context is cancelled,
   and a server destroyed under a live stream releases it; a drain callback still registered when its stream dies is
   released without running. A response that cannot be streamed -- a status without a body, HTTP/1.0 without a length, a
-  session without the hooks of the new `qb::http::streaming_session` concept, which the HTTP/2 and HTTP/3 sessions do
-  not offer yet -- gets a buffered stream with the same interface, sent whole at `end()` through the ordinary
+  session without the hooks of the new `qb::http::streaming_session` concept (the HTTP/2 and HTTP/3 sessions offer them
+  since the second lot, below) -- gets a buffered stream with the same interface, sent whole at `end()` through the ordinary
   completion, its hooks included. Observers read a streamed response at its end: the head's status, even when it was
   cut short, and `Context::streamed_bytes()`, which `AccessLog` logs as its size.
   `qbm-http-test-system-response-stream` (42 cases, the two TLS ones over `ssl::DefaultSecureSession`) and

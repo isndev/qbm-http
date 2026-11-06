@@ -321,6 +321,13 @@ struct Http2ClientStream : public Http2StreamBase {
  * Extends the base stream state with server-specific information such as
  * the assembled request, response handling state, and push promise support.
  */
+/// The pieces of a streamed response not yet framed, and its trailer section once end_streamed_response() planned
+/// it (Huly QB-86): `Http2ServerStream::streamed`, owned only while the response streams.
+struct Http2StreamedBody {
+    qb::allocator::pipe<char>                     buffer;
+    std::vector<qb::protocol::hpack::HeaderField> trailer_fields;
+};
+
 struct Http2ServerStream : public Http2StreamBase {
     // Application-specific members for server side. The request's method and URI are assembled_request's own:
     // a `method` string, a `request_uri` and an `application_tracking_id` nothing read sat here until Huly QB-1215.
@@ -344,6 +351,15 @@ struct Http2ServerStream : public Http2StreamBase {
     bool has_pending_data_to_send = false;  ///< True if response_to_send.body() has data remaining or if trailers are pending after body.
     qb::http::Response response_to_send;    ///< The complete response object being sent (headers, body, trailers).
     bool               is_trailers = false; ///< True if response_to_send includes trailers that need to be sent after the body.
+    /// A streamed response (Huly QB-86): its HEADERS left at begin_streamed_response(), the pieces write_streamed_body()
+    /// takes wait in `streamed->buffer` for the windows and the peer's frame size, and END_STREAM -- after the trailer
+    /// section `streamed->trailer_fields` holds, when `is_trailers` -- follows the last of them once `stream_ended`.
+    bool streaming    = false;
+    bool stream_ended = false;
+    /// What a streamed response holds beside the stream, allocated by begin_streamed_response() and never before: a
+    /// pipe allocates 4 KiB at construction, and a stream that is not streamed must pay neither that nor the words of
+    /// a vector it never fills (measured on a plain GET, Huly QB-86).
+    std::unique_ptr<Http2StreamedBody> streamed;
     /// Real progress since the server's last idle sweep: response HEADERS or DATA sent, a stream
     /// WINDOW_UPDATE received. A store on the frame path; the sweep, which reads the clock anyway,
     /// turns it into `last_activity` (ServerHttp2Protocol::cleanup_idle_streams).

@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include <qb/io/async/listener.h> // qb::io::async::defer: POST_RESPONSE_SEND past a streamed end (Huly QB-86)
 #include <qb/io/async/quic/endpoint.h>
 #include <qb/system/allocator/pipe.h>
 #include <qb/system/container/unordered_map.h>
@@ -101,12 +102,36 @@ private:
     qb::allocator::pipe<char>    _out;
     std::shared_ptr<ContextType> _context;
     bool                         _response_sent = false;
+    /// The response stream begun on this request stream (Huly QB-86), weak: the producer owns it. `_stream_gone`: the
+    /// QUIC stream or its connection ended (cancel_context): nothing is written or reset on it any more.
+    std::weak_ptr<qb::http::ResponseStream<Derived>> _stream;
+    std::size_t                                      _stream_high_watermark = qb::http::default_stream_high_watermark;
+    bool                                             _stream_live           = false;
+    bool                                             _stream_gone           = false;
+    /// Inside stream_end() or a HEAD's stream_head(): a FIN the drain forwards at once would run `POST_RESPONSE_SEND`
+    /// before `ResponseStream::end()` completes the context (and drop the session's reference to it, which may be the
+    /// last); the hook is deferred to the tail of the turn instead (finish_streamed_response_sent).
+    bool _stream_ending = false;
+
+    /// A live response stream ends with this session: its producer is told (a parked drain resumes false).
+    void
+    cancel_live_stream() noexcept {
+        _stream_live = false;
+        if (auto stream = _stream.lock())
+            stream->cancel();
+        _stream.reset();
+    }
 
 public:
     session() = delete;
 
     explicit session(Handler &server)
         : _server(&server) {}
+
+    /// A server destroyed under a live stream releases its producer (Huly QB-86).
+    ~session() {
+        cancel_live_stream();
+    }
 
     [[nodiscard]] Handler &
     server() noexcept {
@@ -176,6 +201,8 @@ public:
      */
     void
     cancel_context(std::string const &reason) noexcept {
+        _stream_gone = true;  // the QUIC stream, or its connection, is gone: nothing to write or reset on it
+        cancel_live_stream(); // the producer first: the cancellation of the context then resets nothing (Huly QB-86)
         if (_context) {
             _context->cancel(reason);
             _context.reset();
@@ -194,9 +221,23 @@ public:
             return;
         }
         _response_sent = true;
+        if (_stream_ending) {
+            return; // finish_streamed_response_sent() runs the hook once the stream completed its context
+        }
         if (_context) {
             _context->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND);
             _context.reset();
+        }
+    }
+
+    /// After a streamed end or a HEAD's head left under `_stream_ending`: when the FIN was already drained, the hook
+    /// runs at the tail of this turn -- after `ResponseStream::end()` (or `begin_stream()`, for a HEAD) completed the
+    /// context -- on a reference the deferred call owns, so the context outlives the session's release of it.
+    void
+    finish_streamed_response_sent() {
+        if (_response_sent && _context) {
+            auto ctx = std::move(_context);
+            qb::io::async::defer([ctx] { ctx->execute_hook(qb::http::HookPoint::POST_RESPONSE_SEND); });
         }
     }
 
@@ -236,6 +277,150 @@ public:
         }
         _server->send_response(_connection_id, _stream_id, response);
         return _out;
+    }
+
+    /**
+     * @brief Send the response of a finalised context (the router's callback): nothing for a response whose head
+     *        left at `begin_stream()` and whose body went through its stream (Huly QB-86), the response otherwise.
+     */
+    void
+    send_response(ContextType &ctx) {
+        if (ctx.is_streaming())
+            return;
+        *this << ctx.response();
+    }
+
+    // --- the streaming hooks of qb::http::ResponseStream (Huly QB-86; the streaming_session concept) ----------------
+    //
+    // One session per request stream: the stream handed to a hook is this session's. The pieces are handed to nghttp3
+    // as they come and leave as the QUIC stream's credit allows; `stream_pending()` is what the peer has not acknowledged.
+
+    /// Whether this session can stream the response to `ctx` now: it answers `ctx` -- stored, or being routed for it
+    /// (a synchronous handler) -- no response was sent, no stream is live, and the QUIC stream is still there.
+    [[nodiscard]] bool
+    stream_can_answer(ContextType &ctx) const noexcept {
+        if (_response_sent || _stream_live || _stream_gone)
+            return false;
+        if (_context)
+            return _context.get() == &ctx;
+        return ctx.session().get() == static_cast<Derived const *>(this);
+    }
+
+    /// The request being answered is a HEAD: a streamed response sends its head alone.
+    [[nodiscard]] bool
+    stream_request_is_head(ContextType const &) const noexcept {
+        return _request_method == qb::http::method::HEAD;
+    }
+
+    /// HTTP/3 ends a message by the stream's FIN: a stream without a declared length is `end_of_stream` framing.
+    [[nodiscard]] static constexpr bool
+    stream_delimits_messages() noexcept {
+        return true;
+    }
+
+    /// Write the head of `ctx.response()` now -- its header section, the body to follow through the stream; a HEAD's
+    /// response goes whole and headers-only, as any HEAD response does here -- and keep the stream to notify. `false`
+    /// when the head was refused (the server then reset the stream, H3_REQUEST_CANCELLED) or the session cannot answer
+    /// `ctx`. A context being routed is NOT adopted here: attach_context() stores it when route() returns, and a
+    /// `POST_RESPONSE_SEND` the FIN earns before then is deferred to that call -- adopting it early ran the hook twice
+    /// for a synchronous handler (once from mark_response_sent(), once from attach_context()).
+    [[nodiscard]] bool
+    stream_head(ContextType &ctx, std::shared_ptr<qb::http::ResponseStream<Derived>> const &stream) {
+        if (!stream_can_answer(ctx))
+            return false;
+        auto &response     = ctx.response();
+        response.stream_id = _stream_id;
+        if (_request_method == qb::http::method::HEAD) {
+            _stream_ending = true;
+            *this << response;
+            _stream_ending = false;
+            finish_streamed_response_sent();
+            return true;
+        }
+        if (!_server->begin_streamed_response(_connection_id, _stream_id, response))
+            return false;
+        _stream      = stream;
+        _stream_live = true;
+        return true;
+    }
+
+    /// Append a piece of a streamed body: handed to nghttp3 now, sent as the QUIC stream's credit allows.
+    void
+    stream_write(qb::http::ResponseStream<Derived> const &, std::string_view bytes) {
+        if (_stream_live)
+            (void) _server->write_streamed_body(_connection_id, _stream_id, bytes);
+    }
+    /// A chunk never reaches HTTP/3 (a stream here is `end_of_stream` or `content_length` framed): its payload is taken.
+    void
+    stream_write(qb::http::ResponseStream<Derived> const &stream, qb::http::Chunk const &chunk) {
+        stream_write(stream, std::string_view{chunk.data(), chunk.size()});
+    }
+
+    /// The bytes written to the stream that the peer has not acknowledged.
+    [[nodiscard]] std::size_t
+    stream_pending(qb::http::ResponseStream<Derived> const &) const noexcept {
+        return _stream_live ? static_cast<std::size_t>(_server->streamed_body_pending(_connection_id, _stream_id)) : 0;
+    }
+
+    /// The hard cap of what a stream may hold unacknowledged: qb-io's write-buffer cap, the bound every protocol's
+    /// stream shares (a producer that waits for `drain()` stays at `stream_high_watermark()`).
+    [[nodiscard]] static constexpr std::size_t
+    stream_write_cap() noexcept {
+        return QB_MAX_WRITE_BUFFER_SIZE;
+    }
+
+    /// The bytes a producer may leave unacknowledged before it should wait (1 MiB by default).
+    [[nodiscard]] std::size_t
+    stream_high_watermark() const noexcept {
+        return _stream_high_watermark;
+    }
+    Derived &
+    stream_high_watermark(std::size_t bytes) noexcept {
+        _stream_high_watermark = bytes;
+        return static_cast<Derived &>(*this);
+    }
+
+    /// The end of a streamed body: the response's trailer section (its `trailers()` as they stand now) when it has
+    /// one, then FIN after the pieces still waiting. A trailer section the connection refuses resets the stream
+    /// (H3_REQUEST_CANCELLED) and cancels the context, as HTTP/2's RST_STREAM does: the observers see one outcome.
+    void
+    stream_end(qb::http::ResponseStream<Derived> const &stream, bool) {
+        if (!_stream_live)
+            return;
+        _stream_live = false;
+        _stream.reset();
+        const auto ctx   = stream.context();
+        _stream_ending   = true;
+        const bool ended = _server->end_streamed_response(_connection_id, _stream_id, ctx ? &ctx->response() : nullptr);
+        _stream_ending   = false;
+        if (!ended) {
+            if (ctx && !ctx->is_completed() && !ctx->is_cancelled())
+                ctx->cancel("the streamed response could not be ended: the stream was reset");
+            return;
+        }
+        finish_streamed_response_sent();
+    }
+
+    /// A streamed body cannot be completed correctly: the stream is reset (H3_REQUEST_CANCELLED), the connection serves
+    /// on. Nothing is sent on a stream the peer ended first.
+    void
+    stream_abort(qb::http::ResponseStream<Derived> const &) noexcept {
+        if (!_stream_live)
+            return;
+        _stream_live = false;
+        _stream.reset();
+        if (!_stream_gone)
+            _server->abandon_streamed_response(_connection_id, _stream_id);
+    }
+
+    /// Server hook: the peer acknowledged bytes of this stream (Huly QB-86): a producer parked on `drain()` under the
+    /// low mark is resumed, at the end of the turn.
+    void
+    http3_stream_acked() noexcept {
+        if (!_stream_live)
+            return;
+        if (auto stream = _stream.lock())
+            stream->notify_drain(static_cast<std::size_t>(_server->streamed_body_pending(_connection_id, _stream_id)));
     }
 };
 
@@ -851,10 +1036,22 @@ public:
     /**
      * @brief Protocol callback: stream data acknowledged by the peer.
      *
-     * Default no-op; provided as a customization point.
+     * Default no-op; provided as a customization point. The connection calls the three-argument form below when
+     * it exists, as it does here.
      */
     void
     on_http3_stream_acked(std::uint64_t, std::uint64_t) {}
+
+    /**
+     * @brief Protocol callback: the peer acknowledged `bytes` of `stream_id`'s output (Huly QB-86). A streamed
+     *        response's producer parked on `drain()` may resume (session::http3_stream_acked).
+     */
+    void
+    on_http3_stream_acked(std::uint64_t connection_id, std::uint64_t stream_id, std::uint64_t) {
+        if (auto it = _sessions.find(stream_key{connection_id, stream_id}); it != _sessions.end()) {
+            it->second->http3_stream_acked();
+        }
+    }
 
     /**
      * @brief Protocol callback: a stream has been closed.
@@ -970,6 +1167,68 @@ public:
         }
         reset_http3_stream(connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
         return false;
+    }
+
+    /**
+     * @brief Begin a streamed response on a stream (Huly QB-86; session::stream_head): its header section leaves now,
+     *        the body follows through write_streamed_body(). A head the connection refuses resets the stream,
+     *        H3_REQUEST_CANCELLED, as a response it cannot submit is.
+     * @return True once the head is submitted; false when the connection is gone or the head was refused.
+     */
+    bool
+    begin_streamed_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const &response) {
+        auto *conn = connection(connection_id);
+        if (!conn) {
+            return false;
+        }
+        if (conn->begin_streamed_response(stream_id, response)) {
+            return true;
+        }
+        reset_http3_stream(connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+        return false;
+    }
+
+    /// Append a piece to a streamed response (Huly QB-86): handed to nghttp3, sent as the stream's credit allows.
+    bool
+    write_streamed_body(std::uint64_t connection_id, std::uint64_t stream_id, std::string_view bytes) {
+        auto *conn = connection(connection_id);
+        return conn && conn->write_streamed_body(stream_id, bytes);
+    }
+
+    /**
+     * @brief End a streamed response (Huly QB-86): the trailer section of `final_response` when it has one, then FIN
+     *        after the pieces still waiting. A trailer section the connection refuses resets the stream,
+     *        H3_REQUEST_CANCELLED: the message cannot be completed as the producer asked.
+     */
+    bool
+    end_streamed_response(std::uint64_t connection_id, std::uint64_t stream_id, qb::http::Response const *final_response) {
+        auto *conn = connection(connection_id);
+        if (!conn) {
+            return false;
+        }
+        if (conn->end_streamed_response(stream_id, final_response)) {
+            maybe_finish_graceful_shutdown(connection_id);
+            return true;
+        }
+        reset_http3_stream(connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+        return false;
+    }
+
+    /// Give up a streamed response (Huly QB-86): the stream is reset, H3_REQUEST_CANCELLED; the connection serves on.
+    void
+    abandon_streamed_response(std::uint64_t connection_id, std::uint64_t stream_id) {
+        auto *conn = connection(connection_id);
+        if (!conn || !conn->abandon_streamed_response(stream_id)) {
+            return;
+        }
+        reset_http3_stream(connection_id, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+    }
+
+    /// The bytes of a streamed response the peer has not acknowledged (Huly QB-86); 0 for any other stream.
+    [[nodiscard]] std::uint64_t
+    streamed_body_pending(std::uint64_t connection_id, std::uint64_t stream_id) const noexcept {
+        const auto it = _connections.find(connection_id);
+        return it != _connections.end() && it->second ? it->second->streamed_body_pending(stream_id) : 0;
     }
 };
 

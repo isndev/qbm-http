@@ -238,7 +238,7 @@ If you hand the request or response off to another subsystem — most commonly a
 
 ### Streaming the body instead
 
-A handler that writes its body piece by piece calls `ctx->begin_stream()` instead of a terminal helper (`qbm/http/src/qbm/http/routing/context.h:1522`, Huly QB-86). From that call the stream owns the completion: `complete()` is ignored while it is open, and the stream completes the context at `end()`, at `abort()` or when it is dropped, so the handler never calls `complete()` itself and may hand the stream on and return. The handler owns the stream, and a stream dropped before `end()` closes the connection (a 500 when buffered). For a response that cannot be streamed, or on a session without the streaming hooks, the same calls gather the body and send it whole at `end()`. `is_streaming()` says the head already left at `begin_stream()` (`qbm/http/src/qbm/http/routing/context.h:1599`), and `streamed_bytes()` what the stream handed to the session, once it ended (`qbm/http/src/qbm/http/routing/context.h:1613`). Backpressure, framing, `HEAD` and cancellation are in [Advanced topics](./16-advanced-topics.md).
+A handler that writes its body piece by piece calls `ctx->begin_stream()` instead of a terminal helper (`qbm/http/src/qbm/http/routing/context.h:1523`, Huly QB-86). From that call the stream owns the completion: `complete()` is ignored while it is open, and the stream completes the context at `end()`, at `abort()` or when it is dropped, so the handler never calls `complete()` itself and may hand the stream on and return. The handler owns the stream, and a stream dropped before `end()` closes the connection (a 500 when buffered). For a response that cannot be streamed, or on a session without the streaming hooks, the same calls gather the body and send it whole at `end()`. `is_streaming()` says the head already left at `begin_stream()` (`qbm/http/src/qbm/http/routing/context.h:1610`), and `streamed_bytes()` what the stream handed to the session, once it ended (`qbm/http/src/qbm/http/routing/context.h:1629`). Backpressure, framing, `HEAD` and cancellation are in [Advanced topics](./16-advanced-topics.md).
 
 ## Cancellation
 
@@ -310,7 +310,7 @@ router.add_lifecycle_hook([](qb::http::Context<MySession>& c, qb::http::HookPoin
 });
 ```
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,362,603,817-841; qbm/http/src/qbm/http/routing/router_core.h:379-386,487; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:125-180,501-532 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:244-270,362,603,817-841; qbm/http/src/qbm/http/routing/router_core.h:379-386,487; qbm/http/src/qbm/http/routing/router.h:364-365; src/qbm/http/2/http2.h:129-184,695-731 -->
 
 ## Lifecycle in order
 
@@ -337,7 +337,7 @@ A `PRE_HANDLER_EXECUTION` hook that completes or cancels the context owns that o
 
 These read-only queries exist mainly for instrumentation, coroutine adapters, and tests — the normal request path never needs them: `is_completed()`, `state()`, `get_processing_phase()`, `last_task_result()`, and `completion_count()` (the number of accepted `complete()` calls processed, including `CONTINUE`; ignored calls after finalization do not count). `defer_finalization_scope()` returns an RAII guard that holds back finalization until it leaves scope; it is the mechanism behind synchronous post-`next()` mutation in functional middleware, and you should not need it directly.
 
-<!-- src: qbm/http/src/qbm/http/routing/context.h:1310-1326,1461-1492,1695-1735, 559 -->
+<!-- src: qbm/http/src/qbm/http/routing/context.h:1310-1326,1461-1492,1711-1751, 559 -->
 
 ## Pitfalls
 

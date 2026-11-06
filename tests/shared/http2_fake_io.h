@@ -109,6 +109,13 @@ struct Http2FakeIO {
         return output;
     }
 
+    /// The write-buffer cap a real io enforces in `publish()`: unlimited here unless a test sets it (Huly QB-86).
+    std::size_t write_cap = static_cast<std::size_t>(-1);
+    [[nodiscard]] std::size_t
+    max_write_buffer_size() const noexcept {
+        return write_cap;
+    }
+
     template <typename Frame>
     Http2FakeIO &
     operator<<(const Frame &frame) {

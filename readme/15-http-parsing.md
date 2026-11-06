@@ -23,7 +23,7 @@ This module is a **compiled library**, not header-only — the parser templates 
 
 `Parser` wraps **llhttp**, the parser that powers Node.js. Its C sources are vendored under `qbm/http/not-qb/llhttp` and built as an `OBJECT` library target named `llhttp`, whose objects are part of libqbm-http: no llhttp archive is built, linked, exported or installed, so packaging qbm-http never collides with a system llhttp's `libllhttp` file. That target has **no public include directory**. Its single public header lives with the module's own headers, at `qbm/http/src/qbm/http/vendor/llhttp.h`.
 
-<!-- src: qbm/http/CMakeLists.txt:64,186; qbm/http/not-qb/llhttp/CMakeLists.txt:8,38 -->
+<!-- src: qbm/http/CMakeLists.txt:64,187; qbm/http/not-qb/llhttp/CMakeLists.txt:8,38 -->
 
 ```cmake
 # qbm/http/CMakeLists.txt — llhttp is a build dependency of qbm-http,
@@ -221,7 +221,7 @@ The parser is hardened against framing attacks. Its limits are a `qb::http::requ
 
 The body limit is checked twice: once against the declared `Content-Length` *before* any body buffer is reserved (so an oversized declaration is rejected before allocation), and again against the running total as body bytes arrive. Whatever the limit, the protocol hands the refused request to the session (`http1_refuse_request`), which answers it once every request received before it is answered, and drops what the client sends meanwhile. The limits are read from the server when a request begins (the session's `http_request_limits()` hook), so a new value applies to the next request. The HTTP/2 and HTTP/3 servers take the same `request_limits` and give the same answers (Huly QB-94).
 
-<!-- src: src/qbm/http/1.1/protocol/base.h:103-120,307-309,632-634,671-674,877-879,915-917; src/qbm/http/1.1/http.h:655-662,675-680,882-884 -->
+<!-- src: src/qbm/http/1.1/protocol/base.h:103-120,307-309,632-634,671-674,877-879,915-917; src/qbm/http/1.1/http.h:662-669,682-687,896-898 -->
 
 Four defenses go beyond size limits, all in `on_headers_complete`:
 

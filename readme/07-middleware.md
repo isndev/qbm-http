@@ -200,7 +200,7 @@ router.use(
 
 This deferral only spans **synchronous** downstream work. If anything downstream is asynchronous (a `qb::io::async::callback`, an actor round-trip, a DB query), the lambda returns before that work finishes and the deferral has already closed — code after `next()` would run too early. For mutations that must happen at final send time regardless of downstream timing, register a **`HookPoint::PRE_RESPONSE_SEND`** lifecycle hook instead. <!-- src: qbm/http/src/qbm/http/routing/types.h:38-46 -->
 
-A **streamed** downstream response is out of reach as well, synchronous or not: its head leaves at `ctx->begin_stream()`, inside the downstream chain, so code after `next()` edits a head already on the wire and a body that stays empty (`ctx->is_streaming()` says so, `qbm/http/src/qbm/http/routing/context.h:1599`). A `PRE_RESPONSE_SEND` hook still reaches it: `begin_stream()` runs those hooks before the head leaves.
+A **streamed** downstream response is out of reach as well, synchronous or not: its head leaves at `ctx->begin_stream()`, inside the downstream chain, so code after `next()` edits a head already on the wire and a body that stays empty (`ctx->is_streaming()` says so, `qbm/http/src/qbm/http/routing/context.h:1610`). A `PRE_RESPONSE_SEND` hook still reaches it: `begin_stream()` runs those hooks before the head leaves.
 
 ### Synchronous versus asynchronous middleware
 

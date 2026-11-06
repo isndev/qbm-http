@@ -1500,9 +1500,9 @@ public:
      * @details From this call the stream owns the completion: `complete()` is ignored until the stream ends, so the
      *          handler may hand the stream to a producer and return. Then, in order:
      *          1. Whether the response can go to the wire as it is produced, as the handler left it: the session
-     *             offers the streaming hooks (the HTTP/1.1 server session does; HTTP/2 and HTTP/3 do not yet) and
-     *             answers this context, the status carries a body (not 1xx, 204, 304), and the head frames it -- a
-     *             valid `Content-Length`, or a `Transfer-Encoding` whose only coding is `chunked`, or neither and a
+     *             offers the streaming hooks (the HTTP/1.1, HTTP/2 and HTTP/3 server sessions do) and answers this
+     *             context, the status carries a body (not 1xx, 204, 304), and the head frames it -- a valid
+     *             `Content-Length`, or a `Transfer-Encoding` whose only coding is `chunked`, or neither and a
      *             request that is not HTTP/1.0. If not, the stream is BUFFERED: the pieces gather in
      *             `response().body()` after what is there and leave whole at `end()` through the ordinary
      *             completion, its hooks included.
@@ -1510,10 +1510,11 @@ public:
      *             empty body -- a body already in the response is moved aside, to be the stream's first piece.
      *          3. The framing is decided from the head as the hooks left it: a valid `Content-Length` is honoured and
      *             enforced, the first piece included; a `Transfer-Encoding` whose only coding is `chunked` is chunked
-     *             framing as it stands; neither is `Transfer-Encoding: chunked`, added. A head the hooks turned into
-     *             something a stream cannot carry -- a status without a body, another coding, a malformed or a second
-     *             framing header -- is BUFFERED, the first piece back in the body and the hooks marked as run, so the
-     *             completion does not run them again.
+     *             framing as it stands; neither is `Transfer-Encoding: chunked`, added -- on a session that delimits
+     *             its messages (HTTP/2 END_STREAM, HTTP/3 FIN) it is `end_of_stream` framing instead, with no coding
+     *             header, which is hop-by-hop there. A head the hooks turned into something a stream cannot carry -- a
+     *             status without a body, another coding, a malformed or a second framing header -- is BUFFERED, the
+     *             first piece back in the body and the hooks marked as run, so the completion does not run them again.
      *          4. The head leaves now, then the first piece. The response to a HEAD request is complete at its head:
      *             the context completes here, and the stream only counts what it is given.
      *          Set the status and the headers before calling it: on the streaming path they are sent.
@@ -1553,15 +1554,25 @@ public:
                 if (framing == stream_framing::buffered) {
                     _response.body() = std::move(preamble); // buffered after all: the first piece is the body's start again
                 } else {
-                    if (framing == stream_framing::chunked && !_response.has_header("Transfer-Encoding"))
-                        _response.set_header("Transfer-Encoding", "chunked");
-                    head_only = session->stream_request_is_head();
+                    if (framing == stream_framing::chunked) {
+                        if (session->stream_delimits_messages()) {
+                            // DATA frames, END_STREAM: no chunked coding on HTTP/2 and HTTP/3. The `Transfer-Encoding:
+                            // chunked` a handler written for HTTP/1.1 said (the only coding this framing admits) goes
+                            // with it: the field is forbidden there, and the head would be refused.
+                            framing = stream_framing::end_of_stream;
+                            _response.remove_header("Transfer-Encoding");
+                        } else if (!_response.has_header("Transfer-Encoding")) {
+                            _response.set_header("Transfer-Encoding", "chunked");
+                        }
+                    }
+                    head_only = session->stream_request_is_head(*this);
                     high      = session->stream_high_watermark();
                     cap       = session->stream_write_cap();
                 }
             }
         }
-        auto stream = std::make_shared<ResponseStream<SessionType>>(this->weak_from_this(), _session, framing, declared, head_only, high, cap);
+        auto stream = std::make_shared<ResponseStream<SessionType>>(this->weak_from_this(), _session, framing, declared, head_only, high, cap,
+                                                                    _request.stream_id);
         _stream     = stream;
         if (framing == stream_framing::buffered) {
             stream->_written = _response.body().size(); // a body already there is the stream's first piece
@@ -1599,6 +1610,11 @@ public:
     is_streaming() const noexcept {
         return _streamed;
     }
+
+    /// Begin a Server-Sent Events response (Huly QB-86): `qb::http::sse::begin(ctx)`, defined in `sse.h` -- the head
+    /// of a `text/event-stream`, then `begin_stream()`, wrapped in an `sse::Stream` that writes events.
+    [[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
+    [[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse(sse::Options const &options);
 
     /// The stream `begin_stream()` returned, while its producer holds it; `nullptr` otherwise (Huly QB-86).
     [[nodiscard]] std::shared_ptr<ResponseStream<SessionType>>

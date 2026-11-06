@@ -110,6 +110,10 @@ private:
     friend qb::io::async::with_timeout<session<Derived, Handler>>;
 
     qb::unordered_map<uint32_t, std::shared_ptr<ContextType>> _contexts; ///< Stream contexts
+    /// The response streams begun on this connection (Huly QB-86), by stream id, weak: the producer owns each. A
+    /// stream is told what its peer took (notify_drain) and when its stream or the connection ends (cancel).
+    qb::unordered_map<uint32_t, std::weak_ptr<qb::http::ResponseStream<Derived>>> _streams;
+    std::size_t _stream_high_watermark{qb::http::default_stream_high_watermark}; ///< stream_high_watermark()
 
     Http1Protocol *_http1_protocol; ///< HTTP/1.1 protocol handler
     Http2Protocol *_http2_protocol; ///< HTTP/2 protocol handler
@@ -179,11 +183,56 @@ private:
         }
     }
 
+    /// A response stream's peer is gone -- its stream reset or closed, the connection ended (Huly QB-86): its producer
+    /// is told before its context is cancelled, as the HTTP/1.1 session tells one on disconnect, so the cancellation
+    /// of the context resets nothing (the stream is cancelled already). The entry goes.
+    void
+    cancel_stream(uint32_t stream_id) noexcept {
+        auto it = _streams.find(stream_id);
+        if (it == _streams.end())
+            return;
+        if (auto stream = it->second.lock())
+            stream->cancel();
+        _streams.erase(it);
+    }
+
+    /// Every response stream of this connection is cancelled (disconnect, extraction, destruction).
+    void
+    cancel_all_streams() noexcept {
+        for (auto &[stream_id, weak] : _streams) {
+            if (auto stream = weak.lock())
+                stream->cancel();
+        }
+        _streams.clear();
+    }
+
+    /// The socket took some of the output (`pending_write`, or `eos` with 0): every live response stream reads what
+    /// its peer has not taken -- the socket's remainder and the pieces its windows hold back -- and a producer parked
+    /// on `drain()` under the low mark is resumed, at the end of the turn; a stream gone with its producer is forgotten.
+    void
+    notify_streams(std::size_t socket_pending) noexcept {
+        // The pieces the socket's write cap held back leave first -- before the map is consulted: stream_end() forgets
+        // its stream before the flush that may stop for room, so the map can be empty while a tail still waits.
+        if (_http2_protocol && _http2_protocol->streams_wait_for_socket())
+            _http2_protocol->resume_streamed_responses();
+        if (_streams.empty())
+            return;
+        for (auto it = _streams.begin(); it != _streams.end();) {
+            if (auto stream = it->second.lock()) {
+                stream->notify_drain(socket_pending + (_http2_protocol ? _http2_protocol->streamed_body_pending(it->first) : 0));
+                ++it;
+            } else {
+                it = _streams.erase(it);
+            }
+        }
+    }
+
     // A neutral peer reset is a lifecycle notification, not a stream error.
     // The protocol opts in through this private hook without extending the
     // public error-event contract of custom IO handlers.
     void
     on_peer_stream_reset(uint32_t stream_id) noexcept {
+        cancel_stream(stream_id); // a streamed response ends with its stream (Huly QB-86)
         auto it = _contexts.find(stream_id);
         if (it == _contexts.end())
             return;
@@ -241,6 +290,7 @@ public:
     }
 
     ~session() {
+        cancel_all_streams(); // a server destroyed under a live stream releases its producer (Huly QB-86)
         LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 internal::session (server-side) destroyed.");
     }
 
@@ -319,6 +369,150 @@ public:
         } else {
             static constexpr qb::http::request_limits defaults{};
             return defaults;
+        }
+    }
+
+    /**
+     * @brief Send the response of a finalised context (the router's callback): nothing for a response whose head
+     *        left at `begin_stream()` and whose body went through its stream (Huly QB-86), the response itself
+     *        otherwise (`operator<<`).
+     */
+    void
+    send_response(ContextType &ctx) {
+        if (ctx.is_streaming())
+            return;
+        *this << ctx.response();
+    }
+
+    // --- the streaming hooks of qb::http::ResponseStream (Huly QB-86; the streaming_session concept) ----------------
+    //
+    // One connection, many streams: each hook about a stream takes it and reads its stream id. The pieces go as DATA
+    // frames as far as the stream's and the connection's send windows and the peer's frame size allow; the rest waits in
+    // the protocol's stream until a WINDOW_UPDATE lets it go. The HTTP/1.1 fallback (ALPN http/1.1) buffers.
+
+    /// Whether this session can stream the response to `ctx` now: it speaks HTTP/2, `ctx` answers a request stream of
+    /// this connection -- stored, or being routed for it (a synchronous handler) -- that can take a streamed response
+    /// (dispatched, open to a response, none sent), and no stream is live on it. A query: nothing changes.
+    [[nodiscard]] bool
+    stream_can_answer(ContextType &ctx) {
+        if (!_http2_protocol || this->protocol() != _http2_protocol || !this->is_connected())
+            return false;
+        const auto id = ctx.request().stream_id;
+        if (id > std::numeric_limits<uint32_t>::max() || !is_valid_http2_stream_id(static_cast<uint32_t>(id)))
+            return false;
+        const auto stream_id = static_cast<uint32_t>(id);
+        if (_streams.find(stream_id) != _streams.end())
+            return false;
+        if (auto it = _contexts.find(stream_id); it != _contexts.end())
+            return it->second.get() == &ctx && _http2_protocol->can_begin_streamed_response(stream_id);
+        return ctx.session().get() == static_cast<Derived *>(this) && _http2_protocol->can_begin_streamed_response(stream_id);
+    }
+
+    /// The request being answered is a HEAD: a streamed response sends its head alone (HEADERS with END_STREAM).
+    [[nodiscard]] static bool
+    stream_request_is_head(ContextType const &ctx) noexcept {
+        return ctx.request().method() == qb::http::method::HEAD;
+    }
+
+    /// HTTP/2 ends a message by END_STREAM: a stream without a declared length is `end_of_stream` framing, no coding.
+    [[nodiscard]] static constexpr bool
+    stream_delimits_messages() noexcept {
+        return true;
+    }
+
+    /// Write the head of `ctx.response()` now -- its HEADERS, without END_STREAM (with it for a HEAD, whose exchange
+    /// ends there) -- adopting `ctx` when it is being routed for this session, and keep the stream to notify. `false`
+    /// when the head could not be written: the stream can no longer take it, or the protocol refused the head (a field
+    /// HTTP/2 forbids) and reset the stream, which cancels the context through on(Http2StreamErrorEvent).
+    [[nodiscard]] bool
+    stream_head(ContextType &ctx, std::shared_ptr<qb::http::ResponseStream<Derived>> const &stream) {
+        if (!stream_can_answer(ctx))
+            return false;
+        const auto stream_id = static_cast<uint32_t>(ctx.request().stream_id);
+        if (_contexts.find(stream_id) == _contexts.end())
+            _contexts[stream_id] = ctx.shared_from_this(); // on(Request&&, stream_id)'s own assignment then stores the same object
+        auto &response     = ctx.response();
+        response.stream_id = stream_id;
+        const bool head    = stream_request_is_head(ctx);
+        if (!_http2_protocol->begin_streamed_response(stream_id, response, head)) {
+            this->ready_to_write(); // the refusal's RST_STREAM, if any
+            return false;
+        }
+        if (!head)
+            _streams[stream_id] = stream;
+        this->ready_to_write();
+        this->updateTimeout();
+        return true;
+    }
+
+    /// Append a piece of a streamed body: DATA frames as far as the windows go, the rest waits in the stream. Each
+    /// piece refreshes the inactivity timeout: a stream that writes is not an idle connection.
+    void
+    stream_write(qb::http::ResponseStream<Derived> const &stream, std::string_view bytes) {
+        if (!_http2_protocol || !_http2_protocol->write_streamed_body(static_cast<uint32_t>(stream.stream_id()), bytes))
+            return;
+        this->ready_to_write();
+        this->updateTimeout();
+    }
+    /// A chunk never reaches HTTP/2 (a stream here is `end_of_stream` or `content_length` framed): its payload is taken.
+    void
+    stream_write(qb::http::ResponseStream<Derived> const &stream, qb::http::Chunk const &chunk) {
+        stream_write(stream, std::string_view{chunk.data(), chunk.size()});
+    }
+
+    /// What the peer has not taken of this stream's output: the socket's output buffer, shared by every stream of the
+    /// connection, and the pieces this stream's windows hold back.
+    [[nodiscard]] std::size_t
+    stream_pending(qb::http::ResponseStream<Derived> const &stream) noexcept {
+        return this->out().size() + (_http2_protocol ? _http2_protocol->streamed_body_pending(static_cast<uint32_t>(stream.stream_id())) : 0);
+    }
+
+    /// The hard cap of the output: qb-io's write-buffer cap, which `publish()` enforces by disconnecting. A stream's own
+    /// buffer is bounded by the producer's `drain()`: it waits at `stream_high_watermark()`. The cap is checked against
+    /// this stream's pieces at `write()`; what every stream held back for a window flushes under it too, the protocol
+    /// bounding each flush by the socket's room (`resume_streamed_responses()` on the next write pass).
+    [[nodiscard]] static constexpr std::size_t
+    stream_write_cap() noexcept {
+        return QB_MAX_WRITE_BUFFER_SIZE;
+    }
+
+    /// The bytes a producer may leave queued before it should wait (1 MiB by default), per stream.
+    [[nodiscard]] std::size_t
+    stream_high_watermark() const noexcept {
+        return _stream_high_watermark;
+    }
+    Derived &
+    stream_high_watermark(std::size_t bytes) noexcept {
+        _stream_high_watermark = bytes;
+        return static_cast<Derived &>(*this);
+    }
+
+    /// The end of a streamed body: END_STREAM follows the pieces still waiting -- after the response's trailer section
+    /// (its `trailers()` as they stand now, the fields its `trailer` header announces) when it has one.
+    void
+    stream_end(qb::http::ResponseStream<Derived> const &stream, bool) {
+        const auto stream_id = static_cast<uint32_t>(stream.stream_id());
+        _streams.erase(stream_id);
+        if (!_http2_protocol)
+            return;
+        const auto ctx = stream.context();
+        _http2_protocol->end_streamed_response(stream_id, ctx ? &ctx->response() : nullptr);
+        this->ready_to_write();
+        this->updateTimeout();
+    }
+
+    /// A streamed body cannot be completed correctly: the stream is reset (RST_STREAM INTERNAL_ERROR), which cancels its
+    /// context; the connection serves on. Nothing is sent on a stream the peer ended first, nor once the connection is
+    /// gone or extracted.
+    void
+    stream_abort(qb::http::ResponseStream<Derived> const &stream) noexcept {
+        const auto stream_id = static_cast<uint32_t>(stream.stream_id());
+        _streams.erase(stream_id);
+        if (!_http2_protocol || this->protocol() != _http2_protocol || !this->is_connected())
+            return;
+        if (_http2_protocol->abandon_streamed_response(stream_id)) {
+            this->ready_to_write();
+            this->updateTimeout();
         }
     }
 
@@ -498,9 +692,10 @@ public:
      * @param event Pending write event
      */
     void
-    on([[maybe_unused]] qb::io::async::event::pending_write &&event) {
+    on(qb::io::async::event::pending_write &&event) {
         LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
         this->updateTimeout();
+        notify_streams(event.bytes); // a producer parked on drain() may resume (Huly QB-86)
         // Periodic cleanup of idle streams for DDoS protection
         if (_http2_protocol) {
             reclaim_completed_stream_contexts();
@@ -529,6 +724,7 @@ public:
             }
             // The io closes after this delivery: the response was published with close_after_deliver().
         } else if (_http2_protocol) {
+            notify_streams(0); // the socket took everything: what a stream's windows hold back is all that waits (Huly QB-86)
             reclaim_completed_stream_contexts();
         }
     }
@@ -539,6 +735,7 @@ public:
         // Stop the libev watcher immediately so this event loop stops monitoring
         // the socket before it is moved to another io_handler.
         this->stop();
+        cancel_all_streams(); // the producers are told first: the cancellation of a context then resets nothing (Huly QB-86)
         for (auto &[stream_id, context] : _contexts) {
             context->cancel("Session extracted");
         }
@@ -567,6 +764,7 @@ public:
         } else {
             LOG_HTTP_INFO_PA(this->id(), "Disconnected. Reason code: " << e.reason);
         }
+        cancel_all_streams(); // the producers are told first (Huly QB-86)
         for (auto &context : _contexts) {
             context.second->cancel("Session disconnected");
         }
@@ -593,6 +791,7 @@ public:
     on(const qb::protocol::http2::Http2StreamErrorEvent &event) {
         LOG_HTTP_WARN_PA(this->id(), "HTTP/2 Stream Error on stream " << event.stream_id << ". Code: " << static_cast<int>(event.error_code)
                                                                       << ", Msg: " << event.message);
+        cancel_stream(event.stream_id); // a streamed response ends with its stream (Huly QB-86)
         // Context for this stream might need to be cleared or marked.
         auto it = _contexts.find(event.stream_id);
         if (it != _contexts.end() && it->second) {

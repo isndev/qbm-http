@@ -190,6 +190,8 @@ qhttp_test(unit http2-protocol-coverage unit/http2/http2-protocol-coverage.cpp E
 qhttp_test(unit http2-protocol-roundtrip unit/http2/http2-protocol-roundtrip.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-server-coverage-deep unit/http2/http2-server-coverage-deep.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-client-coverage-deep unit/http2/http2-client-coverage-deep.cpp EXTRA_LABELS http2)
+qhttp_test(unit http2-server-stream unit/http2/http2-server-stream.cpp EXTRA_LABELS http2 routing) # Huly QB-86: the streamed response, frame by frame
+qhttp_test(unit sse-format unit/sse/sse-format.cpp EXTRA_LABELS routing) # Huly QB-86: the wire form of a Server-Sent Event
 # The reconnection backoff policy the h2 client follows (Huly QB-103) is qb-io's
 # qb::io::reconnect_policy since Huly QB-126; its arithmetic is pinned by qb-io-test-unit-reconnect-contract.
 # ws units (crypto-link ssl: ws.h #errors without qb::io::crypto; pure-logic, no socket)
@@ -215,6 +217,8 @@ qhttp_test(system response-stream-huge-body system/routing/response-stream.cpp R
            DEFINES QBM_TEST_RESPONSE_STREAM_HUGE_BODY EXTRA_LABELS http1 routing huge-body)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
+qhttp_test(system http2-response-stream system/http2/http2-response-stream.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl routing) # Huly QB-86
+qhttp_test(system sse-stream system/routing/sse-stream.cpp REQUIRES live EXTRA_LABELS routing) # Huly QB-86: SSE on h1 (h2 under ssl, h3 under http3 inside)
 qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cpp REQUIRES live
            DEFINES QBM_TEST_FACTORY_PLAINTEXT_ONLY EXTRA_LABELS http1)
 qhttp_test(system make-server-factory-tls system/server/make-server-factory.cpp REQUIRES ssl live
@@ -264,6 +268,7 @@ if(QBM_HTTP_HAS_HTTP3)
     # no daemon) — so it needs neither `live` nor the quic/ssl transport gates, only QBM_HTTP_HAS_HTTP3.
     qhttp_test(system http3-connection-direct system/http3/http3-connection-direct.cpp EXTRA_LABELS http3)
     qhttp_test(system http3-loopback   system/http3/http3-loopback.cpp REQUIRES quic ssl live EXTRA_LABELS http3 quic ssl)
+    qhttp_test(system http3-response-stream system/http3/http3-response-stream.cpp REQUIRES quic ssl live EXTRA_LABELS http3 quic ssl routing) # Huly QB-86
     qhttp_test(system http3-interop    system/http3/http3-interop.cpp  REQUIRES quic ssl live EXTRA_LABELS http3 interop)
 endif()
 

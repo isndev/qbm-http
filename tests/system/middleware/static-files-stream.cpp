@@ -159,8 +159,8 @@ public:
 
     /// The session's own answer, its peak recorded: a stream asks it before every write.
     [[nodiscard]] std::size_t
-    stream_pending() noexcept {
-        const auto  n    = Base::stream_pending();
+    stream_pending(qb::http::ResponseStream<FileSession> const &stream) noexcept {
+        const auto  n    = Base::stream_pending(stream);
         std::size_t seen = g_max_pending.load();
         while (n > seen && !g_max_pending.compare_exchange_weak(seen, n)) {
         }

@@ -8,7 +8,7 @@ Upgrade an HTTP/1.1 connection to a full-duplex RFC 6455 WebSocket — server-si
 
 WebSocket lives under `qb::http::ws`. It is not a separate module: an application that already links `qbm::http` gets it for free through the umbrella header. A connection begins life as an ordinary HTTP/1.1 `GET` carrying `Upgrade: websocket`; once the handshake succeeds the byte stream stops being parsed as HTTP and is handed to `qb::http::ws::protocol`, which turns frames into `on(...)` events.
 
-> **Feature gate.** The entire WebSocket subsystem requires `QB_HAS_SSL`, not only secure WS. `<qbm/http/http.h>` includes `src/qbm/http/ws/ws.h` only under `#ifdef QB_HAS_SSL`, and `src/qbm/http/ws/ws.h` itself opens with `#error "websocket protocol requires OpenSSL crypto library"` — even plaintext `ws://` cannot compile without OpenSSL, because the handshake hash (SHA-1 + base64) and the masking-key CSPRNG come from `qb::crypto`. In an SSL-less build, `qb::http::ws::*` simply does not exist. <!-- src: qbm/http/src/qbm/http/http.h:45-48, src/qbm/http/ws/ws.h:22-25 -->
+> **Feature gate.** The entire WebSocket subsystem requires `QB_HAS_SSL`, not only secure WS. `<qbm/http/http.h>` includes `src/qbm/http/ws/ws.h` only under `#ifdef QB_HAS_SSL`, and `src/qbm/http/ws/ws.h` itself opens with `#error "websocket protocol requires OpenSSL crypto library"` — even plaintext `ws://` cannot compile without OpenSSL, because the handshake hash (SHA-1 + base64) and the masking-key CSPRNG come from `qb::crypto`. In an SSL-less build, `qb::http::ws::*` simply does not exist. <!-- src: qbm/http/src/qbm/http/http.h:46-49, src/qbm/http/ws/ws.h:22-25 -->
 
 ```cpp
 #include <qbm/http/http.h>   // umbrella: pulls in WebSocket support under QB_HAS_SSL
@@ -157,7 +157,7 @@ void on(TransferToWebSocketEvent &event) {
 `qb::http::Server::drain(deadline, on_drained)` includes a WebSocket upgraded in place while the session remains in that server's ownership (Huly QB-1097). It queues Close `1001 Going Away`, stops dispatching new Data/Ping/Pong to the application, and waits for the closing session or the shared drain deadline. The protocol still answers Ping with Pong until the peer Close arrives ([RFC 6455 §5.5.2](https://www.rfc-editor.org/rfc/rfc6455#section-5.5.2)); application Ping/Pong callbacks stay suppressed. A valid peer Close is still delivered to its Close observer; output already queued is finished before transport closure. A custom Close handler can inspect the active `ws_protocol`'s `server_draining()` and must not echo an acknowledgement of the Close the drain already sent.
 
 This does **not** extend the old HTTP server's ownership: after `extractSession`, the receiving actor/server must manage the transferred connection's shutdown. A raw `qb::io::tcp::server` is not automatically an HTTP server with this drain API. Coroutine sessions preserve `IncomingFrame::Close` and its code/reason; waiting with `close_async()` after a close has begun sends no duplicate frame.
-<!-- src: src/qbm/http/1.1/http.h:989-1030,1069-1090,1121-1135; src/qbm/http/ws/ws.h:510-580,583-585,655-674; src/qbm/http/ws/coro.h:837-864,925-952 -->
+<!-- src: src/qbm/http/1.1/http.h:1003-1044,1083-1104,1135-1149; src/qbm/http/ws/ws.h:510-580,583-585,655-674; src/qbm/http/ws/coro.h:837-864,925-952 -->
 
 ## Sending frames
 
