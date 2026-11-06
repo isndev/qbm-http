@@ -293,6 +293,26 @@ All notable changes to the qbm-http module are documented here. The format is ba
   pair: `PROTOCOL_ERROR` for a contradicted `content-length`, `INTERNAL_ERROR` now; nothing is sent before the reset,
   and the same connection serves the next request. The other refusals of an invalid response keep their codes.
 
+- **Security: the HTTP/2 server bounds the resets it sends on closed streams, closes a refused stream's id, frees the
+  slot of a handler that throws, and makes a `WINDOW_UPDATE` of 0 and a short `PRIORITY` stream errors (Huly QB-1270;
+  CVE-2019-9514).** Each `DATA`, `HEADERS` or `WINDOW_UPDATE` a client sent on a closed stream drew a `RST_STREAM`,
+  without a bound -- the reset flood of CVE-2019-9514. They are counted with the `PONG`s and `SETTINGS` ACKs the
+  client solicits (`MAX_QUEUED_CONTROL_REPLIES`, 1000, forgiven by request progress), and past them the connection is
+  closed with `GOAWAY(ENHANCE_YOUR_CALM)`: on a client-to-server frame exchange, 1100 frames on a closed stream drew
+  1100 resets and no `GOAWAY`; the 1001st closes the connection now, while 900 between requests, three times over, are
+  answered. A stream refused with `REFUSED_STREAM` -- the concurrency limit, a shutdown -- left its id idle, and a
+  `DATA`, `WINDOW_UPDATE` or `RST_STREAM` the client had sent on it before it saw the refusal closed the connection
+  with `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §5.1.1); the id is closed now, a `GOAWAY` still names the last stream
+  accepted, and the refusal itself -- a reset the client solicits, unbounded too -- shares the control-reply budget. A
+  handler that threw inside the `DATA` completing an upload reset its stream and kept it resident, half-closed,
+  holding a concurrency slot until the idle sweep (30 s): 50 such uploads refused the 51st stream, which is served
+  now. A `WINDOW_UPDATE` of 0 on a stream and a `PRIORITY` that is not 5 octets are stream errors (RFC 9113 §6.9,
+  §6.3), for which the frame layer ended the connection without a `GOAWAY`: the stream is reset now (`PROTOCOL_ERROR`,
+  `FRAME_SIZE_ERROR`) and the connection serves on, the reset counted against the Rapid Reset ceiling on a request in
+  flight (the 101st such pair closes the connection) and against the control replies on a closed stream; on an idle
+  stream, which no `RST_STREAM` may name (§6.4), the connection is closed with a `GOAWAY`. A `PRIORITY` naming its own
+  stream stays ignored: RFC 9113 deprecates priority signals and keeps no self-dependency error (§5.3.2).
+
 - **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
   as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list
   against that bound before encoding it -- each name and value, and 32 octets (RFC 9113 §6.5.2); the two other blocks

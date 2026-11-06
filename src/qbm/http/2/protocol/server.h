@@ -248,7 +248,7 @@ public:
         _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS;
         _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
         _peer_allows_push            = true;
-        _last_promised_stream_id     = 0;
+        _last_promised_stream_id = _highest_client_stream_id = 0;
         _waiting_push_responses.clear();
         _push_response_leaving = 0;
         _peer_goaway_received  = false;
@@ -378,12 +378,12 @@ public:
 
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end()) {
-            if (stream_id > _last_client_initiated_stream_id) {
+            if (stream_id > _highest_client_stream_id) {
                 this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA frame received on idle stream");
                 return;
             }
             this->_connection_receive_window -= data_payload_size;
-            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received on closed stream");
+            this->send_closed_stream_rst(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received on closed stream");
             this->conditionally_send_connection_window_update();
             return;
         }
@@ -395,7 +395,7 @@ public:
             this->_connection_receive_window -= data_payload_size;
             this->conditionally_send_connection_window_update();
             if (stream.state == Http2StreamConcreteState::IDLE) {
-                this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame on IDLE stream.");
+                this->send_closed_stream_rst(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame on IDLE stream.");
             }
             return;
         }
@@ -467,8 +467,8 @@ public:
             auto after_dispatch = _server_streams.find(stream_id);
             if (after_dispatch != _server_streams.end()) {
                 Http2ServerStream &current_stream = after_dispatch->second;
-                // If END_STREAM also means end of connection for this stream, update state.
-                if (current_stream.end_stream_sent) { // If we also sent END_STREAM
+                // Answered, or reset -- a handler that threw: closed, its slot freed (it was rewritten half-closed, Huly QB-1270).
+                if (current_stream.end_stream_sent || current_stream.rst_stream_sent || current_stream.rst_stream_received) {
                     current_stream.state = Http2StreamConcreteState::CLOSED;
                     this->try_close_stream_context(stream_id);
                 } else {
@@ -523,13 +523,13 @@ public:
         auto               it         = _server_streams.find(stream_id);
 
         if (it == _server_streams.end()) {
-            if (stream_id <= _last_client_initiated_stream_id) {
-                this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS for old/closed stream");
+            if (stream_id <= _highest_client_stream_id) {
+                this->send_closed_stream_rst(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS for old/closed stream");
                 this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
             if (_graceful_shutdown_initiated) {
-                this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "New stream during graceful shutdown");
+                this->refuse_new_stream(stream_id, "New stream during graceful shutdown");
                 this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
@@ -547,16 +547,16 @@ public:
                                                                                  DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS);
             if (active_client_streams >= max_concurrent_from_us) {
                 LOG_HTTP_WARN_PA(stream_id, "Server: Refused new stream. Max concurrent streams limit reached: " << max_concurrent_from_us);
-                this->send_rst_stream(stream_id, ErrorCode::REFUSED_STREAM, "Exceeded MAX_CONCURRENT_STREAMS limit");
+                this->refuse_new_stream(stream_id, "Exceeded MAX_CONCURRENT_STREAMS limit");
                 this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
 
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-            auto              emp_res        = _server_streams.emplace(stream_id, std::move(new_stream));
-            stream_ptr                       = &emp_res.first->second;
-            _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
+            auto              emp_res = _server_streams.emplace(stream_id, std::move(new_stream));
+            stream_ptr                = &emp_res.first->second;
+            _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
         } else {
             stream_ptr = &it->second;
         }
@@ -873,7 +873,7 @@ public:
         // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a
         // window update crossing the end of a push closed the connection (Huly QB-1239).
         const bool pushed = (stream_id & 1u) == 0u;
-        if (!pushed && stream_id <= _last_client_initiated_stream_id) {
+        if (!pushed && stream_id <= _highest_client_stream_id) {
             ++_rst_stream_count;
             // Cancelled before its request was complete -- an upload, say: opened, never dispatched.
             if (const auto held = _server_streams.find(stream_id); held != _server_streams.end() && !held->second.request_dispatched)
@@ -913,7 +913,7 @@ public:
             // The observer may have erased the stream. Reclaim by fresh lookup
             // and never use the preceding stream reference after user code.
             this->try_close_stream_context(stream_id);
-        } else if (stream_id > (pushed ? _last_promised_stream_id : _last_client_initiated_stream_id)) {
+        } else if (stream_id > (pushed ? _last_promised_stream_id : _highest_client_stream_id)) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
         // If stream not found (already closed), the reset was still counted above.
@@ -1068,7 +1068,7 @@ public:
             if (it == _server_streams.end()) {
                 // A pushed stream at or below the largest promised has closed: its window update is ignored (RFC 9113
                 // §6.9, Huly QB-1239).
-                if (stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _last_client_initiated_stream_id)) {
+                if (stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _highest_client_stream_id)) {
                     this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE frame received on idle stream");
                 }
                 return;
@@ -1079,12 +1079,12 @@ public:
                 // 2^31-1. Otherwise, it can be ignored for closed/rst streams if it doesn't cause overflow. Simpler to just check for overflow
                 // if closed, or treat any WU on IDLE as error.
                 if (stream.state == Http2StreamConcreteState::IDLE) {
-                    this->send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE on IDLE stream.");
+                    this->send_closed_stream_rst(stream_id, ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE on IDLE stream.");
                     return;
                 }
                 if (stream.peer_window_size > (static_cast<int64_t>(MAX_WINDOW_SIZE_LIMIT) - window_increment)) {
-                    this->send_rst_stream(stream_id, ErrorCode::FLOW_CONTROL_ERROR,
-                                          "WINDOW_UPDATE on closed stream causes flow control window to exceed maximum.");
+                    this->send_closed_stream_rst(stream_id, ErrorCode::FLOW_CONTROL_ERROR,
+                                                 "WINDOW_UPDATE on closed stream causes flow control window to exceed maximum.");
                 }
                 return; // Otherwise ignore for CLOSED stream if no overflow
             }
@@ -1167,7 +1167,7 @@ public:
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "PRIORITY frame on stream 0 from client");
             return;
         }
-        // Any stream state; a self-dependency is ignored -- reset, it would be provoked (send_provoked_rst_stream).
+        // Any stream state (RFC 9113 §6.3); a self-dependency is ignored: RFC 9113 deprecates priority signals (§5.3.2).
         // Store it in stream context if stream exists.
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
@@ -2940,8 +2940,8 @@ private:
      *        reset by neither side -- free its slot as a client RST_STREAM would while the application's work may go on,
      *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)). Resets provoked before dispatch
      *        (DATA over the window, a body against its content-length, trailers without END_STREAM) are not counted; a
-     *        WINDOW_UPDATE of 0 comes here too, though the framer refuses it first. A stream the server reset itself (a
-     *        handler that threw) may stay resident, half-closed: not counted again. A client RST_STREAM on an id whose
+     *        WINDOW_UPDATE of 0 or a short PRIORITY on a request in flight comes here too (on_stream_frame_error). A stream
+     *        the server reset itself is not counted again (a handler that threw: closed). A client RST_STREAM on an id whose
      *        reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling only.
      */
     void
@@ -3007,6 +3007,60 @@ private:
         }
         return size;
     }
+
+    /**
+     * @brief Answer a frame on a closed stream with RST_STREAM, counted with the other replies the client solicits -- the
+     *        PONGs and SETTINGS ACKs of MAX_QUEUED_CONTROL_REPLIES, forgiven by request progress: past them the connection
+     *        is closed with GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of
+     *        CVE-2019-9514; Huly QB-1270).
+     */
+    void
+    send_closed_stream_rst(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
+        if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive frames on closed streams (HTTP/2 reset flood)");
+            return;
+        }
+        this->send_rst_stream(stream_id, error_code, context_msg);
+    }
+
+    /**
+     * @brief Refuse a new client stream with REFUSED_STREAM (RFC 9113 §8.7): opened by its HEADERS and closed at once, its id
+     *        is no longer idle (§5.1.1) -- a frame the client sent on it before it saw the refusal is one on a closed stream
+     *        -- while the last stream accepted, which a GOAWAY names, does not move. The id stayed idle, and such a frame
+     *        closed the connection with GOAWAY(PROTOCOL_ERROR). The refusal is a reset the client solicits, budgeted as
+     *        those on a closed stream are: a client that opens streams past the limit without pause is closed (Huly QB-1270).
+     */
+    void
+    refuse_new_stream(uint32_t stream_id, const std::string &context_msg) noexcept {
+        _highest_client_stream_id = std::max(_highest_client_stream_id, stream_id);
+        this->send_closed_stream_rst(stream_id, ErrorCode::REFUSED_STREAM, context_msg);
+    }
+
+    /**
+     * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets
+     *        (§6.3) -- for which the frame layer ended the connection, without a GOAWAY (Huly QB-1270): the stream is reset
+     *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling
+     *        (send_provoked_rst_stream), a closed stream against the control replies (send_closed_stream_rst); an idle
+     *        stream, which no RST_STREAM may name (§6.4), makes it a connection error, with its GOAWAY (§5.4.1).
+     */
+    void
+    on_stream_frame_error(ErrorCode error_code, const std::string &message, uint32_t stream_id) noexcept {
+        if (stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _highest_client_stream_id)) {
+            this->send_goaway_and_close(error_code, message);
+            return;
+        }
+        const auto it = _server_streams.find(stream_id);
+        if (it == _server_streams.end() || it->second.state == Http2StreamConcreteState::CLOSED || it->second.rst_stream_sent
+            || it->second.rst_stream_received) {
+            this->send_closed_stream_rst(stream_id, error_code, message);
+            return;
+        }
+        this->send_provoked_rst_stream(stream_id, error_code, message);
+    }
+
+    /// The highest id the client used, a refused stream's too: above it a client stream is idle (RFC 9113 §5.1.1), at or
+    /// below it closed or open; the last stream accepted -- the id a GOAWAY names -- is _last_client_initiated_stream_id.
+    uint32_t _highest_client_stream_id = 0;
 
 }; // class ServerHttp2Protocol
 

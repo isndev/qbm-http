@@ -1408,6 +1408,15 @@ private:
      */
     [[nodiscard]] bool
     handle_priority_frame_payload(const uint8_t *payload_data, std::size_t payload_size) noexcept {
+        // A PRIORITY that is not 5 octets is a STREAM error (RFC 9113 §6.3): a side that handles stream frame errors gets it
+        // and the frame layer reads on; it ended the connection, without a GOAWAY (Huly QB-1270).
+        if constexpr (requires(SideProtocol &side) { side.on_stream_frame_error(ErrorCode::FRAME_SIZE_ERROR, std::string{}, 1u); }) {
+            if (payload_size != 5 && _current_frame_header.get_stream_id() != 0) {
+                static_cast<SideProtocol *>(this)->on_stream_frame_error(ErrorCode::FRAME_SIZE_ERROR, "PRIORITY frame payload incorrect size.",
+                                                                         _current_frame_header.get_stream_id());
+                return true;
+            }
+        }
         if (!validate_payload_size(5, payload_size, "PRIORITY", _current_frame_header.get_stream_id())) {
             return false;
         }
@@ -1558,6 +1567,14 @@ private:
 
         // Validate window size increment
         if (wu_f.payload.window_size_increment == 0) {
+            // On a stream, a STREAM error (RFC 9113 §6.9), as for a short PRIORITY; on the connection, the connection's.
+            if constexpr (requires(SideProtocol &side) { side.on_stream_frame_error(ErrorCode::PROTOCOL_ERROR, std::string{}, 1u); }) {
+                if (_current_frame_header.get_stream_id() != 0) {
+                    static_cast<SideProtocol *>(this)->on_stream_frame_error(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with zero increment",
+                                                                             _current_frame_header.get_stream_id());
+                    return true;
+                }
+            }
             return report_frame_error(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with zero increment", _current_frame_header.get_stream_id());
         }
 
