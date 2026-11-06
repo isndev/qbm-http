@@ -325,6 +325,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
   queued. Measured on a client/server connection pair: 100 regular fields were refused both ways and are submitted and
   delivered now, 101 refused; an authority of 8193 bytes was submitted and is refused now, one of 8192 served.
 
+- **A moved HTTP/3 `connection` keeps its control stream and what the peer acknowledged of it, and the peer's SETTINGS
+  are read through `recv_settings2` from nghttp3 1.14 (Huly QB-1242).** The move constructor took the streams, the
+  bindings and a started shutdown, not the control stream's id nor the bytes sent and acknowledged on it: after a
+  move, `control_stream_acknowledged()` read their defaults -- every byte of a GOAWAY not yet acknowledged counted as
+  acknowledged, so a graceful close could leave before the client had the GOAWAY -- and an acknowledgment of the
+  control stream reached nghttp3 as a request stream's, never counted. The servers and clients hold a connection by
+  pointer and never move it; a program that moves one is served now. Measured on a client/server connection pair:
+  after a move, a GOAWAY with one byte acknowledged read as acknowledged; now it reads so only once its last byte is.
+  nghttp3 deprecated `recv_settings` in 1.14 ("New settings will not be notified"); the connection reads
+  `SETTINGS_MAX_FIELD_SECTION_SIZE` through `recv_settings2` where it exists, and through `recv_settings` on the
+  module's floor, 1.12.
+
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
   `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`

@@ -1551,6 +1551,41 @@ TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsShutdownState) {
     EXPECT_FALSE(client_owner.shutdowns.empty()) << "the GOAWAY reached the peer";
 }
 
+/**
+ * @test A moved connection keeps its control stream and what the peer acknowledged of it (Huly QB-1242)
+ * @brief The move took the streams, the bindings and a started shutdown, not the control stream's id nor the bytes
+ *        sent and acknowledged on it: after a move, control_stream_acknowledged() read their defaults -- every byte of a
+ *        GOAWAY not yet acknowledged counted as acknowledged -- and an acknowledgment of the control stream went to
+ *        nghttp3 as a request stream's, never counted. A server connection sends its GOAWAY, has a byte of its control
+ *        stream acknowledged, is moved, and the rest is acknowledged through the destination, a byte short then whole.
+ */
+TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsControlStreamAndItsAcknowledgments) {
+    ClientOwner      client_owner;
+    ServerOwner      server_owner;
+    ClientConnection client{client_owner, 1, ClientConnection::role::client};
+    ASSERT_TRUE(client.bind_local_streams());
+    auto source = std::make_unique<ServerConnection>(server_owner, 1, ServerConnection::role::server);
+    ASSERT_TRUE(source->bind_local_streams());
+    qb::unordered_map<std::uint64_t, std::uint64_t> server_wire;
+    ASSERT_TRUE(source->shutdown()); // a GOAWAY on the control stream, after its SETTINGS
+    pump(client_owner, client, server_owner, *source, nullptr, &server_wire);
+    ASSERT_FALSE(client_owner.shutdowns.empty()) << "the GOAWAY reached the peer";
+    constexpr std::uint64_t control = 3; // the server's first unidirectional stream
+    const auto              sent    = server_wire[control];
+    ASSERT_GT(sent, 0u);
+    source->add_ack_offset(control, 1); // a byte acknowledged before the move
+    EXPECT_FALSE(source->control_stream_acknowledged()) << "not all of it, before the move";
+
+    ServerConnection server{std::move(*source)};
+    source.reset();
+    EXPECT_FALSE(server.control_stream_acknowledged()) << "the move forgot what the control stream sent";
+    server.add_ack_offset(control, sent - 2);
+    EXPECT_FALSE(server.control_stream_acknowledged()) << "a byte short";
+    server.add_ack_offset(control, 1);
+    EXPECT_TRUE(server.control_stream_acknowledged()) << "the acknowledgment was not counted after the move";
+    EXPECT_FALSE(server_owner.close.has_value());
+}
+
 // =============================================================================
 // :authority — an IPv6 literal keeps its brackets (Huly QB-572)
 // =============================================================================

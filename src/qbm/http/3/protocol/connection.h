@@ -1348,9 +1348,9 @@ private:
     }
 
     // The peer's SETTINGS (RFC 9114 §7.2.4): its SETTINGS_MAX_FIELD_SECTION_SIZE bounds the sections sent to it (Huly
-    // QB-1204). The callback nghttp3 has offered since before this module's floor (1.12): `recv_settings2` came in 1.14.
+    // QB-1204). Read by `recv_settings2` from nghttp3 1.14, by `recv_settings` -- deprecated since -- below (QB-1242).
     static int
-    recv_settings_cb(nghttp3_conn *, const nghttp3_settings *settings, void *conn_user_data) {
+    recv_settings_cb(nghttp3_conn *, const auto *settings, void *conn_user_data) {
         return guard_callback([&]() -> int {
             self(conn_user_data)->_peer_max_field_section_size = settings->max_field_section_size;
             return 0;
@@ -1569,8 +1569,12 @@ private:
         cb.end_stream        = end_stream_cb;
         cb.reset_stream      = reset_stream_cb;
         cb.shutdown          = shutdown_cb;
-        cb.recv_settings     = recv_settings_cb;
-        cb.rand              = rand_cb;
+#if NGHTTP3_VERSION_NUM >= 0x010e00 // `recv_settings2` (1.14): "New settings will not be notified" to `recv_settings`
+        cb.recv_settings2 = recv_settings_cb;
+#else // the module's floor, 1.12 (Huly QB-1242)
+        cb.recv_settings = recv_settings_cb;
+#endif
+        cb.rand = rand_cb;
         return cb;
     }
 
@@ -1611,15 +1615,12 @@ public:
     connection &operator=(connection const &) = delete;
 
     /**
-     * @brief Move-construct, transferring the nghttp3 connection and all of its state.
-     *
-     * The destination is the connection: nghttp3's callbacks reach it (its native identity is
-     * re-pointed), and it keeps the stream state, the bound local streams, a started shutdown and
-     * any close still parked. The source is left empty -- @c ok() is false -- and may be
-     * destroyed at once.
-     *
-     * @pre No nghttp3 call of @p rhs is on the stack: a connection is moved between events,
-     *      never from inside one of its own callbacks.
+     * @brief Move-construct, transferring the nghttp3 connection and all of its state: nghttp3's callbacks reach the
+     *        destination (its native identity re-pointed), which keeps the stream state, the bound local streams -- the
+     *        control stream, its bytes sent and acknowledged among them (Huly QB-1242: lost) --, a started shutdown and
+     *        any close still parked. The source is left empty -- @c ok() is false -- and may be destroyed at once.
+     * @pre No nghttp3 call of @p rhs is on the stack: a connection is moved between events, never from inside one of
+     *      its own callbacks.
      * @param rhs Source connection.
      */
     connection(connection &&rhs) noexcept
@@ -1630,6 +1631,9 @@ public:
         , _streams(std::move(rhs._streams))
         , _local_streams_bound(std::exchange(rhs._local_streams_bound, false))
         , _shutdown_started(std::exchange(rhs._shutdown_started, false))
+        , _control_stream_id(rhs._control_stream_id)
+        , _control_bytes_sent(rhs._control_bytes_sent)
+        , _control_bytes_acked(rhs._control_bytes_acked)
         , _peer_max_field_section_size(rhs._peer_max_field_section_size)
         , _alive(std::move(rhs._alive))
         , _engine_depth(std::exchange(rhs._engine_depth, 0))
@@ -1650,13 +1654,9 @@ public:
     }
 
     /**
-     * @brief Open and bind the HTTP/3 control and QPACK encoder/decoder streams.
-     *
-     * Idempotent: a no-op once the local streams are bound. On first success the
-     * pending control/QPACK output is drained to the transport.
-     *
-     * @return @c true on success (or if already bound); @c false if any stream
-     *         fails to bind.
+     * @brief Open and bind the HTTP/3 control and QPACK encoder/decoder streams. Idempotent: a no-op once the local
+     *        streams are bound. On first success the pending control/QPACK output is drained to the transport.
+     * @return @c true on success (or if already bound); @c false if any stream fails to bind.
      */
     bool
     bind_local_streams() {
