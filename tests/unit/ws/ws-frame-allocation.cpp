@@ -1,13 +1,15 @@
 /**
  * @file qbm/http/tests/unit/ws/ws-frame-allocation.cpp
- * @brief The WebSocket frame decoder allocates nothing per frame, and the frame buffer it reuses carries nothing
- *        from one frame to the next (Huly QB-1247).
+ * @brief The WebSocket frame decoder allocates nothing per frame, the frame buffer it reuses carries nothing from one
+ *        frame to the next and is not kept past 64 KiB, and the client side decodes through it as the server does
+ *        (Huly QB-1247).
  *
  * `onMessage()` built a local `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed
  * it at the end of the frame -- one allocation and one free for a 16-byte text frame or an empty Ping. The frame's
- * payload lands in a buffer the protocol keeps now, reset between frames. The count is read with the replaced
- * global `operator new` of tests/shared/allocation_counter.h, never a timing; the second test checks what a
- * reused buffer could leak and runs under every preset.
+ * payload lands in a buffer the protocol keeps now, reset between frames, freed at the end of a frame that grew it
+ * past 64 KiB. Allocations are counted with the replaced global `operator new` of tests/shared/allocation_counter.h,
+ * never a timing (those tests skip where the counter is not live); the buffer's capacity is also read through a Ping
+ * handler, the leak and the client paths through what is decoded, in every preset.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -75,7 +77,8 @@ struct ServerIO {
     qb::allocator::pipe<char> output;
     std::size_t               messages = 0;
     std::string               last; ///< the last message's payload, copied only when `keep` is set
-    bool                      keep = false;
+    bool                      keep          = false;
+    std::size_t               ping_capacity = 0; ///< the frame buffer's capacity a Ping was decoded into
 
     struct error {};
 
@@ -99,6 +102,10 @@ struct ServerIO {
         if (keep) {
             last.assign(event.data, event.size);
         }
+    }
+    void
+    on(qb::protocol::ws_internal::event_ping &&event) {
+        ping_capacity = event.ws._data.capacity();
     }
     void
     on(error &&) {}
@@ -143,7 +150,8 @@ allocations_per_round(ServerProtocol &protocol, ServerIO &io, const std::vector<
         feed(protocol, io, frame);
         io.output.reset();
     }
-    std::size_t total = 0;
+    std::size_t       total  = 0;
+    const std::size_t before = io.messages;
     for (int i = 0; i < rounds; ++i) {
         std::memcpy(io.input.allocate_back(frame.size()), frame.data(), frame.size());
         {
@@ -156,6 +164,9 @@ allocations_per_round(ServerProtocol &protocol, ServerIO &io, const std::vector<
             total += AllocScope::count();
         }
         EXPECT_TRUE(io.input.empty()) << "round " << i << ": the frame was not decoded";
+        if (!ping) {
+            EXPECT_EQ(io.messages, before + static_cast<std::size_t>(i) + 1u) << "round " << i << ": no message delivered";
+        }
         if (ping) {
             EXPECT_EQ(io.output.size(), frame.size() - 4u) << "round " << i << ": no Pong (an unmasked copy of the Ping)";
         }
@@ -320,11 +331,10 @@ TEST(WsFrameAllocation, AFramePast64KiBLeavesNoBufferBehind) {
         ASSERT_TRUE(protocol.ok());
         (void) allocations_per_round(protocol, io, small, 1);
         const auto large = masked_frame(0x2u, std::string(size, 'b'));
-        (void) allocations_of(protocol, io, large);
-        (void) allocations_of(protocol, io, large); // the reassembly buffer has grown to it too
+        (void) allocations_of(protocol, io, large); // the reassembly buffer grows to it too, and keeps it
         EXPECT_EQ(allocations_of(protocol, io, small), kept ? 0u : 1u) << "the frame after a frame of " << size << " octets";
         EXPECT_EQ(allocations_of(protocol, io, small), 0u) << "and the one after it";
-        EXPECT_EQ(io.messages, 9u) << "4 warming, 1 counted, 2 large, 2 after";
+        EXPECT_EQ(io.messages, 8u) << "4 warming, 1 counted, 1 large, 2 after";
         EXPECT_TRUE(protocol.ok());
     }
 }
@@ -359,4 +369,22 @@ TEST(WsFrameAllocation, TheClientDecodesUnmaskedFramesAfterAPingAndAfterItsBuffe
     EXPECT_EQ(io.messages[1], "");
     EXPECT_EQ(io.messages[2], "after");
     EXPECT_TRUE(protocol.ok());
+}
+
+// The bound read without the allocation counter, so it holds under every preset: the capacity of the buffer an empty
+// Ping is decoded into after a frame of 60000 octets is the 64 KiB that frame grew it to, kept; after a frame of
+// 100000 octets it is 0 -- the buffer was freed, and an empty frame allocates nothing.
+TEST(WsFrameAllocation, ThePingAfterALargeFrameSeesTheBufferKeptOrFreed) {
+    using namespace ws_frame_allocation_test;
+    for (const auto &[size, capacity] : std::vector<std::pair<std::size_t, std::size_t>>{{60000, 65536}, {100000, 0}}) {
+        SCOPED_TRACE(size);
+        ServerIO       io;
+        ServerProtocol protocol(io, upgrade_request());
+        ASSERT_TRUE(protocol.ok());
+        feed(protocol, io, masked_frame(0x2u, std::string(size, 'b')));
+        ASSERT_EQ(io.messages, 1u);
+        feed(protocol, io, masked_frame(0x9u, ""));
+        EXPECT_EQ(io.ping_capacity, capacity) << "the frame buffer after a frame of " << size << " octets";
+        EXPECT_TRUE(protocol.ok());
+    }
 }

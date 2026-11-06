@@ -110,13 +110,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   protocol keeps now, reset between frames; each frame writes its own `_expected_size` bytes, so nothing of a longer
   frame is read after a shorter one, and the reassembled message stays a buffer of its own. Counted with a replaced
   `operator new` on 64 decoded frames of each shape (a 16-byte masked text, an empty Ping and a 125-octet one
-  answered by their Pong, an empty text): 64 allocations a shape before, 0 now. A/B on an M4 (3 copies a side, seeded
-  order): the 16-byte masked text decode -2.7 %, the empty Ping and its Pong -2.0 %, against an A/A spread of 1.0 to
-  1.3 %. The buffer is the connection's, 4 KiB from the handshake on; a frame that grows it past 64 KiB frees it at
-  its end, so a connection does not hold a second copy of its largest message between frames (the reassembly buffer
-  keeps its own, as before). The reuse makes a null frame buffer reachable -- after such a frame, or on a client
-  whose Ping, Pong or Close handler moves `event.ws._data` out -- so the unmasked copy is guarded: an empty frame
-  there would be `memcpy(nullptr, src, 0)`, undefined.
+  answered by their Pong, an empty text): 64 allocations a shape before, 0 now. A/B on an M4, qb unchanged on both
+  sides (3 copies a side, seeded order), `ws-throughput.bench.cpp`: `BM_WS_DecodeMaskedText/bytes:16` -4.1 %,
+  `BM_WS_DecodePingAutoPong/bytes:0` -4.4 %, against an A/A spread of 0.5 to 1.8 %. The buffer is the connection's, 4
+  KiB from the handshake on; a frame that grows it past 64 KiB frees it at its end, so a connection does not hold a
+  second copy of its largest message between frames (the reassembly buffer keeps its own, as before), and the next
+  frame allocates once. The reuse makes a null frame buffer reachable -- after such a frame, or on a client whose
+  Ping, Pong or Close handler moves `event.ws._data` out -- so the unmasked copy is guarded: an empty frame there
+  would be `memcpy(nullptr, src, 0)`, undefined. An empty Ping, Pong or Close after such a frame carries a null
+  `event.data` with its size of 0: a view, as before, to be copied by its size.
 
 - **The HTTP/2 server moves a regular field's NAME into the request beside its value (Huly QB-1216).** The value moved
   since QB-1215; the name was still copied and folded by qb's `string_to_lower::convert()`, which took only a const
