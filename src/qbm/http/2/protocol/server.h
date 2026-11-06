@@ -248,7 +248,7 @@ public:
         _peer_max_concurrent_streams = DEFAULT_SETTINGS_MAX_CONCURRENT_STREAMS;
         _peer_max_header_list_size   = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE;
         _peer_allows_push            = true;
-        _last_promised_stream_id = _highest_client_stream_id = 0;
+        _last_promised_stream_id = _highest_client_stream_id = _closed_stream_reply_count = _streams_opened_at_closed_reply = 0;
         _waiting_push_responses.clear();
         _push_response_leaving = 0;
         _peer_goaway_received  = false;
@@ -556,7 +556,7 @@ public:
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
             auto              emp_res = _server_streams.emplace(stream_id, std::move(new_stream));
             stream_ptr                = &emp_res.first->second;
-            _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_last_client_initiated_stream_id, stream_id);
+            _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_highest_client_stream_id, stream_id);
         } else {
             stream_ptr = &it->second;
         }
@@ -3009,14 +3009,19 @@ private:
     }
 
     /**
-     * @brief Answer a frame on a closed stream with RST_STREAM, counted with the other replies the client solicits -- the
-     *        PONGs and SETTINGS ACKs of MAX_QUEUED_CONTROL_REPLIES, forgiven by request progress: past them the connection
-     *        is closed with GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of
-     *        CVE-2019-9514; Huly QB-1270).
+     * @brief Answer a frame on a closed stream with RST_STREAM, at most MAX_QUEUED_CONTROL_REPLIES of them between two
+     *        streams the client opens -- a request dispatched, or one it cancelled, which the Rapid Reset guard weighs --
+     *        never forgiven by a frame it can send for nothing (an empty DATA forgives the PING/SETTINGS budget): past
+     *        them the connection is closed with GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound
+     *        (the reset flood of CVE-2019-9514; Huly QB-1270).
      */
     void
     send_closed_stream_rst(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
-        if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+        if (_client_streams_opened != _streams_opened_at_closed_reply) { // a stream opened since: the budget is forgiven
+            _streams_opened_at_closed_reply = _client_streams_opened;
+            _closed_stream_reply_count      = 0;
+        }
+        if (++_closed_stream_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive frames on closed streams (HTTP/2 reset flood)");
             return;
         }
@@ -3036,6 +3041,7 @@ private:
         this->send_closed_stream_rst(stream_id, ErrorCode::REFUSED_STREAM, context_msg);
     }
 
+public:
     /**
      * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets
      *        (§6.3) -- for which the frame layer ended the connection, without a GOAWAY (Huly QB-1270): the stream is reset
@@ -3058,9 +3064,12 @@ private:
         this->send_provoked_rst_stream(stream_id, error_code, message);
     }
 
+private:
     /// The highest id the client used, a refused stream's too: above it a client stream is idle (RFC 9113 §5.1.1), at or
     /// below it closed or open; the last stream accepted -- the id a GOAWAY names -- is _last_client_initiated_stream_id.
     uint32_t _highest_client_stream_id = 0;
+    /// The resets send_closed_stream_rst() sent since the client last opened a stream (_client_streams_opened, as it was).
+    std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
 
 }; // class ServerHttp2Protocol
 

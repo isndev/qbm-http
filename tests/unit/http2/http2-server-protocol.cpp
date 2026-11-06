@@ -4093,7 +4093,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
     ASSERT_TRUE(protocol.ok());
 
     const std::size_t rst_before = count_frames(io.output, FrameType::RST_STREAM);
-    // DATA on stream 1 (<= last_client_initiated, not in the map) -> RST_STREAM.
+    // DATA on stream 1 (<= the highest client id used, not in the map) -> RST_STREAM.
     push_frame(io, FrameType::DATA, 0, 1, {'x', 'y'});
     drive(protocol, io);
 
@@ -7112,8 +7112,8 @@ TEST(HTTP2ServerProtocol, FramesOnAClosedStreamWithinTheBudgetAreAnswered) {
 // GOAWAY(PROTOCOL_ERROR), every stream of an honest client lost. It is a frame on a closed stream now (Huly QB-1270), and
 // the final GOAWAY still names the last stream accepted, not the refused one.
 TEST(HTTP2ServerProtocol, AFrameOnARefusedStreamIsAFrameOnAClosedStream) {
-    // Each frame, and the last reset stream 101 has drawn: a frame on a closed stream answered STREAM_CLOSED, or nothing.
-    const std::vector<std::tuple<std::string, std::function<void(Http2FakeIO &)>, ErrorCode>> in_flight{
+    // Each frame, and the last reset stream 101 has drawn: a frame on a closed stream answered, or nothing.
+    const std::vector<std::tuple<std::string, std::function<void(Http2FakeIO &)>, std::optional<ErrorCode>>> in_flight{
         {"DATA",
          [](Http2FakeIO &io) { push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 101, std::vector<uint8_t>(8, 'x')); },
          ErrorCode::STREAM_CLOSED},
@@ -7123,38 +7123,56 @@ TEST(HTTP2ServerProtocol, AFrameOnARefusedStreamIsAFrameOnAClosedStream) {
                         encode_hpack_headers(default_request_headers("/again")));
          },
          ErrorCode::STREAM_CLOSED},
-        {"WINDOW_UPDATE", [](Http2FakeIO &io) { make_window_update_frame(io, 101, 100); }, ErrorCode::REFUSED_STREAM},
-        {"RST_STREAM", [](Http2FakeIO &io) { push_frame(io, FrameType::RST_STREAM, 0, 101, {0x00, 0x00, 0x00, 0x08}); },
-         ErrorCode::REFUSED_STREAM},
+        {"WINDOW_UPDATE", [](Http2FakeIO &io) { make_window_update_frame(io, 101, 100); }, std::nullopt},
+        {"RST_STREAM", [](Http2FakeIO &io) { push_frame(io, FrameType::RST_STREAM, 0, 101, {0x00, 0x00, 0x00, 0x08}); }, std::nullopt},
+        {"WINDOW_UPDATE of 0", [](Http2FakeIO &io) { push_frame(io, FrameType::WINDOW_UPDATE, 0, 101, {0x00, 0x00, 0x00, 0x00}); },
+         ErrorCode::PROTOCOL_ERROR},
+        {"PRIORITY of 4 octets", [](Http2FakeIO &io) { push_frame(io, FrameType::PRIORITY, 0, 101, {0x00, 0x00, 0x00, 0x00}); },
+         ErrorCode::FRAME_SIZE_ERROR},
     };
-    for (auto const &[label, frame, last_reset] : in_flight) {
-        SCOPED_TRACE(label);
-        Http2FakeIO    io;
-        ServerProtocol protocol(io);
-        do_handshake(protocol, io);
-        for (uint32_t sid = 1; sid <= 99; sid += 2) {
-            qb1270_test::open_upload(io, sid); // 50 uploads fill the 50 slots the server advertises
+    for (const bool shutdown : {false, true}) {
+        for (auto const &[label, frame, answer] : in_flight) {
+            SCOPED_TRACE(std::string(shutdown ? "refused during a shutdown, " : "refused at the limit, ") + label);
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            do_handshake(protocol, io);
+            if (shutdown) {
+                qb1270_test::open_upload(io, 99);
+                drive(protocol, io);
+                const auto notice_at = io.output.size();
+                ASSERT_TRUE(protocol.begin_graceful_shutdown());
+                const auto ping = emitted_ping(io.output, notice_at);
+                ASSERT_TRUE(ping.has_value());
+                push_frame(io, FrameType::PING, qb::protocol::http2::FLAG_ACK, 0, *ping); // the final GOAWAY: 99
+                drive(protocol, io);
+            } else {
+                for (uint32_t sid = 1; sid <= 99; sid += 2) {
+                    qb1270_test::open_upload(io, sid); // 50 uploads fill the 50 slots the server advertises
+                }
+            }
+            qb1270_test::open_upload(io, 101);
+            drive(protocol, io);
+            ASSERT_EQ(last_rst_stream_error(io.output, 101), ErrorCode::REFUSED_STREAM);
+            frame(io);
+            drive(protocol, io);
+            EXPECT_EQ(io.goaway_count, 0) << "a frame on a refused stream was read as one on an idle stream";
+            EXPECT_EQ(last_rst_stream_error(io.output, 101), answer.value_or(ErrorCode::REFUSED_STREAM)) << "a frame on a closed stream";
+            EXPECT_EQ(io.request_count, 0) << "nothing on a refused stream reaches the application";
+            EXPECT_TRUE(protocol.ok());
+            if (shutdown) {
+                continue;
+            }
+            const auto notice_at = io.output.size();
+            ASSERT_TRUE(protocol.begin_graceful_shutdown());
+            const auto ping = emitted_ping(io.output, notice_at);
+            ASSERT_TRUE(ping.has_value());
+            const auto final_at = io.output.size();
+            push_frame(io, FrameType::PING, qb::protocol::http2::FLAG_ACK, 0, *ping);
+            drive(protocol, io);
+            const auto final_goaway = emitted_goaways(io.output, final_at);
+            ASSERT_EQ(final_goaway.size(), 1u);
+            EXPECT_EQ(final_goaway[0].last_stream_id, 99u) << "the final GOAWAY names the last stream accepted, not the refused one";
         }
-        qb1270_test::open_upload(io, 101);
-        drive(protocol, io);
-        ASSERT_EQ(last_rst_stream_error(io.output, 101), ErrorCode::REFUSED_STREAM);
-        frame(io);
-        drive(protocol, io);
-        EXPECT_EQ(io.goaway_count, 0) << "a frame on a refused stream was read as one on an idle stream";
-        EXPECT_EQ(last_rst_stream_error(io.output, 101), last_reset) << "a frame on a closed stream";
-        EXPECT_EQ(io.request_count, 0) << "nothing on a refused stream reaches the application";
-        EXPECT_TRUE(protocol.ok());
-
-        const auto notice_at = io.output.size();
-        ASSERT_TRUE(protocol.begin_graceful_shutdown());
-        const auto ping = emitted_ping(io.output, notice_at);
-        ASSERT_TRUE(ping.has_value());
-        const auto final_at = io.output.size();
-        push_frame(io, FrameType::PING, qb::protocol::http2::FLAG_ACK, 0, *ping);
-        drive(protocol, io);
-        const auto final_goaway = emitted_goaways(io.output, final_at);
-        ASSERT_EQ(final_goaway.size(), 1u);
-        EXPECT_EQ(final_goaway[0].last_stream_id, 99u) << "the final GOAWAY names the last stream accepted, not the refused one";
     }
 }
 
@@ -7199,6 +7217,9 @@ TEST(HTTP2ServerProtocol, AHandlerThatThrowsOnTheLastDataFreesItsSlot) {
     }
     ASSERT_EQ(io.request_count, 50);
     EXPECT_EQ(last_rst_stream_error(io.output, 99), ErrorCode::INTERNAL_ERROR) << "the handler threw";
+    make_window_update_frame(io, 99, 0x7FFFFFFF); // past 2^31-1 on a resident stream; ignored on one reclaimed
+    drive(protocol, io);
+    EXPECT_EQ(last_rst_stream_error(io.output, 99), ErrorCode::INTERNAL_ERROR) << "the stream stayed resident, closed";
     qb1270_test::open_upload(io, 101);
     push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 101, std::vector<uint8_t>(16, 'x'));
     drive(protocol, io);
@@ -7215,6 +7236,7 @@ TEST(HTTP2ServerProtocol, AWindowUpdateOfZeroAndAShortPriorityAreStreamErrors) {
     const std::vector<std::tuple<std::string, FrameType, std::vector<uint8_t>, ErrorCode>> frames{
         {"WINDOW_UPDATE of 0", FrameType::WINDOW_UPDATE, {0x00, 0x00, 0x00, 0x00}, ErrorCode::PROTOCOL_ERROR},
         {"PRIORITY of 4 octets", FrameType::PRIORITY, {0x00, 0x00, 0x00, 0x00}, ErrorCode::FRAME_SIZE_ERROR},
+        {"PRIORITY of 0 octets", FrameType::PRIORITY, {}, ErrorCode::FRAME_SIZE_ERROR},
     };
     for (auto const &[label, type, payload, error] : frames) {
         SCOPED_TRACE(label);
@@ -7251,6 +7273,7 @@ TEST(HTTP2ServerProtocol, AStreamErrorOnARequestInFlightCountsAgainstTheRapidRes
     const std::vector<std::pair<std::string, std::pair<FrameType, std::vector<uint8_t>>>> frames{
         {"WINDOW_UPDATE of 0", {FrameType::WINDOW_UPDATE, {0x00, 0x00, 0x00, 0x00}}},
         {"PRIORITY of 4 octets", {FrameType::PRIORITY, {0x00, 0x00, 0x00, 0x00}}},
+        {"PRIORITY of 0 octets", {FrameType::PRIORITY, {}}},
     };
     for (auto const &[label, frame] : frames) {
         SCOPED_TRACE(label);
@@ -7269,4 +7292,47 @@ TEST(HTTP2ServerProtocol, AStreamErrorOnARequestInFlightCountsAgainstTheRapidRes
         EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
         EXPECT_EQ(pairs, qb1244_test::max_resets + 1);
     }
+}
+
+// The closed-stream budget is forgiven by a stream the client opens -- a request dispatched, or one it cancels, both of
+// which the Rapid Reset guard weighs -- never by a frame it can send for nothing: 999 frames on a closed stream, then an
+// empty DATA on an upload left open, over and over, drew a reset per frame and never a GOAWAY (Huly QB-1270, review R1).
+TEST(HTTP2ServerProtocol, AnEmptyDataDoesNotForgiveTheClosedStreamBudget) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    qb1270_test::closed_stream_one(protocol, io);
+    qb1270_test::open_upload(io, 3);
+    drive(protocol, io);
+    for (int round = 0; round < 10 && io.goaway_count == 0; ++round) {
+        for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
+            qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
+        }
+        push_frame(io, FrameType::DATA, 0, 3, {}); // an empty DATA on the open upload
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "an empty DATA forgave the budget";
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// A RST_STREAM on a refused stream is a reset of a stream the client opened, which the Rapid Reset guard counts (Huly
+// QB-1244): 50 uploads held, then refused HEADERS + RST_STREAM pairs -- GOAWAY(ENHANCE_YOUR_CALM) at the 101st pair, the
+// Rapid Reset ceiling, well before the 1001st refusal would close it (Huly QB-1270).
+TEST(HTTP2ServerProtocol, ResetsOfRefusedStreamsCountAgainstTheRapidResetCeiling) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    for (uint32_t sid = 1; sid <= 99; sid += 2) {
+        qb1270_test::open_upload(io, sid);
+    }
+    drive(protocol, io);
+    int      pairs = 0;
+    uint32_t sid   = 101;
+    for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        qb1270_test::open_upload(io, sid);
+        push_frame(io, FrameType::RST_STREAM, 0, sid, {0x00, 0x00, 0x00, 0x08});
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(pairs, qb1244_test::max_resets + 1) << "a reset of a refused stream was not counted";
 }

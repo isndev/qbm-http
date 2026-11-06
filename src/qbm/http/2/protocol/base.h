@@ -102,9 +102,9 @@ constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
  *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
 
-/** @brief Cap on unacknowledged peer-triggered control-frame replies (PING PONGs +
- *  SETTINGS ACKs) queued in one drain window, bounding the PING/SETTINGS flood amplification
- *  (CVE-2019-9512 / CVE-2019-9515) that control frames' flow-control exemption otherwise allows. */
+/** @brief Cap on peer-triggered replies: PING PONGs + SETTINGS ACKs between two units of request progress (the PING/
+ *  SETTINGS floods, CVE-2019-9512 / CVE-2019-9515), and, on its own count, the server's RST_STREAMs on closed or refused
+ *  streams between two streams the client opens (the reset flood, CVE-2019-9514; Huly QB-1270). */
 constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
 /** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not
@@ -1249,7 +1249,15 @@ private:
             } break;
 
             // Frames that MUST have a non-zero payload according to RFC 9113 if type is known:
-            case FrameType::PRIORITY:      // Payload: 5 octets
+            case FrameType::PRIORITY: // Payload: 5 octets; any other size is a STREAM error (RFC 9113 §6.3, Huly QB-1270)
+                if constexpr (requires(SideProtocol &side) { side.on_stream_frame_error(ErrorCode::FRAME_SIZE_ERROR, std::string{}, 1u); }) {
+                    if (_current_frame_header.get_stream_id() != 0) {
+                        static_cast<SideProtocol *>(this)->on_stream_frame_error(
+                            ErrorCode::FRAME_SIZE_ERROR, "PRIORITY frame with zero payload.", _current_frame_header.get_stream_id());
+                        break;
+                    }
+                }
+                [[fallthrough]];
             case FrameType::RST_STREAM:    // Payload: 4 octets
             case FrameType::GOAWAY:        // Payload: Min 8 octets
             case FrameType::WINDOW_UPDATE: // Payload: 4 octets
