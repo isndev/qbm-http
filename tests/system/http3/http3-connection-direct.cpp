@@ -1375,7 +1375,7 @@ TEST(Http3ConnectionDirect, ARoutingFieldInsideTheTrailerSectionRefusesTheStream
  * @test An over-long response field refuses the stream on the CLIENT side, and the client keeps its connection
  * @brief The client submits a request; a response block with a value over MAX_HEADER_VALUE_LENGTH fails
  *        recv_header_cb in the client role. The response never reaches the owner, the client resets its
- *        stream with H3_MESSAGE_ERROR instead of closing the connection, and a second request on the same
+ *        stream with H3_REQUEST_CANCELLED instead of closing the connection, and a second request on the same
  *        connection is answered normally.
  */
 TEST(Http3ConnectionDirect, AnOverLongResponseFieldRefusesTheStreamNotTheConnection) {

@@ -485,8 +485,8 @@ protected:
     // hooks are invoked when present (detected via `requires`).
     void
     dispatch(qb::io::async::quic::event::connected const &ev) override {
-        if (ev.negotiated_alpn != "h3") {
-            close_http3_connection(ev.connection_id, 0x010c, "HTTP/3 ALPN mismatch");
+        if (ev.negotiated_alpn != "h3") { // a connection code: H3_REQUEST_CANCELLED cancels a stream (RFC 9114 §8.1, Huly QB-1267)
+            close_http3_connection(ev.connection_id, NGHTTP3_H3_GENERAL_PROTOCOL_ERROR, "HTTP/3 ALPN mismatch");
             return;
         }
         auto &conn = ensure_connection(ev.connection_id);

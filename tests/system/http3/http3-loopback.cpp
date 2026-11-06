@@ -3708,6 +3708,7 @@ class ControlledRttBackend final : public qb::io::quic::backend {
 
 public:
     std::vector<std::uint64_t>                          connections;
+    std::vector<std::uint64_t>                          close_codes;
     std::vector<std::pair<std::uint64_t, qb::duration>> estimates;
     std::uint64_t                                       aggregate_rtt_us    = 10000000;
     bool                                                legacy_capabilities = false;
@@ -3784,6 +3785,7 @@ public:
     }
     void
     close_connection(std::uint64_t id, std::uint64_t code, std::string_view reason) override {
+        close_codes.push_back(code); // the application code the server closes a connection with (Huly QB-1267)
         _native->close_connection(id, code, reason);
     }
     void
@@ -3884,10 +3886,10 @@ public:
     std::vector<std::chrono::steady_clock::time_point> goaway_arrivals;
 
     bool
-    open(std::string const &origin) {
+    open(std::string const &origin, std::vector<std::string> const &alpn = {"h3"}) {
         qb::io::quic::tls_config tls;
         tls.verify_peer = false;
-        return connect(qb::io::uri(origin), tls, {"h3"});
+        return connect(qb::io::uri(origin), tls, alpn);
     }
 };
 
@@ -4126,5 +4128,37 @@ TEST_F(Http3LoopbackTest, AResponseTheServerCannotSubmitIsResetWithRequestCancel
     EXPECT_EQ(server->stats().active_connections, 1u) << "the follow-up went over a new connection";
 
     client->disconnect();
+    server->close();
+}
+
+// RFC 9114 section 8.1 makes H3_REQUEST_CANCELLED (0x010c) the code of a request stream the endpoint cancels; a server that
+// saw another application protocol negotiated closed the CONNECTION with it. It closes it with H3_GENERAL_PROTOCOL_ERROR now
+// (Huly QB-1267). http3::Server::listen() offers h3 alone, and qb-io closes a handshake that negotiated nothing before the
+// server sees it: the base endpoint's listen, offering a second protocol, is the way there. h3 on the same server is served.
+TEST_F(Http3LoopbackTest, AConnectionThatNegotiatesAnotherProtocolIsClosedWithAConnectionCode) {
+    const auto port       = next_port();
+    auto       server     = qb::http3::make_server();
+    auto       controlled = std::make_unique<http3_shutdown_wire_test::ControlledRttBackend>();
+    auto      *backend    = controlled.get();
+    server->set_backend(std::move(controlled));
+    server->router().compile();
+    ASSERT_TRUE(static_cast<qb::io::async::quic::endpoint &>(*server).listen(qb::io::uri(https_origin(port)), cert_path(), key_path(),
+                                                                             {"h3", "hq-interop"}));
+    http3_shutdown_wire_test::RawH3Peer other;
+    ASSERT_TRUE(other.open(https_origin(port), {"hq-interop"}));
+    ASSERT_TRUE(pump([&] { return !backend->close_codes.empty() && other.closed; })) << "the connection is closed";
+    ASSERT_EQ(backend->close_codes.size(), 1u);
+    EXPECT_EQ(backend->close_codes.front(), static_cast<std::uint64_t>(NGHTTP3_H3_GENERAL_PROTOCOL_ERROR));
+    EXPECT_NE(backend->close_codes.front(), static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED)) << "a stream's code";
+
+    http3_shutdown_wire_test::RawH3Peer h3;
+    ASSERT_TRUE(h3.open(https_origin(port)));
+    ASSERT_TRUE(pump([&] { return h3.connected && backend->connections.size() == 2; }));
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(h3.closed) << "h3 is served";
+    EXPECT_EQ(backend->close_codes.size(), 1u);
     server->close();
 }

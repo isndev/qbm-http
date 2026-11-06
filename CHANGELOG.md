@@ -307,6 +307,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   follows decoded by the client; under 100 a trailer section of 101 octets was sent and resets its stream now, one of
   100 leaves and ends it.
 
+- **The HTTP/3 server closes a connection that negotiated another application protocol with
+  `H3_GENERAL_PROTOCOL_ERROR`, not `H3_REQUEST_CANCELLED` (Huly QB-1267).** `0x010c` is the code of a request stream
+  the endpoint cancels (RFC 9114 §8.1), never a connection's. `http3::Server::listen()` offers `h3` alone and qb-io
+  closes a handshake that negotiated nothing before the server sees it, so the case is a server whose base endpoint
+  `listen()` offers a second protocol. Measured on a loopback with a raw QUIC peer that negotiates `hq-interop`: the
+  server closed with `0x010c`, it closes with `0x0101` now; an `h3` peer of the same server is served.
+
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
   `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`
