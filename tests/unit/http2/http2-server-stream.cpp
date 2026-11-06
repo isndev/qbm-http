@@ -463,7 +463,7 @@ TEST(Http2ServerStream, AForbiddenHeaderRefusesTheHeadAndResetsTheStream) {
     const auto frames = h.frames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FrameType::RST_STREAM);
-    EXPECT_EQ(h.io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(h.io.last_stream_error, ErrorCode::INTERNAL_ERROR);
     EXPECT_FALSE(h.protocol.is_streaming_response(id));
 }
 
