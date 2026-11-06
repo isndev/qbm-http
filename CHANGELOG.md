@@ -104,6 +104,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **Every chunked body of a kept HTTP/1.1 connection starts from the pipe's initial buffer (Huly QB-1248).** The
+  parser reads a chunked body -- and any body when it is driven directly, `Parser::parse()` past the headers -- into
+  a buffer it moves into each message, so from the second such body of a connection the buffer was null, and its
+  first write took the pipe's slow path: 8 KiB for five octets, twice what the first took. A null buffer is given the
+  pipe's initial one when the body fits it (`Parser::body_buffer()`); a body past it grows as before, and a message
+  without a body allocates nothing. Read per message on a kept connection, at the protocol: a chunked request of five
+  octets 8440 bytes before, 4344 now, a chunked response of two 8360 and 4264, the allocations as many; a
+  `Content-Length` body is copied from the input buffer, never through this one, and a GET reads the same. Read on a
+  `Parser` driven directly: the second body takes 8192 before, 4096 now, declared or chunked. Independent of qb's own
+  fix of the slow path (qb CHANGELOG, Huly QB-1248), which gives the same 4096 by itself.
+
 - **The WebSocket frame decoder allocates nothing per frame (Huly QB-1247).** `onMessage()` built a local
   `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed it at the end of the frame --
   an allocation and a free for a 16-byte text frame or an empty Ping. The frame's payload lands in a buffer the

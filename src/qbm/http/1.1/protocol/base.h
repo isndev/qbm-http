@@ -639,8 +639,8 @@ private:
             // And cap the hint: see MAX_BODY_RESERVE_HINT. `content_length` is peer-supplied and is
             // known before any body byte arrives, so an unbounded reserve turns a ~40-byte request
             // into a 100 MB allocation held for the connection's lifetime.
-            self->_chunked.reserve(
-                std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT));
+            const auto hint = std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT);
+            self->body_buffer(hint).reserve(hint); // never from a null buffer: see body_buffer() (Huly QB-1248)
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
         msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
@@ -672,7 +672,7 @@ private:
         if (next_total > self->_limits.max_body_size) {
             return refuse_with_status(parser, "HTTP body exceeds configured size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
         }
-        auto &chunked = self->_chunked;
+        auto &chunked = self->body_buffer(length);
         std::copy_n(at, length, chunked.allocate_back(length));
         self->_body_bytes_seen = next_total;
         return 0;
@@ -782,12 +782,12 @@ private:
     std::size_t               _header_pairs_seen = 0;     ///< Number of parsed header fields in the current message
     std::size_t               _body_bytes_seen   = 0;     ///< Total parsed body bytes for the current message
     std::size_t               _url_bytes_seen    = 0;     ///< Total URL bytes seen across fragmented on_url callbacks
-    /// The limits of the next message: set_request_limits(), normalized (a 0 "none" stored as the largest size, so
-    /// each check stays one comparison). Configuration, kept across reset().
-    qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
-    int                      _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
-    std::size_t              _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
-    bool                     _host_malformed = false; ///< One of them names no authority (note_host_field())
+    /// The next message's limits, normalized (0 "none" stored as the largest size); configuration, kept across reset().
+    qb::http::request_limits   _limits         = qb::http::request_limits{}.normalized();
+    int                        _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
+    std::size_t                _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
+    bool                       _host_malformed = false; ///< One of them names no authority (note_host_field())
+    qb::allocator::pipe<char> &body_buffer(std::size_t expected); ///< `_chunked`, never null at a body's start (QB-1248)
 
 public:
     /**
@@ -1257,3 +1257,23 @@ public:
     }
 };
 } // namespace qb::protocol::http
+
+namespace qb::http {
+/**
+ * @brief The body's buffer, given the pipe's initial buffer when it is null and the @p expected bytes fit it.
+ * @details The buffer is moved into each message (on_message_complete()), so from the second message of a kept
+ *          connection it was null, and the first write of a body took the pipe's slow path: 8 KiB for a body of a
+ *          few octets, twice what the first message's took (Huly QB-1248). A body past the initial size grows from a
+ *          null pipe as it would from that buffer, so it is left to grow; nothing is allocated for a message without
+ *          a body.
+ */
+template <typename MessageType>
+qb::allocator::pipe<char> &
+Parser<MessageType>::body_buffer(std::size_t expected) {
+    static const std::size_t initial = qb::allocator::pipe<char>{}.capacity(); // the pipe's own initial size, read once
+    if (_chunked.capacity() == 0 && expected != 0 && expected <= initial) {
+        _chunked = qb::allocator::pipe<char>{};
+    }
+    return _chunked;
+}
+} // namespace qb::http

@@ -202,7 +202,7 @@ After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a re
 
 - **Header-only requests.** llhttp reports `ULLONG_MAX` ("unknown length") when neither `Content-Length` nor `Transfer-Encoding` is present. For requests this is normalized to `content_length = 0` (RFC 9112 framing — a request with no framing headers has an empty body).
 - **Bodyless responses.** Responses with a `1xx`, `204`, or `304` status force `content_length = 0` regardless of any declared `Content-Length` header (RFC 9112 §6.3). The test suite asserts this for both `304 Not Modified` and `204 No Content`.
-- **Reservation.** When the body length is known and within `MAX_BODY_SIZE`, the body buffer is `reserve`d up front for that many bytes — one allocation instead of repeated growth.
+- **Reservation.** When the body length is known and within `MAX_BODY_SIZE`, the body buffer is `reserve`d up front for that many bytes, at most `MAX_BODY_RESERVE_HINT` (64 KiB: the length is the peer's word) — one allocation instead of repeated growth. A chunked body is read into that buffer, which is moved into each message: every chunked body of a kept connection starts again from the pipe's initial buffer when it fits there (Huly QB-1248: from a null buffer, the first write took 8 KiB for a body of a few octets). A `Content-Length` body is copied from the input buffer, never through this one.
 
 ## Security limits and rejected messages
 

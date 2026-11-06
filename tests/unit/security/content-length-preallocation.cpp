@@ -148,4 +148,39 @@ TEST(ContentLengthPreallocation, DeclaredBodyStillParsesCorrectlyWhenItActuallyA
     EXPECT_EQ(std::string(msg.body().raw().begin(), msg.body().raw().size()), payload);
 }
 
+/// The capacity of the body buffer of the SECOND message a parser reads, @p head then @p body each time -- a kept
+/// connection: the parser is reset() between messages, as the protocol does; the first message's is @p first.
+[[nodiscard]] std::size_t
+second_body_capacity(const std::string &head, const std::string &body, std::size_t *first = nullptr) {
+    qb::http::Parser<Request> parser;
+    for (int message = 0; message < 2; ++message) {
+        if (message == 1) {
+            parser.reset();
+        }
+        EXPECT_EQ(parser.parse(head.data(), head.size()), HPE_PAUSED) << "message " << message;
+        parser.resume();
+        EXPECT_EQ(parser.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE) << "message " << message;
+        if (message == 0 && first) {
+            *first = parser.get_parsed_message().body().raw().capacity();
+        }
+    }
+    return parser.get_parsed_message().body().raw().capacity();
+}
+
+// The body buffer is moved into each message, so from the second message of a kept connection it was null, and the
+// first write of a body took the pipe's slow path: 8 KiB for five octets, twice the first message's (Huly QB-1248).
+// Every body starts from the pipe's initial buffer now, declared or chunked; one past it grows as the first did.
+TEST(ContentLengthPreallocation, EveryBodyOfAKeptConnectionStartsFromTheInitialBuffer) {
+    const std::size_t initial = qb::allocator::pipe<char>{}.capacity();
+    const std::string head    = "POST /upload HTTP/1.1\r\nHost: example.test\r\n";
+    std::size_t       first   = 0;
+
+    EXPECT_EQ(second_body_capacity(head + "Content-Length: 5\r\n\r\n", "hello", &first), initial) << "a declared body";
+    EXPECT_EQ(first, initial);
+    EXPECT_EQ(second_body_capacity(head + "Transfer-Encoding: chunked\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n"), initial) << "a chunked body";
+    const std::string large(initial + 904, 'z');
+    EXPECT_EQ(second_body_capacity(head + "Content-Length: " + std::to_string(large.size()) + "\r\n\r\n", large, &first), first)
+        << "a body past the initial buffer grows as the first message's";
+}
+
 } // namespace
