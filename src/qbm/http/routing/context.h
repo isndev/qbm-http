@@ -159,11 +159,13 @@ private:
     /// The incremental body of this response, once the handler began one (Huly QB-86). The handler owns the stream;
     /// the context keeps a weak reference, so the two make no cycle (a producer may: ResponseStream says how it is broken).
     std::weak_ptr<ResponseStream<SessionType>> _stream;
-    std::size_t _streamed_bytes   = 0;     ///< the body bytes a streamed response handed to its session (streamed_bytes())
-    bool        _stream_begun     = false; ///< begin_stream() ran or is running: a hook it runs gets nullptr, not a second stream
-    bool        _stream_completes = false; ///< a begun stream is open: only it, or a cancellation, completes this context
-    bool        _pre_send_ran     = false; ///< PRE_RESPONSE_SEND ran at begin_stream(): the completion does not run it again
-    bool        _streamed         = false; ///< the head left at begin_stream(): the response is on the wire, not in `_response`
+    std::size_t _streamed_bytes   = 0; ///< the producer's body bytes a streamed response took, coding and framing excluded (streamed_bytes())
+    bool        _stream_begun     = false;          ///< begin_stream() ran or is running: a hook it runs gets nullptr, not a second stream
+    bool        _stream_completes = false;          ///< a begun stream is open: only it, or a cancellation, completes this context
+    bool        _pre_send_ran     = false;          ///< PRE_RESPONSE_SEND ran at begin_stream(): the completion does not run it again
+    bool        _streamed         = false;          ///< the head left at begin_stream(): the response is on the wire, not in `_response`
+    std::unique_ptr<stream_filter> _pending_filter; ///< a content coding a PRE_RESPONSE_SEND hook set while begin_stream() ran (Huly QB-1208)
+    bool _stream_hooks_running = false;             ///< begin_stream() is running its PRE_RESPONSE_SEND hooks: `stream_beginning()`
 
     /**
      * @brief Consolidated lifecycle state (F24).
@@ -1541,9 +1543,12 @@ public:
                     preamble = std::move(_response.body());
                     _response.body().clear();
                 }
-                _pre_send_ran = true;
+                _pre_send_ran         = true;
+                _stream_hooks_running = true;
                 execute_hook_internal(HookPoint::PRE_RESPONSE_SEND); // the head leaves now: the hooks' last chance at it
+                _stream_hooks_running = false;
                 if (is_finalised_internal() || _lc.is_cancelled) {
+                    _pending_filter.reset();
                     _stream_completes = false;
                     return nullptr; // a hook ended the request
                 }
@@ -1551,7 +1556,10 @@ public:
                 framing  = detail::status_carries_no_body(static_cast<int>(_response.status().code()))
                                ? stream_framing::buffered
                                : stream_framing_of_head_internal(declared);
+                if (_pending_filter && framing != stream_framing::buffered)
+                    apply_stream_coding_internal(framing, declared); // the head set for the coding, the framing read again (Huly QB-1208)
                 if (framing == stream_framing::buffered) {
+                    _pending_filter.reset();                // no stream to code: the body leaves whole, as it is, under its own head
                     _response.body() = std::move(preamble); // buffered after all: the first piece is the body's start again
                 } else {
                     if (framing == stream_framing::chunked) {
@@ -1574,6 +1582,9 @@ public:
         auto stream = std::make_shared<ResponseStream<SessionType>>(this->weak_from_this(), _session, framing, declared, head_only, high, cap,
                                                                     _request.stream_id);
         _stream     = stream;
+        if (_pending_filter && framing != stream_framing::buffered && !head_only)
+            stream->install_filter(std::move(_pending_filter)); // the coding the hook set: the pieces leave coded (Huly QB-1208)
+        _pending_filter.reset();
         if (framing == stream_framing::buffered) {
             stream->_written = _response.body().size(); // a body already there is the stream's first piece
             return stream;
@@ -1611,6 +1622,33 @@ public:
         return _streamed;
     }
 
+    /// `begin_stream()` is running its `PRE_RESPONSE_SEND` hooks and the head has not left yet: what such a hook sees
+    /// when the body will come through a stream rather than whole (Huly QB-1208) -- the moment to set a content
+    /// coding on it. False at the ordinary completion, a buffered stream's included.
+    [[nodiscard]] bool
+    stream_beginning() const noexcept {
+        return _stream_hooks_running;
+    }
+
+    /**
+     * @brief Set the content coding the stream `begin_stream()` is creating will apply to its pieces (Huly QB-1208).
+     * @details For a `PRE_RESPONSE_SEND` hook, while `stream_beginning()`: the hook hands the filter here and touches
+     *          no header; once the hooks ran and the framing is known not buffered, the context sets the head for the
+     *          coding -- `Content-Length` dropped (the coded length is unknown: chunked on HTTP/1.1, END_STREAM or FIN
+     *          on HTTP/2 and HTTP/3, whatever a later hook declared), `Content-Encoding` the filter's `name()`,
+     *          `Accept-Encoding` listed in `Vary` once, a strong `ETag` made weak, `Accept-Ranges` dropped -- and the
+     *          stream takes the filter: the pieces leave coded, the tail at `end()`. A request that reads no chunked
+     *          body (HTTP/1.0) keeps its length and gets no coding, as does a response that turns out buffered after
+     *          all, or one a later hook made a range or coded itself; a HEAD's head carries the coded description its
+     *          GET would, its stream nothing to code. A second call replaces the first; outside
+     *          `stream_beginning()` the filter is ignored.
+     */
+    void
+    set_stream_coding(std::unique_ptr<stream_filter> filter) noexcept {
+        if (_stream_hooks_running && filter)
+            _pending_filter = std::move(filter);
+    }
+
     /// Begin a Server-Sent Events response (Huly QB-86): `qb::http::sse::begin(ctx)`, defined in `sse.h` -- the head
     /// of a `text/event-stream`, then `begin_stream()`, wrapped in an `sse::Stream` that writes events.
     [[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
@@ -1622,9 +1660,10 @@ public:
         return _stream.lock();
     }
 
-    /// The body bytes a streamed response handed to its session, framing excluded (Huly QB-86): set when its stream
-    /// ends, is aborted or is cancelled, so an observer of a streamed response reads it where `response().body()` is
-    /// empty. 0 for a response that did not stream, and for the response to a HEAD request.
+    /// The producer's body bytes a streamed response took, framing excluded and, under a content coding, the coded
+    /// form's size excluded too (Huly QB-86, QB-1208): set when its stream ends, is aborted or is cancelled, so an
+    /// observer of a streamed response reads it where `response().body()` is empty. 0 for a response that did not
+    /// stream, and for the response to a HEAD request.
     [[nodiscard]] std::size_t
     streamed_bytes() const noexcept {
         return _streamed_bytes;
@@ -1681,6 +1720,59 @@ private:
             }
         }
         return codings == 1 && chunked ? stream_framing::chunked : stream_framing::buffered;
+    }
+
+    /// The coding a hook set, applied once the hooks ran and the head is known to stream (Huly QB-1208): the head loses
+    /// its `Content-Length` and the framing is read again -- chunked, END_STREAM or FIN -- unless the head without a
+    /// length would not stream (HTTP/1.0 reads no chunked body): then the length stays and the coding is dropped, the
+    /// body leaving as it is. A later hook that made the answer a range, or coded it itself, drops the coding too: that
+    /// head is not this coding's. Coded, the head says `Content-Encoding`, lists `Accept-Encoding` in `Vary` (once), a
+    /// strong `ETag` turns weak (the coded representation is not byte-equal) and `Accept-Ranges` goes: a client that
+    /// resumed a coded 200 under a `Range` without `If-Range` would splice identity octets into a coded body.
+    void
+    apply_stream_coding_internal(stream_framing &framing, std::size_t &declared) {
+        if (_response.status() == qb::http::status::PARTIAL_CONTENT || _response.has_header("Content-Range")
+            || _response.has_header("Content-Encoding")) {
+            _pending_filter.reset();
+            return;
+        }
+        std::string length;
+        const bool  had_length = _response.has_header("Content-Length");
+        if (had_length) {
+            length = _response.header("Content-Length");
+            _response.remove_header("Content-Length");
+        }
+        std::size_t without  = 0;
+        const auto  reframed = stream_framing_of_head_internal(without);
+        if (reframed != stream_framing::chunked) {
+            if (had_length)
+                _response.set_header("Content-Length", length);
+            _pending_filter.reset();
+            return;
+        }
+        framing  = reframed;
+        declared = 0;
+        _response.set_header("Content-Encoding", std::string(_pending_filter->name()));
+        if (!header_lists_internal("Vary", "Accept-Encoding"))
+            _response.add_header("Vary", "Accept-Encoding");
+        _response.remove_header("Accept-Ranges");
+        if (_response.has_header("ETag")) {
+            const std::string &tag = _response.header("ETag");
+            if (tag.size() < 2 || tag[0] != 'W' || tag[1] != '/')
+                _response.set_header("ETag", "W/" + tag);
+        }
+    }
+
+    /// Whether a value of the response header `name` lists `token` (comma-separated, case-insensitive) or `*`.
+    [[nodiscard]] bool
+    header_lists_internal(const char *name, std::string_view token) const {
+        const auto it = _response.headers().find(name);
+        if (it == _response.headers().end())
+            return false;
+        for (const std::string &line : it->second)
+            if (utility::list_names(line, token))
+                return true;
+        return false;
     }
 
     /// A begun stream ended (Huly QB-86) -- its `end()`, or a buffered `abort()`: the completion it held returns to

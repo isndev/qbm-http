@@ -30,8 +30,10 @@
  *   - PRE_RESPONSE_SEND hooks: one that drops the length streams chunked; one that leaves a head a stream cannot
  *     carry gets the body read whole, under the cap, and over it a 413 with the head of the historical one, a framing
  *     it added dropped; one that answers 304 leaves the file unread; one that ends the request gets no stream, and a
- *     503 that declares no body on a connection that serves on; compression leaves a streamed body alone and still
- *     compresses one read whole;
+ *     503 that declares no body on a connection that serves on; a streamed body the client accepts a coding for is
+ *     coded on the fly (Huly QB-1208: chunked, `Content-Encoding`, `Vary`, a weak ETag, the bytes inflating to the
+ *     file, the memory bound kept), a range never, a client that accepts none gets the file as it is, and a body
+ *     read whole is compressed as before;
  *   - over TLS, the same stream, every byte.
  *   - the stall watch (Huly QB-1212): a client that stops reading is cut at the idle deadline, measured, its file,
  *     stream and connection released; one that keeps taking bytes under the deadline finishes 16 MiB though bytes
@@ -1414,30 +1416,223 @@ TEST_F(StaticFilesStreamTest, AHookThatEndsTheRequestLeavesTheFileUnstreamedAndT
 }
 
 #ifdef QB_HAS_COMPRESSION
-// The trade-off, pinned: a streamed body passes PRE_RESPONSE_SEND empty, so CompressionMiddleware leaves it alone; a
-// body read whole is compressed as before.
-TEST_F(StaticFilesStreamTest, CompressionLeavesAStreamedBodyAloneAndStillCompressesOneReadWhole) {
+namespace static_files_stream_test {
+/// The coded body of a chunked response in `wire`, past its head: the chunks' payloads, and their count.
+inline std::pair<std::string, std::size_t>
+dechunk(std::string const &wire, std::size_t head_end) {
+    std::string body;
+    std::size_t chunks = 0;
+    for (std::size_t pos = head_end + 4;;) {
+        const auto line_end = wire.find("\r\n", pos);
+        if (line_end == std::string::npos)
+            break;
+        const std::size_t size = std::stoul(wire.substr(pos, line_end - pos), nullptr, 16);
+        if (size == 0)
+            break;
+        body.append(wire, line_end + 2, size);
+        ++chunks;
+        pos = line_end + 2 + size + 2;
+    }
+    return {body, chunks};
+}
+/// `bytes` inflated under `encoding`, through the module's own Body.
+inline std::string
+inflate(std::string const &bytes, std::string const &encoding) {
+    qb::http::Body body;
+    body = bytes;
+    body.uncompress(encoding);
+    return body.as<std::string>();
+}
+/// A server with the compression middleware ahead of the static files: `encodings` preferred, 512 bytes the floor.
+inline auto
+with_compression(std::vector<std::string> encodings) {
+    return [encodings = std::move(encodings)](Router &router) {
+        auto compression = std::make_shared<qb::http::CompressionMiddleware<FileSession>>();
+        compression->update_options(
+            qb::http::CompressionOptions().compress_responses(true).min_size_to_compress(512).preferred_encodings(encodings));
+        router.use(compression);
+    };
+}
+/// `wire`, a whole request, sent on a fresh connection and its chunked response read to the last-chunk.
+inline bool
+read_chunked(RawClient &c, std::uint16_t port, std::string const &wire) {
+    if (!c.connect(port) || !c.send(wire))
+        return false;
+    return c.read_until([&] { return c.buffer.size() >= 5 && c.buffer.compare(c.buffer.size() - 5, 5, "0\r\n\r\n") == 0; }, 10s);
+}
+} // namespace static_files_stream_test
+
+// A streamed body is coded on the fly when the client accepts a coding (Huly QB-1208): the pieces leave compressed
+// as they are read from the file, the head says so, and what the client inflates is the file; a body read whole is
+// compressed as before.
+TEST_F(StaticFilesStreamTest, AStreamedBodyIsCodedOnTheFlyAndInflatesToTheFile) {
     const std::string text_small(kThreshold / 2, 'a');
     std::string       text_large;
     while (text_large.size() < 2 * kThreshold)
         text_large += "a line of compressible text for the static files suite\n";
     write_file("small.txt", text_small);
     write_file("large.txt", text_large);
-    auto server = serve(options(), [](Router &router) {
-        auto compression = std::make_shared<qb::http::CompressionMiddleware<FileSession>>();
-        compression->update_options(
-            qb::http::CompressionOptions().compress_responses(true).min_size_to_compress(512).preferred_encodings({"gzip"}));
-        router.use(compression);
-    });
+    // Every codec this build registers: the default preference puts zstd and br first, so a browser's Accept-Encoding
+    // streams through them wherever they are on.
+    std::vector<std::string> encodings{"gzip", "deflate"};
+#if defined(QB_HAS_ZSTD)
+    encodings.push_back("zstd");
+#endif
+#if defined(QB_HAS_BROTLI)
+    encodings.push_back("br");
+#endif
+    auto server = serve(options(), with_compression(encodings));
     ASSERT_TRUE(server->ready());
+    const auto plain = exchange(server->port(), request("/static/large.txt", "plain"));
+    EXPECT_EQ(plain.response.field("accept-ranges"), "bytes") << "an identity body can be resumed: " << plain.response.head;
     const auto whole = exchange(server->port(), request("/static/small.txt", "gz-small", "Accept-Encoding: gzip\r\n"));
     EXPECT_EQ(whole.response.field("content-encoding"), "gzip") << whole.response.head;
     EXPECT_LT(whole.response.body.size(), text_small.size());
-    const auto streamed = exchange(server->port(), request("/static/large.txt", "gz-large", "Accept-Encoding: gzip\r\n"));
-    EXPECT_FALSE(streamed.response.has("content-encoding")) << streamed.response.head;
-    EXPECT_TRUE(streamed.response.body == text_large);
-    ASSERT_TRUE(wait_for([] { return record_of("gz-large").has_value(); }));
-    EXPECT_TRUE(record_of("gz-large")->streaming);
+    EXPECT_TRUE(whole.response.has("content-length")) << "a body read whole keeps its length";
+    EXPECT_FALSE(whole.response.has("accept-ranges"))
+        << "a body compressed whole cannot be resumed by byte range either: " << whole.response.head;
+    EXPECT_EQ(whole.response.field("etag").substr(0, 2), "W/") << whole.response.head;
+    for (std::string const &encoding : encodings) {
+        RawClient c;
+        ASSERT_TRUE(read_chunked(c, server->port(), request("/static/large.txt", "coded-" + encoding, "Accept-Encoding: " + encoding + "\r\n")))
+            << c.buffer.substr(0, 256);
+        const auto head_end = c.buffer.find("\r\n\r\n");
+        ASSERT_NE(head_end, std::string::npos);
+        const auto head = parse_response(std::string_view(c.buffer).substr(0, head_end + 4), true);
+        EXPECT_EQ(head.status, 200);
+        EXPECT_EQ(head.field("content-encoding"), encoding) << head.head;
+        EXPECT_EQ(head.field("transfer-encoding"), "chunked") << "the coded length is unknown: " << head.head;
+        EXPECT_FALSE(head.has("content-length")) << head.head;
+        EXPECT_NE(head.field("vary").find("Accept-Encoding"), std::string::npos) << head.head;
+        ASSERT_TRUE(head.has("etag")) << head.head;
+        EXPECT_EQ(head.field("etag"), plain.response.field("etag")) << "the file's validator, weak as the static files make it";
+        EXPECT_FALSE(head.has("accept-ranges")) << "a coded body cannot be resumed by byte range: " << head.head;
+        const auto [coded, chunks] = dechunk(c.buffer, head_end);
+        EXPECT_LT(coded.size(), text_large.size()) << "compressible text got smaller";
+        EXPECT_EQ(chunks, (text_large.size() + kPiece - 1) / kPiece + 1) << "a chunk a piece, flushed as it is coded, and one for the tail";
+        EXPECT_TRUE(inflate(coded, encoding) == text_large) << "the inflated bytes differ from the file's (" << encoding << ")";
+        ASSERT_TRUE(wait_for([&] { return record_of("coded-" + encoding).has_value(); }));
+        EXPECT_TRUE(record_of("coded-" + encoding)->streaming);
+        EXPECT_EQ(record_of("coded-" + encoding)->streamed, text_large.size()) << "the producer's own bytes are what the stream counts";
+    }
+}
+
+// A range is never coded (Huly QB-1208: a coding applied on the fly cannot carry a Content-Range), streamed or read
+// whole, and a client that accepts no coding gets the file as it is under its length.
+TEST_F(StaticFilesStreamTest, ARangeIsNeverCodedAndAClientThatAcceptsNoCodingGetsTheFileAsItIs) {
+    std::string text_large;
+    while (text_large.size() < 2 * kThreshold)
+        text_large += "a line of compressible text for the static files suite\n";
+    write_file("large.txt", text_large);
+    auto server = serve(options(), with_compression({"gzip"}));
+    ASSERT_TRUE(server->ready());
+    const std::size_t last  = kThreshold + kThreshold / 2 - 1; // a range over the threshold: streamed, as a 206
+    const auto        range = exchange(
+        server->port(), request("/static/large.txt", "range", "Accept-Encoding: gzip\r\nRange: bytes=0-" + std::to_string(last) + "\r\n"));
+    EXPECT_EQ(range.response.status, 206) << range.response.head;
+    EXPECT_FALSE(range.response.has("content-encoding")) << "a range is never coded: " << range.response.head;
+    EXPECT_EQ(range.response.field("content-length"), std::to_string(last + 1));
+    EXPECT_EQ(range.response.field("content-range"), "bytes 0-" + std::to_string(last) + "/" + std::to_string(text_large.size()));
+    EXPECT_TRUE(range.response.body == text_large.substr(0, last + 1));
+    ASSERT_TRUE(wait_for([] { return record_of("range").has_value(); }));
+    EXPECT_TRUE(record_of("range")->streaming) << "the range was streamed, and still not coded";
+    // A small range, read whole: not coded either -- the whole-body path refused a 206 from this lot on (it did not).
+    const auto small_range =
+        exchange(server->port(), request("/static/large.txt", "small-range", "Accept-Encoding: gzip\r\nRange: bytes=0-2047\r\n"));
+    EXPECT_EQ(small_range.response.status, 206) << small_range.response.head;
+    EXPECT_FALSE(small_range.response.has("content-encoding")) << "a range read whole is never coded either: " << small_range.response.head;
+    EXPECT_EQ(small_range.response.field("content-length"), "2048");
+    EXPECT_TRUE(small_range.response.body == text_large.substr(0, 2048));
+    ASSERT_TRUE(wait_for([] { return record_of("small-range").has_value(); }));
+    EXPECT_FALSE(record_of("small-range")->streaming);
+    const auto plain = exchange(server->port(), request("/static/large.txt", "plain"));
+    EXPECT_EQ(plain.response.status, 200);
+    EXPECT_FALSE(plain.response.has("content-encoding")) << plain.response.head;
+    EXPECT_EQ(plain.response.field("content-length"), std::to_string(text_large.size()));
+    EXPECT_TRUE(plain.response.body == text_large);
+}
+
+// An HTTP/1.0 request reads no chunked body (Huly QB-1208): the coding the middleware set is dropped once the framing
+// is known, the length kept, and the body still streams under it.
+TEST_F(StaticFilesStreamTest, AnHttp10RequestKeepsItsLengthGetsNoCodingAndStillStreams) {
+    std::string text_large;
+    while (text_large.size() < 2 * kThreshold)
+        text_large += "a line of compressible text for the static files suite\n";
+    write_file("large.txt", text_large);
+    auto server = serve(options(), with_compression({"gzip"}));
+    ASSERT_TRUE(server->ready());
+    const auto http10 = exchange(server->port(), request("/static/large.txt", "http10", "Accept-Encoding: gzip\r\n", "GET", "HTTP/1.0"));
+    EXPECT_EQ(http10.response.status, 200) << http10.response.head;
+    EXPECT_FALSE(http10.response.has("content-encoding")) << "HTTP/1.0 cannot take a coded, unlengthed body: " << http10.response.head;
+    EXPECT_EQ(http10.response.field("content-length"), std::to_string(text_large.size()));
+    EXPECT_TRUE(http10.response.body == text_large);
+    ASSERT_TRUE(wait_for([] { return record_of("http10").has_value(); }));
+    EXPECT_TRUE(record_of("http10")->streaming) << "an HTTP/1.0 request streams under its length, as before";
+}
+
+// A HEAD never streams (QB-101): it describes the identity representation under its length, as it does for a body the
+// middleware compresses whole -- the coding is a property of the body that leaves, not of the resource.
+TEST_F(StaticFilesStreamTest, AHeadOfAStreamableFileDescribesTheIdentityRepresentation) {
+    std::string text_large;
+    while (text_large.size() < 2 * kThreshold)
+        text_large += "a line of compressible text for the static files suite\n";
+    write_file("large.txt", text_large);
+    auto server = serve(options(), with_compression({"gzip"}));
+    ASSERT_TRUE(server->ready());
+    const auto head = exchange(server->port(), request("/static/large.txt", "head", "Accept-Encoding: gzip\r\n", "HEAD"), true);
+    EXPECT_EQ(head.response.status, 200);
+    EXPECT_FALSE(head.response.has("content-encoding")) << head.response.head;
+    EXPECT_EQ(head.response.field("content-length"), std::to_string(text_large.size()));
+    EXPECT_TRUE(head.response.body.empty());
+}
+
+// A type that is compressed already (an image) streams as it is, whatever the client accepts (Huly QB-1208): the
+// coding is never set on it, as the whole-body path never compresses it.
+TEST_F(StaticFilesStreamTest, APrecompressedTypeStreamsAsItIsWhateverTheClientAccepts) {
+    const std::string image = pattern(2 * kThreshold, 0x1208u);
+    write_file("photo.png", image);
+    auto server = serve(options(), with_compression({"gzip"}));
+    ASSERT_TRUE(server->ready());
+    const auto r = exchange(server->port(), request("/static/photo.png", "png", "Accept-Encoding: gzip\r\n"));
+    EXPECT_EQ(r.response.status, 200) << r.response.head;
+    EXPECT_EQ(r.response.field("content-type").substr(0, 9), "image/png") << r.response.head;
+    EXPECT_FALSE(r.response.has("content-encoding")) << "a compressed type is never coded again: " << r.response.head;
+    EXPECT_EQ(r.response.field("content-length"), std::to_string(image.size()));
+    EXPECT_TRUE(r.response.body == image);
+    ASSERT_TRUE(wait_for([] { return record_of("png").has_value(); }));
+    EXPECT_TRUE(record_of("png")->streaming);
+}
+
+// A coded download keeps the memory bound of QB-101 (Huly QB-1208): a client that stops reading holds the session's
+// output under the high watermark plus one coded piece -- the piece is admitted against the coding's bound of it
+// before it is coded -- and the stream, the producer and the file are released when the client leaves.
+TEST_F(StaticFilesStreamTest, ACodedDownloadHoldsUnderTheMemoryBoundAndIsReleasedWhenTheClientLeaves) {
+    g_high_mark = kHighMark;
+    write_huge();
+    auto server = serve(options(), [](Router &router) {
+        with_compression({"gzip"})(router);
+        watch_stream(router);
+    });
+    ASSERT_TRUE(server->ready());
+    RawClient c;
+    ASSERT_TRUE(c.connect(server->port(), kClientRcv));
+    ASSERT_TRUE(c.send(request("/static/huge.bin", "coded-stall", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(wait_for([] { return g_max_pending.load() >= kHighMark; })) << "the output never reached the mark";
+    ASSERT_TRUE(wait_for([] { return stream_seen("coded-stall"); }));
+    std::this_thread::sleep_for(300ms);
+    const std::size_t bound = kPiece + (kPiece >> 8) + 128; // the coding's bound of a piece
+    EXPECT_LE(g_max_pending.load(), kHighMark + bound + 16) << "the output stayed under the high mark plus a coded piece and its framing";
+    EXPECT_FALSE(stream_released("coded-stall"));
+    // The head the client did receive says the download IS coded: the bound measured is a coded stream's.
+    ASSERT_TRUE(c.read_until([&] { return c.buffer.find("\r\n\r\n") != std::string::npos; }, 2s)) << "no head";
+    const auto head = parse_response(std::string_view(c.buffer).substr(0, c.buffer.find("\r\n\r\n") + 4), true);
+    EXPECT_EQ(head.field("content-encoding"), "gzip") << head.head;
+    EXPECT_EQ(head.field("transfer-encoding"), "chunked") << head.head;
+    c.close();
+    ASSERT_TRUE(wait_for([] { return record_of("coded-stall").has_value(); }));
+    EXPECT_TRUE(record_of("coded-stall")->cancelled);
+    EXPECT_TRUE(record_of("coded-stall")->streaming);
+    EXPECT_TRUE(wait_for([] { return stream_released("coded-stall"); })) << "the producer and its stream outlived the client";
 }
 #endif // QB_HAS_COMPRESSION
 

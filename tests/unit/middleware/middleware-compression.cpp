@@ -25,8 +25,10 @@
  */
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <initializer_list>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -473,6 +475,196 @@ TEST_F(CompressionMiddlewareTest, ACodecTheBuildDoesNotRegisterIsPassedOver) {
     dec = _session->_response.body().as<std::string>();
     dec.uncompress("gzip");
     EXPECT_EQ(dec.as<std::string>(), original);
+}
+
+/// A provider of the test's own, scripted call by call (Huly QB-1208): what `StreamCoding::run()` does with a coder
+/// that fills its window exactly, one that ends its stream early, one that makes no progress.
+struct ScriptedCoder final : qb::compression::compress_provider {
+    struct Step {
+        std::size_t take; ///< input bytes reported taken (clamped to what is offered)
+        std::size_t make; ///< output bytes written (clamped to the window): 'x' * make
+        bool        done; ///< the stream ended
+    };
+    std::vector<Step> steps;
+    bool              repeat_last = false; ///< past the script, the last step again (a coder that never stops)
+    std::size_t       calls       = 0;
+    std::string       name        = "scripted";
+    const std::string &
+    algorithm() const override {
+        return name;
+    }
+    std::size_t
+    compress(const uint8_t *, std::size_t input_size, uint8_t *output, std::size_t output_size, qb::compression::operation_hint,
+             std::size_t &input_bytes_processed, bool &done) override {
+        const Step step = calls < steps.size() ? steps[calls] : (repeat_last && !steps.empty() ? steps.back() : Step{0, 0, false});
+        ++calls;
+        input_bytes_processed  = std::min(step.take, input_size);
+        const std::size_t made = std::min(step.make, output_size);
+        std::fill_n(output, made, static_cast<uint8_t>('x'));
+        done = step.done;
+        return made;
+    }
+    void
+    reset() override {}
+};
+
+TEST_F(CompressionMiddlewareTest, AWholeBodyCodedKeepsOneVaryWeakensItsETagAndDropsAcceptRanges) {
+    qb::http::CompressionOptions opts;
+    opts.compress_responses(true).min_size_to_compress(10);
+    auto comp_mw = qb::http::compression_middleware<MockMiddlewareSession>(opts);
+    auto req     = create_request(qb::http::method::GET, "/tagged");
+    req.set_header("Accept-Encoding", "gzip");
+    _router = std::make_unique<qb::http::Router<MockMiddlewareSession>>();
+    _router->use(comp_mw);
+    _router->get("/tagged", [](auto ctx) {
+        ctx->response().set_header("Content-Type", "text/plain");
+        ctx->response().set_header("ETag", "\"v1\"");
+        ctx->response().set_header("Accept-Ranges", "bytes");
+        ctx->response().set_header("Vary", "Accept-Language, Accept-Encoding");
+        ctx->response().body() = std::string(2048, 'A');
+        ctx->complete();
+    });
+    _router->compile();
+    _session->reset();
+    _router->route(_session, std::move(req));
+    auto &res = _session->_response;
+    EXPECT_EQ(res.header("Content-Encoding"), "gzip");
+    EXPECT_EQ(res.header("ETag"), "W/\"v1\"") << "the coded representation is not byte-equal";
+    EXPECT_FALSE(res.has_header("Accept-Ranges")) << "a coded body cannot be resumed by byte range";
+    EXPECT_EQ(res.header("Vary"), "Accept-Language, Accept-Encoding");
+    EXPECT_TRUE(res.header("Vary", 1).empty()) << "Accept-Encoding listed already: no second Vary line";
+}
+
+TEST_F(CompressionMiddlewareTest, StreamCodingEndsAPieceOnTheDrainCallThatFindsNothingPending) {
+    // The first call takes the piece whole and fills its window exactly: the loop drains once more, as the provider's
+    // contract asks; that drain takes nothing and makes nothing -- the flush was complete -- and the piece is coded.
+    auto              coder  = std::make_unique<ScriptedCoder>();
+    auto             *script = coder.get();
+    const std::string piece(100, 'p');
+    const std::size_t window = std::max<std::size_t>(piece.size() + (piece.size() >> 8) + 128, 1024); // the filter's first window
+    script->steps            = {{piece.size(), window, false}, {0, 0, false}};
+    qb::http::detail::StreamCoding coding(std::move(coder), "scripted");
+    std::string                    out;
+    EXPECT_TRUE(coding.code(piece, out)) << "an exactly filled window, then an empty drain, is a coded piece";
+    EXPECT_EQ(out.size(), window);
+    EXPECT_EQ(script->calls, 2u) << "one call for the piece, one drain";
+    // The tail: the finishing call says done at once.
+    script->steps = {{0, 3, true}};
+    script->calls = 0;
+    out.clear();
+    EXPECT_TRUE(coding.finish(out));
+    EXPECT_EQ(out, "xxx");
+    EXPECT_EQ(script->calls, 1u);
+}
+
+TEST_F(CompressionMiddlewareTest, StreamCodingRefusesACoderThatEndsEarlyOrMakesNoProgress) {
+    {
+        // The stream ended with input left: not a coding of this piece, refused at once -- not one call later by the
+        // no-progress guard, which a coder that keeps making bytes after its end would pass.
+        auto  coder        = std::make_unique<ScriptedCoder>();
+        auto *script       = coder.get();
+        coder->steps       = {{10, 5, true}, {0, 5, true}};
+        coder->repeat_last = true;
+        qb::http::detail::StreamCoding coding(std::move(coder), "scripted");
+        std::string                    out;
+        EXPECT_FALSE(coding.code(std::string(100, 'p'), out));
+        EXPECT_EQ(script->calls, 1u);
+    }
+    {
+        // A coder that never stops making output (its window filled every call, nothing taken, never done) is cut at
+        // the rounds ceiling, not looped for ever on the loop thread.
+        auto  coder  = std::make_unique<ScriptedCoder>();
+        auto *script = coder.get();
+        coder->steps = {{100, 1024, false}};
+        for (int i = 0; i < 200; ++i) // 200 windows: far past the ceiling, and bounded for a loop without one
+            coder->steps.push_back({0, 16384, false});
+        qb::http::detail::StreamCoding coding(std::move(coder), "scripted");
+        std::string                    out;
+        EXPECT_FALSE(coding.code(std::string(100, 'p'), out));
+        EXPECT_EQ(script->calls, 65u) << "the first window, then 64 rounds";
+    }
+    {
+        // No progress with input left: the loop never spins.
+        auto  coder  = std::make_unique<ScriptedCoder>();
+        auto *script = coder.get();
+        coder->steps = {{10, 5, false}, {0, 0, false}};
+        qb::http::detail::StreamCoding coding(std::move(coder), "scripted");
+        std::string                    out;
+        EXPECT_FALSE(coding.code(std::string(100, 'p'), out));
+        EXPECT_EQ(script->calls, 2u);
+    }
+    {
+        // A finishing call that never says done and makes nothing: refused, not looped.
+        auto  coder  = std::make_unique<ScriptedCoder>();
+        auto *script = coder.get();
+        coder->steps = {{0, 0, false}};
+        qb::http::detail::StreamCoding coding(std::move(coder), "scripted");
+        std::string                    out;
+        EXPECT_FALSE(coding.finish(out));
+        EXPECT_EQ(script->calls, 1u);
+    }
+    {
+        // A coder that throws is a failed coding, not an exception out of the stream.
+        struct Throwing final : qb::compression::compress_provider {
+            std::string name = "throwing";
+            const std::string &
+            algorithm() const override {
+                return name;
+            }
+            std::size_t
+            compress(const uint8_t *, std::size_t, uint8_t *, std::size_t, qb::compression::operation_hint, std::size_t &, bool &) override {
+                throw std::runtime_error("broken");
+            }
+            void
+            reset() override {}
+        };
+        qb::http::detail::StreamCoding coding(std::make_unique<Throwing>(), "throwing");
+        std::string                    out;
+        EXPECT_FALSE(coding.code("piece", out));
+    }
+}
+
+TEST_F(CompressionMiddlewareTest, StreamCodingPiecesThenTheTailInflateToTheInput) {
+    // Every real coder this build registers, piece by piece, made at the first piece as the middleware makes it: every
+    // piece leaves bytes (a flush), the pieces and the tail together inflate to the input, and a piece's coded form stays
+    // under the filter's bound -- an incompressible 64 KiB piece included, where the bound matters.
+    std::vector<std::string> encodings{"gzip", "deflate"};
+#if defined(QB_HAS_ZSTD)
+    encodings.push_back("zstd");
+#endif
+#if defined(QB_HAS_BROTLI)
+    encodings.push_back("br");
+#endif
+    std::string noise(64 * 1024, '\0');
+    for (std::uint32_t i = 0, x = 0x9e3779b9u; i < noise.size(); ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        noise[i] = static_cast<char>(x);
+    }
+    for (std::string const &encoding : encodings) {
+        qb::http::detail::StreamCoding coding(encoding);
+        EXPECT_EQ(coding.name(), encoding);
+        std::string input, coded;
+        for (int i = 0; i < 65; ++i) {
+            std::string piece = i == 32 ? noise : std::string(1000 + i * 37, static_cast<char>('a' + i % 26));
+            piece += std::to_string(i * 7919);
+            input += piece;
+            std::string out;
+            ASSERT_TRUE(coding.code(piece, out)) << encoding << " piece " << i;
+            EXPECT_GT(out.size(), 0u) << "a piece leaves bytes: the flush is partial, not held (" << encoding << ")";
+            EXPECT_LE(out.size(), coding.bound(piece.size())) << encoding << " piece " << i;
+            coded += out;
+        }
+        std::string tail;
+        ASSERT_TRUE(coding.finish(tail)) << encoding;
+        coded += tail;
+        EXPECT_LT(coded.size(), noise.size() + input.size() / 4) << encoding;
+        qb::http::Body body;
+        body = coded;
+        body.uncompress(encoding);
+        EXPECT_TRUE(body.as<std::string>() == input) << "the pieces and the tail inflate to the input (" << encoding << ")";
+    }
 }
 
 #endif // QB_HAS_COMPRESSION

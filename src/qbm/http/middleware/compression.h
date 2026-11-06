@@ -16,18 +16,22 @@
 #pragma once
 
 #include <algorithm> // For std::find_if
+#include <charconv>  // std::from_chars: a declared Content-Length against min_size_to_compress (Huly QB-1208)
 #include <chrono>    // For std::chrono::seconds etc.
+#include <cstdint>   // std::uint8_t: the coder's bytes (Huly QB-1208)
 #include <memory>    // For std::shared_ptr
 #include <stdexcept> // For std::runtime_error (used by Body compression)
 #include <string>    // For std::string
-#include <vector>    // For std::vector
+#include <string_view>
+#include <vector> // For std::vector
 
-#include "../body.h"               // For qb::http::Body
-#include "../request.h"            // For qb::http::Request (used by Context)
-#include "../response.h"           // For qb::http::Response (used by Context)
-#include "../routing/middleware.h" // For IMiddleware, Context, AsyncTaskResult, HookPoint
-#include "../types.h"              // For qb::http::status constants and qb::http::method
-#include "../utility.h"            // For qb::http::utility::split_string, ::iequals
+#include "../body.h"                    // For qb::http::Body
+#include "../routing/response_stream.h" // qb::http::stream_filter: a streamed body coded on the fly (Huly QB-1208)
+#include "../request.h"                 // For qb::http::Request (used by Context)
+#include "../response.h"                // For qb::http::Response (used by Context)
+#include "../routing/middleware.h"      // For IMiddleware, Context, AsyncTaskResult, HookPoint
+#include "../types.h"                   // For qb::http::status constants and qb::http::method
+#include "../utility.h"                 // For qb::http::utility::split_string, ::iequals
 
 namespace qb::http {
 /**
@@ -142,6 +146,99 @@ public:
     }
 };
 
+#ifdef QB_HAS_COMPRESSION
+namespace detail {
+/**
+ * @brief A streamed body's content coding (Huly QB-1208): qb-io's incremental compressor, each piece flushed as it
+ *        is coded (a partial flush: what a piece produced leaves with it, an event stream's events included), the
+ *        stream finished at `end()`. The state is the codec's (zlib: about 384 KiB for its window and its memory
+ *        level); the output of a piece is bounded by `bound()`, which the stream admits the piece against before
+ *        coding it, so the memory bound of a streamed download (QB-101) holds: the session's high watermark, a
+ *        piece, its coded form, and this state.
+ */
+class StreamCoding final : public stream_filter {
+    std::unique_ptr<qb::compression::compress_provider>
+        _coder; ///< made at the first piece (a HEAD's stream, or one buffered after all, never pays for it); one that cannot be made fails that
+                ///< piece, the exchange aborted
+    std::string _name;
+
+    /// Past the first window (the bound of the piece), the rounds of 16 KiB a call that filled its window may add: a
+    /// flush's remainder is a few bytes, so a coder still making output here never stops, and is refused.
+    static constexpr std::size_t max_rounds = 64;
+
+    /// Hand `piece` to the coder under `hint`, appending what comes out to `out`: a call that filled its window is
+    /// repeated for the rest (the provider's contract: the flush may hold more), a last one until the coder says it
+    /// is done. A repeated call that takes nothing and makes nothing is a coder that cannot go on; one that ends its
+    /// stream with input left did not code this piece; one that never stops making output is cut at `max_rounds`.
+    [[nodiscard]] bool
+    run(std::string_view piece, std::string &out, qb::compression::operation_hint hint) {
+        try {
+            if (!_coder) {
+                _coder = qb::compression::builtin::make_compressor(_name);
+                if (!_coder)
+                    return false;
+            }
+            std::size_t offset = 0;
+            std::size_t window = std::max<std::size_t>(bound(piece.size()), 1024);
+            std::size_t rounds = 0;
+            while (true) {
+                const std::size_t before = out.size();
+                out.resize(before + window);
+                std::size_t taken = 0;
+                bool        done  = false;
+                const auto  made  = _coder->compress(reinterpret_cast<const std::uint8_t *>(piece.data()) + offset, piece.size() - offset,
+                                                     reinterpret_cast<std::uint8_t *>(out.data()) + before, window, hint, taken, done);
+                out.resize(before + made);
+                offset += taken;
+                const bool input_left = offset < piece.size();
+                const bool finishing  = hint == qb::compression::operation_hint::is_last && !done;
+                if (!input_left && !finishing && made < window)
+                    return true;
+                if (taken == 0 && made == 0)
+                    return false; // no progress: a coder that cannot go on never loops here
+                if (done && input_left)
+                    return false; // the stream ended with input left: not a coding of this piece
+                if (++rounds > max_rounds)
+                    return false; // a coder that never stops making output
+                window = 16 * 1024;
+            }
+        } catch (const std::exception &) {
+            return false;
+        }
+    }
+
+public:
+    /// The coding `name` names -- gzip, deflate, zstd or br, whichever this build registers -- its coder made at the
+    /// first piece.
+    explicit StreamCoding(std::string name)
+        : _name(std::move(name)) {}
+    /// A coder of the caller's: the tests' scripted providers, the benchmark's.
+    StreamCoding(std::unique_ptr<qb::compression::compress_provider> coder, std::string name)
+        : _coder(std::move(coder))
+        , _name(std::move(name)) {}
+    [[nodiscard]] std::string_view
+    name() const noexcept override {
+        return _name;
+    }
+    /// A piece never grows past it under any of the four codecs -- deflate's own bound (stored blocks and a flush's
+    /// few bytes), zstd's `ZSTD_COMPRESSBOUND`, brotli's flush -- for the pieces a stream writes, rounded up; for 0 it
+    /// is the tail's room `finish()` keeps.
+    [[nodiscard]] std::size_t
+    bound(std::size_t piece) const noexcept override {
+        return piece + (piece >> 8) + 128;
+    }
+    [[nodiscard]] bool
+    code(std::string_view piece, std::string &out) override {
+        return run(piece, out, qb::compression::operation_hint::has_more);
+    }
+    [[nodiscard]] bool
+    finish(std::string &out) override {
+        return run({}, out, qb::compression::operation_hint::is_last);
+    }
+};
+} // namespace detail
+#endif // QB_HAS_COMPRESSION
+
 /**
  * @brief Middleware for automatic request body decompression and response body compression.
  *
@@ -225,6 +322,13 @@ public:
                             // std::cerr << "CompressionMiddleware: Error compressing response: " << e.what() << std::endl;
                         } catch (const std::exception &) {
                             // std::cerr << "CompressionMiddleware: Generic error compressing response: " << e.what() << std::endl;
+                        }
+                    } else if (ctx_ref.stream_beginning()) {
+                        // The body will come through a stream (Huly QB-86): coded on the fly, piece by piece (Huly QB-1208).
+                        try {
+                            code_streamed_response(ctx_ref, options_snapshot);
+                        } catch (const std::exception &) {
+                            // the filter could not be allocated: the stream leaves as it is, its head untouched
                         }
                     }
                 }
@@ -324,6 +428,8 @@ private:
             // Use parsed ContentType
             return;
         }
+        if (response.status() == qb::http::status::PARTIAL_CONTENT || response.has_header("Content-Range"))
+            return; // a range is never coded, read whole or streamed: a Content-Range names identity octets (Huly QB-1208)
 
         std::string selected_encoding = select_best_encoding(ctx_ref.request(), options);
         if (selected_encoding.empty()) {
@@ -344,8 +450,18 @@ private:
         if (compressed_size > 0 && compressed_size < original_size) {
             // Only set headers if compression was effective
             response.set_header("Content-Encoding", selected_encoding);
-            response.add_header("Vary", "Accept-Encoding"); // Add to existing Vary or create new
+            if (!vary_lists_accept_encoding(response))
+                response.add_header("Vary", "Accept-Encoding");
             response.set_header("Content-Length", std::to_string(compressed_size));
+            // The coded representation is not byte-equal, and a client that resumed it under a Range without If-Range
+            // would splice identity octets into it: a strong ETag turns weak, Accept-Ranges goes (as on a stream,
+            // Huly QB-1208).
+            if (response.has_header("ETag")) {
+                const std::string &tag = response.header("ETag");
+                if (tag.size() < 2 || tag[0] != 'W' || tag[1] != '/')
+                    response.set_header("ETag", "W/" + tag);
+            }
+            response.remove_header("Accept-Ranges");
         } else if (compressed_size > 0) {
             response.body() = original_body;
             response.remove_header("Content-Encoding");
@@ -356,6 +472,50 @@ private:
         (void) ctx_ref; // Avoid unused parameter warning
 #endif
     }
+
+    /// Whether a `Vary` value of `response` lists `Accept-Encoding` already (or `*`): a second line is never added.
+    [[nodiscard]] static bool
+    vary_lists_accept_encoding(ResponseType const &response) {
+        const auto it = response.headers().find("Vary");
+        if (it == response.headers().end())
+            return false;
+        for (const std::string &line : it->second)
+            if (utility::list_names(line, "Accept-Encoding"))
+                return true;
+        return false;
+    }
+
+#ifdef QB_HAS_COMPRESSION
+    /**
+     * @brief Hand the stream `begin_stream()` is creating a content coding (Huly QB-1208), when the client accepts one
+     *        the build registers, the type is compressible, the status is not 206 and no coding is on the head
+     *        already; a declared length under `min_size_to_compress` is left as it is, a length unknown taken as
+     *        large. The head is the context's to set, once the hooks ran and the framing is known: `Content-Length`
+     *        dropped (chunked on HTTP/1.1, END_STREAM or FIN on HTTP/2 and HTTP/3), `Content-Encoding`,
+     *        `Accept-Encoding` listed in `Vary` once, a strong `ETag` made weak, `Accept-Ranges` dropped; an HTTP/1.0
+     *        request, which reads no chunked body, keeps its length and gets no coding, as does a head a later hook
+     *        made a range or coded itself. The coder itself is made at the first piece: a HEAD's stream, or one
+     *        buffered after all, never allocates it.
+     */
+    static void
+    code_streamed_response(Context<SessionType> &ctx_ref, const CompressionOptions &options) {
+        ResponseType &response = ctx_ref.response();
+        if (response.status() == qb::http::status::PARTIAL_CONTENT || response.has_header("Content-Range")
+            || response.has_header("Content-Encoding") || is_precompressed_content_type(std::string(response.content_type().type())))
+            return; // a range is never coded; a coding already there is the handler's
+        if (response.has_header("Content-Length")) {
+            const std::string &length   = response.header("Content-Length");
+            std::uint64_t      declared = 0;
+            const auto [end, ec]        = std::from_chars(length.data(), length.data() + length.size(), declared);
+            if (ec == std::errc{} && end == length.data() + length.size() && declared < options.get_min_size_to_compress())
+                return;
+        }
+        const std::string encoding = select_best_encoding(ctx_ref.request(), options);
+        if (encoding.empty())
+            return;
+        ctx_ref.set_stream_coding(std::make_unique<detail::StreamCoding>(encoding)); // the coder is made at the first piece
+    }
+#endif // QB_HAS_COMPRESSION
 
     /**
      * @brief Selects the best supported compression encoding based on client's `Accept-Encoding` header.
