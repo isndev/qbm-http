@@ -1395,7 +1395,7 @@ TEST(Http3ConnectionDirect, AnOverLongResponseFieldRefusesTheStreamNotTheConnect
     ASSERT_EQ(pair.client_owner.resets.size(), 1u);
     EXPECT_EQ(pair.client_owner.resets.front().first, 0u);
     EXPECT_EQ(pair.client_owner.resets.front().second, static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED)) << "discarded, not malformed";
-    pair.client.close_stream(0, NGHTTP3_H3_MESSAGE_ERROR);
+    pair.client.close_stream(0, NGHTTP3_H3_REQUEST_CANCELLED);
     EXPECT_EQ(pair.client.stream_state_count(), states);
 
     // A second exchange on the SAME client connection, answered by the real server side.
