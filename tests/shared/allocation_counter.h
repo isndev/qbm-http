@@ -1,6 +1,6 @@
 /**
  * @file qbm/http/tests/shared/allocation_counter.h
- * @brief A replaced global `operator new` that counts the bytes allocated while an AllocScope is alive.
+ * @brief A replaced global `operator new` that counts the allocations and the bytes made while an AllocScope is alive.
  *
  * Moved unchanged out of unit/security/content-length-preallocation.cpp, where it was written and
  * verified live (release and sanitize presets), so that another test binary can ask "did this
@@ -38,7 +38,7 @@ std::atomic<std::size_t> g_count{0};
 /// The bytes C++ allocated minus those it freed while counting, each block by the size the allocator gave it -- what
 /// a measured call keeps (Huly QB-1203). The allocator's own statistics count blocks a thread cache holds as in use.
 /// A block allocated before the scope and freed in it counts against it; every thread counts; a nested AllocScope
-/// starts both counts again, and its end stops the counting of the scope around it.
+/// starts every count again, and its end stops the counting of the scope around it.
 std::atomic<long long> g_live{0};
 
 /// RAII arm/disarm so a throw inside the parser cannot leave counting on.

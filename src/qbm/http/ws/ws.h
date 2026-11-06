@@ -841,9 +841,9 @@ public:
             LOG_HTTP_WARN("WebSocket frame handling threw an unknown exception");
             this->not_ok();
         }
-
-        // Reset per-frame state (also on the exception path).
-        _expected_size = _parsed = _fin_rsv_opcode = 0;
+        if (_frame._data.capacity() > (std::size_t{64} << 10u))          // a frame past 64 KiB leaves no buffer behind (QB-1247)
+            (void) ::qb::allocator::pipe<char>(std::move(_frame._data)); // freed: nothing allocated, nothing thrown
+        _expected_size = _parsed = _fin_rsv_opcode = 0;                  // per-frame state, reset on the exception path too
     }
 
     void
