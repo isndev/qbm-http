@@ -1471,17 +1471,6 @@ All notable changes to the qbm-http module are documented here. The format is ba
   bytes discarded when a stream is refused. nghttp3's separate consumed-byte count continues to
   cover framing. Direct adapter tests check exact credit in both directions, and a QUIC/TLS loopback
   crosses multiple small stream and connection windows.
-- **WebSocket client connection hardening (Huly QB-513, QB-609, QB-517).** A client destroyed
-  during an in-flight transport connect no longer leaves a callback that can access it. A
-  nonzero connect timeout now covers the transport and the HTTP Upgrade as one deadline, with
-  one failure completion when the server withholds its response. A retry started from that
-  failure callback waits for the retired transport to finish closing and drops its buffered bytes.
-  Parsed handshake errors, established notifications and disconnect callbacks run after parser
-  dispatch, so they may release the client;
-  a request hook that cancels or replaces an attempt cannot send its retired Upgrade. A peer
-  close before the 101 reports a failed connect, and clients reject a 101 response that selects
-  an extension they did not offer. The qb-io integer and typed `disconnect(reason)` overloads
-  remain available through the WebSocket client.
 - **A coroutine parked on a client request says so in qb's `CoroutineScheduler::dump()` (Huly QB-71).** `http_awaiter`
   -- every coroutine form of the client -- begins its `await_suspend` with `qb::io::async::track_suspension(h,
   "http")`: with suspension tracking on, the dump shows the coroutine waiting on `"http"`, for how long. An awaiter
