@@ -239,6 +239,23 @@ trim_http_whitespace(std::string_view sv) noexcept {
 }
 
 /**
+ * @brief Whether the comma-separated list `value` -- a `Vary`, a `Connection` -- names `token`, case-insensitively, or
+ *        `*` (Huly QB-1208). Each item is trimmed of HTTP whitespace.
+ */
+[[nodiscard]] inline bool
+list_names(std::string_view value, std::string_view token) noexcept {
+    while (true) {
+        const auto comma = value.find(',');
+        const auto item  = trim_http_whitespace(value.substr(0, comma));
+        if (item == "*" || iequals(item, token))
+            return true;
+        if (comma == std::string_view::npos)
+            return false;
+        value.remove_prefix(comma + 1);
+    }
+}
+
+/**
  * @brief Splits a header value string by a delimiter and trims HTTP whitespace from each part.
  *
  * This function is typically used for parsing list-based header fields,

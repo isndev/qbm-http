@@ -34,6 +34,7 @@
 #include <gtest/gtest.h>
 
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/compression.h>
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 
@@ -3391,6 +3392,56 @@ TEST_F(Http3LoopbackTest, StaticFilesStreamABodyOverTheStreamThresholdAndMaxFile
     client->disconnect();
     server->close();
 }
+
+#ifdef QB_HAS_COMPRESSION
+// A streamed static body the client accepts a coding for is coded on the fly on HTTP/3 too (Huly QB-1208): the head
+// says `Content-Encoding: gzip` and declares no length (FIN ends the body), and the bytes inflate to the file.
+TEST_F(Http3LoopbackTest, StaticFilesStreamACodedBodyOnTheFlyThatInflatesToTheFile) {
+    const TempRoot temp("qbm-h3-coded-");
+    const auto    &root = temp.path;
+    std::string    text;
+    while (text.size() < std::size_t{2} * 1024 * 1024)
+        text += "a line of compressible text for the HTTP/3 static files suite, over and over\n";
+    std::ofstream(root / "text.txt", std::ios::binary).write(text.data(), static_cast<std::streamsize>(text.size()));
+
+    const auto port        = next_port();
+    auto       server      = qb::http3::make_server();
+    auto       compression = std::make_shared<qb::http::CompressionMiddleware<qb::http3::DefaultSession>>();
+    compression->update_options(
+        qb::http::CompressionOptions().compress_responses(true).min_size_to_compress(512).preferred_encodings({"gzip"}));
+    server->router().use(compression);
+    server->router().use(qb::http::static_files_middleware<qb::http3::DefaultSession>(
+        qb::http::StaticFilesOptions(root).with_stream_threshold(std::size_t{64} * 1024)));
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+
+    auto              state = std::make_shared<std::optional<qb::http::Response>>();
+    qb::http::Request request{qb::io::uri(https_origin(port) + "/text.txt")};
+    request.set_header("Accept-Encoding", "gzip");
+    ASSERT_TRUE(client->push_request(std::move(request), [state](qb::http::Response r) { *state = std::move(r); }));
+    ASSERT_TRUE(pump([&] { return state->has_value(); }, 10s));
+    auto &response = state->value();
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.header("Content-Encoding"), "gzip");
+    EXPECT_FALSE(response.has_header("Content-Length")) << "the coded length is unknown: FIN ends the body";
+    EXPECT_NE(response.header("Vary").find("Accept-Encoding"), std::string::npos);
+    EXPECT_LT(response.body().size(), text.size()) << "compressible text got smaller";
+    ASSERT_NO_THROW(response.body().uncompress("gzip"));
+    EXPECT_TRUE(response.body().as<std::string>() == text) << "the inflated body differs from the file";
+
+    qb::http::Request plain{qb::io::uri(https_origin(port) + "/text.txt")};
+    auto              plain_state = std::make_shared<std::optional<qb::http::Response>>();
+    ASSERT_TRUE(client->push_request(std::move(plain), [plain_state](qb::http::Response r) { *plain_state = std::move(r); }));
+    ASSERT_TRUE(pump([&] { return plain_state->has_value(); }, 10s));
+    EXPECT_FALSE(plain_state->value().has_header("Content-Encoding")) << "a client that accepts no coding gets the file as it is";
+    EXPECT_EQ(plain_state->value().header("Content-Length"), std::to_string(text.size()));
+
+    client->disconnect();
+    server->close();
+}
+#endif // QB_HAS_COMPRESSION
 
 #endif // QBM_HTTP_HAS_HTTP3
 

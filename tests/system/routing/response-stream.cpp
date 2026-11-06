@@ -28,7 +28,7 @@
  *     it, buffered (HTTP/1.0) or streamed; a handler that throws after handing it on leaves the answer to it; one that
  *     throws with its stream still in hand aborts it; `begin_stream()` refuses a context whose completion is held back;
  *   - the framing is decided after PRE_RESPONSE_SEND: a body already in the response is the first piece; compression
- *     at the head leaves a streamed body alone; a length a hook rewrote is the one enforced; a hook that makes the head
+ *     at the head codes a streamed body on the fly (Huly QB-1208); a length a hook rewrote is the one enforced; a hook that makes the head
  *     unstreamable buffers it, its hooks run once; a handler's own `Transfer-Encoding: chunked` streams chunked;
  *   - the end of a stream: a piece past a declared length, an `end()` short of it, an explicit `abort()` and a
  *     dropped stream close the connection without a terminator; the peer leaving, an application `cancel()`, an
@@ -74,6 +74,7 @@
 #include <qbm/http/middleware/metrics.h>
 
 #include <qb/io/async/coroutine.h>
+#include <qb/io/compression.h>
 #include <qb/io/tcp/socket.h>
 
 #ifdef QB_HAS_SSL
@@ -91,6 +92,11 @@ namespace response_stream_test {
 struct Observed {
     std::atomic<int>         framing{-1}; ///< the last stream's stream_framing, as an int
     std::atomic<bool>        streaming{false};
+    std::atomic<bool>        filter_set{false};           ///< the last stream had a content coding installed (Huly QB-1208)
+    std::atomic<int>         pieces{0};                   ///< /mw/tight: the pieces admitted before `wait`
+    std::atomic<std::size_t> bytes{0};                    ///< /mw/tight: the producer's bytes the stream took
+    std::atomic<int>         beginning_at_completion{-1}; ///< /mw/dropped: stream_beginning() as the completion's hook saw it
+    std::atomic<int>         beginning_after{-1};         ///< /mw/etag: stream_beginning() once begin_stream() returned (0)
     std::atomic<int>         pre_hooks{0};
     std::atomic<int>         post_hooks{0};
     std::atomic<bool>        cancelled{false};
@@ -120,22 +126,27 @@ struct Observed {
 
     void
     reset() {
-        framing                = -1;
-        streaming              = false;
-        pre_hooks              = 0;
-        post_hooks             = 0;
-        cancelled              = false;
-        context_cancelled      = false;
-        max_pending            = 0;
-        waits                  = 0;
-        first_drain            = -1;
-        second_drain           = -1;
-        producer_done          = false;
-        handler_parked         = false;
-        handler_resumed        = false;
-        helper_saw_parked      = false;
-        post_handler_saw_ended = -1;
-        post_send_status       = 0;
+        framing                 = -1;
+        streaming               = false;
+        filter_set              = false;
+        pieces                  = 0;
+        bytes                   = 0;
+        beginning_at_completion = -1;
+        beginning_after         = -1;
+        pre_hooks               = 0;
+        post_hooks              = 0;
+        cancelled               = false;
+        context_cancelled       = false;
+        max_pending             = 0;
+        waits                   = 0;
+        first_drain             = -1;
+        second_drain            = -1;
+        producer_done           = false;
+        handler_parked          = false;
+        handler_resumed         = false;
+        helper_saw_parked       = false;
+        post_handler_saw_ended  = -1;
+        post_send_status        = 0;
         for (auto &v : verdicts)
             v = 0;
         high                  = 0;
@@ -223,8 +234,49 @@ count_hooks(std::shared_ptr<C> const &ctx) {
 template <typename C, typename S>
 void
 record(std::shared_ptr<C> const &ctx, std::shared_ptr<S> const &stream) {
-    g_seen.framing   = static_cast<int>(stream->framing());
-    g_seen.streaming = ctx->is_streaming();
+    g_seen.framing    = static_cast<int>(stream->framing());
+    g_seen.streaming  = ctx->is_streaming();
+    g_seen.filter_set = stream->filter() != nullptr;
+}
+
+/// The payloads of a chunked body in `wire`, one per chunk, the last-chunk excluded (Huly QB-1208: an event a chunk).
+inline std::vector<std::string>
+chunk_payloads(std::string const &wire) {
+    std::vector<std::string> out;
+    std::size_t              pos = wire.find("\r\n\r\n");
+    if (pos == std::string::npos)
+        return out;
+    pos += 4;
+    while (pos < wire.size()) {
+        const auto eol = wire.find("\r\n", pos);
+        if (eol == std::string::npos)
+            break;
+        const std::size_t size = std::stoul(wire.substr(pos, eol - pos), nullptr, 16);
+        if (size == 0)
+            break;
+        out.push_back(wire.substr(eol + 2, size));
+        pos = eol + 2 + size + 2;
+    }
+    return out;
+}
+
+/// `coded` inflated through `inflater`, which keeps its state between calls: what one chunk yields on its own.
+inline std::string
+inflate_piece(qb::compression::decompress_provider &inflater, std::string const &coded) {
+    std::string out;
+    std::size_t offset = 0;
+    while (true) {
+        char        buf[4096];
+        std::size_t taken = 0;
+        bool        done  = false;
+        const auto  made =
+            inflater.decompress(reinterpret_cast<const std::uint8_t *>(coded.data()) + offset, coded.size() - offset,
+                                reinterpret_cast<std::uint8_t *>(buf), sizeof buf, qb::compression::operation_hint::has_more, taken, done);
+        out.append(buf, made);
+        offset += taken;
+        if ((offset >= coded.size() && made < sizeof buf) || (taken == 0 && made == 0))
+            return out;
+    }
 }
 
 inline void
@@ -650,8 +702,9 @@ public:
             pieces_over_turns(std::move(stream), 0, 3);
         });
 
-        // Compression at the head of a stream (review M3): the hooks see an empty body, so CompressionMiddleware leaves
-        // the 1 KiB preamble -- the first piece -- and every later one alone.
+        // Compression at the head of a stream (review M3, then Huly QB-1208): the hooks see an empty body and a stream
+        // beginning, so CompressionMiddleware sets a content coding on it -- the 1 KiB preamble, the first piece, and
+        // every later one leave coded, chunked, under `Content-Encoding`.
         {
             qb::http::CompressionOptions options;
             options.compress_responses(true).min_size_to_compress(1024).preferred_encodings({"gzip", "deflate"});
@@ -666,6 +719,173 @@ public:
                 record(ctx, stream);
                 (void) stream->write("tail;");
                 stream->end();
+            });
+            // A strong validator turns weak under the coding, a weak one is left as it is (Huly QB-1208).
+            const auto etag_route = [](std::shared_ptr<Ctx> ctx) {
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                ctx->response().set_header("ETag", ctx->request().has_header("X-Weak") ? "W/\"abc\"" : "\"abc\"");
+                ctx->response().set_header("Accept-Ranges", "bytes"); // a coded body cannot be resumed by byte range: dropped
+                if (ctx->request().has_header("X-Vary"))
+                    ctx->response().set_header("Vary", "Accept-Language, Accept-Encoding"); // listed already: no second line
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                g_seen.beginning_after = ctx->stream_beginning() ? 1 : 0; // the hooks ran: false from here on
+                (void) stream->write(std::string(2048, 'e'));
+                stream->end();
+            };
+            compressed->get("/etag", etag_route);
+            compressed->head("/etag", etag_route); // a HEAD reaches the same handler: the coded head, nothing to code
+            // The admission runs on the coding's bound of a piece, before the coder sees it (Huly QB-1208): a piece that
+            // fits as it is but not under its bound is refused for good, never coded; the next piece is coded alone.
+            compressed->get("/cap", [](std::shared_ptr<Ctx> ctx) {
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                stream->set_watermarks(std::size_t{256} << 10, std::size_t{128} << 10);
+                const std::size_t room = g_cap.load() - stream->high_watermark() - Stream::chunk_overhead(0);
+                record_verdict(0, stream->write(std::string(room - 200, 'r'))); // fits as it is, not under its bound: too_large
+                record_verdict(1, stream->write(std::string(std::size_t{64} << 10, 'c')));
+                stream->end();
+            });
+            // A filter of the test's own, holding every other piece: an empty coded form leaves nothing on the wire, the piece
+            // is taken, and the held bytes leave with the next one (Huly QB-1208: a coder may buffer).
+            compressed->get("/holding", [](std::shared_ptr<Ctx> ctx) {
+                struct Holding final : qb::http::stream_filter {
+                    std::string held;
+                    bool        hold = true;
+                    std::string_view
+                    name() const noexcept override {
+                        return "x-hold";
+                    }
+                    std::size_t
+                    bound(std::size_t piece) const noexcept override {
+                        return piece * 2 + 16;
+                    }
+                    bool
+                    code(std::string_view piece, std::string &out) override {
+                        if (hold) {
+                            held.assign(piece.data(), piece.size());
+                            hold = false;
+                            return true; // nothing out: held
+                        }
+                        out.append(held).append(piece.data(), piece.size());
+                        held.clear();
+                        hold = true;
+                        return true;
+                    }
+                    bool
+                    finish(std::string &out) override {
+                        out.append(held);
+                        held.clear();
+                        return true;
+                    }
+                };
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                ctx->add_lifecycle_hook([](Ctx &c, qb::http::HookPoint point) {
+                    if (point == qb::http::HookPoint::PRE_RESPONSE_SEND && c.stream_beginning())
+                        c.set_stream_coding(std::make_unique<Holding>());
+                });
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                record_verdict(0, stream->write("one;"));   // held: nothing leaves, taken
+                record_verdict(1, stream->write("two;"));   // "one;two;" leaves
+                record_verdict(2, stream->write("three;")); // held
+                stream->end();                              // the tail: "three;"
+            });
+            // A later hook that codes the answer itself, or makes it a range, after the middleware set its coding: the
+            // coding is dropped, the head and the bytes are that hook's (Huly QB-1208).
+            compressed->get("/late", [](std::shared_ptr<Ctx> ctx) {
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                const bool range = ctx->request().has_header("X-Range");
+                ctx->add_lifecycle_hook([range](Ctx &c, qb::http::HookPoint point) {
+                    if (point != qb::http::HookPoint::PRE_RESPONSE_SEND || !c.stream_beginning())
+                        return;
+                    if (range) {
+                        c.response().status() = qb::http::status::PARTIAL_CONTENT;
+                        c.response().set_header("Content-Range", "bytes 0-2047/4096");
+                    } else {
+                        c.response().set_header("Content-Encoding", "identity");
+                    }
+                });
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                (void) stream->write(std::string(2048, 'l'));
+                stream->end();
+            });
+            // The coding's tail keeps its room under the cap (Huly QB-1208): a filter whose bound is exact fills the output
+            // up to the cap less the tail's room, and end() still writes the tail. Driven without Accept-Encoding, so the
+            // middleware sets nothing and the handler's own filter is the stream's.
+            compressed->get("/tight", [](std::shared_ptr<Ctx> ctx) {
+                struct Tight final : qb::http::stream_filter {
+                    std::string_view
+                    name() const noexcept override {
+                        return "x-tight";
+                    }
+                    std::size_t
+                    bound(std::size_t piece) const noexcept override {
+                        return piece ? piece : 64; // exact for a piece; the tail's room for 0
+                    }
+                    bool
+                    code(std::string_view piece, std::string &out) override {
+                        out.append(piece.data(), piece.size());
+                        return true;
+                    }
+                    bool
+                    finish(std::string &out) override {
+                        out.append(64, 'T');
+                        return true;
+                    }
+                };
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                ctx->add_lifecycle_hook([](Ctx &c, qb::http::HookPoint point) {
+                    if (point == qb::http::HookPoint::PRE_RESPONSE_SEND && c.stream_beginning())
+                        c.set_stream_coding(std::make_unique<Tight>());
+                });
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                stream->set_watermarks(std::size_t{16} << 10, std::size_t{8} << 10);
+                // 1017-byte pieces (1024 framed) until the admission refuses one, then 1-byte pieces (6 framed) until it
+                // does: the output ends within 6 bytes of the admission's limit -- the head's own bytes sit in the same
+                // output, so no fixed count holds -- and only the tail's reserve leaves the tail its room.
+                int pieces = 0;
+                while (stream->write(std::string(1017, 't')) == Stream::write_result::taken)
+                    ++pieces;
+                while (stream->write("t") == Stream::write_result::taken)
+                    ++pieces;
+                g_seen.pieces = pieces;
+                g_seen.bytes  = stream->written();
+                stream->end(); // the tail: 64 bytes, 70 framed, in the room every admission kept for it
+            });
+            // An event stream under the coding (Huly QB-1208): each event is flushed as its own chunk, so a client that
+            // inflates chunk by chunk reads event by event.
+            compressed->get("/sse", [](std::shared_ptr<Ctx> ctx) {
+                auto events = ctx->begin_sse();
+                if (!events)
+                    return;
+                record(ctx, events->stream());
+                (void) events->send(qb::http::sse::Event{.name = "tick", .data = "one", .id = "1"});
+                (void) events->send(qb::http::sse::Event{.data = "two"});
+                (void) events->send(qb::http::sse::Event{.name = "tick", .data = "three", .id = "3"});
+                events->end();
+            });
+            // A buffered stream (HTTP/1.0 reads no chunked body) dropped by its producer: the 500 that follows carries no
+            // coding -- the hooks run at that completion are not begin_stream()'s (Huly QB-1208).
+            compressed->get("/dropped", [](std::shared_ptr<Ctx> ctx) {
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Type", "text/plain");
+                ctx->add_lifecycle_hook([](Ctx &c, qb::http::HookPoint point) {
+                    if (point == qb::http::HookPoint::PRE_RESPONSE_SEND)
+                        g_seen.beginning_at_completion = c.stream_beginning() ? 1 : 0; // the completion's hooks: never
+                });
+                auto stream = ctx->begin_stream();
+                record(ctx, stream);
+                (void) stream->write("never whole");
+                // dropped here: a buffered stream ended by its destructor answers 500
             });
         }
 
@@ -1511,18 +1731,205 @@ TEST_F(ResponseStreamTest, ABodyAlreadyInTheResponseIsTheFirstPiece) {
     }
 }
 
-TEST_F(ResponseStreamTest, CompressionAtTheHeadOfAStreamLeavesItsBodyAlone) {
+TEST_F(ResponseStreamTest, CompressionAtTheHeadOfAStreamCodesItsPiecesOnTheFly) {
+    // Huly QB-1208: the middleware's PRE_RESPONSE_SEND hook runs inside begin_stream() and sets a coding on the stream;
+    // the preamble (the first piece) and the tail leave coded, chunked, and inflate to what the handler wrote. A client
+    // that accepts no coding gets the pieces as they are.
+    {
+        RawClient c;
+        ASSERT_TRUE(c.connect(port));
+        ASSERT_TRUE(c.send(get("/mw/preamble", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\n")));
+        ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << "no response at all: " << c.buffer;
+        const auto r = parse_response(c.buffer);
+        EXPECT_EQ(r.status, 200);
+        EXPECT_TRUE(r.chunked) << r.head;
+        EXPECT_FALSE(r.has_content_length) << r.head;
+        EXPECT_EQ(r.header_count("content-encoding"), 1) << "a streamed body is coded on the fly: " << r.head;
+        EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << r.head;
+        EXPECT_TRUE(r.header_is("vary", "Accept-Encoding")) << r.head;
+        EXPECT_LT(r.body.size(), 1024u + 5u) << "1 KiB of one letter got smaller";
+        qb::http::Body inflated;
+        inflated = r.body;
+        ASSERT_NO_THROW(inflated.uncompress("gzip"));
+        EXPECT_EQ(inflated.as<std::string>(), std::string(1024, 'p') + "tail;");
+        EXPECT_EQ(g_seen.pre_hooks.load(), 1);
+    }
+    g_seen.reset();
+    {
+        RawClient c;
+        ASSERT_TRUE(c.connect(port));
+        ASSERT_TRUE(c.send(get("/mw/preamble")));
+        ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+        const auto r = parse_response(c.buffer);
+        EXPECT_TRUE(r.chunked) << r.head;
+        EXPECT_EQ(r.header_count("content-encoding"), 0) << "no coding accepted, none applied: " << r.head;
+        EXPECT_EQ(r.body, std::string(1024, 'p') + "tail;");
+    }
+}
+
+TEST_F(ResponseStreamTest, ACodedStreamWeakensAStrongETagAndLeavesAWeakOne) {
+    for (bool weak : {false, true}) {
+        RawClient c;
+        ASSERT_TRUE(c.connect(port));
+        ASSERT_TRUE(c.send(get("/mw/etag", "HTTP/1.1", "GET", weak ? "Accept-Encoding: gzip\r\nX-Weak: 1\r\n" : "Accept-Encoding: gzip\r\n")));
+        ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+        const auto r = parse_response(c.buffer);
+        EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << r.head;
+        EXPECT_TRUE(r.header_is("etag", "W/\"abc\"")) << (weak ? "a weak tag is left as it is: " : "a strong tag turns weak: ") << r.head;
+        EXPECT_EQ(r.header_count("etag"), 1);
+        EXPECT_EQ(r.header_count("accept-ranges"), 0) << "a coded body cannot be resumed by byte range: " << r.head;
+        EXPECT_EQ(r.header_count("vary"), 1) << r.head;
+        EXPECT_TRUE(g_seen.filter_set) << "the stream took the coding";
+        EXPECT_EQ(g_seen.beginning_after.load(), 0) << "stream_beginning() is false once begin_stream() returned";
+    }
+    // A handler that lists Accept-Encoding in Vary already gets no second Vary line.
     RawClient c;
     ASSERT_TRUE(c.connect(port));
-    ASSERT_TRUE(c.send(get("/mw/preamble", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\n")));
-    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << "no response at all: " << c.buffer;
+    ASSERT_TRUE(c.send(get("/mw/etag", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\nX-Vary: 1\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
     const auto r = parse_response(c.buffer);
+    EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << r.head;
+    EXPECT_EQ(r.header_count("vary"), 1) << "Accept-Encoding listed once: " << r.head;
+    EXPECT_TRUE(r.header_is("vary", "Accept-Language, Accept-Encoding")) << r.head;
+}
+
+TEST_F(ResponseStreamTest, AHeadUnderCompressionCarriesTheCodedHeadAndItsStreamTakesNoFilter) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/etag", "HTTP/1.1", "HEAD", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer, true).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer, true);
     EXPECT_EQ(r.status, 200);
+    EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << "the head its GET would carry: " << r.head;
+    EXPECT_TRUE(r.header_is("etag", "W/\"abc\"")) << r.head;
     EXPECT_TRUE(r.chunked) << r.head;
     EXPECT_FALSE(r.has_content_length) << r.head;
-    EXPECT_EQ(r.header_count("content-encoding"), 0) << "a streamed body is not compressed: " << r.head;
-    EXPECT_EQ(r.body, std::string(1024, 'p') + "tail;");
-    EXPECT_EQ(g_seen.pre_hooks.load(), 1);
+    EXPECT_EQ(r.header_count("accept-ranges"), 0) << r.head;
+    EXPECT_FALSE(g_seen.filter_set) << "a HEAD's stream codes nothing";
+    EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::chunked));
+    c.buffer.erase(0, r.consumed);
+    ASSERT_TRUE(c.send(get("/plain")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    EXPECT_EQ(parse_response(c.buffer).body, "plain-body") << "no body byte of the HEAD response may precede the next answer";
+}
+
+TEST_F(ResponseStreamTest, ALaterHookThatCodesOrRangesTheAnswerDropsTheStreamCoding) {
+    for (bool range : {false, true}) {
+        RawClient c;
+        ASSERT_TRUE(c.connect(port));
+        ASSERT_TRUE(
+            c.send(get("/mw/late", "HTTP/1.1", "GET", range ? "Accept-Encoding: gzip\r\nX-Range: 1\r\n" : "Accept-Encoding: gzip\r\n")));
+        ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+        const auto r = parse_response(c.buffer);
+        EXPECT_EQ(r.status, range ? 206 : 200) << r.head;
+        EXPECT_TRUE(r.chunked) << r.head;
+        EXPECT_EQ(r.body, std::string(2048, 'l')) << "the bytes left as the handler wrote them";
+        EXPECT_FALSE(g_seen.filter_set) << "the coding the middleware set was dropped";
+        if (range) {
+            EXPECT_EQ(r.header_count("content-encoding"), 0) << r.head;
+            EXPECT_TRUE(r.header_is("content-range", "bytes 0-2047/4096")) << r.head;
+        } else {
+            EXPECT_TRUE(r.header_is("content-encoding", "identity")) << "the later hook's coding, not the middleware's: " << r.head;
+        }
+        EXPECT_EQ(r.header_count("vary"), 0) << r.head;
+    }
+}
+
+TEST_F(ResponseStreamTest, TheCodingsTailKeepsItsRoomUnderTheCapSoAFullStreamStillEnds) {
+    g_cap = 65541; // 64 framed pieces of 1024 bytes plus the last-chunk's 5: the tail's room is the only slack
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/tight")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; }))
+        << "no last-chunk: the tail was refused and the stream aborted\n"
+        << c.buffer.substr(0, 200);
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_TRUE(r.header_is("content-encoding", "x-tight")) << r.head;
+    EXPECT_GE(g_seen.pieces.load(), 63) << "63 pieces of 1017 at least, then the 1-byte fill";
+    EXPECT_EQ(r.chunks, g_seen.pieces.load() + 1) << "every piece a chunk, and the tail";
+    EXPECT_EQ(r.body.size(), g_seen.bytes.load() + 64) << "the producer's bytes and the 64-byte tail";
+    EXPECT_EQ(r.body.substr(r.body.size() - 64), std::string(64, 'T'));
+}
+
+TEST_F(ResponseStreamTest, AnEventStreamUnderCompressionLeavesEachEventAsItsOwnInflatableChunk) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/sse", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_NE(r.head.find("text/event-stream"), std::string::npos) << r.head;
+    EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << r.head;
+    EXPECT_TRUE(r.chunked) << r.head;
+    EXPECT_EQ(r.chunks, 4) << "three events and the coding's tail, a chunk each";
+    EXPECT_TRUE(g_seen.filter_set);
+    const auto payloads = chunk_payloads(c.buffer);
+    ASSERT_EQ(payloads.size(), 4u);
+    auto inflater = qb::compression::builtin::make_decompressor("gzip");
+    ASSERT_TRUE(inflater);
+    std::string text;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::string event = inflate_piece(*inflater, payloads[i]);
+        EXPECT_TRUE(event.size() >= 2 && event.compare(event.size() - 2, 2, "\n\n") == 0)
+            << "chunk " << i << " inflates to a whole event: " << event;
+        text += event;
+    }
+    text += inflate_piece(*inflater, payloads[3]);
+    EXPECT_NE(text.find("data: one\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("data: two\n\n"), std::string::npos) << text;
+    EXPECT_NE(text.find("data: three\n"), std::string::npos) << text;
+    std::size_t blanks = 0;
+    for (std::size_t at = text.find("\n\n"); at != std::string::npos; at = text.find("\n\n", at + 2))
+        ++blanks;
+    EXPECT_EQ(blanks, 3u) << "three events, nothing else: " << text;
+}
+
+TEST_F(ResponseStreamTest, ACodedPieceIsAdmittedOnItsBoundBeforeTheCoderSeesIt) {
+    g_cap = std::size_t{1} << 20;
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/cap", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_TRUE(r.header_is("content-encoding", "gzip")) << r.head;
+    EXPECT_EQ(g_seen.verdicts[0].load(), verdict(Stream::write_result::too_large))
+        << "a piece under the room as it is, over it under its bound";
+    EXPECT_EQ(g_seen.verdicts[1].load(), verdict(Stream::write_result::taken));
+    qb::http::Body inflated;
+    inflated = r.body;
+    ASSERT_NO_THROW(inflated.uncompress("gzip"));
+    EXPECT_EQ(inflated.size(), std::size_t{64} << 10) << "the refused piece never reached the coder: only the second was coded";
+    EXPECT_EQ(inflated.as<std::string>(), std::string(std::size_t{64} << 10, 'c'));
+}
+
+TEST_F(ResponseStreamTest, AFilterThatHoldsAPieceLeavesNothingUntilItEmits) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/holding", "HTTP/1.1", "GET", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_TRUE(r.header_is("content-encoding", "x-hold")) << "the test's own coding, set by the test's own hook: " << r.head;
+    EXPECT_TRUE(r.chunked) << r.head;
+    EXPECT_EQ(r.body, "one;two;three;") << "every piece arrived, held ones with the next or the tail";
+    EXPECT_EQ(r.chunks, 2) << "a held piece left nothing on the wire: one chunk for 'one;two;', one for the tail";
+    EXPECT_EQ(g_seen.verdicts[0].load(), verdict(Stream::write_result::taken)) << "a held piece is taken";
+    EXPECT_EQ(g_seen.verdicts[1].load(), verdict(Stream::write_result::taken));
+    EXPECT_EQ(g_seen.verdicts[2].load(), verdict(Stream::write_result::taken));
+}
+
+TEST_F(ResponseStreamTest, ABufferedStreamDroppedUnderCompressionAnswersAnUncodedError) {
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/mw/dropped", "HTTP/1.0", "GET", "Accept-Encoding: gzip\r\n")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete || c.eof; })) << c.buffer;
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 500) << r.head;
+    EXPECT_EQ(r.header_count("content-encoding"), 0) << "the completion of a dropped buffered stream codes nothing: " << r.head;
+    EXPECT_TRUE(r.body.empty());
+    EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
+    EXPECT_EQ(g_seen.beginning_at_completion.load(), 0) << "the hooks of the ordinary completion never see stream_beginning()";
 }
 
 TEST_F(ResponseStreamTest, ALengthAHookRewroteIsTheLengthEnforced) {

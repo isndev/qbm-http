@@ -130,6 +130,40 @@ All notable changes to the qbm-http module are documented here. The format is ba
   -- with no deadline, and under the 60 s default -- and finishes over a 64 KiB/s one; zero disables and reaches the
   stream as zero; a stream's own shorter deadline set on one already armed at the middleware's cuts at once; a
   producer writing every 700 ms under a 250 ms deadline, to a client that reads, is never cut.
+- **A streamed body is coded on the fly: `CompressionMiddleware` sets a content coding on the stream `begin_stream()`
+  creates, so a static file over `stream_threshold` leaves compressed when the client accepts it (Huly QB-1208).** The
+  middleware's `PRE_RESPONSE_SEND` hook, which runs inside `begin_stream()` with an empty body, now reads
+  `Context::stream_beginning()`: when the client accepts a coding the build registers (gzip and deflate are the proven
+  ones; zstd and brotli come through the same provider where their builds are on), the type is compressible, the
+  status is not 206, no coding is on the head already and a declared length is not under `min_size_to_compress`, it
+  hands the context a `qb::http::stream_filter` through `Context::set_stream_coding()`: qb-io's incremental compressor
+  (`qb::http::detail::StreamCoding`), each piece flushed as it is coded (a partial flush: what a piece produced leaves
+  with it), finished at `end()`. Once every hook ran and the framing is known, the CONTEXT sets the head:
+  `Content-Length` dropped (the coded length is unknown: chunked on HTTP/1.1, END_STREAM or FIN on HTTP/2 and HTTP/3,
+  whatever a later hook declared), `Content-Encoding`, `Vary: Accept-Encoding` (listed once), a strong `ETag` made
+  weak, `Accept-Ranges` dropped (a coded 200 resumed under a `Range` without `If-Range` would splice identity octets
+  into a coded body); a later hook that coded the answer itself or made it a range keeps its own head, uncoded here;
+  an HTTP/1.0 request, which reads no chunked body, keeps its length and gets no coding, and streams as before.
+  `ResponseStream::write()` admits a piece against the coding's bound of it BEFORE coding it, so a piece refused for
+  room (`wait`, `too_large`) was never consumed and is written again as it is; `written()` and `streamed_bytes()`
+  count the producer's own bytes, the wire carries the coded form; `filter()` says which. The memory bound of QB-101
+  holds: the session's high watermark, a piece, its coded form and the codec's state (zlib: about 384 KiB). Never on a
+  buffered stream (the body leaves whole, compressed at its completion as before), on a HEAD's stream (a HEAD the
+  static files answer whole describes the identity representation, as before; a HEAD a handler streams carries the
+  coded head its GET would, and nothing to code), or under a length a hook kept. A range is never coded, on the
+  whole-body path either: a 206 read whole left compressed until this lot; that path weakens a strong `ETag`, drops
+  `Accept-Ranges` and lists `Accept-Encoding` in `Vary` once, as the stream's does. An event stream (`begin_sse()`) is
+  coded like any streamed body, each event flushed as its own chunk, so a client inflates it event by event. The coder
+  is made at the first piece: a HEAD's stream, or one buffered after all, never allocates it. A middleware's own filter, set from a
+  `PRE_RESPONSE_SEND` hook while `stream_beginning()`, follows the same contract. The documented workaround (raising
+  `stream_threshold` to keep large text assets compressed, at the cost of reading each whole) is gone with its cause;
+  the QB-101 upgrade note below is superseded. Proofs: on HTTP/1.1, HTTP/2 and HTTP/3 the bytes a client inflates are the
+  file (text, and a 16 MiB random file on HTTP/2), the head says `Content-Encoding`, no length, `Vary`, a weak ETag; a
+  streamed range (206) and one read whole, an HTTP/1.0 request and a client that accepts no coding get the file as it
+  is; a client that stops reading a coded download holds the output under the high watermark plus one coded piece and
+  releases the producer, the stream and the file when it leaves; a handler's own stream with a preamble is coded from
+  its first piece, its strong ETag weakened and a weak one left, a piece under the room as it is but over it under its
+  bound refused before the coder sees it, a buffered stream it drops answered 500 uncoded.
 - **Cross-site request forgery protection: `qb::http::CsrfMiddleware` and `qb::http::CsrfOptions` (Huly QB-95).** The
   module had none: a browser attaches a site's cookies to every request sent to it, whichever page sent it, and every
   application authenticated by a cookie had to build its own defence. `router().use(qb::http::csrf_middleware<S>())`
@@ -186,7 +220,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   that throws after handing it on leaves the answer to it. `begin_stream()` returns `nullptr` once the context is
   finalised, cancelled or holding back a completion. The framing is decided from the head as the `PRE_RESPONSE_SEND`
   hooks leave it: the hooks run first, seeing an empty body -- a body already in the response is the stream's first
-  piece, so `CompressionMiddleware` leaves a streamed body alone -- then a valid `Content-Length` is honoured and
+  piece, so `CompressionMiddleware` left a streamed body alone until Huly QB-1208, above -- then a valid `Content-Length` is honoured and
   enforced (a piece past it, or an `end()` short of it, closes the connection rather than deliver a message the peer
   would misread), a `Transfer-Encoding` whose only coding is `chunked` is chunked as it stands, and otherwise
   `Transfer-Encoding: chunked` is set. The response to HEAD is whole at its head: its exchange ends there and the next
@@ -323,15 +357,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   Release and under ASan+UBSan alike.
 
 - **Upgrade note: under `CompressionMiddleware`, a static file larger than `StaticFilesOptions::stream_threshold` is
-  no longer compressed on HTTP/1.1 (Huly QB-101).** The static files stream such a body (next entry), and a streamed
-  body reaches the `PRE_RESPONSE_SEND` hooks empty, so the compression hook leaves it alone. With the default
-  threshold, 1 MiB, a text asset over 1 MiB -- a bundled script, a stylesheet, a JSON, CSV or SVG file -- that 3.3
-  sent compressed to an HTTP/1.1 client is sent as it is on disk, its `Content-Length` the file's and no
-  `Content-Encoding`. HTTP/2 and HTTP/3, which read every body whole, still compress it, and so does HTTP/1.1 below
-  the threshold. To keep compressing such assets on HTTP/1.1, raise the threshold above the largest of them
-  (`with_stream_threshold()`; `SIZE_MAX` streams nothing): each of their downloads then holds the whole file in
-  memory again, as in 3.3, under `max_file_size`.
-
+  no longer compressed on HTTP/1.1 (Huly QB-101).** Superseded in this same release by Huly QB-1208 above: a streamed
+  body is now coded on the fly, and the threshold no longer decides whether a large text asset leaves compressed. The
+  static files stream such a body (next entry), and a streamed body reached the `PRE_RESPONSE_SEND` hooks empty, so
+  the compression hook left it alone until QB-1208. With the default threshold, 1 MiB, a text asset over 1 MiB -- a bundled
+  script, a stylesheet, a JSON, CSV or SVG file -- that 3.3 sent compressed to an HTTP/1.1 client is sent as it is on
+  disk, its `Content-Length` the file's and no `Content-Encoding`. HTTP/2 and HTTP/3, which read every body whole,
+  still compress it, and so does HTTP/1.1 below the threshold. To keep compressing such assets on HTTP/1.1, raise the
+  threshold above the largest of them (`with_stream_threshold()`; `SIZE_MAX` streams nothing): each of their downloads
+  then holds the whole file in memory again, as in 3.3, under `max_file_size`.
 - **`StaticFilesMiddleware` streams a body over `StaticFilesOptions::stream_threshold` on HTTP/1.1: a download holds
   the stream's high watermark and two 64 KiB pieces, not the file, so N concurrent downloads no longer cost N copies
   of it (Huly QB-101).** Every request used to read the whole file, or the whole range, into the response, and the
@@ -352,8 +386,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   multiple range and `HEAD`, which a test compares against the same server with streaming off; `HEAD`, `304` and `416`
   never stream. What changes, and is documented in `readme/08`: `max_file_size` bounds a body read whole only, so a
   streamed body is served whatever its size and a `HEAD` or a range of a file over the cap gets what its `GET` would
-  (`200`, `206`, `416`, not `413`); a streamed body is not compressed (`PRE_RESPONSE_SEND` hooks see an empty body:
-  raise the threshold to keep compressing larger text assets); a file that fails or shrinks after the head has left
+  (`200`, `206`, `416`, not `413`); a streamed body was not compressed until Huly QB-1208, above (`PRE_RESPONSE_SEND` hooks see
+  an empty body); a file that fails or shrinks after the head has left
   closes the connection short of its declared length; a download keeps its file open until its last byte, for as long
   as its client takes -- read through qb-io's descriptor (`internal::StaticFileSource` over `qb::io::sys::file`), which
   on Windows shares delete (Huly QB-320), so a file being downloaded can be renamed away and its name removed there

@@ -54,6 +54,7 @@
 
 #include <qb/io/async/coroutine.h>
 #include <qbm/http/http.h>
+#include <qbm/http/middleware/compression.h>
 #include <qbm/http/middleware/static_files.h>
 
 using namespace std::chrono_literals;
@@ -207,6 +208,14 @@ class WireServer : public qb::http2::use<WireServer>::server<WireSession> {
 public:
     WireServer() {
         router().add_observer(std::make_shared<Observer>());
+#ifdef QB_HAS_COMPRESSION
+        { // ahead of the static files: a streamed body the client accepts a coding for is coded on the fly (Huly QB-1208)
+            auto compression = std::make_shared<qb::http::CompressionMiddleware<WireSession>>();
+            compression->update_options(
+                qb::http::CompressionOptions().compress_responses(true).min_size_to_compress(512).preferred_encodings({"gzip"}));
+            router().use(compression);
+        }
+#endif
         if (!g_static_root.empty()) // /static/big.bin streams, and a client that stops taking bytes is cut at 500 ms
             router().use(qb::http::static_files_middleware<WireSession>(qb::http::StaticFilesOptions(g_static_root)
                                                                             .with_path_prefix_to_strip("/static")
@@ -749,6 +758,57 @@ TEST_F(Http2StreamWireTest, AnIdleProducerBesideABusySiblingIsNeverCut) {
     (void) last_growth;
     c.close();
 }
+
+#ifdef QB_HAS_COMPRESSION
+TEST_F(Http2StreamWireTest, AStreamedFileIsCodedOnTheFlyAndItsDataFramesInflateToIt) {
+    // The client accepts gzip (Huly QB-1208): the HEADERS say `content-encoding: gzip` and no `content-length` (the
+    // coded length is unknown: END_STREAM ends the body), each DATA frame carries coded bytes, and the whole inflates
+    // to the 16 MiB file -- pseudo-random bytes, so the coded form is about as large, which is not the point.
+    std::string big(kBigFile, '\0');
+    {
+        std::uint32_t x = 7u;
+        for (auto &ch : big) {
+            x  = x * 1664525u + 1013904223u;
+            ch = static_cast<char>(x >> 24);
+        }
+    }
+    // The windows must hold the CODED form, a little larger than the random file (stored blocks, a header, a trailer):
+    // a window of exactly the file's size left the last bytes and END_STREAM held back, the stream ended on the server's
+    // side and so out of its stall watch (QB-1212), for the connection's idle sweep.
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 0x7fffffffu}}));
+    ASSERT_TRUE(c.window_update(0, 0x7fffffffu - 65535u));
+    const auto id = c.request("/static/big.bin", "GET", {{"accept-encoding", "gzip"}});
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(c.read_until([&] { return c.stream(id).end_stream || c.stream(id).reset; }, 30s))
+        << "the coded download never ended: " << c.stream(id).data_bytes << " bytes, eof " << c.eof << ", status " << c.stream(id).status();
+    EXPECT_FALSE(c.stream(id).reset);
+    EXPECT_EQ(c.stream(id).status(), 200);
+    std::string encoding, length, vary, etag;
+    for (auto const &field : c.stream(id).headers) {
+        if (field.name == "content-encoding")
+            encoding = field.value;
+        if (field.name == "content-length")
+            length = field.value;
+        if (field.name == "vary")
+            vary = field.value;
+        if (field.name == "etag")
+            etag = field.value;
+    }
+    EXPECT_EQ(encoding, "gzip");
+    EXPECT_TRUE(length.empty()) << "the coded length is unknown: " << length;
+    EXPECT_NE(vary.find("Accept-Encoding"), std::string::npos) << vary;
+    EXPECT_EQ(etag.substr(0, 2), "W/") << etag;
+    qb::http::Body body;
+    body = c.stream(id).body();
+    ASSERT_NO_THROW(body.uncompress("gzip"));
+    EXPECT_EQ(body.size(), kBigFile);
+    EXPECT_TRUE(body.as<std::string>() == big) << "the inflated DATA frames differ from the file";
+    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").streamed == kBigFile; }))
+        << "the producer's own bytes are what the stream counts";
+    c.close();
+}
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(Http2StreamWireTest, AChunkedCodingTheHandlerSaidIsDroppedAndTheStreamIsEndOfStreamFramed) {
     Http2RawClient c;

@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -129,6 +130,28 @@ concept per_stream_waiting = requires(S &s, ResponseStream<S> const &stream) {
 };
 
 /**
+ * @brief A content coding applied to a stream's pieces as they are written (Huly QB-1208): `code()` appends to `out`
+ *        what `piece` becomes, `finish()` the coding's tail at `end()`; either answering `false` ends the exchange as
+ *        `abort()` does. `bound(n)` is what the stream admits a piece of `n` bytes against BEFORE coding it, so a
+ *        piece refused for room (`wait`, `too_large`) was never handed to the coder and is written again as it is; a
+ *        coder that appends more than the bound is written all the same (the slack of the pieces before covers it),
+ *        and `finish()` appends at most `bound(0)`: the stream keeps that much room, framed, under the cap from the
+ *        first write, so the tail is never refused. Installed by the middleware that negotiated the coding, through
+ *        `Context::set_stream_coding()` from a `PRE_RESPONSE_SEND` hook while `begin_stream()` runs, before the head
+ *        leaves (the context sets the head for it); the stream hands the coded form to the session and counts the
+ *        producer's own bytes in `written()`. Never on a buffered stream, on a HEAD's, or under a declared
+ *        `Content-Length` (the coding drops it).
+ */
+class stream_filter {
+public:
+    virtual ~stream_filter()                                                              = default;
+    [[nodiscard]] virtual std::string_view name() const noexcept                          = 0;
+    [[nodiscard]] virtual std::size_t      bound(std::size_t piece) const noexcept        = 0;
+    [[nodiscard]] virtual bool             code(std::string_view piece, std::string &out) = 0;
+    [[nodiscard]] virtual bool             finish(std::string &out)                       = 0;
+};
+
+/**
  * @brief A response body written piece by piece, with backpressure (Huly QB-86).
  * @tparam SessionType The session type of the `Context` that began the stream.
  *
@@ -193,12 +216,14 @@ concept per_stream_waiting = requires(S &s, ResponseStream<S> const &stream) {
  * first piece, on every path. The response to a HEAD request streams its head alone: the pieces are counted and discarded, never faulted
  * against a length. A response that cannot be streamed gets a BUFFERED stream: same interface, the body leaves whole at `end()` through the
  * ordinary completion, `pending()` reads 0 and `drain()` never waits. `PRE_RESPONSE_SEND` hooks run once: at `begin_stream()` when the response
- * may stream -- they see the head that leaves and an empty body, so a body-rewriting hook (compression) leaves a streamed body alone -- and at
+ * may stream -- they see the head that leaves and an empty body, so a body-rewriting hook sets a content coding on the stream instead
+ * (`Context::set_stream_coding()`, Huly QB-1208) -- and at
  * the ordinary completion when the response is buffered from the start, so compression, logging and timing see
  * the body they are owed. `POST_RESPONSE_SEND` runs when the last byte is delivered, as for any response. A session
  * whose inactivity timeout runs while a producer writes nothing ends the stream like a peer that left: a stream of
  * events writes a heartbeat, or the session's timeout is raised.
  */
+
 template <typename SessionType>
 class ResponseStream : public std::enable_shared_from_this<ResponseStream<SessionType>> {
     friend class Context<SessionType>;
@@ -329,10 +354,13 @@ public:
         }
         if constexpr (streaming_session<SessionType>) {
             // The framing bytes travel with the piece: a chunk is its hexadecimal size, CRLF, the bytes, CRLF; and the
-            // last-chunk end() writes keeps its room, so end() never overruns the cap a write was admitted under.
+            // last-chunk end() writes keeps its room, so end() never overruns the cap a write was admitted under. A
+            // coded piece is admitted on the coding's bound of it, before it is coded: refused, it was never consumed;
+            // the coding's tail keeps its room the same way (`_tail_reserve`), so end() is never refused it.
             const bool        chunked = _framing == stream_framing::chunked;
-            const std::size_t framed  = chunked ? bytes.size() + chunk_overhead(bytes.size()) : bytes.size();
-            const std::size_t reserve = chunked ? chunk_overhead(0) : 0;
+            const std::size_t widest  = _filter ? _filter->bound(bytes.size()) : bytes.size();
+            const std::size_t framed  = chunked ? widest + chunk_overhead(widest) : widest;
+            const std::size_t reserve = (chunked ? chunk_overhead(0) : 0) + _tail_reserve;
             if (_write_cap != static_cast<std::size_t>(-1)) {
                 // A piece that would not fit after a drain either -- the output falls under the low mark, under the
                 // high one, which is at most half the cap -- is refused for good: waiting for it would loop for ever.
@@ -342,10 +370,23 @@ public:
                 if (session->stream_pending(*this) > _write_cap - reserve - framed)
                     return write_result::wait; // publish() would disconnect the peer for the producer's haste
             }
+            std::string_view wire = bytes;
+            if (_filter) {
+                _coded.clear();
+                if (!_filter->code(bytes, _coded)) {
+                    abort(); // the coder failed: the message cannot be completed
+                    return write_result::closed;
+                }
+                if (_coded.empty()) { // the coder holds it for now: nothing leaves, the piece is taken
+                    _written += bytes.size();
+                    return write_result::taken;
+                }
+                wire = _coded;
+            }
             if (chunked)
-                session->stream_write(*this, Chunk{bytes.data(), bytes.size()});
+                session->stream_write(*this, Chunk{wire.data(), wire.size()});
             else
-                session->stream_write(*this, bytes);
+                session->stream_write(*this, wire);
             if (_watching) {
                 if (_last_pending == 0)
                     _progress_at = qb::mono_now(); // nothing waited until now: the wait for the socket starts here
@@ -381,6 +422,16 @@ public:
         if (_framing == stream_framing::content_length && _written != _declared) {
             abort();
             return;
+        }
+        if (_filter && _framing != stream_framing::buffered) {
+            // The coding's tail (Huly QB-1208): what the coder still holds and its trailer, written as a last piece --
+            // small, since every piece was flushed as it was coded -- before the message closes. A tail the output
+            // cannot take, or a coder that fails, ends the exchange: the peer would take a short coded body for whole.
+            _coded.clear();
+            if (!_filter->finish(_coded) || (!_coded.empty() && write_tail(_coded) != write_result::taken)) {
+                abort();
+                return;
+            }
         }
         _ended = true;
         stop_watch();
@@ -426,8 +477,9 @@ public:
             }
             return;
         }
-        // The bytes that left are recorded here: the context's cancel() reads them from the stream only while it is
-        // alive, and the abort of a producer that dropped its handle runs from the destructor, when it no longer is.
+        // The producer's bytes the stream took are recorded here (under a coding, their coded form is what left): the
+        // context's cancel() reads them from the stream only while it is alive, and the abort of a producer that
+        // dropped its handle runs from the destructor, when it no longer is.
         if (ctx && ctx->_streamed)
             ctx->_streamed_bytes = _written;
         if (auto session = _session.lock()) {
@@ -521,6 +573,11 @@ public:
     [[nodiscard]] std::shared_ptr<context_type>
     context() const noexcept {
         return _ctx.lock();
+    }
+    /// The content coding the pieces leave under, if a middleware installed one (Huly QB-1208); null otherwise.
+    [[nodiscard]] stream_filter const *
+    filter() const noexcept {
+        return _filter.get();
     }
     [[nodiscard]] std::size_t
     high_watermark() const noexcept {
@@ -679,6 +736,38 @@ private:
         if (_write_cap != static_cast<std::size_t>(-1) && h > _write_cap / 2)
             h = _write_cap / 2;
         return h ? h : 1;
+    }
+
+    /// The coding the context installs at creation (Huly QB-1208): the pieces leave coded from the first write, and
+    /// the tail's room -- `bound(0)`, framed -- is kept under the cap by every admission.
+    void
+    install_filter(std::unique_ptr<stream_filter> filter) {
+        _filter                = std::move(filter);
+        const std::size_t tail = _filter->bound(0);
+        _tail_reserve          = tail + (_framing == stream_framing::chunked ? chunk_overhead(tail) : 0);
+    }
+
+    /// The coding's tail at end(): written as the pieces are, framed, admitted against the cap, past the filter.
+    [[nodiscard]] write_result
+    write_tail(std::string_view wire) {
+        auto session = _session.lock();
+        if (!session)
+            return write_result::closed;
+        if constexpr (streaming_session<SessionType>) {
+            const bool        chunked = _framing == stream_framing::chunked;
+            const std::size_t framed  = chunked ? wire.size() + chunk_overhead(wire.size()) : wire.size();
+            const std::size_t reserve = chunked ? chunk_overhead(0) : 0;
+            if (_write_cap != static_cast<std::size_t>(-1)
+                && (framed > _write_cap - reserve || session->stream_pending(*this) > _write_cap - reserve - framed))
+                return write_result::wait; // the tail would overrun the cap: publish() would disconnect the peer
+            if (chunked)
+                session->stream_write(*this, Chunk{wire.data(), wire.size()});
+            else
+                session->stream_write(*this, wire);
+            return write_result::taken;
+        } else {
+            return write_result::closed;
+        }
     }
 
     /// A piece of a buffered body: gathered in the response, under the bound every protocol's serializer applies.
@@ -897,6 +986,10 @@ private:
     bool                      _watching{false};
     std::unique_ptr<Watch>    _watch;
     std::unique_ptr<RateRing> _rate;
+    // The content coding (Huly QB-1208): the filter the context handed over at creation, and the coded form of a piece.
+    std::unique_ptr<stream_filter> _filter;
+    std::string                    _coded;
+    std::size_t                    _tail_reserve{0}; ///< the tail's room under the cap: bound(0), framed
 };
 
 namespace sse {

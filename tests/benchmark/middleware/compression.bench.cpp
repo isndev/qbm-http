@@ -188,6 +188,38 @@ BM_Compress_BodyEncodeOnly(benchmark::State &state, const std::string &encoding)
     state.SetItemsProcessed(state.iterations());
 }
 
+// A streamed body coded on the fly (Huly QB-1208): the filter the middleware sets on a ResponseStream, fed the pieces a
+// static download writes (64 KiB), finished once -- the per-piece cost the coded path pays, as bytes a second.
+void
+BM_Compress_StreamCoding(benchmark::State &state, const std::string &encoding) {
+    const auto        piece  = static_cast<std::size_t>(state.range(0));
+    const std::string corpus = make_corpus(std::size_t{4} * 1024 * 1024);
+    std::string       out;
+    for (auto _ : state) {
+        state.PauseTiming();
+        qb::http::detail::StreamCoding coding(qb::compression::builtin::make_compressor(encoding), encoding);
+        std::size_t                    coded = 0;
+        state.ResumeTiming();
+        for (std::size_t offset = 0; offset < corpus.size(); offset += piece) {
+            out.clear();
+            if (!coding.code(std::string_view(corpus).substr(offset, piece), out)) {
+                state.SkipWithError("the coder refused a piece");
+                return;
+            }
+            coded += out.size();
+        }
+        out.clear();
+        if (!coding.finish(out)) {
+            state.SkipWithError("the coder refused to finish");
+            return;
+        }
+        coded += out.size();
+        benchmark::DoNotOptimize(coded);
+    }
+    state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(corpus.size()));
+    state.SetItemsProcessed(state.iterations());
+}
+
 // ===========================================================================
 // MIDDLEWARE: process() + PRE_RESPONSE_SEND hook (Accept-Encoding negotiation).
 //
@@ -249,6 +281,11 @@ BENCHMARK_CAPTURE(BM_Compress_BodyRoundTrip, gzip, std::string("gzip"))
     ->Arg(256)
     ->Arg(2048)
     ->Arg(16 * 1024)
+    ->Arg(64 * 1024)
+    ->ArgNames({"bytes"})
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_Compress_StreamCoding, gzip, std::string("gzip"))->Arg(64 * 1024)->ArgNames({"bytes"})->Unit(benchmark::kMicrosecond);
+BENCHMARK_CAPTURE(BM_Compress_StreamCoding, deflate, std::string("deflate"))
     ->Arg(64 * 1024)
     ->ArgNames({"bytes"})
     ->Unit(benchmark::kMicrosecond);

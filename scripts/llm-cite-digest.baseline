@@ -54,32 +54,36 @@ llm/qbm-http.llm.api.md	chunk.h:106-106	8b2020e847e8	pipe<char> &pipe<char>::put
 llm/qbm-http.llm.api.md	chunk.h:133-133	8a9eaf17a4a0	[[nodiscard]] bool writes_trailer_section(const internal::MessageBase...
 llm/qbm-http.llm.api.md	chunk.h:150-150	4e151baec6a1	void write_trailed_chunked_message(qb::allocator::pipe<char> &out, co...
 llm/qbm-http.llm.api.md	chunk.h:32-32	50cb5b8d9d2c	class Chunk {
-llm/qbm-http.llm.api.md	compression.h:161-161	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
-llm/qbm-http.llm.api.md	compression.h:40-40	d3a697e2ad5b	class CompressionOptions {
-llm/qbm-http.llm.api.md	compression.h:541-541	0c5e06cc94a3	compression_middleware(CompressionOptions options = CompressionOption...
+llm/qbm-http.llm.api.md	compression.h:159-159	5355f14abb7d	class StreamCoding final : public stream_filter {
+llm/qbm-http.llm.api.md	compression.h:258-258	e1fb666ef806	class CompressionMiddleware final : public IMiddleware<SessionType> {
+llm/qbm-http.llm.api.md	compression.h:44-44	d3a697e2ad5b	class CompressionOptions {
+llm/qbm-http.llm.api.md	compression.h:501-501	10bd76332ff6	code_streamed_response(Context<SessionType> &ctx_ref, const Compressi...
+llm/qbm-http.llm.api.md	compression.h:701-701	0c5e06cc94a3	compression_middleware(CompressionOptions options = CompressionOption...
 llm/qbm-http.llm.api.md	conditional.h:154-154	36cc9178c5f7	conditional_middleware(typename ConditionalMiddleware<SessionType>::P...
 llm/qbm-http.llm.api.md	conditional.h:42-42	c19422f76c02	class ConditionalMiddleware final : public IMiddleware<SessionType> {
-llm/qbm-http.llm.api.md	context.h:1131-1131	33a3d55f8489	json(qb::json json_data, qb::http::status status_code = qb::http::sta...
-llm/qbm-http.llm.api.md	context.h:1310-1310	6154b20691c3	complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE) {
-llm/qbm-http.llm.api.md	context.h:1414-1414	74aae78c693a	cancel(const std::string &reason = "Cancelled by application") noexce...
-llm/qbm-http.llm.api.md	context.h:1455-1455	26d4e2a87ebb	is_cancelled() const noexcept {
-llm/qbm-http.llm.api.md	context.h:1488-1488	deaf345cb492	suppress_response() noexcept {
-llm/qbm-http.llm.api.md	context.h:1523-1523	1cb1402a3eb0	begin_stream() {
-llm/qbm-http.llm.api.md	context.h:1610-1610	f67cd8a68cc2	is_streaming() const noexcept {
-llm/qbm-http.llm.api.md	context.h:1616-1616	17b122ebc9ea	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
-llm/qbm-http.llm.api.md	context.h:1617-1617	e559de7d444d	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse(sse...
-llm/qbm-http.llm.api.md	context.h:1621-1621	a50dd3235e81	stream() const noexcept {
-llm/qbm-http.llm.api.md	context.h:1629-1629	b37328078d4b	streamed_bytes() const noexcept {
-llm/qbm-http.llm.api.md	context.h:616-616	2dcb7c7500f1	request() noexcept {
-llm/qbm-http.llm.api.md	context.h:698-698	8b64ffe0c86d	route_pattern() const noexcept {
-llm/qbm-http.llm.api.md	context.h:817-817	ffba101443fd	add_lifecycle_hook(LifecycleHook hook_fn) {
-llm/qbm-http.llm.api.md	context.h:860-860	f5161d5431e3	set(const std::string &key, T value) {
-llm/qbm-http.llm.api.md	context.h:874-874	2d1782b02852	get(const std::string &key) const {
-llm/qbm-http.llm.api.md	context.h:896-896	9d7fe82af049	get_if(const std::string &key) noexcept {
-llm/qbm-http.llm.api.md	context.h:914-914	cecfdf313bd2	get_if(const std::string &key) const noexcept {
-llm/qbm-http.llm.api.md	context.h:928-928	bd8a29cb8c69	has(const std::string &key) const noexcept {
-llm/qbm-http.llm.api.md	context.h:948-948	01618fd7b393	remove(const std::string &key) noexcept {
-llm/qbm-http.llm.api.md	context.h:983-983	c5dcd56683b7	set(const Slot<T> &slot, T value) {
+llm/qbm-http.llm.api.md	context.h:1133-1133	33a3d55f8489	json(qb::json json_data, qb::http::status status_code = qb::http::sta...
+llm/qbm-http.llm.api.md	context.h:1312-1312	6154b20691c3	complete(AsyncTaskResult result = AsyncTaskResult::COMPLETE) {
+llm/qbm-http.llm.api.md	context.h:1416-1416	74aae78c693a	cancel(const std::string &reason = "Cancelled by application") noexce...
+llm/qbm-http.llm.api.md	context.h:1457-1457	26d4e2a87ebb	is_cancelled() const noexcept {
+llm/qbm-http.llm.api.md	context.h:1490-1490	deaf345cb492	suppress_response() noexcept {
+llm/qbm-http.llm.api.md	context.h:1525-1525	1cb1402a3eb0	begin_stream() {
+llm/qbm-http.llm.api.md	context.h:1621-1621	f67cd8a68cc2	is_streaming() const noexcept {
+llm/qbm-http.llm.api.md	context.h:1629-1629	f8560ce68a31	stream_beginning() const noexcept {
+llm/qbm-http.llm.api.md	context.h:1647-1647	ac11fc0c7995	set_stream_coding(std::unique_ptr<stream_filter> filter) noexcept {
+llm/qbm-http.llm.api.md	context.h:1654-1654	17b122ebc9ea	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
+llm/qbm-http.llm.api.md	context.h:1655-1655	e559de7d444d	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse(sse...
+llm/qbm-http.llm.api.md	context.h:1659-1659	a50dd3235e81	stream() const noexcept {
+llm/qbm-http.llm.api.md	context.h:1668-1668	b37328078d4b	streamed_bytes() const noexcept {
+llm/qbm-http.llm.api.md	context.h:618-618	2dcb7c7500f1	request() noexcept {
+llm/qbm-http.llm.api.md	context.h:700-700	8b64ffe0c86d	route_pattern() const noexcept {
+llm/qbm-http.llm.api.md	context.h:819-819	ffba101443fd	add_lifecycle_hook(LifecycleHook hook_fn) {
+llm/qbm-http.llm.api.md	context.h:862-862	f5161d5431e3	set(const std::string &key, T value) {
+llm/qbm-http.llm.api.md	context.h:876-876	2d1782b02852	get(const std::string &key) const {
+llm/qbm-http.llm.api.md	context.h:898-898	9d7fe82af049	get_if(const std::string &key) noexcept {
+llm/qbm-http.llm.api.md	context.h:916-916	cecfdf313bd2	get_if(const std::string &key) const noexcept {
+llm/qbm-http.llm.api.md	context.h:930-930	bd8a29cb8c69	has(const std::string &key) const noexcept {
+llm/qbm-http.llm.api.md	context.h:950-950	01618fd7b393	remove(const std::string &key) noexcept {
+llm/qbm-http.llm.api.md	context.h:985-985	c5dcd56683b7	set(const Slot<T> &slot, T value) {
 llm/qbm-http.llm.api.md	controller.h:135-135	23fb4595e77b	set_base_path_segment(std::string path_segment) noexcept {
 llm/qbm-http.llm.api.md	controller.h:168-168	02be97746240	virtual void initialize_routes() = 0;
 llm/qbm-http.llm.api.md	controller.h:218-218	6fc21ea46c61	use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
@@ -241,7 +245,7 @@ llm/qbm-http.llm.api.md	parameter_validator.h:35-35	bdccc56f9657	struct Paramete
 llm/qbm-http.llm.api.md	protocol/connection.h:1802-1802	93331a7177d4	control_stream_acknowledged() const noexcept {
 llm/qbm-http.llm.api.md	protocol/connection.h:80-80	f34c4add2bb2	inline constexpr std::uint64_t max_field_section_size = 1024 * 1024;
 llm/qbm-http.llm.api.md	protocol/connection.h:944-944	e710b5de4f17	answer_refused_request(std::uint64_t stream_id, stream_state &st, qb:...
-llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1366-1425	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
+llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1426	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.api.md	rate_limit.h:142-142	cc4621c8922c	client_id_extractor(std::function<std::string(const Context<SessionTy...
 llm/qbm-http.llm.api.md	rate_limit.h:167-167	d1f5abc327d8	trust_forwarded_headers(bool enabled = true) noexcept {
 llm/qbm-http.llm.api.md	rate_limit.h:348-348	40568f99af7c	class RateLimitMiddleware final : public IMiddleware<SessionType> {
@@ -270,13 +274,15 @@ llm/qbm-http.llm.api.md	response.h:368-368	d4cfa8bc1ae1	pipe<char> &pipe<char>::
 llm/qbm-http.llm.api.md	response.h:56-58	e5d0228cfdc0	Response() noexcept
 llm/qbm-http.llm.api.md	response.h:76-76	2705db5fe133	status() const noexcept {
 llm/qbm-http.llm.api.md	response.h:80-80	82246683f1d1	status() noexcept {
-llm/qbm-http.llm.api.md	response_stream.h:108-108	84f2c152f62e	concept streaming_session = requires(S &s, Context<S> &ctx, ResponseS...
-llm/qbm-http.llm.api.md	response_stream.h:210-210	6f299207b5bb	enum class write_result : std::uint8_t {
-llm/qbm-http.llm.api.md	response_stream.h:296-296	179ef4641dff	~ResponseStream() {
-llm/qbm-http.llm.api.md	response_stream.h:309-309	114de7b13f00	write(std::string_view bytes) {
-llm/qbm-http.llm.api.md	response_stream.h:360-360	a0c89504c6c5	write(char const *data, std::size_t size) {
-llm/qbm-http.llm.api.md	response_stream.h:66-66	8262d7ec5989	enum class stream_framing : std::uint8_t {
-llm/qbm-http.llm.api.md	response_stream.h:74-74	29b55fe59bf8	inline constexpr std::size_t default_stream_high_watermark = std::siz...
+llm/qbm-http.llm.api.md	response_stream.h:109-109	84f2c152f62e	concept streaming_session = requires(S &s, Context<S> &ctx, ResponseS...
+llm/qbm-http.llm.api.md	response_stream.h:145-145	2f39ed42e048	class stream_filter {
+llm/qbm-http.llm.api.md	response_stream.h:235-235	6f299207b5bb	enum class write_result : std::uint8_t {
+llm/qbm-http.llm.api.md	response_stream.h:321-321	179ef4641dff	~ResponseStream() {
+llm/qbm-http.llm.api.md	response_stream.h:334-334	114de7b13f00	write(std::string_view bytes) {
+llm/qbm-http.llm.api.md	response_stream.h:401-401	a0c89504c6c5	write(char const *data, std::size_t size) {
+llm/qbm-http.llm.api.md	response_stream.h:579-579	20952e46a3fc	filter() const noexcept {
+llm/qbm-http.llm.api.md	response_stream.h:67-67	8262d7ec5989	enum class stream_framing : std::uint8_t {
+llm/qbm-http.llm.api.md	response_stream.h:75-75	29b55fe59bf8	inline constexpr std::size_t default_stream_high_watermark = std::siz...
 llm/qbm-http.llm.api.md	route.h:139-139	b610b99d7dbc	class CustomRouteAdapterTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route.h:51-51	ebbc59b09b09	class RouteLambdaTask final : public IAsyncTask<SessionType> {
 llm/qbm-http.llm.api.md	route_group.h:148-148	6fc21ea46c61	use(H &&handler, std::string name = "UnnamedCoroMiddleware") {
@@ -403,8 +409,8 @@ llm/qbm-http.llm.api.md	src/qbm/http/routing/handler_node.h:136-136	d73510be7d0b
 llm/qbm-http.llm.api.md	src/qbm/http/routing/middleware.h:39-39	e310f50b5179	class IMiddleware {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/observer.h:70-70	57a7f2938e15	class IRequestObserver {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/path_parameters.h:32-32	fdea36bcf7be	class PathParameters {
-llm/qbm-http.llm.api.md	src/qbm/http/routing/response_stream.h:203-203	9ab91a7a91d8	class ResponseStream : public std::enable_shared_from_this<ResponseSt...
-llm/qbm-http.llm.api.md	src/qbm/http/routing/response_stream.h:66-66	8262d7ec5989	enum class stream_framing : std::uint8_t {
+llm/qbm-http.llm.api.md	src/qbm/http/routing/response_stream.h:228-228	9ab91a7a91d8	class ResponseStream : public std::enable_shared_from_this<ResponseSt...
+llm/qbm-http.llm.api.md	src/qbm/http/routing/response_stream.h:67-67	8262d7ec5989	enum class stream_framing : std::uint8_t {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/route.h:239-239	f405f34feaa5	class Route : public IHandlerNode<SessionType> {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/route_group.h:50-50	ed616d0a03dc	class RouteGroup : public IHandlerNode<Session> {
 llm/qbm-http.llm.api.md	src/qbm/http/routing/router.h:54-54	45a1c2f12876	class Router {
@@ -473,7 +479,7 @@ llm/qbm-http.llm.api.md	types.h:935-935	028e26dbdc36	enum DisconnectedReason : i
 llm/qbm-http.llm.api.md	types.h:942-944	e9ad04cab8a3	/// The server drains (`drain()`, Huly QB-167): an idle connection cl...
 llm/qbm-http.llm.api.md	types.h:950-950	eedbfe7f25a1	enum class drain_outcome : std::uint8_t {
 llm/qbm-http.llm.api.md	types.h:963-963	6c7c92a87174	struct hash<qb::http::method> {
-llm/qbm-http.llm.api.md	utility.h:273-275	a316e8ede202	template <typename String>
+llm/qbm-http.llm.api.md	utility.h:290-292	a316e8ede202	template <typename String>
 llm/qbm-http.llm.api.md	utility.h:34-34	8ee074414546	namespace utility {
 llm/qbm-http.llm.md	1.1/http.h:1003-1044	db88fffc9cda	[[nodiscard]] static qb::http::detail::websocket_drain *
 llm/qbm-http.llm.md	1.1/http.h:1083-1104	9ed9fad6098f	drain(qb::duration deadline, std::function<void(qb::http::drain_outco...
@@ -485,7 +491,7 @@ llm/qbm-http.llm.md	3/dual_stack.h:322-322	83353ce82899	drain(qb::duration deadl
 llm/qbm-http.llm.md	3/http3.h:536-623	6e79b15144e4	shutdown_notice_wait(std::uint64_t connection_id) const noexcept {
 llm/qbm-http.llm.md	3/http3.h:818-820	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
 llm/qbm-http.llm.md	3/http3.h:916-959	2e074dea8c73	graceful_shutdown() {
-llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1366-1425	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
+llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1426	5ac98822db38	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:240-244	889fc62c5cea	Client::~Client() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:280-315	6211468140a7	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:346-357	289b3dda3894	Client::disconnect() {
@@ -534,6 +540,7 @@ llm/qbm-http.llm.md	src/qbm/http/detail/redirect.cpp:64-112	678155bd192c	split_r
 llm/qbm-http.llm.md	src/qbm/http/detail/server_tls.cpp:11-11	780038b37336	set_server_tls_context(qb::io::tcp::ssl::listener &listener, qb::io::...
 llm/qbm-http.llm.md	src/qbm/http/middleware/access_log.h:110-118	df1036709f9d	void
 llm/qbm-http.llm.md	src/qbm/http/middleware/access_log.h:160-160	0b9d49616e2d	access_log(typename AccessLog<SessionType>::Sink sink, AccessLogForma...
+llm/qbm-http.llm.md	src/qbm/http/middleware/compression.h:501-501	10bd76332ff6	code_streamed_response(Context<SessionType> &ctx_ref, const Compressi...
 llm/qbm-http.llm.md	src/qbm/http/middleware/conditional.h:87-111	4a2fae499b3f	process(ContextPtr ctx) override {
 llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:175-175	370a5f973069	request_metrics(RequestMetricsOptions options = {}) {
 llm/qbm-http.llm.md	src/qbm/http/middleware/metrics.h:238-238	adf2abfb6e2e	metrics_handler(qb::Actor &actor, MetricsEndpointOptions options = {}) {
@@ -544,17 +551,19 @@ llm/qbm-http.llm.md	src/qbm/http/redirect.h:215-340	1e60fd74f0d0	REQUEST(Request
 llm/qbm-http.llm.md	src/qbm/http/redirect.h:25-38	c103a7dda1f3	struct RedirectOptions {
 llm/qbm-http.llm.md	src/qbm/http/redirect.h:92-162	929c73a6795c	launch(Request &request) {
 llm/qbm-http.llm.md	src/qbm/http/routing/async_task.h:92-115	4c8620673d9e	struct RouteNameArena {
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1414-1449	31ca2f6539db	cancel(const std::string &reason = "Cancelled by application") noexce...
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1523-1523	1cb1402a3eb0	begin_stream() {
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1616-1616	17b122ebc9ea	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:244-270	e4efcd50c976	execute_hook_internal(HookPoint point) {
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:698-698	8b64ffe0c86d	route_pattern() const noexcept {
-llm/qbm-http.llm.md	src/qbm/http/routing/context.h:817-830	70e7f6d13c25	add_lifecycle_hook(LifecycleHook hook_fn) {
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1416-1451	31ca2f6539db	cancel(const std::string &reason = "Cancelled by application") noexce...
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1525-1525	1cb1402a3eb0	begin_stream() {
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1629-1647	151d15ddf8d6	stream_beginning() const noexcept {
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:1654-1654	17b122ebc9ea	[[nodiscard]] std::shared_ptr<sse::Stream<SessionType>> begin_sse();
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:246-272	e4efcd50c976	execute_hook_internal(HookPoint point) {
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:700-700	8b64ffe0c86d	route_pattern() const noexcept {
+llm/qbm-http.llm.md	src/qbm/http/routing/context.h:819-832	70e7f6d13c25	add_lifecycle_hook(LifecycleHook hook_fn) {
 llm/qbm-http.llm.md	src/qbm/http/routing/middleware.h:58-61	b6254c5139b3	* @brief Called if the task chain processing is cancelled.
 llm/qbm-http.llm.md	src/qbm/http/routing/observer.h:70-70	57a7f2938e15	class IRequestObserver {
 llm/qbm-http.llm.md	src/qbm/http/routing/path_parameters.h:32-57	ea8c81b1bdbf	class PathParameters {
-llm/qbm-http.llm.md	src/qbm/http/routing/response_stream.h:203-203	9ab91a7a91d8	class ResponseStream : public std::enable_shared_from_this<ResponseSt...
-llm/qbm-http.llm.md	src/qbm/http/routing/response_stream.h:548-598	e053b929d52d	set_idle_deadline(qb::duration deadline) noexcept {
+llm/qbm-http.llm.md	src/qbm/http/routing/response_stream.h:145-145	2f39ed42e048	class stream_filter {
+llm/qbm-http.llm.md	src/qbm/http/routing/response_stream.h:228-228	9ab91a7a91d8	class ResponseStream : public std::enable_shared_from_this<ResponseSt...
+llm/qbm-http.llm.md	src/qbm/http/routing/response_stream.h:605-655	e053b929d52d	set_idle_deadline(qb::duration deadline) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/routing/router.h:294-294	13269e8ed1eb	Router<SessionType> &add_observer(std::shared_ptr<IRequestObserver<Se...
 llm/qbm-http.llm.md	src/qbm/http/routing/router_core.h:445-455	13eb14e65fc7	}
 llm/qbm-http.llm.md	src/qbm/http/routing/router_core.h:88-94	49e409b4133c	get_retained_error_tasks(std::shared_ptr<const std::vector<std::share...
