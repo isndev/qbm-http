@@ -85,7 +85,7 @@ private:
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
     std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client resets, sent or provoked; streams opened (Rapid Reset)
-    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies queued this drain window (flood guard)
+    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies since request progress (flood guard)
     std::uint32_t _continuation_frame_count = 0;                     ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
@@ -1027,7 +1027,7 @@ public:
 
         LOG_HTTP_TRACE_PA(stream_id, "Server: Received WINDOW_UPDATE frame with increment " << window_increment);
 
-        if (window_increment == 0) {
+        if (window_increment == 0) { // a guard: the frame layer ends both first (on_stream_frame_error, report_frame_error)
             if (stream_id == 0) {
                 this->on_connection_error(ErrorCode::PROTOCOL_ERROR, "Received WINDOW_UPDATE with 0 increment on stream 0.");
             } else {
@@ -3031,9 +3031,9 @@ private:
     /**
      * @brief Refuse a new client stream with REFUSED_STREAM (RFC 9113 §8.7): opened by its HEADERS and closed at once, its id
      *        is no longer idle (§5.1.1) -- a frame the client sent on it before it saw the refusal is one on a closed stream
-     *        -- while the last stream accepted, which a GOAWAY names, does not move. The id stayed idle, and such a frame
-     *        closed the connection with GOAWAY(PROTOCOL_ERROR). The refusal is a reset the client solicits, budgeted as
-     *        those on a closed stream are: a client that opens streams past the limit without pause is closed (Huly QB-1270).
+     *        -- while the last stream accepted, which a GOAWAY names, does not move. The id stayed idle: a DATA, WINDOW_UPDATE or
+     *        RST_STREAM on it closed the connection with GOAWAY(PROTOCOL_ERROR), a HEADERS was refused again or served anew. The
+     *        refusal, a reset the client solicits, is budgeted as those on a closed stream are (Huly QB-1270).
      */
     void
     refuse_new_stream(uint32_t stream_id, const std::string &context_msg) noexcept {
@@ -3046,12 +3046,12 @@ public:
      * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets
      *        (§6.3) -- for which the frame layer ended the connection, without a GOAWAY (Huly QB-1270): the stream is reset
      *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling
-     *        (send_provoked_rst_stream), a closed stream against the control replies (send_closed_stream_rst); an idle
-     *        stream, which no RST_STREAM may name (§6.4), makes it a connection error, with its GOAWAY (§5.4.1).
+     *        (send_provoked_rst_stream), a closed stream against the closed-stream budget (send_closed_stream_rst); an idle
+     *        stream, which no RST_STREAM may name (§6.4), or stream 0 makes it a connection error, with its GOAWAY (§5.4.1).
      */
     void
     on_stream_frame_error(ErrorCode error_code, const std::string &message, uint32_t stream_id) noexcept {
-        if (stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _highest_client_stream_id)) {
+        if (stream_id == 0 || stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _highest_client_stream_id)) {
             this->send_goaway_and_close(error_code, message);
             return;
         }
