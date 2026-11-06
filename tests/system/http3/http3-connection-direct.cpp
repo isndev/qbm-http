@@ -1586,6 +1586,28 @@ TEST(Http3ConnectionDirect, AMovedConnectionKeepsItsControlStreamAndItsAcknowled
     EXPECT_FALSE(server_owner.close.has_value());
 }
 
+/**
+ * @test A started shutdown is drained only once its request streams are (Huly QB-1242, review R1)
+ * @brief is_drained() reads nghttp3_conn_is_drained2 from 1.16, nghttp3_conn_is_drained -- deprecated since -- below:
+ *        a server connection that shuts down with a request in flight is not drained until that stream closes.
+ */
+TEST(Http3ConnectionDirect, AShutdownIsDrainedOnlyOnceItsStreamsAre) {
+    Pair              pair;
+    qb::http::Request request{qb::http::method::GET, qb::io::uri("https://example.test/in-flight")};
+    ASSERT_TRUE(pair.client.submit_request(0, request));
+    pair.settle();
+    ASSERT_EQ(pair.server_owner.requests.size(), 1u);
+    ASSERT_TRUE(pair.server.shutdown());
+    pair.settle();
+    EXPECT_FALSE(pair.server.is_drained()) << "a request in flight";
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    ASSERT_TRUE(pair.server.submit_response(0, response));
+    pair.settle();
+    pair.server.close_stream(0, NGHTTP3_H3_NO_ERROR);
+    EXPECT_TRUE(pair.server.is_drained()) << "its last stream closed";
+}
+
 // =============================================================================
 // :authority — an IPv6 literal keeps its brackets (Huly QB-572)
 // =============================================================================

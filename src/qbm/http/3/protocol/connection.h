@@ -1570,8 +1570,9 @@ private:
         cb.reset_stream      = reset_stream_cb;
         cb.shutdown          = shutdown_cb;
 #if NGHTTP3_VERSION_NUM >= 0x010e00 // `recv_settings2` (1.14): "New settings will not be notified" to `recv_settings`
-        cb.recv_settings2 = recv_settings_cb;
-#else // the module's floor, 1.12 (Huly QB-1242)
+        cb.recv_settings2                                  = recv_settings_cb;
+        [[maybe_unused]] const nghttp3_recv_settings floor = recv_settings_cb; // the 1.12 instantiation, type-checked here
+#else                                                                          // the module's floor, 1.12 (Huly QB-1242)
         cb.recv_settings = recv_settings_cb;
 #endif
         cb.rand = rand_cb;
@@ -1619,8 +1620,7 @@ public:
      *        destination (its native identity re-pointed), which keeps the stream state, the bound local streams -- the
      *        control stream, its bytes sent and acknowledged among them (Huly QB-1242: lost) --, a started shutdown and
      *        any close still parked. The source is left empty -- @c ok() is false -- and may be destroyed at once.
-     * @pre No nghttp3 call of @p rhs is on the stack: a connection is moved between events, never from inside one of
-     *      its own callbacks.
+     * @pre No nghttp3 call of @p rhs is on the stack: it is moved between events, never from one of its own callbacks.
      * @param rhs Source connection.
      */
     connection(connection &&rhs) noexcept
@@ -1846,14 +1846,14 @@ public:
         return true;
     }
 
-    /**
-     * @brief Whether a started shutdown has fully drained.
-     * @return @c true only after ::shutdown was called and nghttp3 reports the
-     *         connection drained (safe to close the transport).
-     */
+    /// @brief Whether a started shutdown has drained: ::shutdown was called and nghttp3 says so (safe to close the transport).
     [[nodiscard]] bool
     is_drained() const noexcept {
+#if NGHTTP3_VERSION_NUM >= 0x011000 // `nghttp3_conn_is_drained` is deprecated since 1.16 (Huly QB-1242, review R1)
+        return _shutdown_started && nghttp3_conn_is_drained2(_conn) != 0;
+#else
         return _shutdown_started && nghttp3_conn_is_drained(_conn) != 0;
+#endif
     }
 
     /**
