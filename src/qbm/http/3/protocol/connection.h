@@ -597,8 +597,8 @@ make_request_headers(qb::http::Request const &request, std::optional<qb::http::d
         return std::nullopt;
     }
     header_block block;
-    std::size_t  fields = 0; // regular fields, as a server reads them: the four pseudo-headers counted (Huly QB-1266)
-    auto         target = request_target(request.uri()), authority = qb::http::origin::authority(request.uri());
+    std::size_t  fields = 0; // the regular fields alone, as a server reads them: pseudo-headers counted until Huly QB-1266
+    std::string  target = request_target(request.uri()), authority = qb::http::origin::authority(request.uri());
     if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return std::nullopt;
     }
@@ -657,7 +657,7 @@ make_response_headers(qb::http::Response const &response, std::optional<qb::http
         return std::nullopt;
     }
     header_block block;
-    std::size_t  fields = 0; // regular fields, as a client reads them: :status counted (Huly QB-1266)
+    std::size_t  fields = 0; // the regular fields alone, as a client reads them: :status counted until Huly QB-1266
     block.add(":status", std::to_string(response.status().code()));
     if (!add_regular_headers(block, response, fields, trailers ? &*trailers : nullptr)) {
         return std::nullopt;

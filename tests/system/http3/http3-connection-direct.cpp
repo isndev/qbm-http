@@ -2674,8 +2674,8 @@ TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted
         ClientConnection client{client_owner, 1, ClientConnection::role::client};
         ASSERT_TRUE(client.bind_local_streams());
         EXPECT_TRUE(client.submit_request(0, request_of(advertised + 1))) << "the bound is the peer's, unknown until it says it";
-        // The largest request the outgoing limits allow -- 100 regular fields of 8 KiB, :path and :authority at theirs --
-        // stays within this module's 1 MiB and is submitted. It passed it through :authority, unbounded until Huly QB-1266.
+        // A request at the outgoing limits -- 100 regular fields of 8 KiB, names of 255 bytes (their Huffman code within
+        // nghttp3's 160), :path and :authority at theirs -- stays within 1 MiB. It passed it through :authority (QB-1266).
         const std::string host = std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH - 5, 'a') + ".test";
         const std::string path = "/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 1, 'p');
         qb::http::Request big{qb::http::method::GET, qb::io::uri("https://" + host + path)};
@@ -2683,8 +2683,10 @@ TEST(Http3ConnectionDirect, AMessagePastThePeersFieldSectionSizeIsNeverSubmitted
             {":method", "GET"}, {":scheme", "https"}, {":authority", host}, {":path", path}
         };
         for (std::size_t i = 0; i < qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
-            big.add_header("x-" + std::to_string(i), std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
-            counted.emplace_back("x-" + std::to_string(i), std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
+            const auto digits = std::to_string(i);
+            const auto name   = std::string(255 - digits.size(), 'a') + digits;
+            big.add_header(name, std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
+            counted.emplace_back(name, std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'));
         }
         ASSERT_LT(field_section_size(counted), 1024u * 1024u);
         EXPECT_TRUE(client.submit_request(4, big)) << "the largest request the outgoing limits allow, no bound known yet";
