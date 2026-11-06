@@ -21,7 +21,7 @@
  *   - trailers whose content-length contradicts the delivered body -> PROTOCOL_ERROR.
  *   - send_response on a RESERVED_LOCAL (server-pushed) stream -> PROTOCOL_ERROR
  *     stream error (the RESERVED_LOCAL arm of the send-state guard).
- *   - send_response with a control byte in a response header VALUE -> PROTOCOL_ERROR
+ *   - send_response with a control byte in a response header VALUE -> INTERNAL_ERROR
  *     (the is_valid_header_field send-path arm; the value is set via Response::set_header,
  *     which stores verbatim, so it reaches the validator before any HPACK encode).
  *   - GOAWAY received: the dispatched Http2GoAwayEvent carries the peer's
@@ -429,7 +429,8 @@ TEST(HTTP2ServerCoverageDeep, PromisedStreamIsAnsweredThroughSendResponse) {
 }
 
 // ===========================================================================
-// send_response with a control byte in a response header VALUE -> PROTOCOL_ERROR.
+// send_response with a control byte in a response header VALUE -> INTERNAL_ERROR: the
+// application's response is invalid, the request was not (RFC 9113 §7; Huly QB-1273).
 // Response::set_header stores the value verbatim (no validation), so the byte
 // survives to send_response's is_valid_header_field check, which runs BEFORE any
 // HPACK encoding (the inbound HEADERS path can't reach this because the HPACK
