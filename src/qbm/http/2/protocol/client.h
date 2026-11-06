@@ -1174,7 +1174,7 @@ public:
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
         if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
-            // Nothing was sent: trailers() a trailer section cannot carry (Huly QB-1073), past the server's bound (QB-1274).
+            release_unsent_stream_id(stream_id); // nothing was sent: trailers() a section cannot carry (QB-1073), the bound (QB-1274)
             LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
             _client_streams.erase(iter);
             return false;
@@ -1349,9 +1349,9 @@ public:
      *          when nothing is left (Huly QB-1202).
      * @param stream_id Stream ID
      * @param trailers Trailer headers to send
-     * @return true if the trailers were sent or queued behind the body; false if the stream is
-     *         unknown or already ended, a trailer section was already handed over, or a field
-     *         was refused (the stream is then reset).
+     * @return true if the trailers were sent or queued behind the body; false if the stream is unknown or already
+     *         ended, a trailer section was already handed over, a field was refused, or the section passes the server's
+     *         SETTINGS_MAX_HEADER_LIST_SIZE, judged now and again as it leaves (the stream is then reset; Huly QB-1274).
      */
     [[nodiscard]] bool
     send_request_trailers(uint32_t stream_id, const qb::http::headers &trailers) {
@@ -1400,9 +1400,9 @@ public:
 
         if (stream.has_pending_data_to_send) {
             // Part of the body still waits for flow-control credit: the trailer block must follow
-            // its last DATA frame, so try_send_pending_data_for_stream() sends it then.
-            stream.queued_trailer_fields = std::move(trailer_fields);
-            return true;
+            // its last DATA frame, so try_send_pending_data_for_stream() sends it then -- judged
+            // against the server's bound here, and again there (Huly QB-1274).
+            return queue_trailer_section(stream, std::move(trailer_fields));
         }
         return send_request_trailer_block(stream, std::move(trailer_fields));
     }
@@ -2491,7 +2491,7 @@ private:
      *        CONTINUATION frames past the peer's SETTINGS_MAX_FRAME_SIZE (Huly QB-522).
      * @details Called only once the body's last DATA frame is out. The stream may be erased by
      *          the time this returns (closed after END_STREAM): callers do not touch it again.
-     * @return false if encoding or sending failed (the stream is reset on an encoding failure).
+     * @return false if the section passes the server's bound or encoding or sending failed (the first two reset it).
      */
     [[nodiscard]] bool
     send_request_trailer_block(Http2ClientStream &stream, std::vector<hpack::HeaderField> &&trailer_fields) noexcept {
@@ -2681,6 +2681,32 @@ private:
             send_rst_stream(stream_id, ErrorCode::COMPRESSION_ERROR, "HPACK encoding failed for trailers");
             return false;
         }
+        return true;
+    }
+
+    /**
+     * @brief Give back the stream id of a request refused before anything was sent: the next request takes it, and a
+     *        frame the server sends on it is one on an idle stream (RFC 9113 §5.1). It stayed spent -- recorded as
+     *        initiated, never on the wire -- and such a frame was read as one on a closed stream (Huly QB-1274).
+     */
+    void
+    release_unsent_stream_id(uint32_t stream_id) noexcept {
+        _next_client_stream_id    = stream_id;
+        _last_initiated_stream_id = stream_id > 2u ? stream_id - 2u : 0u;
+    }
+
+    /**
+     * @brief Keep a trailer section until the body's last DATA frame is out, judged first by the server's
+     *        SETTINGS_MAX_HEADER_LIST_SIZE: past it the stream is reset with INTERNAL_ERROR and nothing is kept --
+     *        send_request_trailers() returned true and the reset came only once the body was out (Huly QB-1274).
+     */
+    [[nodiscard]] bool
+    queue_trailer_section(Http2ClientStream &stream, std::vector<hpack::HeaderField> &&fields) noexcept {
+        if (!fits_peer_header_list(stream.id, fields)) {
+            send_rst_stream(stream.id, ErrorCode::INTERNAL_ERROR, "Trailer section past the server's SETTINGS_MAX_HEADER_LIST_SIZE");
+            return false;
+        }
+        stream.queued_trailer_fields = std::move(fields);
         return true;
     }
 

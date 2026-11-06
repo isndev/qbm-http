@@ -289,10 +289,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   client judges both now as the server judges a response (Huly QB-1235, QB-1240), counted as RFC 9113 §6.5.2 counts
   it -- each name and value, and 32 octets -- before the block is encoded, so the HPACK table never runs ahead of the
   server's: past it `send_request()` returns `false` with nothing written (`qb::http2::Client` answers the caller
-  `503`), and a trailer section is judged again when it leaves, by the bound then in force -- one handed to
-  `send_request_trailers()`, or one whose body waited for credit while the server lowered its bound, resets the
-  stream with `INTERNAL_ERROR`, the section never sent. Read on a client against an 8 KiB bound: a request one octet
-  past it left; it is refused now with zero bytes on the socket, and one of exactly 8192 octets leaves.
+  `503`), and a trailer section is judged again when it is handed to `send_request_trailers()` and when it leaves, by
+  the bound then in force -- one whose body waited for credit while the server lowered its bound resets the stream
+  with `INTERNAL_ERROR`, the section never sent, and so does one handed over past the bound,
+  `send_request_trailers()` returning `false` at once. A request refused before anything is sent -- past the bound,
+  or with a trailer section `trailers()` cannot carry (Huly QB-1073) -- gives its stream id back: it stayed spent,
+  never on the wire, and a frame the server sent on it was read as one on a closed stream. Read on a client against a
+  2 KiB bound: a request one octet past it left; it is refused now with zero bytes on the socket, the next request
+  takes its stream id, and one of exactly 2048 octets leaves.
 
 - **The HTTP/2 server resets every response it refuses itself with `INTERNAL_ERROR` (Huly QB-1273; the maintainer's
   decision of 2026-11-06).** `send_response()` reset a response carrying a forbidden or an invalid field, an invalid
