@@ -293,6 +293,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   pair: `PROTOCOL_ERROR` for a contradicted `content-length`, `INTERNAL_ERROR` now; nothing is sent before the reset,
   and the same connection serves the next request. The other refusals of an invalid response keep their codes.
 
+- **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
+  as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list
+  against that bound before encoding it -- each name and value, and 32 octets (RFC 9113 §6.5.2); the two other blocks
+  the server encodes were sent past it: the promised request of a `PUSH_PROMISE`, and a response's trailer section.
+  `send_push_promise()` now refuses a promise past the bound with a new
+  `PushPromiseFailureReason::PEER_HEADER_LIST_SIZE_EXCEEDED`, before its stream is reserved and ahead of the one
+  refusal that only has to wait, `PEER_CONCURRENCY_LIMIT_REACHED` (Huly QB-1202); a trailer section past it resets its
+  stream with `INTERNAL_ERROR`, as a leading block past it does, judged by the bound in force when it leaves -- a body
+  that waits for credit keeps its section, and a bound the client lowers meanwhile holds it. Neither block is encoded,
+  so the HPACK table stays in step with the client's. Measured on a client-to-server frame exchange: under a bound of
+  187 octets a promise of 188 was sent and is refused now, the same id promised at 187 right after, every block that
+  follows decoded by the client; under 100 a trailer section of 101 octets was sent and resets its stream now, one of
+  100 leaves and ends it.
+
 - **The HTTP/3 server resets a response it cannot submit with `H3_REQUEST_CANCELLED`, not `H3_MESSAGE_ERROR` (Huly
   QB-1241; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with `0x010e` when
   `submit_response()` refused the response -- a field a response cannot carry (`te`, Huly QB-1191), a `content-length`

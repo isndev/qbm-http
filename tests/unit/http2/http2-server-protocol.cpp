@@ -5834,7 +5834,8 @@ TEST(HTTP2ServerProtocol, EveryResponseThatWaitsLeavesWhileTheLimitHasRoom) {
 TEST(HTTP2ServerProtocol, AResponseThatHasToWaitIsJudgedFirst) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
-    handshake_one_push_no_window(protocol, io, {{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}});
+    // 200 octets: a promise's list, 179, fits it -- a promise is held to it too (Huly QB-1240) -- the wide response's not.
+    handshake_one_push_no_window(protocol, io, {{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 200}});
     for (const uint32_t id : {2u, 4u, 6u}) {
         EXPECT_FALSE(protocol.send_push_promise(1, id, make_promised_request("https://example.test/" + std::to_string(id))).has_value());
     }
@@ -6754,4 +6755,198 @@ TEST(HTTP2ServerProtocol, TheClientsAndTheProvokedResetsShareOneCeiling) {
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
     EXPECT_EQ(pairs, qb1244_test::max_resets + 1) << "51 client resets and 50 provoked, one ceiling";
+}
+
+// ===========================================================================
+// RFC 9113 section 6.5.2: SETTINGS_MAX_HEADER_LIST_SIZE announces "the maximum size of field section that the sender is
+// prepared to accept". The server held a response's header list to it (Huly QB-1235), not the two other blocks it
+// encodes: a PUSH_PROMISE's and a trailer section left past it (Huly QB-1240). Each is now judged before it is encoded,
+// so the HPACK table stays in step with the client's: a promise past the bound is refused before anything is reserved --
+// ahead of the refusal that only has to wait -- and a trailer section past it resets its stream, by the bound in force
+// when it leaves.
+// ===========================================================================
+namespace qb1240_test {
+
+using qb::protocol::http2::PushPromiseFailureReason;
+
+/// Handshake with push enabled, the client's header list bound and, optionally, its concurrency limit.
+void
+handshake_bounded(ServerProtocol &protocol, Http2FakeIO &io, uint32_t max_header_list, std::optional<uint32_t> max_concurrent = std::nullopt) {
+    push_preface(io);
+    std::vector<std::pair<Http2SettingIdentifier, uint32_t>> settings{
+        {Http2SettingIdentifier::SETTINGS_ENABLE_PUSH, 1}, {Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, max_header_list}
+    };
+    if (max_concurrent.has_value()) {
+        settings.emplace_back(Http2SettingIdentifier::SETTINGS_MAX_CONCURRENT_STREAMS, *max_concurrent);
+    }
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload(settings));
+    drive(protocol, io);
+}
+
+/// The list a promise of https://example.test<path> carries, counted as RFC 9113 section 6.5.2 counts it.
+[[nodiscard]] uint32_t
+promised_list_size(const std::string &path) {
+    const std::vector<qb::protocol::hpack::HeaderField> fields{
+        {":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", path}
+    };
+    std::size_t size = 0;
+    for (const auto &f : fields) {
+        size += f.hpack_size();
+    }
+    return static_cast<uint32_t>(size);
+}
+
+/// One header block the server sent, as the client decodes it.
+struct SentBlock {
+    FrameType                                     type;
+    uint32_t                                      stream_id;
+    std::vector<qb::protocol::hpack::HeaderField> fields;
+
+    [[nodiscard]] std::string
+    value(std::string_view name) const {
+        for (const auto &f : fields) {
+            if (f.name == name) {
+                return f.value;
+            }
+        }
+        return {};
+    }
+};
+
+/// Every header block the server sent -- HEADERS and PUSH_PROMISE, in order -- decoded with one decoder, as the client
+/// decodes them: a block encoded and never sent leaves the server's table ahead, and the blocks after it decode wrong.
+[[nodiscard]] std::vector<SentBlock>
+sent_blocks_decoded(const qb::allocator::pipe<char> &output) {
+    qb::protocol::hpack::Decoder decoder;
+    std::vector<SentBlock>       blocks;
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (f.type != FrameType::HEADERS && f.type != FrameType::PUSH_PROMISE) {
+            continue;
+        }
+        EXPECT_EQ(f.flags & qb::protocol::http2::FLAG_PADDED, 0) << "a padded block";
+        auto payload = emitted_payload(output, f);
+        if (f.type == FrameType::PUSH_PROMISE) {
+            payload.erase(payload.begin(), payload.begin() + 4); // the promised stream id
+        }
+        SentBlock block{f.type, f.stream_id, {}};
+        bool      incomplete = false;
+        EXPECT_TRUE(decoder.decode(payload, block.fields, incomplete));
+        blocks.push_back(std::move(block));
+    }
+    return blocks;
+}
+
+/// A response whose trailer section is one field, x-c, of @p octets octets: 3 + octets + 32 in the list.
+[[nodiscard]] qb::http::Response
+trailed_response(std::size_t octets, std::string body = {}) {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::move(body);
+    response.trailers().set_header("x-c", std::string(octets, 'c'));
+    return response;
+}
+
+/// The HEADERS blocks sent on @p stream_id.
+[[nodiscard]] std::size_t
+headers_count(const qb::allocator::pipe<char> &output, uint32_t stream_id) {
+    std::size_t n = 0;
+    for (const auto &f : parse_emitted_frames(output)) {
+        n += f.type == FrameType::HEADERS && f.stream_id == stream_id ? 1u : 0u;
+    }
+    return n;
+}
+
+} // namespace qb1240_test
+
+// A promise of exactly the client's bound is sent, a byte more is refused before its stream is reserved or its block
+// encoded: the id is promised at the bound right after, and the client decodes every block that follows.
+TEST(HTTP2ServerProtocol, APromisePastTheClientsHeaderListBoundIsRefusedBeforeAnythingIsReserved) {
+    const uint32_t at = qb1240_test::promised_list_size("/asset.css");
+    ASSERT_EQ(at, 187u) << "42 + 44 + 54 + 47";
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    qb1240_test::handshake_bounded(protocol, io, at, 10);
+    open_get_stream_end_stream(protocol, io, 1, "/parent");
+
+    const auto past = protocol.send_push_promise(1, 2, make_promised_request("https://example.test/asset.cssx"));
+    ASSERT_TRUE(past.has_value()) << "a byte past the bound was promised";
+    EXPECT_EQ(*past, qb1240_test::PushPromiseFailureReason::PEER_HEADER_LIST_SIZE_EXCEEDED);
+    EXPECT_FALSE(frame_type_seen(io.output, FrameType::PUSH_PROMISE));
+
+    EXPECT_FALSE(protocol.send_push_promise(1, 2, make_promised_request()).has_value()) << "exactly the bound, the same id";
+    qb::http::Response pushed;
+    pushed.status() = qb::http::status::NO_CONTENT;
+    EXPECT_TRUE(protocol.send_response(2, pushed));
+    EXPECT_TRUE(protocol.send_response(1, pushed));
+
+    const auto blocks = qb1240_test::sent_blocks_decoded(io.output);
+    ASSERT_EQ(blocks.size(), 3u);
+    EXPECT_EQ(blocks[0].type, FrameType::PUSH_PROMISE);
+    EXPECT_EQ(blocks[0].value(":path"), "/asset.css");
+    EXPECT_EQ(blocks[0].value(":authority"), "example.test");
+    EXPECT_EQ(blocks[1].value(":status"), "204");
+    EXPECT_EQ(blocks[2].value(":status"), "204");
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A promise past the bound is a refusal a retry cannot change: it comes before the one that only has to wait, as the
+// other definitive refusals do (Huly QB-1202), or a caller that waits for room retries a promise that can never be made.
+TEST(HTTP2ServerProtocol, APromisePastTheHeaderListBoundIsRefusedAheadOfTheConcurrencyLimit) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    qb1240_test::handshake_bounded(protocol, io, qb1240_test::promised_list_size("/asset.css"), 0); // no room for a push
+    open_get_stream_end_stream(protocol, io, 1, "/parent");
+    const auto past = protocol.send_push_promise(1, 2, make_promised_request("https://example.test/asset.cssx"));
+    ASSERT_TRUE(past.has_value());
+    EXPECT_EQ(*past, qb1240_test::PushPromiseFailureReason::PEER_HEADER_LIST_SIZE_EXCEEDED);
+    const auto at = protocol.send_push_promise(1, 2, make_promised_request());
+    ASSERT_TRUE(at.has_value());
+    EXPECT_EQ(*at, qb1240_test::PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED) << "the one that only has to wait";
+    EXPECT_FALSE(frame_type_seen(io.output, FrameType::PUSH_PROMISE));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A trailer section of exactly the client's bound leaves and ends its stream; a byte more resets the stream with
+// INTERNAL_ERROR, as a leading block past it does (Huly QB-1235), and is never encoded: the client decodes what follows.
+TEST(HTTP2ServerProtocol, ATrailerSectionPastTheClientsHeaderListBoundResetsItsStream) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 100}}));
+    drive(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/past");
+    open_get_stream_end_stream(protocol, io, 3, "/at");
+    // The leading block, :status 200 and `trailer: x-c`, counts 42 + 42; x-c and 65 octets 3 + 65 + 32 = 100.
+    protocol.send_response(1, qb1240_test::trailed_response(66));
+    EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::INTERNAL_ERROR) << "a byte past the bound";
+    EXPECT_EQ(qb1240_test::headers_count(io.output, 1), 1u) << "the trailer section past the bound was sent";
+
+    EXPECT_TRUE(protocol.send_response(3, qb1240_test::trailed_response(65)));
+    EXPECT_FALSE(last_rst_stream_error(io.output, 3).has_value()) << "exactly the bound";
+    const auto blocks = qb1240_test::sent_blocks_decoded(io.output);
+    ASSERT_EQ(blocks.size(), 3u);
+    EXPECT_EQ(blocks[2].stream_id, 3u);
+    EXPECT_EQ(blocks[2].value("x-c"), std::string(65, 'c'));
+    EXPECT_TRUE(protocol.is_stream_closed(3)) << "the trailer section ends the stream";
+    EXPECT_TRUE(protocol.ok());
+}
+
+// The trailer section is judged when it leaves, by the bound then in force: a response whose body waits for credit keeps
+// its trailer section, and a bound the client lowers meanwhile holds it.
+TEST(HTTP2ServerProtocol, ATrailerSectionIsJudgedByTheBoundInForceWhenItLeaves) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+    drive(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/waits");
+    EXPECT_TRUE(protocol.send_response(1, qb1240_test::trailed_response(23, "abc"))); // x-c counts 3 + 23 + 32 = 58
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 0u) << "the body waits for credit";
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 57}}));
+    make_window_update_frame(io, 1, 100);
+    drive(protocol, io);
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 3u);
+    EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::INTERNAL_ERROR) << "judged by the bound the client lowered";
+    EXPECT_EQ(qb1240_test::headers_count(io.output, 1), 1u);
+    EXPECT_TRUE(protocol.ok());
 }

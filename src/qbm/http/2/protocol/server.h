@@ -1397,8 +1397,7 @@ public:
     /**
      * @brief Send PUSH_PROMISE to client
      *
-     * Initiates a server push by sending a PUSH_PROMISE frame. The promised
-     * stream must be followed by a send_response() call with the actual response.
+     * Initiates a server push by sending a PUSH_PROMISE frame; the promised stream is answered by send_response().
      *
      * @param associated_stream_id Stream ID of the client request triggering this push
      * @param promised_stream_id Stream ID for the promised response (must be even)
@@ -1406,14 +1405,15 @@ public:
      *        its URI the scheme, authority and path promised; its fields are sent as a client's request sends them
      *        (append_sent_request_fields, Huly QB-1191).
      * @return std::nullopt once the PUSH_PROMISE is sent, else why it was not: INVALID_PROMISED_STREAM for a promised
-     *         stream id that is zero, odd, past 2^31-1 or not above every stream already promised (RFC 9113 §5.1.1),
+     *         stream id that is zero, odd, past 2^31-1 or not above every one promised (RFC 9113 §5.1.1),
      *         INVALID_ASSOCIATED_STREAM for one the client did not open or that is not open (§8.4),
-     *         INVALID_PROMISED_REQUEST for a promised request §8.4 does not allow, CONNECTION_INACTIVE once a GOAWAY was
-     *         received (§6.8) or sent, the shutdown notice included -- each a refusal a retry cannot change, and judged
+     *         INVALID_PROMISED_REQUEST for a request §8.4 does not allow, PEER_HEADER_LIST_SIZE_EXCEEDED for one past
+     *         the client's SETTINGS_MAX_HEADER_LIST_SIZE (§6.5.2, Huly QB-1240), CONNECTION_INACTIVE once a GOAWAY was
+     *         received (§6.8) or sent, the shutdown notice included -- each a refusal a retry cannot change, judged
      *         first -- and last PEER_CONCURRENCY_LIMIT_REACHED, which only has to wait: the pushed streams the client's
      *         SETTINGS_MAX_CONCURRENT_STREAMS counts -- those a response opened, not those reserved (§5.1.2) -- fill it
-     *         (Huly QB-1202). A promise made under it reserves its stream; the response, once given (send_response()),
-     *         waits for room as long as the limit has none.
+     *         (Huly QB-1202). A promise made under it reserves its stream; its response (send_response()) waits for
+     *         room while the limit has none.
      */
     [[nodiscard]] std::optional<PushPromiseFailureReason>
     send_push_promise(uint32_t associated_stream_id, uint32_t promised_stream_id, qb::http::Request promised_request) {
@@ -1465,17 +1465,6 @@ public:
             || promised_request.has_header("trailer")) {
             return PushPromiseFailureReason::INVALID_PROMISED_REQUEST;
         }
-        // The one refusal that only has to wait comes last: it came before the associated stream and the promised
-        // request were judged, and a caller that retries on it retried a promise that could never be made (Huly
-        // QB-1202). A reserved stream does not count (RFC 9113 §5.1.2): a second promise was refused under a limit of
-        // one.
-        if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
-            LOG_HTTP_WARN_PA(associated_stream_id, "Server: Cannot send PUSH_PROMISE for promised_stream_id "
-                                                       << promised_stream_id << ". Would exceed client's MAX_CONCURRENT_STREAMS limit: "
-                                                       << _peer_max_concurrent_streams);
-            return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
-        }
-
         // :method, :scheme, :authority and :path, then the promised request's fields under the rules a client's request
         // is sent by (append_sent_request_fields): no connection-specific field (RFC 9113 §8.2.2), nor one its
         // `connection` header names, no `host` (`:authority` names the authority, §8.3.1), no `content-length`, no field
@@ -1488,7 +1477,18 @@ public:
         hf_vector.push_back({std::string(qb::http::well_known::COLON_AUTHORITY_SV), std::move(promised_authority)});
         hf_vector.push_back({std::string(qb::http::well_known::COLON_PATH_SV), std::move(promised_path)});
         append_sent_request_fields(promised_request, hf_vector);
-
+        // The list is held to the client's SETTINGS_MAX_HEADER_LIST_SIZE (RFC 9113 §6.5.2) before anything is reserved or
+        // encoded: a promise past it was sent (Huly QB-1240). The one refusal that only has to wait comes last: before the
+        // stream and the request were judged, a caller that retried on it retried a promise that could never be made (Huly
+        // QB-1202). A reserved stream does not count (§5.1.2): a second promise was refused under a limit of one.
+        if (!this->fits_peer_header_list(associated_stream_id, hf_vector)) {
+            return PushPromiseFailureReason::PEER_HEADER_LIST_SIZE_EXCEEDED;
+        }
+        if (get_active_stream_count(true) >= _peer_max_concurrent_streams) {
+            LOG_HTTP_WARN_PA(associated_stream_id,
+                             "Server: push " << promised_stream_id << " refused: MAX_CONCURRENT_STREAMS " << _peer_max_concurrent_streams);
+            return PushPromiseFailureReason::PEER_CONCURRENCY_LIMIT_REACHED;
+        }
         // Create a new stream context for the promised stream
         Http2ServerStream promised_stream(promised_stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
         promised_stream.state            = Http2StreamConcreteState::RESERVED_LOCAL;
@@ -2703,12 +2703,12 @@ private:
             // Exactly the fields the `trailer` header announces, which send_response() kept out of
             // the leading HEADERS (Huly QB-1058), then the response's trailers() (Huly QB-1073).
             std::vector<qb::protocol::hpack::HeaderField> hf_vector_trailers = outgoing_trailer_fields(stream.response_to_send);
-
-            // Trailers always end the stream; a block larger than the peer's frame size is split
-            // over CONTINUATION frames (Huly QB-522).
+            // Held to the client's SETTINGS_MAX_HEADER_LIST_SIZE as the leading block is, by the bound in force, before it is
+            // encoded: one past it was sent (Huly QB-1240). Trailers end the stream, split over CONTINUATION frames (Huly QB-522).
             std::vector<uint8_t> encoded_trailers;
-            if (!hf_vector_trailers.empty() && !_hpack_encoder.encode(hf_vector_trailers, encoded_trailers)) {
-                send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "HPACK trailer encoding error");
+            if (!this->fits_peer_header_list(stream_id_param, hf_vector_trailers)
+                || (!hf_vector_trailers.empty() && !_hpack_encoder.encode(hf_vector_trailers, encoded_trailers))) {
+                send_rst_stream(stream_id_param, ErrorCode::INTERNAL_ERROR, "Trailer section past the client's bound, or not encoded");
                 return; // Stop processing for this stream
             }
 
@@ -2958,6 +2958,30 @@ private:
         if (past_ceiling) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets provoked (HTTP/2 MadeYouReset)");
         }
+    }
+
+    /**
+     * @brief Whether a field section fits the client's SETTINGS_MAX_HEADER_LIST_SIZE, counted as RFC 9113 §6.5.2 counts
+     *        it -- each name and value, and 32 octets. A promised request and a trailer section are judged by it before
+     *        they are encoded, as a response's header list is (Huly QB-1235): both were sent past it (Huly QB-1240).
+     * @param stream_id The stream the section belongs to, for the log.
+     * @param fields The section, as it would be encoded.
+     */
+    [[nodiscard]] bool
+    fits_peer_header_list(uint32_t stream_id, const std::vector<qb::protocol::hpack::HeaderField> &fields) const {
+        if (_peer_max_header_list_size >= DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
+            return true;
+        }
+        std::uint64_t list_size = 0;
+        for (const auto &field : fields) {
+            list_size += field.hpack_size();
+        }
+        if (list_size <= _peer_max_header_list_size) {
+            return true;
+        }
+        LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: field section " << list_size << " exceeds peer's MAX_HEADER_LIST_SIZE "
+                                                                          << _peer_max_header_list_size);
+        return false;
     }
 
 }; // class ServerHttp2Protocol

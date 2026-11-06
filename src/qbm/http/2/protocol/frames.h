@@ -331,8 +331,8 @@ enum class PushPromiseFailureReason {
     INVALID_PROMISED_REQUEST,       ///< No valid pseudo-headers, a method other than GET or HEAD, content or a trailer section.
     INTERNAL_HPACK_ERROR,           ///< HPACK encoding failed for push promise headers.
     CONNECTION_INACTIVE,            ///< Connection is not active, protocol is not ok, or a GOAWAY was sent or received.
-    INTERNAL_ERROR                  ///< An internal server error prevented sending the push promise.
-    // Add other specific reasons as needed
+    INTERNAL_ERROR,                 ///< An internal server error prevented sending the push promise.
+    PEER_HEADER_LIST_SIZE_EXCEEDED  ///< The promised request's field section exceeds the client's SETTINGS_MAX_HEADER_LIST_SIZE.
 };
 
 // --- Frame Size Constants ---
