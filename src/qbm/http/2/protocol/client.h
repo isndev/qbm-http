@@ -1150,7 +1150,7 @@ public:
             return false;
         }
 
-        uint32_t stream_id = _next_client_stream_id;
+        uint32_t stream_id = _next_client_stream_id, initiated_before = _last_initiated_stream_id;
         _next_client_stream_id += 2;
         _last_initiated_stream_id = stream_id;
 
@@ -1174,7 +1174,7 @@ public:
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
         if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
-            release_unsent_stream_id(stream_id); // nothing was sent: trailers() a section cannot carry (QB-1073), the bound (QB-1274)
+            release_unsent_stream_id(stream_id, initiated_before); // nothing sent (QB-1073 trailers, QB-1274 bound)
             LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
             _client_streams.erase(iter);
             return false;
@@ -1351,7 +1351,7 @@ public:
      * @param trailers Trailer headers to send
      * @return true if the trailers were sent or queued behind the body; false if the stream is unknown or already
      *         ended, a trailer section was already handed over, a field was refused, or the section passes the server's
-     *         SETTINGS_MAX_HEADER_LIST_SIZE, judged now and again as it leaves (the stream is then reset; Huly QB-1274).
+     *         SETTINGS_MAX_HEADER_LIST_SIZE now (the stream is then reset; past it when it leaves, a reset only; QB-1274).
      */
     [[nodiscard]] bool
     send_request_trailers(uint32_t stream_id, const qb::http::headers &trailers) {
@@ -2685,14 +2685,15 @@ private:
     }
 
     /**
-     * @brief Give back the stream id of a request refused before anything was sent: the next request takes it, and a
-     *        frame the server sends on it is one on an idle stream (RFC 9113 §5.1). It stayed spent -- recorded as
-     *        initiated, never on the wire -- and such a frame was read as one on a closed stream (Huly QB-1274).
+     * @brief Give back the stream id of a request refused before anything was sent, both counters as they were: the next
+     *        request takes it, and a frame the server sends on it is one on an idle stream (RFC 9113 §5.1). It stayed spent
+     *        -- recorded as initiated, never on the wire -- and such a frame was read as one on a closed stream until the
+     *        next request opened a higher id (Huly QB-1274).
      */
     void
-    release_unsent_stream_id(uint32_t stream_id) noexcept {
+    release_unsent_stream_id(uint32_t stream_id, uint32_t initiated_before) noexcept {
         _next_client_stream_id    = stream_id;
-        _last_initiated_stream_id = stream_id > 2u ? stream_id - 2u : 0u;
+        _last_initiated_stream_id = initiated_before;
     }
 
     /**

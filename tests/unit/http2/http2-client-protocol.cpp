@@ -4340,9 +4340,9 @@ TEST(HTTP2ClientProtocol, EveryInvalidResponseTheServerRefusesIsResetWithInterna
 // server judges a response (Huly QB-1240): the leading block and the trailer section the request plans before anything
 // is sent -- send_request() returns false, zero bytes on the socket, the stream id given back -- and a trailer section
 // when it is handed over and again when it leaves, by the bound then in force: past it the stream is reset
-// (INTERNAL_ERROR), the section never encoded. Every case then sends a block that must decode as the server decodes the
-// connection: a section encoded and dropped would have left its fields in the HPACK table, and the next block would name
-// them by index.
+// (INTERNAL_ERROR), the section never encoded. The first three cases then send a block that must decode as the server
+// decodes the connection: a section encoded and dropped would have left its fields in the HPACK table, and the next block
+// would name them by index.
 // ===========================================================================
 namespace qb1274_test {
 
@@ -4409,11 +4409,25 @@ connection_blocks(const qb::allocator::pipe<char> &output, std::size_t from) {
 /// Lift the server's bound out of the way, then send a request carrying @p name = @p value: the field a refused section
 /// held, which an HPACK table run ahead of the server's would name by index.
 void
-send_after(h2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, std::string const &name, std::string const &value) {
+send_after(h2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, const std::string &name, const std::string &value) {
     protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 65536}}));
     auto request = padded(0);
     request.set_header(name, value);
     EXPECT_TRUE(protocol.send_request(std::move(request), 99));
+}
+
+/// The payload size of every HEADERS frame the client sent from @p from on, in order.
+[[nodiscard]] std::vector<std::size_t>
+header_payload_sizes(const qb::allocator::pipe<char> &output, std::size_t from) {
+    std::vector<std::size_t> sizes;
+    for (std::size_t off = from; off + h2::FRAME_HEADER_SIZE <= output.size();) {
+        const auto fh = peek_frame_header(output, off);
+        if (fh.get_type() == h2::FrameType::HEADERS) {
+            sizes.push_back(fh.get_payload_length());
+        }
+        off += h2::FRAME_HEADER_SIZE + fh.get_payload_length();
+    }
+    return sizes;
 }
 
 } // namespace qb1274_test
@@ -4488,6 +4502,13 @@ TEST(HTTP2ClientProtocol, ATrailerSectionIsJudgedByTheServersBoundInForceWhenItL
         const auto blocks = qb1274_test::connection_blocks(io.output, start);
         ASSERT_EQ(blocks.size(), 2u) << "the request's leading block and the next one's";
         EXPECT_EQ(blocks[1].value("x-checksum"), std::string(1000, 'd')) << "the HPACK table ran ahead of the server's";
+        // The positive control: the encoder indexes such a field once it is sent, so a section encoded and dropped
+        // would have indexed it too -- the same request again names it in a few octets, where its literal takes at
+        // least the 625 its value Huffman-codes to (a 5-bit code per `d`).
+        qb1274_test::send_after(protocol, "x-checksum", std::string(1000, 'd'));
+        const auto sizes = qb1274_test::header_payload_sizes(io.output, start);
+        ASSERT_EQ(sizes.size(), 3u);
+        EXPECT_LT(sizes[2] + 500, sizes[1]) << "the field was not indexed: the check above proves nothing";
     }
     {
         Http2ClientFakeIO                          io;
@@ -4531,4 +4552,29 @@ TEST(HTTP2ClientProtocol, ATrailerSectionHandedOverBehindTheBodyIsJudgedThen) {
     EXPECT_EQ(sum_data_payload_for_stream(io.output, 1, before), 0u) << "the reset stream sent its body";
     EXPECT_EQ(find_frame_offset(io.output, h2::FrameType::HEADERS, before), SIZE_MAX) << "the section was sent";
     EXPECT_TRUE(protocol.ok());
+}
+
+// The id a refused request gives back is the one it took, whatever came before: after stream 1 is answered and closed, a
+// request refused at id 3 leaves stream 1 the last initiated -- a late RST_STREAM on it is one on a closed stream,
+// tolerated -- and id 3 idle: a frame the server sends on it before the next request is a connection error (RFC 9113
+// §5.1), as on any id the client never used. It was read as one on a closed stream.
+TEST(HTTP2ClientProtocol, ARefusedRequestGivesBackTheIdItTookAfterEarlierStreams) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    protocol.on(make_settings_frame({{h2::Http2SettingIdentifier::SETTINGS_MAX_HEADER_LIST_SIZE, 1000}}));
+    ASSERT_TRUE(protocol.send_request(qb1274_test::padded(0), 1));
+    protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, {{":status", "204"}}));
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_FALSE(protocol.send_request(qb1274_test::padded(1000), 2)) << "past the bound";
+    EXPECT_EQ(protocol.last_initiated_stream_id(), 1u) << "the refused request kept id 3";
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(1);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(rst);
+    EXPECT_TRUE(protocol.ok()) << "a late RST_STREAM on closed stream 1 closed the connection";
+    const std::size_t before = io.output.size();
+    protocol.on(make_window_update_frame(3, 100));
+    EXPECT_FALSE(protocol.ok()) << "a frame on id 3, never sent, was read as one on a closed stream";
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::GOAWAY, before), SIZE_MAX);
 }

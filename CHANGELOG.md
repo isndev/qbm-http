@@ -294,9 +294,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   with `INTERNAL_ERROR`, the section never sent, and so does one handed over past the bound,
   `send_request_trailers()` returning `false` at once. A request refused before anything is sent -- past the bound,
   or with a trailer section `trailers()` cannot carry (Huly QB-1073) -- gives its stream id back: it stayed spent,
-  never on the wire, and a frame the server sent on it was read as one on a closed stream. Read on a client against a
-  2 KiB bound: a request one octet past it left; it is refused now with zero bytes on the socket, the next request
-  takes its stream id, and one of exactly 2048 octets leaves.
+  never on the wire, and a frame the server sent on it was read as one on a closed stream until the next request
+  opened a higher id. Read on a client against a 2 KiB bound: a request one octet past it left; it is refused now
+  with zero bytes on the socket, the next request takes its stream id, and one of exactly 2048 octets leaves.
 
 - **The HTTP/2 server resets every response it refuses itself with `INTERNAL_ERROR` (Huly QB-1273; the maintainer's
   decision of 2026-11-06).** `send_response()` reset a response carrying a forbidden or an invalid field, an invalid
