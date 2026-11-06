@@ -1299,17 +1299,17 @@ public:
         // encoded then dropped left this table ahead of the client's, and the next block that referenced an entry it
         // added could not be decoded -- COMPRESSION_ERROR, every stream with it (RFC 9113 §4.3). The ENCODED size was
         // compared, after encoding (Huly QB-1235).
-        if (_peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
-            std::uint64_t list_size = 0;
-            for (const auto &field : hf_vector) {
-                list_size += field.hpack_size();
-            }
-            if (list_size > _peer_max_header_list_size) {
-                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: response header list " << list_size << " exceeds peer's MAX_HEADER_LIST_SIZE "
-                                                                                         << _peer_max_header_list_size);
-                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
-                return false;
-            }
+        if (!this->fits_peer_header_list(stream_id, hf_vector)) { // counts as §6.5.2 does, logs what it refuses
+            send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
+            return false;
+        }
+        // The trailer section, a field section of its own, is held to the same bound here, before anything is sent (Huly
+        // QB-1240: the client had the leading block and the body, then a reset, and true was returned) and again when it
+        // leaves, by the bound then in force (try_send_pending_data_for_stream). A response to HEAD sends none.
+        if (trailed && !response_to_head && _peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE
+            && !this->fits_peer_header_list(stream_id, outgoing_trailer_fields(http_response))) {
+            send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR);
+            return false;
         }
 
         if (stream.state == Http2StreamConcreteState::RESERVED_LOCAL) {
