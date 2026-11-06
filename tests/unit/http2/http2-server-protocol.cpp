@@ -1035,7 +1035,7 @@ TEST(HTTP2ServerProtocol, SendResponseForbiddenHeaderIsStreamError) {
 
         EXPECT_FALSE(protocol.send_response(1, response)) << name;
         EXPECT_EQ(io.stream_error_count, 1) << name;
-        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR) << name;
+        EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR) << name;
     }
 }
 
@@ -2452,7 +2452,7 @@ TEST(HTTP2ServerProtocol, SendResponseWithWhitespaceAtTheEndOfAValueIsStreamErro
         }
         EXPECT_FALSE(protocol.send_response(1, response)) << (trailer ? "trailer" : "header");
         EXPECT_EQ(io.stream_error_count, 1) << (trailer ? "trailer" : "header");
-        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR);
         EXPECT_TRUE(emitted_header_blocks(io.output, 1).empty()) << "nothing was sent";
     }
 }
@@ -5843,7 +5843,7 @@ TEST(HTTP2ServerProtocol, AResponseThatHasToWaitIsJudgedFirst) {
     qb::http::Response connection_specific = pushed_response("def");
     connection_specific.set_header("connection", "close");
     EXPECT_FALSE(protocol.send_response(4, connection_specific)) << "a field HTTP/2 cannot carry, refused at once";
-    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::INTERNAL_ERROR);
     qb::http::Response wide = pushed_response("ghi");
     wide.set_header("x-a", std::string(200, '{'));
     EXPECT_FALSE(protocol.send_response(6, wide)) << "past the client's header-list bound, refused at once";
@@ -6563,7 +6563,7 @@ TEST(HTTP2ServerProtocol, TheServersOwnResetsAreNotCountedAgainstTheClient) {
         io.answer = [&protocol](uint32_t sid) {
             qb::http::Response invalid;
             invalid.status() = qb::http::status::OK;
-            invalid.add_header("connection", "close"); // connection-specific: refused, PROTOCOL_ERROR
+            invalid.add_header("connection", "close"); // connection-specific: refused, INTERNAL_ERROR (Huly QB-1273)
             EXPECT_FALSE(protocol.send_response(sid, invalid));
         };
         push_preface(io);
@@ -6574,9 +6574,9 @@ TEST(HTTP2ServerProtocol, TheServersOwnResetsAreNotCountedAgainstTheClient) {
                        encode_hpack_headers(default_request_headers("/invalid")));
             drive(protocol, io);
         }
-        EXPECT_EQ(io.goaway_count, 0) << "the server's PROTOCOL_ERROR resets of the application's responses were counted";
+        EXPECT_EQ(io.goaway_count, 0) << "the server's resets of the application's responses were counted";
         EXPECT_EQ(io.request_count, 400);
-        EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+        EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR);
     }
 }
 

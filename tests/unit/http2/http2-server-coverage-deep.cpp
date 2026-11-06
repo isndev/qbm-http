@@ -455,7 +455,7 @@ TEST(HTTP2ServerCoverageDeep, SendResponseWithControlByteInHeaderValueIsStreamEr
     const std::size_t before = io.output.size();
     EXPECT_FALSE(server.send_response(sid, response));
     EXPECT_EQ(io.stream_error_count, 1);
-    EXPECT_EQ(io.last_stream_error, ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.last_stream_error, ErrorCode::INTERNAL_ERROR);
     EXPECT_NE(find_frame_offset(io.output, FrameType::RST_STREAM, before), SIZE_MAX);
 }
 

@@ -283,6 +283,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   flight: a client that sends a request answered at once beside each one it resets stays at half and is not closed,
   one request cancelled for each one served.
 
+- **The HTTP/2 server resets every response it refuses itself with `INTERNAL_ERROR` (Huly QB-1273; the maintainer's
+  decision of 2026-11-06).** `send_response()` reset a response carrying a forbidden or an invalid field, an invalid
+  or conflicting `content-length`, or a refused trailer section with `PROTOCOL_ERROR` -- which says the client
+  violated the protocol -- and one whose body passes `MAX_BODY_SIZE` with `ENHANCE_YOUR_CALM` -- which says it
+  generates excessive load. The request was well-formed, and the server met "an unexpected internal error" in the
+  application's response (RFC 9113 §7), the reasoning of Huly QB-1241 and QB-1265: all six use `INTERNAL_ERROR` now,
+  as a contradicted `content-length` and a list past the client's bound already did. Read by the client off the wire,
+  on a client/server pair, one case each: `0x1` (`0xb` for the body) before, `0x2` now; nothing is sent before the
+  reset, and the same connection serves the next request.
+
 - **The HTTP/2 server resets a response whose body contradicts its `content-length` with `INTERNAL_ERROR`, not
   `PROTOCOL_ERROR` (Huly QB-1265; the maintainer's decision of 2026-11-03).** `send_response()` reset the stream with
   `PROTOCOL_ERROR`, a protocol error the endpoint detected (RFC 9113 §7); the request was well-formed, and the server met
@@ -291,7 +301,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   encoding): both now use it, as decided (HTTP/3
   resets the same cases with `H3_REQUEST_CANCELLED`, Huly QB-1241). Read by the client off the wire, on a client/server
   pair: `PROTOCOL_ERROR` for a contradicted `content-length`, `INTERNAL_ERROR` now; nothing is sent before the reset,
-  and the same connection serves the next request. The other refusals of an invalid response keep their codes.
+  and the same connection serves the next request. The other refusals of an invalid response follow (Huly QB-1273).
 
 - **Security: the HTTP/2 server bounds the resets it sends on closed streams, closes a refused stream's id, frees the
   slot of a handler that throws, and makes a `WINDOW_UPDATE` of 0 and a short `PRIORITY` stream errors (Huly QB-1270;

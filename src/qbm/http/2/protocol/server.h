@@ -1241,24 +1241,24 @@ public:
         for (const auto &header_item : http_response.headers()) {
             const std::string &name_lower = header_item.first;
             if (name_lower.empty() || name_lower[0] == ':' || HeaderValidator::is_forbidden_response_header(name_lower)) {
-                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR,
+                this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR,
                                       "Forbidden or invalid HTTP/2 response header: " + header_item.first);
                 return false;
             }
             for (const auto &value :
                  header_item.second) { // Assuming header_item.second is iterable (e.g. vector of strings for multi-value headers)
                 if (!HeaderValidator::is_valid_header_field(name_lower, value)) {
-                    this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response header field: " + header_item.first);
+                    this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, "Invalid HTTP/2 response header field: " + header_item.first);
                     return false;
                 }
                 if (name_lower == "content-length") {
                     const auto parsed = HeaderValidator::parse_content_length(value);
                     if (!parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Invalid HTTP/2 response content-length");
+                        this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, "Invalid HTTP/2 response content-length");
                         return false;
                     }
                     if (declared_content_length && *declared_content_length != *parsed) {
-                        this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, "Conflicting HTTP/2 response content-length headers");
+                        this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, "Conflicting HTTP/2 response content-length headers");
                         return false;
                     }
                     declared_content_length = *parsed;
@@ -1275,7 +1275,7 @@ public:
         const bool trailed = announces_trailers || http_response.has_trailers();
         if (trailed) {
             if (const char *refused = prepare_trailed_header_block(hf_vector, http_response)) {
-                this->on_stream_error(stream_id, ErrorCode::PROTOCOL_ERROR, refused);
+                this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, refused);
                 return false;
             }
         }
@@ -1290,7 +1290,7 @@ public:
             return false;
         }
         if (body_pipe.size() > qb::http::protocol_limits::MAX_BODY_SIZE) {
-            this->on_stream_error(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
+            this->on_stream_error(stream_id, ErrorCode::INTERNAL_ERROR, "HTTP/2 response body exceeds configured limit");
             return false;
         }
 

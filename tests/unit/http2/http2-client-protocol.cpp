@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <numeric>
 #include <optional>
 #include <string>
@@ -4186,7 +4187,7 @@ TEST(HTTP2ClientProtocol, AMalformedResponsePastTheBoundStaysAProtocolError) {
 // SETTINGS_MAX_HEADER_LIST_SIZE (Huly QB-1235), are reset with INTERNAL_ERROR, read by the client off the wire (Huly
 // QB-1265): the request was well-formed, and the server met "an unexpected internal error" (RFC 9113 §7) -- the first
 // was reset with PROTOCOL_ERROR. Nothing is sent before the reset, and the same connection serves the next request.
-// The other refusals of an invalid response keep their codes, by decision (HTTP/3 resets every one of them with
+// The other refusals of an invalid response use it too since Huly QB-1273 (HTTP/3 resets every one of them with
 // H3_REQUEST_CANCELLED, Huly QB-1241).
 // ===========================================================================
 TEST(HTTP2ClientProtocol, AContradictedContentLengthOrAListPastTheClientBoundIsResetWithInternalError) {
@@ -4263,4 +4264,71 @@ TEST(HTTP2ClientProtocol, AContradictedContentLengthOrAListPastTheClientBoundIsR
     pump(client, client_io, server_io);
     EXPECT_EQ(client_io.stream_error_count, 0);
     EXPECT_EQ(client_io.response_count, 1);
+}
+
+// ===========================================================================
+// Every response the server refuses itself in send_response() is reset with INTERNAL_ERROR, read by the client off the
+// wire (Huly QB-1273, the reasoning of QB-1241 and QB-1265): the request was well-formed, and the server met "an
+// unexpected internal error" in the application's response (RFC 9113 §7). A forbidden field, an invalid field, an invalid
+// or conflicting `content-length`, a refused trailer section were reset with PROTOCOL_ERROR -- which says the CLIENT
+// violated the protocol -- and a body past MAX_BODY_SIZE with ENHANCE_YOUR_CALM -- which says it generates excessive load.
+// Nothing is sent before the reset, and the same connection serves the next request.
+// ===========================================================================
+TEST(HTTP2ClientProtocol, EveryInvalidResponseTheServerRefusesIsResetWithInternalError) {
+    const auto shaped = [](const std::function<void(qb::http::Response &)> &shape) {
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        shape(response);
+        return response;
+    };
+    const std::vector<std::pair<std::string, qb::http::Response>> refused{
+        {"a forbidden field", shaped([](qb::http::Response &r) { r.set_header("connection", "close"); })},
+        {"an invalid field", shaped([](qb::http::Response &r) { r.set_header("x-bad", "a\rb"); })},
+        {"an invalid content-length", shaped([](qb::http::Response &r) { r.set_header("content-length", "abc"); })},
+        {"conflicting content-lengths", shaped([](qb::http::Response &r) {
+             r.add_header("content-length", "5");
+             r.add_header("content-length", "6");
+             r.body() = std::string("12345");
+         })},
+        {"a refused trailer section", shaped([](qb::http::Response &r) { r.trailers().set_header("content-length", "7"); })},
+        {"a body past MAX_BODY_SIZE",
+         shaped([](qb::http::Response &r) { r.body() = std::string(qb::http::protocol_limits::MAX_BODY_SIZE + 1, 'x'); })},
+    };
+    for (auto const &[label, response] : refused) {
+        SCOPED_TRACE(label);
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        Http2PeerFakeIO                            server_io;
+        h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/refused");
+        ASSERT_TRUE(client.send_request(std::move(req), 7));
+        pump(server, server_io, client_io);
+        ASSERT_EQ(server_io.request_count, 1);
+
+        EXPECT_FALSE(server.send_response(1, response)) << "refused";
+        EXPECT_TRUE(server.ok()) << "a stream error, the connection kept";
+        EXPECT_EQ(find_frame_offset(server_io.output, h2::FrameType::HEADERS), SIZE_MAX) << "nothing sent before the reset";
+        pump(client, client_io, server_io);
+        EXPECT_TRUE(client.ok());
+        EXPECT_EQ(client_io.stream_error_count, 1) << "the stream was reset";
+        EXPECT_EQ(client_io.last_stream_error, h2::ErrorCode::INTERNAL_ERROR) << "the code on the wire";
+        EXPECT_EQ(client_io.goaway_count, 0);
+
+        qb::http::Request next;
+        next.method() = qb::http::method::GET;
+        next.uri()    = qb::io::uri("https://example.test/next");
+        ASSERT_TRUE(client.send_request(std::move(next), 8));
+        pump(server, server_io, client_io);
+        ASSERT_EQ(server_io.request_count, 2);
+        qb::http::Response accepted;
+        accepted.status() = qb::http::status::OK;
+        accepted.body()   = "accepted";
+        ASSERT_TRUE(server.send_response(3, accepted));
+        pump(client, client_io, server_io);
+        EXPECT_EQ(client_io.response_count, 1) << "the same connection serves the next request";
+        EXPECT_EQ(client_io.last_body, std::string("accepted"));
+    }
 }
