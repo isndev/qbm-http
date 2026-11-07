@@ -3430,8 +3430,8 @@ private:
 
     /**
      * @brief The size RFC 9113 §6.5.2 counts of the trailer section a response sends, from its plan, no field copied:
-     *        the fields outgoing_trailer_fields() keeps -- a response carries no `connection` header (send_response()
-     *        refuses one), so none is nominated -- each name and value, and 32 octets (Huly QB-1240).
+     *        the fields outgoing_trailer_fields() keeps, and a `connection`-nominated one a streamed end() may still
+     *        hold (the head refused the header; counting it only refuses more) -- each name and value, and 32 octets (Huly QB-1240).
      */
     [[nodiscard]] static std::uint64_t
     trailer_section_size(const qb::http::Response &response) {
