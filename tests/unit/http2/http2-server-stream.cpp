@@ -520,7 +520,7 @@ TEST(Http2ServerStream, TheWholeResponsePathIsUnchangedBesideAStreamedOne) {
 TEST(Http2ServerStream, ATrailerSectionPastTheClientsBoundAtTheEndResetsTheStreamAndEncodesNothing) {
     Harness    h({{SETTINGS_MAX_HEADER_LIST_SIZE, 100}});
     const auto past = h.open("/past");
-    ASSERT_TRUE(h.protocol.begin_streamed_response(past, ok_response(), false)); // :status and content-type: 91 of 100
+    ASSERT_TRUE(h.protocol.begin_streamed_response(past, ok_response(), false)); // :status (42) and content-type (54): 96 of 100
     h.clear();
     auto final_response = ok_response();
     final_response.trailers().set_header("x-c", std::string(66, 'c')); // 3 + 66 + 32 = 101: a byte past the bound

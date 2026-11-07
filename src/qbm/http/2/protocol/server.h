@@ -1406,7 +1406,7 @@ public:
      *        (try_send_pending_data_for_stream), and end_streamed_response() sends END_STREAM, after the response's
      *        trailer section when it has one. The head is judged as send_response() judges one -- a field HTTP/2
      *        forbids, an invalid field, a malformed `content-length`, a trailer field a section must not carry refuse
-     *        it (RST_STREAM PROTOCOL_ERROR), a block past the peer's SETTINGS_MAX_HEADER_LIST_SIZE too (INTERNAL_ERROR),
+     *        it (RST_STREAM INTERNAL_ERROR, Huly QB-1273), a block past the peer's SETTINGS_MAX_HEADER_LIST_SIZE too,
      *        nothing sent -- except that a `content-length` is compared to no body: the stream counts the pieces
      *        against it. The body of `http_response` is not read.
      * @return `true` when the HEADERS left; `false` when the stream cannot take a streamed response
