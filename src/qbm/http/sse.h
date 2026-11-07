@@ -62,10 +62,10 @@ namespace qb::http::sse {
  * `id` is dropped, since it would start another field (a value a client supplied could forge an event).
  */
 struct Event {
-    std::string                              name;
-    std::string                              data;
-    std::string                              id;
-    std::optional<std::chrono::milliseconds> retry;
+    std::string                              name{};
+    std::string                              data{};
+    std::string                              id{};
+    std::optional<std::chrono::milliseconds> retry{};
 };
 
 /// The wire form of `event`: its `event:`, `id:`, `retry:` and `data:` lines, then the blank line that ends it.
@@ -89,10 +89,10 @@ inline constexpr std::string_view content_type = "text/event-stream; charset=utf
  */
 struct Options {
     /// A `retry:` line written first: the reconnection time the client keeps (none by default: the client's own).
-    std::optional<std::chrono::milliseconds> retry;
+    std::optional<std::chrono::milliseconds> retry{};
     /// A comment line every `heartbeat` while the stream lives (none by default): see `Stream::heartbeat()`. Under the
     /// session's inactivity timeout, HTTP/2's idle-stream sweep (30 s) and every proxy's idle timeout on the way.
-    std::optional<qb::duration> heartbeat;
+    std::optional<qb::duration> heartbeat{};
     /// `X-Accel-Buffering: no`: tells an nginx in front not to buffer the response (off by default).
     bool accel_buffering_off = false;
 };
