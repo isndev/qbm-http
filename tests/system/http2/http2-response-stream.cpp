@@ -108,9 +108,10 @@ struct Seen {
 inline Seen g;
 
 struct Responded {
-    int         status    = 0;
-    std::size_t streamed  = 0;
-    bool        cancelled = false;
+    int                                   status    = 0;
+    std::size_t                           streamed  = 0;
+    bool                                  cancelled = false;
+    std::chrono::steady_clock::time_point ended{}; ///< when the server ended the request: a reset's own instant
 };
 inline std::mutex                        g_responded_mutex;
 inline std::map<std::string, Responded>  g_responded;   ///< by path: what the observer read at the end
@@ -122,7 +123,9 @@ struct Observer : qb::http::IRequestObserver<WireSession> {
     void
     on_response(Ctx const &ctx, qb::http::RequestEnd const &) noexcept override {
         std::lock_guard lock(g_responded_mutex);
-        g_responded[std::string(ctx.request().uri().path())] = {ctx.response().status().code(), ctx.streamed_bytes(), ctx.is_cancelled()};
+        g_responded[std::string(ctx.request().uri().path())] = {
+            ctx.response().status().code(), ctx.streamed_bytes(), ctx.is_cancelled(), std::chrono::steady_clock::now()
+        };
     }
 };
 
@@ -657,7 +660,10 @@ TEST_F(Http2StreamWireTest, AStalledDownloadIsCutWhileASiblingStreamKeepsTheConn
     // acceptance (Huly QB-1212). Stream A: the static file behind a 16 KiB window never updated. Stream B: a bulk
     // producer, its windows re-credited as it goes, read in sips of 256 KiB with 50 ms between them, so the output
     // holds B's pieces between the marks and every write pass reports less of it -- what a shared count would read as
-    // A's progress. A is reset at its deadline all the same, B flowing to the last cycle; B is untouched.
+    // A's progress. A is reset at its deadline all the same, B flowing to the last cycle; B is untouched. The deadline is
+    // judged where the server ends A (the observer's instant): the reset reaches the client behind every byte of B the
+    // connection already committed -- the kernel's buffers among them, several MiB on a Linux loopback (tcp_wmem and
+    // tcp_rmem 4 and 6 MiB), read here at a sip's pace -- so the client's instant measures the transport, not the watch.
     Http2RawClient c;
     ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 16384}}));
     const auto t0 = std::chrono::steady_clock::now();
@@ -686,14 +692,19 @@ TEST_F(Http2StreamWireTest, AStalledDownloadIsCutWhileASiblingStreamKeepsTheConn
     std::cout << "[  cut   ] HTTP/2 stalled download beside a flowing sibling reset " << cut.count()
               << " ms after its window filled (deadline 500 ms), B at " << c.stream(b).data_bytes << " bytes\n";
     EXPECT_GE(since_t0, 500ms) << since_t0.count() << " ms since the request";
-    EXPECT_LE(cut, 1500ms) << cut.count() << " ms (the reset waits its turn behind B's frames in the output, sipped)";
+    ASSERT_TRUE(wait_for([] { return responded("/static/big.bin").cancelled; })) << "the context was cancelled";
+    const auto ended      = responded("/static/big.bin").ended;
+    const auto server_cut = std::chrono::duration_cast<std::chrono::milliseconds>(ended - parked);
+    std::cout << "[  cut   ] the server ended it " << server_cut.count() << " ms after its window filled\n";
+    EXPECT_GE(ended - t0, 500ms) << "not before the deadline has passed since the request";
+    EXPECT_LE(server_cut, 900ms) << "within the deadline and 400 ms of loop latency, a flowing sibling notwithstanding: " << server_cut.count()
+                                 << " ms";
     EXPECT_EQ(c.stream(a).reset_code, 0x2u) << "INTERNAL_ERROR: the stream was aborted";
     EXPECT_EQ(c.stream(a).data_bytes, 16384u) << "nothing past the window";
     EXPECT_GT(prior_growth + last_growth, 0u) << "the sibling flowed in the cycle A was cut in";
     EXPECT_GT(c.stream(b).data_bytes, std::size_t{2} << 20) << "the sibling flowed all along: " << c.stream(b).data_bytes;
     EXPECT_FALSE(c.stream(b).reset) << "the sibling is untouched";
     EXPECT_FALSE(c.eof) << "the stream, never the connection";
-    EXPECT_TRUE(wait_for([] { return responded("/static/big.bin").cancelled; })) << "the context was cancelled";
     c.close();
 }
 
