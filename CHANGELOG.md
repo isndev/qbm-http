@@ -108,12 +108,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   parser reads a chunked body -- and any body when it is driven directly, `Parser::parse()` past the headers -- into
   a buffer it moves into each message, so from the second such body of a connection the buffer was null, and its
   first write took the pipe's slow path: 8 KiB for five octets, twice what the first took. A null buffer is given the
-  pipe's initial one when the body fits it (`Parser::body_buffer()`); a body past it grows as before, and a message
-  without a body allocates nothing. Read per message on a kept connection, at the protocol: a chunked request of five
-  octets 8440 bytes before, 4344 now, a chunked response of two 8360 and 4264, the allocations as many; a
-  `Content-Length` body is copied from the input buffer, never through this one, and a GET reads the same. Read on a
-  `Parser` driven directly: the second body takes 8192 before, 4096 now, declared or chunked. Independent of qb's own
-  fix of the slow path (qb CHANGELOG, Huly QB-1248), which gives the same 4096 by itself.
+  pipe's initial one when the first write fits it (`Parser::body_buffer()`); a first write past it grows from null as
+  it would from that buffer, and a message that declares no length allocates nothing. Read per message on a kept
+  connection, at the protocol: a chunked request of five octets 8440 bytes before, 4344 now, a chunked response of
+  two 8360 and 4264, the allocations as many; a `Content-Length` body is copied from the input buffer, never through
+  this one, and a GET reads the same. Read on a `Parser` driven directly: the second body takes 8192 before, 4096
+  now, declared or chunked, in one allocation, as before. A chunked body whose first chunk fits 4096 and that grows
+  past it reallocates once more on the way (4096, then 8192, copying what it holds, at most 4 KiB), as from a
+  default-constructed buffer. The same 4096 comes from qb's own fix of the slow path (qb CHANGELOG, Huly QB-1248);
+  this one keeps the parser from depending on the pipe's growth policy.
 
 - **The WebSocket frame decoder allocates nothing per frame (Huly QB-1247).** `onMessage()` built a local
   `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed it at the end of the frame --

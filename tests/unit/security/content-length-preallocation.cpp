@@ -148,39 +148,95 @@ TEST(ContentLengthPreallocation, DeclaredBodyStillParsesCorrectlyWhenItActuallyA
     EXPECT_EQ(std::string(msg.body().raw().begin(), msg.body().raw().size()), payload);
 }
 
-/// The capacity of the body buffer of the SECOND message a parser reads, @p head then @p body each time -- a kept
-/// connection: the parser is reset() between messages, as the protocol does; the first message's is @p first.
-[[nodiscard]] std::size_t
-second_body_capacity(const std::string &head, const std::string &body, std::size_t *first = nullptr) {
+/// What a parser's two messages cost, read @p head then @p body each time -- a kept connection: the parser is
+/// reset() between messages, as the protocol does. The allocations are counted over the body only (resume() and the
+/// body's bytes): a first message's buffer came with the parser, outside any count.
+struct kept_reading {
+    std::size_t first_capacity = 0, second_capacity = 0; ///< the message body's buffer, after each message
+    std::size_t first_count = 0, second_count = 0;       ///< the allocations reading each body made
+};
+
+[[nodiscard]] kept_reading
+read_two_messages(const std::string &head, const std::string &body) {
     qb::http::Parser<Request> parser;
+    kept_reading              reading;
     for (int message = 0; message < 2; ++message) {
         if (message == 1) {
             parser.reset();
         }
         EXPECT_EQ(parser.parse(head.data(), head.size()), HPE_PAUSED) << "message " << message;
-        parser.resume();
-        EXPECT_EQ(parser.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE) << "message " << message;
-        if (message == 0 && first) {
-            *first = parser.get_parsed_message().body().raw().capacity();
+        {
+            AllocScope scope;
+            parser.resume();
+            EXPECT_EQ(parser.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE) << "message " << message;
+            (message == 0 ? reading.first_count : reading.second_count) = AllocScope::count();
         }
+        (message == 0 ? reading.first_capacity : reading.second_capacity) = parser.get_parsed_message().body().raw().capacity();
     }
-    return parser.get_parsed_message().body().raw().capacity();
+    return reading;
+}
+
+/// A chunked body of one chunk of @p payload.
+[[nodiscard]] std::string
+one_chunk(const std::string &payload) {
+    char size[32];
+    std::snprintf(size, sizeof size, "%zx\r\n", payload.size());
+    return size + payload + "\r\n0\r\n\r\n";
 }
 
 // The body buffer is moved into each message, so from the second message of a kept connection it was null, and the
 // first write of a body took the pipe's slow path: 8 KiB for five octets, twice the first message's (Huly QB-1248).
-// Every body starts from the pipe's initial buffer now, declared or chunked; one past it grows as the first did.
+// Every body starts from the pipe's initial buffer now, declared or chunked -- one allocation, the buffer itself --
+// and a first write past it grows as the first message's did, in one allocation, not the initial buffer and then a
+// second.
 TEST(ContentLengthPreallocation, EveryBodyOfAKeptConnectionStartsFromTheInitialBuffer) {
     const std::size_t initial = qb::allocator::pipe<char>{}.capacity();
     const std::string head    = "POST /upload HTTP/1.1\r\nHost: example.test\r\n";
-    std::size_t       first   = 0;
-
-    EXPECT_EQ(second_body_capacity(head + "Content-Length: 5\r\n\r\n", "hello", &first), initial) << "a declared body";
-    EXPECT_EQ(first, initial);
-    EXPECT_EQ(second_body_capacity(head + "Transfer-Encoding: chunked\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n"), initial) << "a chunked body";
+    const std::string chunked = head + "Transfer-Encoding: chunked\r\n\r\n";
     const std::string large(initial + 904, 'z');
-    EXPECT_EQ(second_body_capacity(head + "Content-Length: " + std::to_string(large.size()) + "\r\n\r\n", large, &first), first)
-        << "a body past the initial buffer grows as the first message's";
+    // Warm: the first null buffer body_buffer() sees reads the pipe's initial size once (a one-time allocation), and it
+    // must not land in a counted scope below, whichever case runs first.
+    (void) read_two_messages(chunked, one_chunk("warm"));
+
+    const auto declared = read_two_messages(head + "Content-Length: 5\r\n\r\n", "hello");
+    EXPECT_EQ(declared.second_capacity, initial) << "a declared body";
+    EXPECT_EQ(declared.first_capacity, initial);
+    const auto small = read_two_messages(chunked, one_chunk("hello"));
+    EXPECT_EQ(small.second_capacity, initial) << "a chunked body";
+    const auto past = read_two_messages(chunked, one_chunk(large));
+    EXPECT_EQ(past.second_capacity, past.first_capacity) << "a first write past the initial buffer grows as the first message's";
+    const auto declared_past = read_two_messages(head + "Content-Length: " + std::to_string(large.size()) + "\r\n\r\n", large);
+    EXPECT_EQ(declared_past.second_capacity, declared_past.first_capacity) << "so does a declared one";
+    if (allocation_counter_is_live()) {
+        EXPECT_EQ(small.first_count, 0u) << "the first body writes into the buffer the parser came with";
+        EXPECT_EQ(small.second_count, 1u) << "the second takes the initial buffer, once";
+        EXPECT_EQ(past.first_count, 1u) << "one growth";
+        EXPECT_EQ(past.second_count, 1u) << "one growth from null, not the initial buffer and then a second";
+    }
+}
+
+// A message without a body allocates nothing for one, even after a body left the buffer null: a GET after a chunked
+// message costs what a GET on a fresh parser costs.
+TEST(ContentLengthPreallocation, AMessageWithoutABodyAllocatesNoBodyBuffer) {
+    if (!allocation_counter_is_live())
+        GTEST_SKIP() << "the operator new replacement is not observing allocations on this toolchain";
+    const std::string get       = "GET /x HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    const auto        count_get = [&get](qb::http::Parser<Request> &parser) {
+        AllocScope scope;
+        EXPECT_EQ(parser.parse(get.data(), get.size()), HPE_PAUSED);
+        return AllocScope::count();
+    };
+    qb::http::Parser<Request> fresh;
+    const std::size_t         on_fresh = count_get(fresh);
+
+    qb::http::Parser<Request> kept;
+    const std::string         head = "POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const std::string         body = "5\r\nhello\r\n0\r\n\r\n";
+    ASSERT_EQ(kept.parse(head.data(), head.size()), HPE_PAUSED);
+    kept.resume();
+    ASSERT_EQ(kept.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE); // the body buffer moved into the message: null
+    kept.reset();
+    EXPECT_EQ(count_get(kept), on_fresh) << "a GET after a chunked body allocated a body buffer";
 }
 
 } // namespace
