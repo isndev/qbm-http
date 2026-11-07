@@ -35,9 +35,10 @@ using namespace std::chrono_literals;
 
 namespace http2_server_stream_test {
 
-constexpr uint8_t  END_STREAM                   = qb::protocol::http2::FLAG_END_STREAM;
-constexpr uint8_t  END_HEADERS                  = qb::protocol::http2::FLAG_END_HEADERS;
-constexpr uint16_t SETTINGS_INITIAL_WINDOW_SIZE = 0x4;
+constexpr uint8_t  END_STREAM                    = qb::protocol::http2::FLAG_END_STREAM;
+constexpr uint8_t  END_HEADERS                   = qb::protocol::http2::FLAG_END_HEADERS;
+constexpr uint16_t SETTINGS_INITIAL_WINDOW_SIZE  = 0x4;
+constexpr uint16_t SETTINGS_MAX_HEADER_LIST_SIZE = 0x6;
 
 /// A server protocol past its handshake, the client's SETTINGS as the test wants them, its output cleared.
 struct Harness {
@@ -511,6 +512,65 @@ TEST(Http2ServerStream, TheWholeResponsePathIsUnchangedBesideAStreamedOne) {
     EXPECT_EQ(h.payload(frames[1]), "whole body");
     EXPECT_TRUE(h.protocol.is_stream_closed(whole));
     EXPECT_TRUE(h.protocol.is_streaming_response(streamed)) << "the other stream is untouched";
+}
+
+// A streamed response's trailer section is held to the client's SETTINGS_MAX_HEADER_LIST_SIZE as a buffered one's is
+// (Huly QB-1240): at the end, by the bound in force -- past it the stream is reset, nothing encoded, so the HPACK table
+// stays in step -- and at the bound exactly the section leaves whole.
+TEST(Http2ServerStream, ATrailerSectionPastTheClientsBoundAtTheEndResetsTheStreamAndEncodesNothing) {
+    Harness    h({{SETTINGS_MAX_HEADER_LIST_SIZE, 100}});
+    const auto past = h.open("/past");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(past, ok_response(), false)); // :status and content-type: 91 of 100
+    h.clear();
+    auto final_response = ok_response();
+    final_response.trailers().set_header("x-c", std::string(66, 'c')); // 3 + 66 + 32 = 101: a byte past the bound
+    EXPECT_FALSE(h.protocol.end_streamed_response(past, &final_response));
+    auto frames = h.frames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FrameType::RST_STREAM);
+    EXPECT_EQ(h.io.stream_error_count, 1);
+    EXPECT_EQ(h.io.last_stream_error, ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(h.protocol.is_stream_closed(past));
+
+    const auto at = h.open("/at");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(at, ok_response(), false));
+    h.clear();
+    final_response.trailers().set_header("x-c", std::string(65, 'c')); // exactly the bound
+    EXPECT_TRUE(h.protocol.end_streamed_response(at, &final_response));
+    frames = h.frames();
+    ASSERT_EQ(frames.size(), 1u);
+    EXPECT_EQ(frames[0].type, FrameType::HEADERS);
+    EXPECT_TRUE(frames[0].flags & END_STREAM);
+    EXPECT_EQ(field(h.decode(frames[0]), "x-c"), std::string(65, 'c')) << "the first section was never encoded: this one decodes";
+    EXPECT_TRUE(h.protocol.is_stream_closed(at));
+    EXPECT_TRUE(h.protocol.ok());
+}
+
+// The section is judged again when it leaves, by the bound then in force (Huly QB-1240): pieces the window holds back
+// keep the section waiting, and a bound the client lowers meanwhile refuses it -- the stream reset after the DATA, no
+// HEADERS encoded.
+TEST(Http2ServerStream, AStreamedTrailerSectionIsJudgedByTheBoundInForceWhenItLeaves) {
+    Harness    h({{SETTINGS_INITIAL_WINDOW_SIZE, 0}});
+    const auto id = h.open("/waits");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
+    ASSERT_TRUE(h.protocol.write_streamed_body(id, "abc"));
+    auto final_response = ok_response();
+    final_response.trailers().set_header("x-c", std::string(20, 'c')); // 3 + 20 + 32 = 55
+    ASSERT_TRUE(h.protocol.end_streamed_response(id, &final_response));
+    EXPECT_EQ(h.protocol.streamed_body_pending(id), 3u) << "the body waits for credit, the section behind it";
+    h.clear();
+    push_frame(h.io, FrameType::SETTINGS, 0, 0, make_settings_payload({{SETTINGS_MAX_HEADER_LIST_SIZE, 50}}));
+    drive(h.protocol, h.io);
+    h.clear();
+    h.window_update(id, 100);
+    const auto frames = h.frames();
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0].type, FrameType::DATA);
+    EXPECT_EQ(h.payload(frames[0]), "abc");
+    EXPECT_FALSE(frames[0].flags & END_STREAM);
+    EXPECT_EQ(frames[1].type, FrameType::RST_STREAM);
+    EXPECT_EQ(h.io.last_stream_error, ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(h.protocol.is_stream_closed(id));
 }
 
 } // namespace http2_server_stream_test

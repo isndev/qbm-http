@@ -1495,8 +1495,9 @@ public:
      *        -- on an empty DATA frame when none is left -- after the trailer section when there is one: the fields
      *        `final_response` carries at the end (its `trailers()`, and the fields its `trailer` header announces),
      *        as HTTP/2 sends a trailer section (outgoing_trailer_fields); a section the head announced and the end
-     *        leaves empty is sent empty. A trailer field a section must not carry aborts the stream (RST_STREAM
-     *        INTERNAL_ERROR): the message cannot be completed as the producer asked.
+     *        leaves empty is sent empty. A trailer field a section must not carry, or a section past the client's
+     *        SETTINGS_MAX_HEADER_LIST_SIZE (Huly QB-1240), aborts the stream (RST_STREAM INTERNAL_ERROR): the message
+     *        cannot be completed as the producer asked.
      * @param final_response The response as it stands at the end, for its trailers; `nullptr` sends the head's.
      * @return `false` when the stream has no streamed response to end (not streaming, ended already, closed).
      */
@@ -1516,6 +1517,17 @@ public:
                 stream.streamed.reset();
                 stream.streaming = false;
                 send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "streamed response trailers refused");
+                return false;
+            }
+            // Held to the client's SETTINGS_MAX_HEADER_LIST_SIZE as send_response() holds a buffered response's section
+            // (Huly QB-1240): by the bound in force at the end, counted from the plan, and again when it leaves
+            // (flush_streamed_response), by the bound then in force -- nothing past it is encoded, so the HPACK table
+            // stays in step with the client's.
+            if (_peer_max_header_list_size < DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE
+                && !this->fits_peer_list_size(stream_id, trailer_section_size(source))) {
+                stream.streamed.reset();
+                stream.streaming = false;
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "streamed response trailer section past the client's bound");
                 return false;
             }
             stream.streamed->trailer_fields = outgoing_trailer_fields(source);
@@ -3123,6 +3135,10 @@ private:
             if (streamed_socket_room() <= bound + frames * FRAME_HEADER_SIZE) {
                 stream.has_pending_data_to_send = true; // the trailer section waits for the socket's room, unencoded
                 _streams_wait_for_socket        = true;
+                return;
+            }
+            if (!this->fits_peer_header_list(stream_id, stream.streamed->trailer_fields)) { // the bound then in force (Huly QB-1240)
+                send_rst_stream(stream_id, ErrorCode::INTERNAL_ERROR, "streamed response trailer section past the client's bound");
                 return;
             }
             std::vector<uint8_t> encoded_trailers;

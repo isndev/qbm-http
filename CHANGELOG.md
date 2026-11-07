@@ -440,6 +440,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
+  response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
+  section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it
+  leaves, by the bound then in force -- and the second lot of QB-86, written on a tree without that bound, encoded the
+  trailer section of a streamed response (`end()` with `trailers()`) past it. `end_streamed_response()` now refuses a
+  section past the bound in force at the end as it refuses a forbidden trailer field (the stream reset with
+  `INTERNAL_ERROR`, the context cancelled), and `flush_streamed_response()` judges it again by the bound in force when
+  it leaves, before anything is encoded, so the HPACK table stays in step with the client's. Two unit tests of the
+  streamed response prove both: a byte past the bound at the end resets the stream and encodes nothing while a section
+  at the bound exactly leaves whole, and a bound the client lowers while the body waits for credit refuses the section
+  after the DATA, no HEADERS encoded.
+
 - **An HTTP/2 session no longer reads its protocol after a hook cleared it (Huly QB-86, a residual found by QB-1212's
   sanitizer run).** The second lot of QB-86 made the session's write pass and end of stream resume the streams held
   back for the socket through its protocol pointer, which a drain's `POST_RESPONSE_SEND` hook calling
