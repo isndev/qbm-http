@@ -74,7 +74,9 @@
 #include <qbm/http/middleware/metrics.h>
 
 #include <qb/io/async/coroutine.h>
+#ifdef QB_HAS_COMPRESSION
 #include <qb/io/compression.h>
+#endif
 #include <qb/io/tcp/socket.h>
 
 #ifdef QB_HAS_SSL
@@ -260,6 +262,7 @@ chunk_payloads(std::string const &wire) {
     return out;
 }
 
+#ifdef QB_HAS_COMPRESSION
 /// `coded` inflated through `inflater`, which keeps its state between calls: what one chunk yields on its own.
 inline std::string
 inflate_piece(qb::compression::decompress_provider &inflater, std::string const &coded) {
@@ -278,6 +281,7 @@ inflate_piece(qb::compression::decompress_provider &inflater, std::string const 
             return out;
     }
 }
+#endif // QB_HAS_COMPRESSION
 
 inline void
 record_verdict(int index, Stream::write_result r) {
@@ -1731,6 +1735,7 @@ TEST_F(ResponseStreamTest, ABodyAlreadyInTheResponseIsTheFirstPiece) {
     }
 }
 
+#ifdef QB_HAS_COMPRESSION
 TEST_F(ResponseStreamTest, CompressionAtTheHeadOfAStreamCodesItsPiecesOnTheFly) {
     // Huly QB-1208: the middleware's PRE_RESPONSE_SEND hook runs inside begin_stream() and sets a coding on the stream;
     // the preamble (the first piece) and the tail leave coded, chunked, and inflate to what the handler wrote. A client
@@ -1834,6 +1839,7 @@ TEST_F(ResponseStreamTest, ALaterHookThatCodesOrRangesTheAnswerDropsTheStreamCod
         EXPECT_EQ(r.header_count("vary"), 0) << r.head;
     }
 }
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(ResponseStreamTest, TheCodingsTailKeepsItsRoomUnderTheCapSoAFullStreamStillEnds) {
     g_cap = 65541; // 64 framed pieces of 1024 bytes plus the last-chunk's 5: the tail's room is the only slack
@@ -1852,6 +1858,7 @@ TEST_F(ResponseStreamTest, TheCodingsTailKeepsItsRoomUnderTheCapSoAFullStreamSti
     EXPECT_EQ(r.body.substr(r.body.size() - 64), std::string(64, 'T'));
 }
 
+#ifdef QB_HAS_COMPRESSION
 TEST_F(ResponseStreamTest, AnEventStreamUnderCompressionLeavesEachEventAsItsOwnInflatableChunk) {
     RawClient c;
     ASSERT_TRUE(c.connect(port));
@@ -1902,6 +1909,7 @@ TEST_F(ResponseStreamTest, ACodedPieceIsAdmittedOnItsBoundBeforeTheCoderSeesIt) 
     EXPECT_EQ(inflated.size(), std::size_t{64} << 10) << "the refused piece never reached the coder: only the second was coded";
     EXPECT_EQ(inflated.as<std::string>(), std::string(std::size_t{64} << 10, 'c'));
 }
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(ResponseStreamTest, AFilterThatHoldsAPieceLeavesNothingUntilItEmits) {
     RawClient c;
@@ -1919,6 +1927,7 @@ TEST_F(ResponseStreamTest, AFilterThatHoldsAPieceLeavesNothingUntilItEmits) {
     EXPECT_EQ(g_seen.verdicts[2].load(), verdict(Stream::write_result::taken));
 }
 
+#ifdef QB_HAS_COMPRESSION
 TEST_F(ResponseStreamTest, ABufferedStreamDroppedUnderCompressionAnswersAnUncodedError) {
     RawClient c;
     ASSERT_TRUE(c.connect(port));
@@ -1931,6 +1940,7 @@ TEST_F(ResponseStreamTest, ABufferedStreamDroppedUnderCompressionAnswersAnUncode
     EXPECT_EQ(g_seen.framing.load(), static_cast<int>(qb::http::stream_framing::buffered));
     EXPECT_EQ(g_seen.beginning_at_completion.load(), 0) << "the hooks of the ordinary completion never see stream_beginning()";
 }
+#endif // QB_HAS_COMPRESSION
 
 TEST_F(ResponseStreamTest, ALengthAHookRewroteIsTheLengthEnforced) {
     RawClient c;
