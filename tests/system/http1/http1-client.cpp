@@ -2629,3 +2629,24 @@ TEST(Http1ClientTest, AResponseToHeadOrA304MayNameAnyCodingAndKeepsItsConnection
     EXPECT_EQ(peer.connections.load(), 1) << "a bodyless response that names a coding dropped its connection";
     drain_client_callbacks();
 }
+
+// An unassigned 1xx that names `chunked` is interim like any 1xx (RFC 9110 §15.2) and ends at its header section (RFC
+// 9112 §6.3): the persistent client waits past it for the final response, on the same connection (Huly QB-1248). The
+// final response's status line was read as a chunk size: the request failed and the connection dropped.
+TEST(Http1ClientTest, AnUnassignedInformationalResponseNamingChunkedIsInterim) {
+    http1_head_no_length_test::ScriptedPeer peer(
+        {"HTTP/1.1 104 Unassigned\r\nTransfer-Encoding: chunked\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong",
+         "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\npong2"});
+    auto client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto first  = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/interim")));
+    auto second = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(first.status(), qb::http::status::OK) << "the interim response failed the request";
+    EXPECT_EQ(first.body().template as<std::string>(), "pong");
+    EXPECT_EQ(second.status(), qb::http::status::OK);
+    EXPECT_EQ(second.body().template as<std::string>(), "pong2");
+    EXPECT_EQ(peer.connections.load(), 1) << "the interim response dropped its connection";
+    drain_client_callbacks();
+}

@@ -1649,8 +1649,8 @@ TEST(Http1ProtocolFraming, EveryOtherResponseKeepsTheKeepAliveItHad) {
 // header section whatever its fields say (§6.3): nothing follows to decode. The parser refused every coding but
 // `chunked` alone, and the client lost the response and its connection. A HEAD's response, a 204 (which breaks §6.1
 // naming one, but §6.3 frames it all the same) and a 304 now pass; a 1xx answering a HEAD passes with them, framed at
-// its header section on the HEAD path. Any other 1xx is held to `chunked` as before (llhttp ends only 100 to 103 at the
-// header section by their status), and so is a response with a body, which qb cannot decode.
+// its header section on the HEAD path; every other 1xx joins them in the next block. A response with a body, which qb
+// cannot decode, is held to `chunked`.
 // ===========================================================================
 
 namespace http1_bodyless_coding_test {
@@ -1679,6 +1679,16 @@ deliver(std::string_view first, bool answers_head) {
     out.responses = io.response_count;
     out.ok        = proto.ok() && io.input.size() == 0u;
     return out;
+}
+
+/// `wire` alone, a 101 that nothing after it may be read as HTTP: framed at its header section, delivered once, the
+/// upgrade flag as expected.
+[[nodiscard]] bool
+framed_alone(std::string_view wire, bool upgrade = false) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    feed(io, wire);
+    return step(proto, io) == wire.size() && proto.ok() && io.response_count == 1 && io.last_response->upgrade == upgrade;
 }
 
 /// `wire` alone: the protocol failed it, delivering nothing (a body read to the close would leave it valid).
@@ -1729,8 +1739,8 @@ TEST(Http1ProtocolFraming, AResponseToHeadA204OrA304MayNameAnyCodingAndTheNextRe
     EXPECT_TRUE(not_modified.headers_completed());
 }
 
-// Controls, as they were: a response with a body names `chunked` alone, so does a 1xx not answering a HEAD, Transfer-Encoding
-// beside Content-Length is refused on any response (by llhttp, at its field line, before on_headers_complete), and
+// Controls, as they were: a response with a body names `chunked` alone, Transfer-Encoding beside Content-Length is
+// refused on any response (by llhttp, at its field line, before on_headers_complete), and
 // `chunked` alone frames as before. Each refused case is fed alone: refused is the protocol failed, no response
 // delivered, not a body waiting for the close. A Parser driven directly knows no request: a 200 naming a coding is
 // refused there.
@@ -1742,7 +1752,6 @@ TEST(Http1ProtocolFraming, EveryOtherCodingIsRefusedAsItWas) {
         {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", false},
         {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n", true},
         {"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", false},
-        {"HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: gzip\r\n\r\n", false},
     };
     for (auto const &[wire, answers_head] : refused) {
         EXPECT_TRUE(refused_alone(wire, answers_head)) << "accepted, or left waiting: " << wire;
@@ -1761,4 +1770,54 @@ TEST(Http1ProtocolFraming, EveryOtherCodingIsRefusedAsItWas) {
     const std::string          coded = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
     EXPECT_NE(with_body.parse(coded.data(), coded.size()), HPE_PAUSED);
     EXPECT_FALSE(with_body.headers_completed());
+}
+
+// ===========================================================================
+// Every 1xx ends at its header section (RFC 9112 §6.3), and a client handles an unknown 1xx as interim (RFC 9110
+// §15.2) (Huly QB-1248). A 1xx that named a coding other than `chunked` alone was refused, whatever its status; one
+// that named `chunked` was read as a chunked body once the protocol resumed the parser, unless llhttp ended it by its
+// status (100, 102, 103) or for the upgrade (101) -- the final response's status line taken for a chunk size, the
+// request failed with its connection. The parser now marks every
+// 1xx F_SKIPBODY, llhttp's own mark of a message with no body, and lets every 1xx name any coding: nothing follows.
+// ===========================================================================
+
+TEST(Http1ProtocolFraming, EveryInformationalResponseEndsAtItsHeaderSectionWhateverItsCoding) {
+    using http1_bodyless_coding_test::deliver;
+    for (std::string const wire :
+         {"HTTP/1.1 104 Unassigned\r\nTransfer-Encoding: chunked\r\n\r\n", "HTTP/1.1 199 Unassigned\r\nTransfer-Encoding: chunked\r\n\r\n",
+          "HTTP/1.1 199 Unassigned\r\nTransfer-Encoding: gzip\r\n\r\n", "HTTP/1.1 104 Unassigned\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+          "HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: gzip\r\n\r\n"}) {
+        const auto out = deliver(wire, false);
+        ASSERT_TRUE(out.first.has_value()) << "refused: " << wire;
+        EXPECT_TRUE(out.first->body().empty()) << wire;
+        ASSERT_TRUE(out.next.has_value()) << "the final response was not framed: " << wire;
+        EXPECT_EQ(out.next->body().as<std::string>(), "pong") << wire;
+        EXPECT_EQ(out.responses, 2) << wire;
+        EXPECT_TRUE(out.ok) << wire;
+    }
+
+    // A 101 leaves for the upgrade: what follows it is no HTTP. It is framed at its header section, whatever it names.
+    EXPECT_TRUE(http1_bodyless_coding_test::framed_alone("HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: gzip\r\n\r\n"));
+}
+
+// Controls, as they were: 100, 102 and 103 naming `chunked`, which llhttp ends by their status; a 1xx with no length; a
+// 101 naming `chunked`, and one with its upgrade (the flag kept), which llhttp leaves for the upgrade and the protocol
+// frames at its header section, alone (what follows a 101 is no HTTP); a 200 naming `chunked` reads its body.
+TEST(Http1ProtocolFraming, InformationalResponsesLlhttpAlreadyEndedFrameAsTheyDid) {
+    using http1_bodyless_coding_test::deliver;
+    for (std::string const wire :
+         {"HTTP/1.1 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\n", "HTTP/1.1 102 Processing\r\nTransfer-Encoding: chunked\r\n\r\n",
+          "HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: chunked\r\n\r\n", "HTTP/1.1 199 Unassigned\r\n\r\n"}) {
+        const auto out = deliver(wire, false);
+        ASSERT_TRUE(out.first.has_value()) << "refused: " << wire;
+        ASSERT_TRUE(out.next.has_value()) << "the final response was not framed: " << wire;
+        EXPECT_EQ(out.next->body().as<std::string>(), "pong") << wire;
+        EXPECT_TRUE(out.ok) << wire;
+    }
+    EXPECT_TRUE(http1_bodyless_coding_test::framed_alone("HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\n\r\n"));
+    EXPECT_TRUE(http1_bodyless_coding_test::framed_alone("HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: x\r\n\r\n",
+                                                         /*upgrade=*/true));
+    const auto chunked = deliver("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n", false);
+    ASSERT_TRUE(chunked.first.has_value());
+    EXPECT_EQ(chunked.first->body().as<std::string>(), "ok");
 }

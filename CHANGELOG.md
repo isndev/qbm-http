@@ -490,13 +490,29 @@ All notable changes to the qbm-http module are documented here. The format is ba
   runs only when the coding is not `chunked` alone, so no other message pays for it. The protocol frames a response to
   HEAD at its header section, and resumes the parser on a `204` or a `304` that names a coding, which llhttp ends
   there by its status. A `Parser` driven directly accepts a `204` or a `304` that names a coding too: its status says
-  no body follows. A response with a body is held to `chunked`, which is all qb decodes; so is any other `1xx`, as
-  before (llhttp ends only `100` to `103` at their header section by their status). `Transfer-Encoding` beside
-  `Content-Length` is refused on every message, as before (by llhttp, at its field line). Witnesses:
-  `qbm-http-test-unit-http1-protocol-framing` (a response to HEAD, a `1xx` answering one, a `204` and a `304` naming
-  `gzip`, `gzip, chunked` or `br`, each followed by a response it must not eat; a `304` that ends the buffer; a
-  `Parser` driven directly; the controls, each refused case fed alone) and `qbm-http-test-system-http1-client` (the
-  persistent client against a scripted peer: one connection for a HEAD, a `304` and a GET; three before).
+  no body follows. Every other `1xx` joins them (the entry below). A response with a body is held to `chunked`, which
+  is all qb decodes. `Transfer-Encoding` beside `Content-Length` is refused on every message, as before (by llhttp, at
+  its field line). Witnesses: `qbm-http-test-unit-http1-protocol-framing` (a response to HEAD, a `1xx` answering one,
+  a `204` and a `304` naming `gzip`, `gzip, chunked` or `br`, each followed by a response it must not eat; a `304`
+  that ends the buffer; a `Parser` driven directly; the controls, each refused case fed alone) and
+  `qbm-http-test-system-http1-client` (the persistent client against a scripted peer: one connection for a HEAD, a
+  `304` and a GET; three before).
+
+- **Every `1xx` ends at its header section, whatever transfer coding it names (Huly QB-1248).** A client handles an
+  unknown `1xx` as interim (RFC 9110 §15.2), and every `1xx` ends at its header section (RFC 9112 §6.3). A `1xx` that
+  named a coding other than `chunked` alone was refused, whatever its status (a `103` naming `gzip` among them); one
+  that named `Transfer-Encoding: chunked` was read as a chunked body once the protocol resumed the parser, unless
+  llhttp ended it by its status (`100`, `102`, `103`) or completed it to leave for the upgrade (`101`): the final
+  response's status line taken for a chunk size, the request failed with its connection. The HTTP/1.1 parser now marks
+  every `1xx` `F_SKIPBODY`, llhttp's own mark of a message with no body, before the parser can be resumed on it, and
+  lets every `1xx` name any coding: nothing follows to decode. A `101`'s `upgrade` flag is set before the mark, which
+  llhttp's upgrade test reads only to leave as it did, and a `1xx` was already kept alive by its status: neither
+  changes. Witnesses: `qbm-http-test-unit-http1-protocol-framing` (a `104` and a `199` naming `chunked`, a `199`
+  naming `gzip`, a `104` naming `gzip, chunked` and a `103` naming `gzip`, each followed by the final response; a
+  `101` naming `gzip`, framed alone, since nothing after a `101` is HTTP; the controls: `100`, `102`, `103` and `101`
+  naming `chunked`, a `101` with its upgrade, a `1xx` with no length, a `200` naming `chunked`) and
+  `qbm-http-test-system-http1-client` (the persistent client against a scripted peer waits past a `104` naming
+  `chunked` for the final response, on one connection; two before).
 
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer

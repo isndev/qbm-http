@@ -563,7 +563,7 @@ private:
      * This callback:
      * 1. Sets the HTTP version, and refuses a request whose major version is not 1: 505
      * 2. Checks a request's Host field (check_host_field()); reads a response's declared length as none for 1xx, 204, 304
-     *    and a HEAD's (`_body_forbidden`, marked F_SKIPBODY for keep-alive); refuses a declared length past the body limit: 413
+     *    and a HEAD's (`_body_forbidden`), marking it and a 1xx F_SKIPBODY (no body); refuses a declared length past the limit: 413
      * 3. For a Parser driven directly, reserves memory for the declared body (the h1 protocol copies it: none); sets upgrade
      * 4. Marks headers as completed and pauses the parser
      *
@@ -603,12 +603,12 @@ private:
             if (msg.has_header("Content-Length")) {
                 return fail_with_reason(parser, "HTTP Transfer-Encoding with Content-Length is forbidden");
             }
-            // Nothing follows a HEAD's response, a 204 or a 304 to decode, whatever coding it names (RFC 9112 §6.1, §6.3; QB-1248)
-            if (!is_supported_transfer_encoding(msg) && !(self->_body_forbidden || parser->status_code == 204 || parser->status_code == 304)) {
+            // Nothing follows a HEAD's response, a 1xx, a 204 or a 304 to decode, whatever coding it names (RFC 9112 §6.1, §6.3; QB-1248)
+            if (!is_supported_transfer_encoding(msg)
+                && !(self->_body_forbidden || parser->status_code / 100 == 1 || parser->status_code == 204 || parser->status_code == 304)) {
                 return fail_with_reason(parser, "Unsupported HTTP Transfer-Encoding");
             }
-            // Only a chunked body has a trailer section (trailer_settings, Huly QB-1067): installed under a coding alone, harmless on no body.
-            parser->settings = const_cast<http_settings_s *>(&trailer_settings);
+            parser->settings = const_cast<http_settings_s *>(&trailer_settings); // a chunked body's trailers (QB-1067); harmless on no body
         }
         if constexpr (MessageType::type == HTTP_REQUEST) {
             if (int const refused = check_host_field(parser, msg); refused != 0) {
@@ -622,7 +622,7 @@ private:
             }
         } else if constexpr (MessageType::type == HTTP_RESPONSE) {
             const auto status = parser->status_code;
-            if (self->_body_forbidden) // a HEAD's response ends at its header section: llhttp's own mark, read by keep-alive (QB-1248)
+            if (self->_body_forbidden || (status >= 100 && status < 200)) // a HEAD's response, a 1xx: llhttp's no-body mark (QB-1248)
                 parser->flags |= F_SKIPBODY;
             if ((status >= 100 && status < 200) || status == 204 || status == 304 || self->_body_forbidden) { // or answers a HEAD (QB-1248)
                 parser->content_length = 0;
