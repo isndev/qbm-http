@@ -2413,3 +2413,89 @@ TEST(Http1ClientTest, RedirectHttpsWithoutSslCompletesOnceDeferredWithoutNetwork
     EXPECT_EQ(plaintext.connection_count(), 0);
 }
 #endif
+
+// ===========================================================================
+// A response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2): a declared length
+// past the client's body limit is no refusal (Huly QB-1248). The client's parser refused it at the end of the header
+// section, before the protocol asked whether a body may follow: the HEAD failed, and its connection with it. Both
+// clients, the persistent one and the one-shot session, over the server's own answer to HEAD.
+// ===========================================================================
+
+namespace http1_head_past_limit_test {
+[[nodiscard]] inline std::string
+past_the_body_limit() {
+    return std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+}
+
+/// The test server, one route more: HEAD /head-past-limit declares one byte past the client's body limit.
+struct Server {
+    std::uint16_t                       port = 0;
+    Http1ClientTestServer              *srv  = nullptr; // before `thread`: LoopbackHttp1Server says why
+    ServerThread<Http1ClientTestServer> thread;
+
+    Server()
+        : thread([this](Http1ClientTestServer &server) {
+            srv = &server;
+            server.router().head("/head-past-limit", [&server](auto ctx) {
+                ++server.request_count;
+                ctx->response().status() = qb::http::status::OK;
+                ctx->response().set_header("Content-Length", past_the_body_limit());
+                ctx->response().set_header("X-Head", "past-limit");
+                ctx->complete();
+            });
+            server.router().compile();
+            if (server.transport().listen_v4(0, "127.0.0.1") != 0) {
+                return false;
+            }
+            server.start();
+            return true;
+        }) {
+        if (!thread.ready()) {
+            throw std::runtime_error("HTTP/1.1 loopback server failed to start");
+        }
+        port = thread.port();
+    }
+
+    [[nodiscard]] std::string
+    url(std::string const &path) const {
+        return "http://127.0.0.1:" + std::to_string(port) + path;
+    }
+};
+} // namespace http1_head_past_limit_test
+
+TEST(Http1ClientTest, AHeadResponseDeclaringPastTheBodyLimitIsDeliveredAndKeepsItsConnection) {
+    using namespace http1_head_past_limit_test;
+    Server server;
+    auto   client = qb::http1::make_client(server.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto head = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/head-past-limit")));
+    auto ping = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(head.status(), qb::http::status::OK) << "the response to HEAD was refused";
+    EXPECT_EQ(head.header("Content-Length"), past_the_body_limit());
+    EXPECT_EQ(head.header("X-Head"), "past-limit");
+    EXPECT_TRUE(head.body().empty());
+    EXPECT_EQ(ping.status(), qb::http::status::OK);
+    EXPECT_EQ(ping.body().template as<std::string>(), "pong");
+    EXPECT_EQ(server.srv->connection_count.load(), 1) << "the response to HEAD dropped its connection";
+    EXPECT_EQ(server.srv->request_count.load(), 2);
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, OneShotHeadDeclaringPastTheBodyLimitIsDelivered) {
+    using namespace http1_one_shot_test;
+    qb::io::async::init();
+    http1_head_past_limit_test::Server server;
+    auto                               outcome = std::make_shared<Outcome>();
+
+    qb::http::HEAD(qb::http::Request{{server.url("/head-past-limit")}}, recorder(outcome), std::chrono::seconds(5));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return outcome->count > 0; }, std::chrono::seconds(3)));
+    drain_client_callbacks();
+
+    EXPECT_EQ(outcome->count, 1);
+    EXPECT_EQ(outcome->response.status(), qb::http::status::OK) << "the response to HEAD was refused";
+    EXPECT_EQ(outcome->response.header("Content-Length"), http1_head_past_limit_test::past_the_body_limit());
+    EXPECT_EQ(outcome->response.header("X-Head"), "past-limit");
+    EXPECT_TRUE(outcome->response.body().empty());
+}

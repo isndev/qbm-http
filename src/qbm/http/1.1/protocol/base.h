@@ -562,9 +562,9 @@ private:
      * Finalizes header processing and prepares for body parsing.
      * This callback:
      * 1. Sets the HTTP version, and refuses a request whose major version is not 1: 505
-     * 2. Checks a request's Host field (check_host_field()) and, for a Parser driven directly, reserves memory for the
-     *    body based on Content-Length if available (the h1 protocol copies a declared body: no reserve)
-     * 3. Sets the upgrade flag if applicable
+     * 2. Checks a request's Host field (check_host_field()); reads a response's declared length as none for 1xx, 204, 304
+     *    and a HEAD's (`_body_forbidden`); refuses a declared length past the body limit: 413
+     * 3. For a Parser driven directly, reserves memory for the declared body (the h1 protocol copies it: none); sets upgrade
      * 4. Marks headers as completed and pauses the parser
      *
      * The parser is paused to allow the application to process headers
@@ -624,7 +624,7 @@ private:
             }
         } else if constexpr (MessageType::type == HTTP_RESPONSE) {
             const auto status = parser->status_code;
-            if ((status >= 100 && status < 200) || status == 204 || status == 304) {
+            if ((status >= 100 && status < 200) || status == 204 || status == 304 || self->_body_forbidden) { // or answers a HEAD (QB-1248)
                 parser->content_length = 0;
             }
         }
@@ -796,6 +796,7 @@ private:
 protected:
     /// Reserve a declared body at the end of its header section; the h1 protocol (it copies it) turns this off; kept by reset() (QB-1248).
     bool _reserve_declared_body = true;
+    bool _body_forbidden        = false; ///< A HEAD's response: its declared length read as none; set per response, kept by reset() (QB-1248)
 
 public:
     /// Constructor: initializes the parser and immediately calls reset() to prepare it for parsing a new message.
@@ -811,10 +812,9 @@ public:
      * @return HTTP parser error code or HPE_OK on success
      *
      * Parses HTTP message data according to HTTP/1.1 specification. This method can handle both full messages and
-     * partial messages. For partial messages, it can be called multiple times with subsequent chunks of data until a
-     * complete message is parsed.
-     * When a parsing error occurs, the error_pos field is set to point to the position in the buffer where the error
-     * occurred, which can be useful for debugging.
+     * partial messages: it may be called again with each next chunk of data until a complete message is parsed. When a
+     * parsing error occurs, the error_pos field is set to point to the position in the buffer where the error occurred,
+     * which can be useful for debugging.
      */
     http_errno_t
     parse(const char *buffer, std::size_t const size) {
@@ -1037,8 +1037,9 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     }
 
 protected:
-    /// The parser, its declared-body reserve off: this protocol copies a declared body from its input buffer (QB-1248).
+    /// The parser: its declared-body reserve off (this protocol copies a declared body from its input buffer), its HEAD flag exposed (QB-1248).
     struct parser_type : qb::http::Parser<std::remove_const_t<Trait>> {
+        using qb::http::Parser<std::remove_const_t<Trait>>::_body_forbidden; // set as each response begins (QB-1248)
         parser_type() noexcept {
             this->_reserve_declared_body = false;
         }
@@ -1067,8 +1068,7 @@ public:
      * @brief Calculate the size of a complete HTTP message
      * @return Size of the complete message if available, 0 otherwise
      *
-     * This method implements the AProtocol interface by parsing the
-     * input buffer to determine if a complete HTTP message is available.
+     * This method implements the AProtocol interface by parsing the input buffer to determine if a complete HTTP message is available.
      *
      * For HTTP, this involves:
      * 1. Parsing headers if not already parsed
@@ -1128,24 +1128,24 @@ public:
             if (total <= header_parsed) {
                 return 0;
             }
-            if constexpr (requires(IO_Handler &io) { io.http_request_limits(); }) {
-                // The limits are read when a message begins, from the server's current value: a change
-                // applies to the next request, never to one half read (Huly QB-168, QB-94).
-                if (header_parsed == 0)
+            if (header_parsed == 0) { // a message begins
+                // A server reads its limits now, from their current value: a change applies to the next request, never to one
+                // half read (Huly QB-168, QB-94). A client asks, once, whether the response may have a body: a HEAD's has none (QB-1248).
+                if constexpr (requires(IO_Handler &io) { io.http_request_limits(); })
                     _http_obj.set_request_limits(this->_io.http_request_limits());
+                if constexpr (requires(IO_Handler &io) { io.http1_response_body_forbidden(); })
+                    _http_obj._body_forbidden = this->_io.http1_response_body_forbidden();
             }
             const auto ret = _http_obj.parse(buf + header_parsed, total - header_parsed);
             if (ret == HPE_OK) {
-                // Header block still incomplete — remember how far llhttp has consumed so the
-                // next arrival feeds only what is new.
+                // Header block still incomplete — remember how far llhttp has consumed so the next arrival feeds only what is new.
                 header_parsed = total;
                 return 0;
             }
             if (!_http_obj.headers_completed()) {
                 return fail_message();
             }
-            // `error_pos` is an absolute pointer into the same buffer, so it stays correct
-            // regardless of where this pass started.
+            // `error_pos` is an absolute pointer into the same buffer, so it stays correct regardless of where this pass started.
             body_offset   = static_cast<std::size_t>(_http_obj.error_pos - buf);
             header_parsed = 0;
         }
@@ -1154,7 +1154,7 @@ public:
 
         if constexpr (std::remove_const_t<Trait>::type == HTTP_RESPONSE) {
             if constexpr (requires(IO_Handler &io) { io.http1_response_body_forbidden(); }) {
-                if (this->_io.http1_response_body_forbidden()) {
+                if (_http_obj._body_forbidden) { // the answer the response began with (QB-1248)
                     const auto header_size = body_offset;
                     body_offset            = 0;
                     return header_size;

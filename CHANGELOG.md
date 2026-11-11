@@ -449,6 +449,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A response to HEAD that declares a `Content-Length` past the client's body limit is delivered (Huly QB-1248).** A
+  response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2). The HTTP/1.1 client's
+  parser checked that length against `max_body_size` (100 MB by default) at the end of the header section and refused
+  it, before the protocol asked whether a body may follow (`http1_response_body_forbidden()`): the request failed and
+  its connection was dropped, though no body byte was coming. The protocol now asks once, when each response begins,
+  and tells its parser (`_body_forbidden`, a protected member the protocol's parser type exposes: `Parser`'s public
+  API is unchanged); the parser reads the declared length of a HEAD's response as none, as it does for 1xx, 204 and
+  304, and the protocol frames the response on its header section from the same answer. The response is delivered with
+  its status and header section, the declared length kept, its body empty, and a kept-alive connection serves the next
+  request. A response to another method that declares past the limit is still refused, and so is one a `Parser` driven
+  directly reads, which nobody tells about the request. Witnesses: `qbm-http-test-unit-http1-protocol-framing` (the
+  response to HEAD, then the next response framed, the client asked once per response; its header section cut at every
+  byte; the two refusals as they were) and `qbm-http-test-system-http1-client` (the persistent client and the one-shot
+  session, over the server's own answer to HEAD).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

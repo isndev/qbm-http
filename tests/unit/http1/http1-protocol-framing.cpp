@@ -33,7 +33,8 @@
  *     not_ok() (no message, ok()==false) instead of silently stalling.
  *   - Response specifics: status capture, no-body statuses (204/304) ignore a
  *     declared Content-Length, and the HEAD `http1_response_body_forbidden()`
- *     hook frames a body-bearing response on its headers alone.
+ *     hook frames a body-bearing response on its headers alone -- a declared
+ *     length past the body limit included (Huly QB-1248).
  *   - keep-alive / Connection close derivation surfaces on the dispatched msg.
  *
  * @author qb - C++ Actor Framework
@@ -94,8 +95,9 @@ struct ClientFakeIO {
 
     qb::allocator::pipe<char> input;
 
-    int                               response_count = 0;
-    bool                              body_forbidden = false;
+    int                               response_count      = 0;
+    bool                              body_forbidden      = false;
+    mutable int                       body_forbidden_asks = 0; // the protocol asks once per response (Huly QB-1248)
     std::optional<qb::http::Response> last_response;
 
     qb::allocator::pipe<char> &
@@ -106,6 +108,7 @@ struct ClientFakeIO {
     // Reached by the response-body-forbidden (HEAD) branch in getMessageSize().
     [[nodiscard]] bool
     http1_response_body_forbidden() const noexcept {
+        ++body_forbidden_asks;
         return body_forbidden;
     }
 
@@ -1480,4 +1483,88 @@ TEST(Http1ProtocolFraming, TheDefaultLimitsAreTheConstants) {
     EXPECT_EQ(at.requests, 1);
     const auto over = serve_under({}, get_request("/" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH, 'u')));
     EXPECT_EQ(over.refusals, std::vector<int>{414});
+}
+
+// ===========================================================================
+// A response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2), so a declared length
+// past the body limit is no refusal (Huly QB-1248). The parser refused it at the end of the header section, before the
+// protocol asked whether a body may follow (http1_response_body_forbidden()): the response to HEAD failed, and the
+// connection with it. The protocol now tells its parser when a response begins, and the parser reads the declared
+// length of a HEAD's response as none. A response to another method, and one a Parser driven directly reads, are still
+// refused.
+// ===========================================================================
+
+namespace http1_head_past_limit_test {
+[[nodiscard]] std::string
+past_the_body_limit() {
+    return std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+}
+
+[[nodiscard]] std::string
+declaring_past_the_body_limit() {
+    return "HTTP/1.1 200 OK\r\nContent-Length: " + past_the_body_limit() + "\r\nX-Head: past-limit\r\n\r\n";
+}
+} // namespace http1_head_past_limit_test
+
+TEST(Http1ProtocolFraming, AHeadResponseDeclaringPastTheBodyLimitIsDeliveredAndTheNextResponseFramed) {
+    using namespace http1_head_past_limit_test;
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    io.body_forbidden = true;
+    feed(io, declaring_past_the_body_limit() + "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong");
+
+    ASSERT_GT(step(proto, io), 0u) << "the response to HEAD was refused";
+    ASSERT_TRUE(proto.ok());
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.last_response->status(), 200);
+    EXPECT_EQ(io.last_response->header("Content-Length"), past_the_body_limit()) << "the declared length is the GET's, kept";
+    EXPECT_EQ(io.last_response->header("X-Head"), "past-limit");
+    EXPECT_TRUE(io.last_response->body().empty());
+
+    io.body_forbidden = false; // the next request is a GET: its response has the body it declares
+    ASSERT_GT(step(proto, io), 0u);
+    EXPECT_TRUE(proto.ok());
+    ASSERT_EQ(io.response_count, 2);
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "pong") << "the response after the HEAD's lost its framing";
+    EXPECT_EQ(io.input.size(), 0u);
+    EXPECT_EQ(io.body_forbidden_asks, 2) << "the client is asked once per response, as it begins";
+}
+
+// The protocol asks the client once, when the response BEGINS, and its parser and its HEAD branch read that answer: a
+// header section that arrives in two reads, cut anywhere.
+TEST(Http1ProtocolFraming, AHeadResponseDeclaringPastTheBodyLimitIsDeliveredAtEveryByteBoundary) {
+    using namespace http1_head_past_limit_test;
+    const auto wire = declaring_past_the_body_limit();
+    for (std::size_t cut = 1; cut < wire.size(); ++cut) {
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        io.body_forbidden = true;
+        feed(io, std::string_view(wire).substr(0, cut));
+        ASSERT_EQ(step(proto, io), 0u) << "cut at " << cut;
+        feed(io, std::string_view(wire).substr(cut));
+        ASSERT_EQ(step(proto, io), wire.size()) << "cut at " << cut;
+        ASSERT_TRUE(proto.ok()) << "cut at " << cut;
+        ASSERT_EQ(io.response_count, 1) << "cut at " << cut;
+        EXPECT_TRUE(io.last_response->body().empty()) << "cut at " << cut;
+        EXPECT_EQ(io.body_forbidden_asks, 1) << "cut at " << cut;
+    }
+}
+
+// Controls, as they were: the response to another method that declares past the limit is refused at the end of its
+// header section; a Parser driven directly, which nobody tells about the request, refuses it with 413.
+TEST(Http1ProtocolFraming, AResponseToAnotherMethodDeclaringPastTheBodyLimitIsStillRefused) {
+    using namespace http1_head_past_limit_test;
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    feed(io, declaring_past_the_body_limit());
+
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.response_count, 0);
+    EXPECT_FALSE(proto.ok()) << "a response declaring past the body limit was accepted";
+
+    qb::http::Parser<Response> parser;
+    const auto                 wire = declaring_past_the_body_limit();
+    EXPECT_NE(parser.parse(wire.data(), wire.size()), HPE_PAUSED);
+    EXPECT_FALSE(parser.headers_completed());
+    EXPECT_EQ(parser.refusal_status(), 413);
 }
