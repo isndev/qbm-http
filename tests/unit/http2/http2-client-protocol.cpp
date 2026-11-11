@@ -4578,3 +4578,44 @@ TEST(HTTP2ClientProtocol, ARefusedRequestGivesBackTheIdItTookAfterEarlierStreams
     EXPECT_FALSE(protocol.ok()) << "a frame on id 3, never sent, was read as one on a closed stream";
     EXPECT_NE(find_frame_offset(io.output, h2::FrameType::GOAWAY, before), SIZE_MAX);
 }
+
+// A hostile server's PING/SETTINGS flood (CVE-2019-9512, CVE-2019-9515) is bounded by the client's control-reply budget,
+// forgiven by real response progress. An empty DATA on a response in flight forgave it -- after every 999 PINGs or
+// SETTINGS, 5000 PONGs or ACKs and no GOAWAY: the 1001st closes the connection now, while a DATA carrying an octet of the
+// body still forgives it, five times over (Huly QB-1270).
+TEST(HTTP2ClientProtocol, AnEmptyDataDoesNotForgiveTheControlReplyBudget) {
+    const int                  budget = static_cast<int>(qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES);
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (const bool body_octet : {false, true}) {
+        for (const bool settings : {false, true}) {
+            SCOPED_TRACE(std::string(body_octet ? "an octet of the body" : "an empty DATA") + (settings ? ", SETTINGS" : ", PING"));
+            Http2ClientFakeIO                          io;
+            h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+            qb::http::Request                          req;
+            req.method() = qb::http::method::GET;
+            req.uri()    = qb::io::uri("https://example.test/flood");
+            ASSERT_TRUE(protocol.send_request(std::move(req), 17)); // opens stream 1
+            push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, encode_hpack_headers({{":status", "200"}}));
+            drive(protocol, io);
+            ASSERT_EQ(io.goaway_count, 0);
+            for (int round = 0; round < 5 && io.goaway_count == 0; ++round) {
+                for (int i = 0; i < budget - 1; ++i) {
+                    if (settings) {
+                        push_frame(io, h2::FrameType::SETTINGS, 0, 0, {});
+                    } else {
+                        push_frame(io, h2::FrameType::PING, 0, 0, ping_payload);
+                    }
+                }
+                push_frame(io, h2::FrameType::DATA, 0, 1, body_octet ? std::vector<uint8_t>{'x'} : std::vector<uint8_t>{});
+                drive(protocol, io);
+            }
+            if (body_octet) {
+                EXPECT_EQ(io.goaway_count, 0) << "an octet of the body is real progress";
+                EXPECT_TRUE(protocol.ok());
+            } else {
+                EXPECT_EQ(io.goaway_count, 1) << "an empty DATA forgave the budget";
+                EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+            }
+        }
+    }
+}

@@ -3820,7 +3820,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:3023-3026).
+// (2/protocol/server.h:3032-3035).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3840,7 +3840,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:3017-3022).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:3026-3031).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4079,7 +4079,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:413-422).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:415-424).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4102,7 +4102,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:413-417).
+// (qbm/http/src/qbm/http/2/protocol/server.h:415-419).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -7340,4 +7340,261 @@ TEST(HTTP2ServerProtocol, ResetsOfRefusedStreamsCountAgainstTheRapidResetCeiling
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
     EXPECT_EQ(pairs, qb1244_test::max_resets + 1) << "a reset of a refused stream was not counted";
+}
+
+// ===========================================================================
+// The resets the server sends before a request is dispatched (Huly QB-1270, train 7): the published form of
+// CVE-2019-9514 -- an invalid request on each new stream, each drawing a RST_STREAM -- and the PING/SETTINGS budget a
+// frame that moves no request forward forgave.
+// ===========================================================================
+namespace qb1270_test {
+
+/// What makes the server reset a new stream before its request is dispatched: a malformed request, or a stream error
+/// on an upload (its body against its length, a WINDOW_UPDATE of 0, trailers that do not end the stream), or a request
+/// it refuses for a limit (a declared body past the cap: 413, then RST_STREAM(NO_ERROR)).
+enum class before_dispatch {
+    missing_path,
+    unknown_method,
+    body_past_its_length,
+    body_short_of_its_length,
+    window_update_of_zero,
+    trailers_without_end,
+    declared_body_past_the_cap
+};
+
+void
+upload_declaring(Http2FakeIO &io, uint32_t sid, std::string const &length) {
+    push_frame(
+        io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid,
+        encode_hpack_headers(
+            {{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/upload"}, {"content-length", length}}));
+}
+
+void
+provoke_before_dispatch(Http2FakeIO &io, before_dispatch how, uint32_t sid) {
+    switch (how) {
+        case before_dispatch::missing_path:
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}}));
+            break;
+        case before_dispatch::unknown_method:
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers({{":method", "BREW"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/"}}));
+            break;
+        case before_dispatch::body_past_its_length:
+            upload_declaring(io, sid, "1");
+            push_frame(io, FrameType::DATA, 0, sid, {'a', 'b'});
+            break;
+        case before_dispatch::body_short_of_its_length:
+            upload_declaring(io, sid, "4");
+            push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, sid, {'a', 'b'});
+            break;
+        case before_dispatch::window_update_of_zero:
+            open_upload(io, sid);
+            push_frame(io, FrameType::WINDOW_UPDATE, 0, sid, {0x00, 0x00, 0x00, 0x00});
+            break;
+        case before_dispatch::trailers_without_end:
+            open_upload(io, sid);
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, encode_hpack_headers({{"x-trailer", "1"}}));
+            break;
+        case before_dispatch::declared_body_past_the_cap:
+            upload_declaring(io, sid, std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1));
+            break;
+    }
+}
+
+const std::vector<before_dispatch> all_before_dispatch{
+    before_dispatch::missing_path,
+    before_dispatch::unknown_method,
+    before_dispatch::body_past_its_length,
+    before_dispatch::body_short_of_its_length,
+    before_dispatch::window_update_of_zero,
+    before_dispatch::trailers_without_end,
+    before_dispatch::declared_body_past_the_cap
+};
+
+/// The handshake, with an application that answers each request inside its dispatch, so a request served holds no
+/// concurrency slot: a client served as it goes.
+void
+answer_in_the_dispatch(qb1244_test::AnsweringIO &io, qb1244_test::AnsweringProtocol &protocol) {
+    io.answer = [&protocol](uint32_t sid) {
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        EXPECT_TRUE(protocol.send_response(sid, answer));
+    };
+    push_preface(io);
+    push_frame(io, FrameType::SETTINGS, 0, 0, {});
+    drive(protocol, io);
+}
+
+} // namespace qb1270_test
+
+// A reset the server sends on a new stream before its request is dispatched -- a malformed request, a stream error on an
+// upload, a request refused for a limit -- is one the client solicits per new stream id, as a frame on a closed stream
+// solicits one: the published form of the reset flood (CVE-2019-9514). It was in no count: 1100 such streams drew 1100
+// resets and no GOAWAY. They share the closed-stream budget now -- 1000 between two streams the client opens, then
+// GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270).
+TEST(HTTP2ServerProtocol, ResetsBeforeDispatchPastTheBudgetCloseTheConnection) {
+    for (const auto how : qb1270_test::all_before_dispatch) {
+        SCOPED_TRACE(static_cast<int>(how));
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        uint32_t sid = 1;
+        for (int i = 0; i < qb1270_test::control_budget + 100 && io.goaway_count == 0; ++i, sid += 2) {
+            qb1270_test::provoke_before_dispatch(io, how, sid);
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 1) << "no bound on the resets sent before dispatch";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+        EXPECT_EQ(io.request_count, 0) << "nothing of it reached the application";
+    }
+}
+
+// One budget, not one per kind: 600 frames on a closed stream, then resets before dispatch -- the 1001st reset of either
+// kind closes the connection (Huly QB-1270).
+TEST(HTTP2ServerProtocol, ResetsBeforeDispatchAndOnClosedStreamsShareOneBudget) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    qb1270_test::closed_stream_one(protocol, io);
+    for (int i = 0; i < 600; ++i) {
+        qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
+    }
+    drive(protocol, io);
+    ASSERT_EQ(io.goaway_count, 0);
+    uint32_t sid = 3;
+    for (int i = 0; i < 500 && io.goaway_count == 0; ++i, sid += 2) {
+        qb1270_test::provoke_before_dispatch(io, qb1270_test::before_dispatch::missing_path, sid);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+}
+
+// The budget bounds a flood, not a client whose requests the server sometimes refuses: each stream it opens -- a request
+// dispatched -- forgives it. A reset before dispatch beside every request served, 2000 times, and 900 of them between two
+// requests, three times over: every one answered, the connection kept (Huly QB-1270).
+TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
+    for (const auto how : qb1270_test::all_before_dispatch) {
+        SCOPED_TRACE(static_cast<int>(how));
+        {
+            qb1244_test::AnsweringIO       io;
+            qb1244_test::AnsweringProtocol protocol(io);
+            qb1270_test::answer_in_the_dispatch(io, protocol);
+            uint32_t sid = 1;
+            for (int i = 0; i < 2000; ++i, sid += 4) {
+                qb1270_test::provoke_before_dispatch(io, how, sid);
+                push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid + 2,
+                           encode_hpack_headers(default_request_headers("/served")));
+                drive(protocol, io);
+            }
+            EXPECT_EQ(io.goaway_count, 0) << "a refusal beside each request served closed the connection";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(io.request_count, 2000);
+            EXPECT_EQ(qb1270_test::resets_sent(io.output), 2000u);
+        }
+        {
+            qb1244_test::AnsweringIO       io;
+            qb1244_test::AnsweringProtocol protocol(io);
+            qb1270_test::answer_in_the_dispatch(io, protocol);
+            uint32_t sid = 1;
+            for (int round = 0; round < 3; ++round) {
+                for (int i = 0; i < 900; ++i, sid += 2) {
+                    qb1270_test::provoke_before_dispatch(io, how, sid);
+                }
+                drive(protocol, io);
+                push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                           encode_hpack_headers(default_request_headers("/progress")));
+                drive(protocol, io);
+                sid += 2;
+            }
+            EXPECT_EQ(io.goaway_count, 0) << "a request served forgives the budget";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(io.request_count, 3);
+            EXPECT_EQ(qb1270_test::resets_sent(io.output), 2700u);
+        }
+    }
+}
+
+// The PING/SETTINGS budget (CVE-2019-9512, CVE-2019-9515) is forgiven by real progress only. A DATA frame accepted onto
+// an open upload forgave it whatever it carried: an empty one -- or one of padding alone -- after every 999 PINGs or
+// SETTINGS held it at zero, 5000 PONGs or ACKs and no GOAWAY. So did a HEADERS the server then refused as malformed,
+// and one that opened an upload it never dispatched. None of them moves a request forward: the 1001st control frame
+// closes the connection now (Huly QB-1270).
+TEST(HTTP2ServerProtocol, AFrameThatMovesNoRequestForwardDoesNotForgiveThePingAndSettingsBudget) {
+    enum class nothing { empty_data, padding_only_data, malformed_headers, upload_headers };
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (const auto what : {nothing::empty_data, nothing::padding_only_data, nothing::malformed_headers, nothing::upload_headers}) {
+        for (const bool settings : {false, true}) {
+            SCOPED_TRACE(std::to_string(static_cast<int>(what)) + (settings ? " SETTINGS" : " PING"));
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            do_handshake(protocol, io);
+            qb1270_test::open_upload(io, 1);
+            drive(protocol, io);
+            uint32_t sid = 3;
+            for (int round = 0; round < 5 && io.goaway_count == 0; ++round) {
+                for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
+                    if (settings) {
+                        push_frame(io, FrameType::SETTINGS, 0, 0, {});
+                    } else {
+                        push_frame(io, FrameType::PING, 0, 0, ping_payload);
+                    }
+                }
+                switch (what) {
+                    case nothing::empty_data:
+                        push_frame(io, FrameType::DATA, 0, 1, {});
+                        break;
+                    case nothing::padding_only_data:
+                        push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_PADDED, 1, {0x04, 0x00, 0x00, 0x00, 0x00});
+                        break;
+                    case nothing::malformed_headers:
+                        qb1270_test::provoke_before_dispatch(io, qb1270_test::before_dispatch::missing_path, sid);
+                        sid += 2;
+                        break;
+                    case nothing::upload_headers:
+                        qb1270_test::open_upload(io, sid);
+                        sid += 2;
+                        break;
+                }
+                drive(protocol, io);
+            }
+            EXPECT_EQ(io.goaway_count, 1) << "a frame that moves no request forward forgave the budget";
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        }
+    }
+}
+
+// Real progress forgives the budget, so a busy client is never cut: 999 PINGs between two octets of an upload's body,
+// or between two requests served, five times over -- every PING answered, no GOAWAY (Huly QB-1270).
+TEST(HTTP2ServerProtocol, RequestBodyOctetsAndRequestsServedForgiveThePingBudget) {
+    const std::vector<uint8_t> ping_payload(8, 0x00);
+    for (const bool requests : {false, true}) {
+        SCOPED_TRACE(requests ? "requests served" : "body octets");
+        qb1244_test::AnsweringIO       io;
+        qb1244_test::AnsweringProtocol protocol(io);
+        qb1270_test::answer_in_the_dispatch(io, protocol);
+        qb1270_test::open_upload(io, 1);
+        drive(protocol, io);
+        uint32_t sid = 3;
+        for (int round = 0; round < 5; ++round) {
+            for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
+                push_frame(io, FrameType::PING, 0, 0, ping_payload);
+            }
+            if (requests) {
+                push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                           encode_hpack_headers(default_request_headers("/served")));
+                sid += 2;
+            } else {
+                push_frame(io, FrameType::DATA, 0, 1, {'x'});
+            }
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "real progress did not forgive the budget";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(count_frames(io.output, FrameType::PING), static_cast<std::size_t>(5 * (qb1270_test::control_budget - 1)));
+        EXPECT_EQ(io.request_count, requests ? 5 : 0);
+    }
 }

@@ -389,9 +389,12 @@ public:
             send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "DATA before final response headers");
             return;
         }
-        _control_reply_count = 0; // real response progress (accepted DATA) forgives the flood budget
-
         if (!data_payload.empty()) {
+            // Octets of the response accepted are real progress: they forgive the flood budget. A DATA that carries none
+            // -- empty, or padding alone -- moves nothing forward and forgave it, an empty DATA after every 999 PINGs
+            // holding the guard at zero (Huly QB-1270); the end of the stream it may carry completes the response, which
+            // forgives it there (process_complete_response_if_ready).
+            _control_reply_count = 0;
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
             const auto body_size = stream.assembled_response.body().size();
             if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
