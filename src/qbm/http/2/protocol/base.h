@@ -104,12 +104,13 @@ constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
  *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
 
-/** @brief Cap on peer-triggered replies still QUEUED in the output: the PING PONGs, the SETTINGS ACKs and, on the server,
- *  the RST_STREAMs on closed or refused streams or before a request's dispatch, in one count, each from the moment it is
- *  written until the socket has taken its last byte (the PING/SETTINGS floods, CVE-2019-9512 / CVE-2019-9515, and the
- *  reset flood, CVE-2019-9514; modelled on nghttp2's max_outbound_ack -- Http2Protocol::queue_control_reply()). Those
- *  RST_STREAMs are bounded by the same number on a count of their own as well, between two streams the client opens
- *  (ServerHttp2Protocol::admit_solicited_reset(); Huly QB-1270). */
+/** @brief Cap on peer-triggered replies still QUEUED in the output: the PING PONGs, the SETTINGS ACKs and the RST_STREAMs
+ *  a peer draws for nothing -- on the server those on closed or refused streams or before a request's dispatch, on the
+ *  client those of anything but a request in flight (ClientHttp2Protocol::send_rst_stream()) -- in one count, each from
+ *  the moment it is written until the socket has taken its last byte (the PING/SETTINGS floods, CVE-2019-9512 /
+ *  CVE-2019-9515, and the reset flood, CVE-2019-9514; modelled on nghttp2's max_outbound_ack --
+ *  Http2Protocol::queue_control_reply()). The server's are bounded by the same number on a count of their own as well,
+ *  between two streams the client opens (ServerHttp2Protocol::admit_solicited_reset(); Huly QB-1270). */
 constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
 /** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not
@@ -691,8 +692,8 @@ protected:
     uint32_t                 _peer_max_frame_size                               = qb::protocol::http2::DEFAULT_MAX_FRAME_SIZE;
     bool                     _continuation_required                             = false;
     uint32_t                 _continuation_stream_id                            = 0;
-    /// The replies the peer solicited that the output still holds: PONGs, SETTINGS ACKs and, on the server, the resets
-    /// of streams the client never opened (queue_control_reply(), Huly QB-1270).
+    /// The replies the peer solicited that the output still holds: PONGs, SETTINGS ACKs, on the server the resets of
+    /// streams the client never opened, on the client those of anything but a request in flight (Huly QB-1270).
     detail::control_reply_queue _queued_control_replies;
 
 public:
@@ -970,8 +971,9 @@ protected:
     }
 
     /// The two halves of queue_control_reply(), for a reply its caller writes itself -- the server's reset of a stream
-    /// the client never opened, which may follow a response: whether MAX_QUEUED_CONTROL_REPLIES replies are still
-    /// queued, once those the socket has taken are forgiven -- the next one is then not to be written.
+    /// the client never opened, which may follow a response, and the client's reset of anything but a request in
+    /// flight: whether MAX_QUEUED_CONTROL_REPLIES replies are still queued, once those the socket has taken are
+    /// forgiven -- the next one is then not to be written.
     [[nodiscard]] bool
     control_replies_at_bound() noexcept {
         forgive_control_replies_taken();

@@ -239,6 +239,12 @@ struct qb::protocol::http2::ProtocolTestPeer<qb::protocol::http2::ClientHttp2Pro
         ASSERT_TRUE(inserted);
         it->second.state = h2::Http2StreamConcreteState::RESERVED_REMOTE;
     }
+
+    /// As if the server had promised every even stream up to @p id: push is disabled, so nothing else moves this.
+    static void
+    set_last_promised_stream_id(qb::protocol::http2::ClientHttp2Protocol<Http2ClientFakeIO> &protocol, uint32_t id) {
+        protocol._last_promised_stream_id = id;
+    }
 };
 
 // ===========================================================================
@@ -1723,22 +1729,25 @@ TEST(HTTP2ClientProtocol, DataForUnknownClientStreamIsConnectionError) {
 }
 
 // ===========================================================================
-// DATA for an UNKNOWN pushed (even) stream that was never promised is a
-// stream-level error: RST on the even id, connection survives.
+// DATA for an even stream id the server never promised: the stream is idle, where only HEADERS and PRIORITY are frames
+// at all -- a connection error, PROTOCOL_ERROR (RFC 9113 §5.1). The client disables push, so the server can promise no
+// stream (§6.6) and every even id is idle. It was reset (STREAM_CLOSED) and the connection survived: a 13-octet reply
+// for each such DATA, without a bound (Huly QB-1270; re-derived from DataForUnknownPushedStreamResetsStreamOnly: the
+// same frame, the verdict RFC 9113 asks for).
 // ===========================================================================
-TEST(HTTP2ClientProtocol, DataForUnknownPushedStreamResetsStreamOnly) {
+TEST(HTTP2ClientProtocol, DataOnAnIdleEvenStreamIsAConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
     const std::size_t before = io.output.size();
     protocol.on(make_data_frame(2, 0, "never-promised"));
 
-    EXPECT_TRUE(protocol.ok());
-    EXPECT_EQ(io.goaway_count, 0);
-
-    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
-    ASSERT_NE(rst_off, SIZE_MAX);
-    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 2u);
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX) << "an idle stream was reset";
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::GOAWAY, before), SIZE_MAX);
 }
 
 // ===========================================================================
@@ -2948,13 +2957,13 @@ TEST(HTTP2ClientProtocol, ContinuationWithNoOpenHeaderBlockIsConnectionError) {
 }
 
 // ---------------------------------------------------------------------------
-// HEADERS for an even (server-initiated) stream id that was never promised and
-// is not pending-pushed is treated as HEADERS on an unknown/closed stream:
-// the client RST_STREAMs that id (STREAM_CLOSED) and the connection survives.
-// Drives client.h on(HeadersFrame) unknown-stream RST branch (the even id skips
-// the "idle client stream" GOAWAY branch reserved for odd ids).
+// HEADERS for an even (server-initiated) stream id that was never promised: the stream is idle, and a server opens no
+// stream with HEADERS -- a connection error, PROTOCOL_ERROR (RFC 9113 §5.1.1). The client disables push, so the server
+// can promise no stream (§6.6) and every even id is idle. It was read as a HEADERS on a closed stream: reset
+// (STREAM_CLOSED), the connection kept, a 13-octet reply for each such HEADERS and no bound on them (Huly QB-1270;
+// re-derived from HeadersForUnknownEvenStreamRstsStreamOnly: the same frame, the verdict RFC 9113 asks for).
 // ---------------------------------------------------------------------------
-TEST(HTTP2ClientProtocol, HeadersForUnknownEvenStreamRstsStreamOnly) {
+TEST(HTTP2ClientProtocol, HeadersOnAnIdleEvenStreamIsAConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
 
@@ -2962,13 +2971,13 @@ TEST(HTTP2ClientProtocol, HeadersForUnknownEvenStreamRstsStreamOnly) {
     // Even id 4 was never promised via PUSH_PROMISE and is not a known stream.
     protocol.on(make_headers_frame(4, h2::FLAG_END_HEADERS, {{":status", "200"}}));
 
-    EXPECT_TRUE(protocol.ok()); // stream-level only, connection healthy
-    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.response_count, 0);
-
-    const auto rst_off = find_frame_offset(io.output, h2::FrameType::RST_STREAM, before);
-    ASSERT_NE(rst_off, SIZE_MAX);
-    EXPECT_EQ(peek_frame_header(io.output, rst_off).get_stream_id(), 4u);
+    EXPECT_EQ(find_frame_offset(io.output, h2::FrameType::RST_STREAM, before), SIZE_MAX) << "an idle stream was reset (RFC 9113 §6.4)";
+    EXPECT_NE(find_frame_offset(io.output, h2::FrameType::GOAWAY, before), SIZE_MAX);
     EXPECT_FALSE(io.last_status.has_value());
 }
 
@@ -3485,19 +3494,23 @@ TEST(HTTP2ClientProtocol, WindowUpdateForIdleHighOddStreamIsConnectionError) {
     EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
 }
 
-// A stream-level WINDOW_UPDATE for an EVEN (server-push) stream id we never saw
-// is tolerated and ignored per RFC 9113 6.9 (frames may cross paths with a
-// closed stream): no error, connection stays ok.
-TEST(HTTP2ClientProtocol, WindowUpdateForUnknownEvenStreamIsIgnored) {
+// A stream-level WINDOW_UPDATE for an EVEN stream id the server never promised targets an idle stream, as one for an
+// odd id past the last request does: a connection PROTOCOL_ERROR (RFC 9113 §5.1). It was ignored, as a frame crossing
+// a stream that has closed is (§6.9) -- but no even stream can have closed: the client disables push, so the server
+// can promise none (Huly QB-1270; re-derived from WindowUpdateForUnknownEvenStreamIsIgnored: the same frame, the
+// verdict the odd ids already had).
+TEST(HTTP2ClientProtocol, WindowUpdateOnAnIdleEvenStreamIsAConnectionError) {
     Http2ClientFakeIO                          io;
     h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
     open_stream_one(protocol, 1, "/wu-even");
 
-    protocol.on(make_window_update_frame(4, 100)); // even, unknown -> ignored
+    protocol.on(make_window_update_frame(4, 100)); // even, never promised -> idle
 
-    EXPECT_TRUE(protocol.ok());
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
     EXPECT_EQ(io.stream_error_count, 0);
-    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.goaway_count, 1);
 }
 
 // --- CONTINUATION error + trailers reassembly -------------------------------
@@ -4834,7 +4847,8 @@ TEST(HTTP2ClientProtocol, AReplySplitAcrossAPartialWriteIsForgivenWhenItsLastByt
 // forgave the queued control replies before the client found the overrun, so a hostile server answering each request
 // with one held the guard at zero across rounds of 999 PINGs. No frame the server sends forgives them since the guard
 // counts what the output holds, and this server reads nothing: the 1001st reply queued closes the connection (Huly
-// QB-1270; the resets this DATA draws are written between the PONGs and are not counted with them).
+// QB-1270; the reset this DATA draws is the reset of a request in flight: written between the PONGs, it is not a reply
+// the server drew for nothing and is not counted with them -- TheResetOfARequestInFlightIsNotAReplyTheServerSolicits).
 TEST(HTTP2ClientProtocol, ADataTheStreamIsResetForDoesNotForgiveTheControlReplyBudget) {
     const int                                  budget = static_cast<int>(qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES);
     const std::vector<uint8_t>                 ping_payload(8, 0x00);
@@ -4855,4 +4869,401 @@ TEST(HTTP2ClientProtocol, ADataTheStreamIsResetForDoesNotForgiveTheControlReplyB
     }
     EXPECT_EQ(io.goaway_count, 1) << "a DATA the stream was reset for forgave the budget";
     EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// ===========================================================================
+// The resets a server solicits from the client count with its PONGs and SETTINGS ACKs while the output holds them (Huly
+// QB-1270, the maintainer's « Oui, dans QB-1270 » of 2026-11-11). The reset of a request in flight retires it: the
+// server draws one for each request the client opened. Any other -- a HEADERS on a stream that is closed -- is a reply
+// it draws for nothing, and those had no bound at all: a server that read nothing queued one for each frame it sent,
+// up to qb-io's write cap. A frame on an IDLE stream is not such a reply: it is a connection error (RFC 9113 §5.1).
+// ===========================================================================
+namespace qb1270_reset_test {
+
+namespace fake = qb::http::test;
+using qb1270_queue_test::control_budget;
+using qb1270_queue_test::get;
+using client_protocol = h2::ClientHttp2Protocol<Http2ClientFakeIO>;
+
+/// The octets of a RST_STREAM frame.
+constexpr std::size_t reset_size = h2::FRAME_HEADER_SIZE + 4;
+
+/// What closed the stream the server then sends HEADERS on.
+enum class closed_by { a_response_completed, a_reset_of_the_server, a_reset_of_the_client };
+constexpr std::array<closed_by, 3> all_closed_by{
+    closed_by::a_response_completed, closed_by::a_reset_of_the_server, closed_by::a_reset_of_the_client
+};
+
+[[nodiscard]] const char *
+name_of(closed_by how) {
+    return how == closed_by::a_response_completed    ? "stream 1 closed by a completed response"
+           : how == closed_by::a_reset_of_the_server ? "stream 1 closed by the server's reset"
+                                                     : "stream 1 closed by the client's reset";
+}
+
+/// The client opens stream 1 and the stream is closed @p how -- the client's own reset, of a response with no :status,
+/// is the reset of a request in flight, which is not counted. The socket then takes everything: the server has read the
+/// request, and from here whatever the test lets it read.
+void
+close_stream_one(client_protocol &protocol, Http2ClientFakeIO &io, closed_by how) {
+    ASSERT_TRUE(protocol.send_request(get("/closed"), 1));
+    switch (how) {
+        case closed_by::a_response_completed:
+            push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, 1, encode_hpack_headers({{":status", "204"}}));
+            break;
+        case closed_by::a_reset_of_the_server:
+            push_frame(io, h2::FrameType::RST_STREAM, 0, 1, {0x00, 0x00, 0x00, 0x08}); // CANCEL
+            break;
+        case closed_by::a_reset_of_the_client:
+            push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, encode_hpack_headers({{"x-no-status", "1"}}));
+            break;
+    }
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    ASSERT_EQ(io.goaway_count, 0);
+    fake::socket_takes_everything(io);
+    io.wire.reset();
+}
+
+/// @p n HEADERS frames on closed stream 1, a whole block each: each one draws a RST_STREAM(STREAM_CLOSED).
+void
+headers_on_closed_stream_one(Http2ClientFakeIO &io, int n = 1) {
+    static const std::vector<uint8_t> block = encode_hpack_headers({{":status", "200"}});
+    for (int i = 0; i < n; ++i) {
+        push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, block);
+    }
+}
+
+/// The RST_STREAM frames in @p bytes.
+[[nodiscard]] std::size_t
+resets_in(const qb::allocator::pipe<char> &bytes) {
+    std::size_t n = 0;
+    for (const auto &f : fake::parse_emitted_frames(bytes)) {
+        n += f.type == h2::FrameType::RST_STREAM ? 1u : 0u;
+    }
+    return n;
+}
+
+} // namespace qb1270_reset_test
+
+// The attack: a server that never reads sends 5000 HEADERS on a stream that is closed -- by a completed response, by
+// its own reset, by the client's. Each drew a RST_STREAM(STREAM_CLOSED), 13 octets exempt from flow control, and
+// nothing counted them: 5000 queued, no GOAWAY, and so on up to qb-io's write cap (CVE-2019-9514 from the client's
+// side). A thousand queued close the connection now, and the 1001st reset is not written.
+TEST(HTTP2ClientProtocol, AServerThatNeverReadsIsCutOnceAThousandResetsAreQueued) {
+    using namespace qb1270_reset_test;
+    for (const auto how : all_closed_by) {
+        SCOPED_TRACE(name_of(how));
+        Http2ClientFakeIO io;
+        client_protocol   protocol(io);
+        close_stream_one(protocol, io, how);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        headers_on_closed_stream_one(io, 5000);
+        drive(protocol, io);
+        EXPECT_EQ(io.goaway_count, 1) << "the resets a server that never reads solicited queued without a bound";
+        EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_FALSE(protocol.ok());
+        EXPECT_EQ(resets_in(io.output), static_cast<std::size_t>(control_budget))
+            << "a thousand resets queued is the bound: the 1001st is not written";
+        const auto frames = fake::parse_emitted_frames(io.output);
+        ASSERT_FALSE(frames.empty());
+        EXPECT_EQ(frames.back().type, h2::FrameType::GOAWAY) << "the GOAWAY is the last frame written";
+    }
+}
+
+// One count for every reply the server draws for nothing: 333 PONGs, 333 SETTINGS ACKs and 333 resets queued by a
+// server that reads nothing, then one more reply of any kind -- a thousand queued, within the bound; the next one, of
+// that kind, closes the connection and is not written. The resets were in no count, so a thousand replies queued, a
+// third of them resets, closed nothing.
+TEST(HTTP2ClientProtocol, PongsSettingsAcksAndTheResetsAServerSolicitsShareTheQueuedCount) {
+    using namespace qb1270_reset_test;
+    struct kind {
+        const char                              *name;
+        std::function<void(Http2ClientFakeIO &)> solicit; // one more reply of this kind
+    };
+    const std::vector<kind> kinds = {
+        {"a PING", [](Http2ClientFakeIO &io) { fake::solicit_replies(io, fake::solicited_reply::pong); }},
+        {"a SETTINGS", [](Http2ClientFakeIO &io) { fake::solicit_replies(io, fake::solicited_reply::settings_ack); }},
+        {"a HEADERS on a closed stream", [](Http2ClientFakeIO &io) { headers_on_closed_stream_one(io); }},
+    };
+    const auto replies_in = [](const qb::allocator::pipe<char> &bytes) {
+        return fake::solicited_reply_ends(bytes).size() + resets_in(bytes);
+    };
+    for (const auto &[name, one_more] : kinds) {
+        SCOPED_TRACE(name);
+        Http2ClientFakeIO io;
+        client_protocol   protocol(io);
+        close_stream_one(protocol, io, closed_by::a_response_completed);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        for (int i = 0; i < 333; ++i) {
+            fake::solicit_replies(io, fake::solicited_reply::pong);
+            fake::solicit_replies(io, fake::solicited_reply::settings_ack);
+            headers_on_closed_stream_one(io);
+        }
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        ASSERT_EQ(replies_in(io.output), 999u);
+        one_more(io);
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok()) << "a thousand replies queued are within the bound";
+        EXPECT_EQ(replies_in(io.output), 1000u);
+        const std::size_t queued = io.output.size();
+        one_more(io);
+        drive(protocol, io);
+        EXPECT_EQ(io.goaway_count, 1) << "the 1001st reply queued closed nothing";
+        EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(replies_in(io.output), 1000u) << "the 1001st reply was written";
+        const auto frames = fake::parse_emitted_frames(io.output);
+        ASSERT_FALSE(frames.empty());
+        EXPECT_EQ(frames.back().type, h2::FrameType::GOAWAY);
+        EXPECT_EQ(frames.back().payload_offset - h2::FRAME_HEADER_SIZE, queued) << "something was written before the GOAWAY";
+    }
+}
+
+// A busy, legitimate server is never cut by this count, however many HEADERS fall on streams that have closed, because
+// it reads: 5000 HEADERS on a closed stream each read before the next; 999 in one read, the client's output drained,
+// five times; and what a client meets when the response it resets a request for has more frames in flight -- a
+// request, a response with no :status (the client resets its request: not counted), the trailers that were behind it
+// (on a stream now closed: a reset, counted), 3000 times. Every reset is written, none is refused, no GOAWAY.
+TEST(HTTP2ClientProtocol, ABusyServerWhoseFramesFallOnClosedStreamsIsNeverCut) {
+    using namespace qb1270_reset_test;
+    {
+        SCOPED_TRACE("each reset read before the next HEADERS");
+        Http2ClientFakeIO io;
+        client_protocol   protocol(io);
+        close_stream_one(protocol, io, closed_by::a_response_completed);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        for (int i = 0; i < 5000 && io.goaway_count == 0; ++i) {
+            headers_on_closed_stream_one(io);
+            drive(protocol, io);
+            fake::socket_takes_everything(io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "a server that reads was cut";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.wire.size(), 5000u * reset_size) << "a reset is missing, or something else was written";
+    }
+    {
+        SCOPED_TRACE("999 HEADERS in one read, five times");
+        Http2ClientFakeIO io;
+        client_protocol   protocol(io);
+        close_stream_one(protocol, io, closed_by::a_reset_of_the_server);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        for (int round = 0; round < 5; ++round) {
+            headers_on_closed_stream_one(io, control_budget - 1);
+            drive(protocol, io);
+            fake::socket_takes_everything(io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "a server that reads was cut";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.wire.size(), 5u * static_cast<std::size_t>(control_budget - 1) * reset_size);
+    }
+    {
+        SCOPED_TRACE("3000 requests reset for their response, each with trailers in flight behind it");
+        Http2ClientFakeIO io;
+        client_protocol   protocol(io);
+        fake::socket_takes_everything(io);
+        io.wire.reset();
+        uint32_t sid = 1;
+        for (int i = 0; i < 3000 && io.goaway_count == 0; ++i, sid += 2) {
+            ASSERT_TRUE(protocol.send_request(get("/reset-for-its-response"), 1u + static_cast<uint64_t>(i)));
+            push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, sid, encode_hpack_headers({{"x-no-status", "1"}}));
+            push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, sid, encode_hpack_headers({{"x-trailer", "1"}}));
+            drive(protocol, io);
+            fake::socket_takes_everything(io);
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "a server that reads was cut";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.stream_error_count, 3000);
+        EXPECT_EQ(resets_in(io.wire), 6000u) << "one reset of each request, one for the trailers behind it";
+    }
+}
+
+// A slow server is counted for what it has not read, never for what it has: a thousand resets queued, then one leaves
+// and one is solicited, 3000 times -- always a thousand queued, never the 1001st, no GOAWAY. Then one more with
+// nothing read: the 1001st, and the connection is closed.
+TEST(HTTP2ClientProtocol, ASlowServerIsNotCutWhileFewerThanAThousandResetsAreQueued) {
+    using namespace qb1270_reset_test;
+    Http2ClientFakeIO io;
+    client_protocol   protocol(io);
+    close_stream_one(protocol, io, closed_by::a_response_completed);
+    ASSERT_FALSE(::testing::Test::HasFatalFailure());
+    headers_on_closed_stream_one(io, control_budget);
+    drive(protocol, io);
+    ASSERT_EQ(io.goaway_count, 0) << "a thousand resets queued are within the bound";
+    ASSERT_EQ(io.output.size(), 1000u * reset_size);
+    for (int i = 0; i < 3000 && io.goaway_count == 0; ++i) {
+        fake::socket_takes(io, reset_size); // one reset leaves: 999 queued
+        headers_on_closed_stream_one(io);
+        drive(protocol, io); // a thousand again
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "a slow server was cut with fewer than a thousand resets queued";
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.output.size(), 1000u * reset_size);
+    EXPECT_EQ(io.wire.size(), 3000u * reset_size);
+    headers_on_closed_stream_one(io); // nothing left since: this one would be the 1001st queued
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 1) << "the 1001st queued reset did not close the connection";
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(resets_in(fake::written_and_queued(io)), 4000u) << "the 1001st queued reset was written";
+}
+
+// The partial write of a reset: it is queued until the socket has taken its LAST byte, as a PONG is. A reset written
+// first in an empty output, or behind a request the client queued; the socket takes it but for its last byte, or
+// whole, and the server pings until the connection is closed. While that byte has not left, the reset is one of the
+// thousand: 999 PONGs are admitted behind it. Once it has left, a thousand are. (It was in no count: a thousand PONGs
+// were admitted either way.)
+TEST(HTTP2ClientProtocol, AClientResetIsForgivenWhenItsLastByteHasLeft) {
+    using namespace qb1270_reset_test;
+    for (const auto how : all_closed_by) {
+        for (const bool behind_a_request : {false, true}) {
+            for (const bool last_byte_left : {false, true}) {
+                SCOPED_TRACE(std::string(name_of(how))
+                             + (behind_a_request ? ", the reset behind a request queued" : ", the reset first in the output")
+                             + (last_byte_left ? ", taken whole" : ", taken but for its last byte"));
+                Http2ClientFakeIO io;
+                client_protocol   protocol(io);
+                close_stream_one(protocol, io, how);
+                ASSERT_FALSE(::testing::Test::HasFatalFailure());
+                if (behind_a_request) {
+                    ASSERT_TRUE(protocol.send_request(get("/queued"), 2));
+                    ASSERT_GT(io.output.size(), 0u);
+                }
+                const std::size_t before = io.output.size();
+                headers_on_closed_stream_one(io);
+                drive(protocol, io);
+                ASSERT_TRUE(protocol.ok());
+                ASSERT_EQ(io.output.size(), before + reset_size) << "one reset, and nothing else, was written";
+                fake::socket_takes(io, last_byte_left ? before + reset_size : before + reset_size - 1);
+                EXPECT_EQ(fake::replies_admitted_before_the_cut(protocol, io, fake::solicited_reply::pong, 1100),
+                          control_budget - (last_byte_left ? 0 : 1))
+                    << (last_byte_left ? "a reset the socket took whole was still counted"
+                                       : "a reset whose last byte had not left was forgiven");
+                EXPECT_EQ(io.goaway_count, 1);
+                EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+            }
+        }
+    }
+}
+
+// What is NOT such a reply: the reset of a request in flight. It retires the request, so the server draws one for each
+// request the client opened and no more; it is written with what the client itself sends. 1500 requests, each answered
+// with a response the client resets it for, nothing read: 1500 resets queued and no GOAWAY -- and they take no place
+// in the count: a thousand PONGs are still admitted behind them, the 1001st closes the connection.
+TEST(HTTP2ClientProtocol, TheResetOfARequestInFlightIsNotAReplyTheServerSolicits) {
+    using namespace qb1270_reset_test;
+    Http2ClientFakeIO io;
+    client_protocol   protocol(io);
+    fake::socket_takes_everything(io);
+    io.wire.reset();
+    uint32_t sid = 1;
+    for (int i = 0; i < 1500; ++i, sid += 2) {
+        ASSERT_TRUE(protocol.send_request(get("/no-status"), 1u + static_cast<uint64_t>(i)));
+        push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, sid, encode_hpack_headers({{"x-no-status", "1"}}));
+        drive(protocol, io);
+        ASSERT_EQ(io.goaway_count, 0) << "the reset of request " << i << " closed the connection";
+    }
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.stream_error_count, 1500);
+    EXPECT_EQ(resets_in(io.output), 1500u);
+    EXPECT_EQ(fake::replies_admitted_before_the_cut(protocol, io, fake::solicited_reply::pong, 1100), control_budget)
+        << "the resets of requests in flight were counted with the replies the server solicits";
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// A stream the SERVER opened is never a request in flight: the reset of a pushed stream is a reply it solicits, counted
+// like the others. Push is disabled and no PUSH_PROMISE reaches this code; the test seam reserves the streams, as
+// ReservedPushRejectionRetiresStreamOnce does, and the application refuses each. A thousand refusals queued, the
+// 1001st closes the connection and is not written.
+TEST(HTTP2ClientProtocol, ARefusedPushIsAReplyTheServerSolicits) {
+    using namespace qb1270_reset_test;
+    using peer = h2::ProtocolTestPeer<client_protocol>;
+    Http2ClientFakeIO io;
+    client_protocol   protocol(io);
+    fake::socket_takes_everything(io);
+    io.wire.reset();
+    int refused = 0;
+    for (uint32_t id = 2; refused < 1100 && io.goaway_count == 0; id += 2) {
+        peer::reserve_pushed_stream(protocol, id);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        protocol.application_reject_push(id);
+        refused += io.goaway_count == 0 ? 1 : 0;
+    }
+    EXPECT_EQ(refused, control_budget) << "the resets of pushed streams queued without a bound";
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(resets_in(io.output), static_cast<std::size_t>(control_budget));
+}
+
+// --- a frame on an idle stream of either parity (RFC 9113 §5.1, §5.1.1, §6.4) --------------------------------------------
+
+// RST_STREAM names no idle stream (RFC 9113 §6.4): one for an even id the server never promised is a connection
+// PROTOCOL_ERROR, as one for an odd id past the last request already was. It was ignored.
+TEST(HTTP2ClientProtocol, RstStreamOnAnIdleEvenStreamIsAConnectionError) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/rst-even");
+
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(4);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(rst);
+
+    EXPECT_FALSE(protocol.ok());
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+}
+
+// PRIORITY is the frame an idle stream may receive (RFC 9113 §5.1): on an even id never promised it is read and
+// changes nothing, before and after.
+TEST(HTTP2ClientProtocol, PriorityOnAnIdleEvenStreamIsTolerated) {
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/priority-even");
+    const std::size_t before = io.output.size();
+
+    h2::Http2FrameData<h2::PriorityFrame> priority;
+    priority.header.type = static_cast<uint8_t>(h2::FrameType::PRIORITY);
+    priority.header.set_stream_id(4);
+    protocol.on(priority);
+
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(io.stream_error_count, 0);
+    EXPECT_EQ(io.output.size(), before) << "a PRIORITY on an idle stream was answered";
+}
+
+// Idle is "past the last stream promised", not "even": had the server promised streams 2 and 4 (the test seam says so;
+// push is disabled and nothing else can), a frame on them once they have closed is a frame on a closed stream -- a
+// HEADERS or a DATA is reset (STREAM_CLOSED, a reply counted while queued), a WINDOW_UPDATE or a RST_STREAM crossing
+// the close is ignored (RFC 9113 §6.9, §5.1) -- and the connection lives on. Stream 6 is the first idle one: a HEADERS
+// on it is the connection error.
+TEST(HTTP2ClientProtocol, AFrameOnAClosedEvenStreamIsNotOneOnAnIdleStream) {
+    using peer = h2::ProtocolTestPeer<h2::ClientHttp2Protocol<Http2ClientFakeIO>>;
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    open_stream_one(protocol, 1, "/closed-even");
+    peer::set_last_promised_stream_id(protocol, 4);
+    const std::size_t before = io.output.size();
+
+    protocol.on(make_headers_frame(4, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+    protocol.on(make_data_frame(2, 0, "late"));
+    protocol.on(make_window_update_frame(4, 100));
+    h2::Http2FrameData<h2::RstStreamFrame> rst;
+    rst.header.type = static_cast<uint8_t>(h2::FrameType::RST_STREAM);
+    rst.header.set_stream_id(2);
+    rst.payload.error_code = h2::ErrorCode::CANCEL;
+    protocol.on(rst);
+    EXPECT_TRUE(protocol.ok()) << "a frame on a closed even stream was read as one on an idle stream";
+    EXPECT_EQ(io.goaway_count, 0);
+    EXPECT_EQ(count_frames_from(io.output, h2::FrameType::RST_STREAM, before), 2u) << "the HEADERS and the DATA each draw a reset";
+
+    protocol.on(make_headers_frame(6, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+    EXPECT_FALSE(protocol.ok()) << "stream 6, past the last promised, was not read as idle";
+    ASSERT_TRUE(protocol.get_last_error_code().has_value());
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(count_frames_from(io.output, h2::FrameType::RST_STREAM, before), 2u) << "the idle stream was reset";
 }

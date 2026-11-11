@@ -578,8 +578,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   naming its own stream stays ignored, as RFC 9113 §5.3.2 has it.
 
 - **Security: the HTTP/2 guard of the replies a peer solicits counts those still queued in the output -- PONGs,
-  SETTINGS ACKs and, on the server, resets: a peer that reads nothing is closed at a thousand, one that reads never is
-  by this count (Huly QB-1270; CVE-2019-9512, CVE-2019-9515, CVE-2019-9514).** On the server and on the client alike.
+  SETTINGS ACKs and resets: a peer that reads nothing is closed at a thousand, one that reads never is by this count
+  (Huly QB-1270; CVE-2019-9512, CVE-2019-9515, CVE-2019-9514).** On the server and on the client alike.
   The replies a peer solicits with `PING` and `SETTINGS` frames are exempt from flow control, and the guard bounded them
   at `MAX_QUEUED_CONTROL_REPLIES` (1000) between two frames accepted onto a stream. A `DATA` or `HEADERS` frame the
   server accepted forgave the count, as did a `DATA` or a completed response on the client -- an empty `DATA` after
@@ -607,7 +607,23 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the `GOAWAY`: the session closes the connection without waiting for it. The position of a reply is read from the
   session's own count of bytes written (`bytes_written()`) and the size of its output, when a reply is solicited and
   nowhere on the write path; a protocol instantiated on an io handler without that count forgives its replies when
-  the handler's output is empty. On the client the count holds the PONGs and the SETTINGS ACKs.
+  the handler's output is empty. On the client the count holds the PONGs, the SETTINGS ACKs and the resets of
+  anything but a request in flight. Each `HEADERS` a server sent on a stream that had closed -- by a completed
+  response, by a reset of either side -- drew a `RST_STREAM(STREAM_CLOSED)`, in no count at all: over real TLS sockets a
+  server that answered one request, then sent `HEADERS` on that stream and read nothing drew every reset it solicited,
+  5 162 832 of them (64 MiB), the client still connected and its next request still waiting. They are replies the
+  server draws for nothing and count with the PONGs and the ACKs now: the 1001st queued is not written and the client
+  closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`, the request in flight failing with that reason, while a server
+  that reads them -- 3000 in rounds of 500 over the same sockets -- is never cut. The reset of a request in flight, a
+  response the client refuses, is not counted: it retires the request, so a server draws one for each request the
+  client opens and no more. And a frame on an idle stream is a connection error on the client whatever the stream's
+  parity (RFC 9113 §5.1, §5.1.1, §6.4): the client disables push, so a server can reserve no stream and every even id
+  stays idle, yet a `HEADERS` or a `DATA` on one was reset and the connection kept -- a 13-octet reply for each -- and
+  a `WINDOW_UPDATE` or a `RST_STREAM` there was ignored. Each closes the connection with `GOAWAY(PROTOCOL_ERROR)` now,
+  as on an odd id past the client's last request; a `PRIORITY`, which an idle stream may receive, stays read and
+  ignored, and a frame the frame layer refuses first -- a `WINDOW_UPDATE` of 0, a `PRIORITY` that is not 5 octets --
+  still ends the client's connection without a `GOAWAY`. The client keeps no second budget for its resets, as the
+  server does: a server that reads them is held to no number of them, as with its `PING`s.
 
 - **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
   as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list
