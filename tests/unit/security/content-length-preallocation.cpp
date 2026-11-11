@@ -11,10 +11,14 @@
  *
  * The reservation was also pure waste: it targeted `msg.body().raw()`, but the body accumulates in
  * the parser's separate `_chunked` buffer and `on_message_complete()` **move-assigns** `_chunked`
- * over `msg.body().raw()` — which deallocates whatever was reserved. So the allocation was never
- * used by anything, on any path.
+ * over `msg.body().raw()` — which deallocates whatever was reserved. So that allocation was never
+ * used by anything, on any path. The reserve is on `_chunked` now, for a Parser driven directly, which reads the body
+ * into it; the h1 protocol, server and client, copies a declared body from its input buffer, so its parser reserves
+ * nothing (Huly QB-1248). Two protocol-level oracles hold that: the capacity a following chunked body adopts (the
+ * parser's buffer, after a declared body at the reserve's cap, read after a reset() of the parser), and the allocations
+ * a declared body costs after a chunked one, against after a declared one (it self-skips like oracle 2 below).
  *
- * Two oracles, because one of them is not available everywhere:
+ * For the parser itself, two oracles, because one of them is not available everywhere:
  *
  *   1. `body().raw().capacity()` after a headers-only parse. Allocator-independent, works under
  *      every preset, and observes the exact buffer the old reserve targeted.
@@ -49,8 +53,11 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <new>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #ifdef _MSC_VER
 #include <malloc.h> // _aligned_malloc / _aligned_free (see the aligned pair below)
@@ -59,6 +66,8 @@
 #include <gtest/gtest.h>
 
 #include <qbm/http/1.1/protocol/base.h>
+#include <qbm/http/1.1/protocol/client.h>
+#include <qbm/http/1.1/protocol/server.h>
 #include <qbm/http/http.h>
 
 #include "../../shared/allocation_counter.h" // g_counting / AllocScope / the replaced operator new / allocation_counter_is_live()
@@ -242,6 +251,106 @@ TEST(ContentLengthPreallocation, AMessageWithoutABodyAllocatesNoBodyBuffer) {
     ASSERT_EQ(kept.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE); // the body buffer moved into the message: null
     kept.reset();
     EXPECT_EQ(count_get(kept), on_fresh) << "a GET after a chunked body allocated a body buffer";
+}
+
+// The h1 protocol, server and client, copies a declared body from its input buffer (getMessageSize()); only a chunked
+// body is read into the parser's buffer. So the protocol reserves nothing for a declared one: before, a declared body
+// at the reserve's cap held 64 KiB in that buffer for the connection's lifetime, and a declared body after a chunked one
+// took the initial buffer back for nothing (Huly QB-1248). Driven without a socket, as http1-protocol-framing does.
+struct server_io {
+    using base_io_t = server_io;
+    qb::allocator::pipe<char>        input;
+    std::optional<qb::http::Request> last;
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    void
+    on(qb::http::Request &&request) {
+        last = std::move(request);
+    }
+};
+
+struct client_io {
+    using base_io_t = client_io;
+    qb::allocator::pipe<char>         input;
+    std::optional<qb::http::Response> last;
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    [[nodiscard]] bool
+    http1_response_body_forbidden() const noexcept {
+        return false;
+    }
+    void
+    on(qb::http::Response &&response) {
+        last = std::move(response);
+    }
+};
+
+/// Hands @p wire to the protocol as one read; returns the allocations framing and delivering it made (the read's own
+/// copy into the input buffer is outside the count).
+template <typename Protocol, typename IO>
+std::size_t
+deliver(Protocol &protocol, IO &io, std::string_view wire) {
+    std::memcpy(io.input.allocate_back(wire.size()), wire.data(), wire.size());
+    AllocScope        scope;
+    const std::size_t size = protocol.getMessageSize();
+    EXPECT_EQ(size, wire.size()) << "one whole message";
+    if (size != 0) {
+        protocol.onMessage(size);
+        io.input.free_front(size);
+    }
+    return AllocScope::count();
+}
+
+template <typename Protocol, typename IO>
+void
+declared_bodies_leave_the_parser_buffer_alone(std::string const &declared_head, std::string const &chunked_head) {
+    const std::size_t initial = qb::allocator::pipe<char>{}.capacity();
+    const std::size_t cap     = protocol_limits::MAX_BODY_RESERVE_HINT;
+    const std::string large(cap, 'a');
+    // A small declared body, then one at the reserve's cap -- read after the parser's reset(), which must keep the
+    // reserve off -- then a chunked body: it adopts the parser's buffer, so its capacity is what the declared bodies left.
+    {
+        IO       io;
+        Protocol protocol(io);
+        (void) deliver(protocol, io, declared_head + "5\r\n\r\nhello");
+        (void) deliver(protocol, io, declared_head + std::to_string(cap) + "\r\n\r\n" + large);
+        ASSERT_TRUE(io.last.has_value());
+        EXPECT_EQ(io.last->body().size(), cap);
+        (void) deliver(protocol, io, chunked_head + one_chunk("hello"));
+        ASSERT_TRUE(io.last.has_value());
+        ASSERT_EQ(io.last->body().raw().size(), 5u) << "the chunked message was delivered";
+        EXPECT_EQ(io.last->body().raw().capacity(), initial) << "a declared body left a reserve in the parser's buffer";
+    }
+    if (!allocation_counter_is_live())
+        GTEST_SKIP() << "the operator new replacement is not observing allocations on this toolchain; the capacity oracle "
+                        "above ran";
+    // A declared body costs the same after a chunked body, which left the parser's buffer null, as after a declared one.
+    IO       warm_io;
+    Protocol warm(warm_io);
+    (void) deliver(warm, warm_io, chunked_head + one_chunk("warm")); // restore_body_buffer()'s one-time read, uncounted
+    (void) deliver(warm, warm_io, chunked_head + one_chunk("warm"));
+    IO       after_declared_io, after_chunked_io;
+    Protocol after_declared(after_declared_io), after_chunked(after_chunked_io);
+    (void) deliver(after_declared, after_declared_io, declared_head + "5\r\n\r\nhello");
+    (void) deliver(after_chunked, after_chunked_io, chunked_head + one_chunk("hello"));
+    const auto declared = deliver(after_declared, after_declared_io, declared_head + "5\r\n\r\nhello");
+    const auto chunked  = deliver(after_chunked, after_chunked_io, declared_head + "5\r\n\r\nhello");
+    EXPECT_EQ(chunked, declared) << "a declared body after a chunked one took a buffer it never writes";
+}
+
+TEST(ContentLengthPreallocation, TheServerReservesNothingForADeclaredBodyItCopies) {
+    declared_bodies_leave_the_parser_buffer_alone<qb::protocol::http::server<server_io>, server_io>(
+        "POST /upload HTTP/1.1\r\nHost: example.test\r\nContent-Length: ",
+        "POST /upload HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n");
+}
+
+TEST(ContentLengthPreallocation, TheClientReservesNothingForADeclaredBodyItCopies) {
+    declared_bodies_leave_the_parser_buffer_alone<qb::protocol::http::client<client_io>, client_io>(
+        "HTTP/1.1 200 OK\r\nContent-Length: ", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
 }
 
 } // namespace

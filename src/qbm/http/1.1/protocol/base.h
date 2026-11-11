@@ -75,10 +75,10 @@ constexpr std::size_t MAX_BODY_SIZE = 100 * 1024 * 1024;
  *          per connection until the idle timeout: ~2.6 million times amplification, and trivially
  *          multiplied by the connection count.
  *
- *          Capping the hint keeps the optimisation that matters — the overwhelming majority of
- *          real bodies fit in one allocation and never regrow — while making the pre-body
- *          commitment independent of what the peer claims. Anything larger simply grows
- *          geometrically as bytes actually arrive, so memory tracks delivered traffic.
+ *          Capping the hint keeps the optimisation that matters — the overwhelming majority of real bodies fit in
+ *          one allocation and never regrow — while making the pre-body commitment independent of what the peer
+ *          claims. Anything larger simply grows geometrically as bytes actually arrive, so memory tracks delivered
+ *          traffic. The cap bounds a Parser driven directly: the h1 protocol copies a declared body and reserves none.
  */
 constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
@@ -562,8 +562,8 @@ private:
      * Finalizes header processing and prepares for body parsing.
      * This callback:
      * 1. Sets the HTTP version, and refuses a request whose major version is not 1: 505
-     * 2. Checks a request's Host field (check_host_field()) and reserves memory for the body based on
-     *    Content-Length if available
+     * 2. Checks a request's Host field (check_host_field()) and, for a Parser driven directly, reserves memory for the
+     *    body based on Content-Length if available (the h1 protocol copies a declared body: no reserve)
      * 3. Sets the upgrade flag if applicable
      * 4. Marks headers as completed and pauses the parser
      *
@@ -632,14 +632,14 @@ private:
             if (parser->content_length > self->_limits.max_body_size) {
                 return refuse_with_status(parser, "HTTP Content-Length exceeds configured body size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
             }
-            // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()` is MOVE-ASSIGNED from `_chunked` in
-            // on_message_complete, which deallocates whatever was reserved here, so reserving on it was both dangerous and pure waste.
+            // Reserve on `_chunked`, which a Parser driven directly reads the body into (the protocol copies it: reserve off).
+            // The message adopts `_chunked` in on_message_complete (Huly QB-1216): a reserve on its own buffer would be lost.
             //
             // And cap the hint: see MAX_BODY_RESERVE_HINT. `content_length` is peer-supplied and is
             // known before any body byte arrives, so an unbounded reserve turns a ~40-byte request
             // into a 100 MB allocation held for the connection's lifetime.
             const auto hint = std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT);
-            if (hint != 0) // a declared 0 (a GET, a bodyless status) makes no call; body_buffer(): the initial buffer (Huly QB-1248)
+            if (hint != 0 && self->_reserve_declared_body) // not for a declared 0, nor for the protocol, which copies it (QB-1248)
                 self->body_buffer(hint).reserve(hint);
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
@@ -793,12 +793,12 @@ private:
     }
     QB_NOINLINE QB_COLD void restore_body_buffer(std::size_t expected); ///< body_buffer()'s cold half: the pipe's initial buffer (QB-1248)
 
+protected:
+    /// Reserve a declared body at the end of its header section; the h1 protocol (it copies it) turns this off; kept by reset() (QB-1248).
+    bool _reserve_declared_body = true;
+
 public:
-    /**
-     * @brief Constructor
-     *
-     * Initializes the parser and immediately calls reset() to prepare it for parsing a new message.
-     */
+    /// Constructor: initializes the parser and immediately calls reset() to prepare it for parsing a new message.
     Parser() noexcept
         : http__internal_s() {
         reset();
@@ -980,9 +980,8 @@ namespace qb::protocol::http {
  * @tparam IO_Handler Handler type for I/O operations
  * @tparam Trait Message trait type (Request or Response)
  *
- * This class implements the core HTTP protocol handling functionality.
- * It parses incoming HTTP messages and extracts headers and body content
- * according to the HTTP/1.1 specification. It handles:
+ * This class implements the core HTTP protocol handling functionality. It parses incoming HTTP messages and extracts
+ * headers and body content according to the HTTP/1.1 specification. It handles:
  *
  * - Message header parsing
  * - Content length detection
@@ -990,24 +989,21 @@ namespace qb::protocol::http {
  * - Message completion detection
  * - Buffer management for partial messages
  *
- * The class is used as a base for both client-side (response parsing)
- * and server-side (request parsing) protocol handlers.
+ * The class is used as a base for both client-side (response parsing) and server-side (request parsing) protocol handlers.
  */
 template <typename IO_Handler, typename Trait>
 class base : public qb::io::async::AProtocol<IO_Handler> {
     using String            = typename qb::http::Parser<std::remove_const_t<Trait>>::String;
     std::size_t body_offset = 0; ///< Current offset for body parsing
 
-    /// How many bytes of the *current* header block have already been handed to llhttp.
-    /// The header block is parsed INCREMENTALLY: each call feeds only the bytes that arrived
-    /// since the last one. Re-feeding the whole buffer every time is quadratic in the header
-    /// size — see getMessageSize().
+    /// How many bytes of the *current* header block have already been handed to llhttp. The header block is parsed
+    /// INCREMENTALLY: each call feeds only the bytes that arrived since the last one. Re-feeding the whole buffer every
+    /// time is quadratic in the header size — see getMessageSize().
     std::size_t header_parsed = 0;
 
-    /// True while accumulating a close-delimited response body (no Content-Length, no
-    /// Transfer-Encoding, body-bearing status — RFC 9112 §6.3). getMessageSize cannot know
-    /// the length until the connection closes, so it returns 0 (keep buffering) and flush_eof()
-    /// delivers the accumulated body on disconnect.
+    /// True while accumulating a close-delimited response body (no Content-Length, no Transfer-Encoding, body-bearing
+    /// status — RFC 9112 §6.3). getMessageSize cannot know the length until the connection closes, so it returns 0 (keep
+    /// buffering) and flush_eof() delivers the accumulated body on disconnect.
     bool _close_delimited = false;
 
     /// True once a request was refused, for a limit, its target, its version or Host (fail_message()): the stream lost
@@ -1041,7 +1037,12 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     }
 
 protected:
-    qb::http::Parser<std::remove_const_t<Trait>> _http_obj; ///< HTTP parser
+    /// The parser, its declared-body reserve off: this protocol copies a declared body from its input buffer (QB-1248).
+    struct parser_type : qb::http::Parser<std::remove_const_t<Trait>> {
+        parser_type() noexcept {
+            this->_reserve_declared_body = false;
+        }
+    } _http_obj; ///< HTTP parser
 
 public:
     typedef String string_type; ///< String type used for storage
@@ -1057,8 +1058,7 @@ public:
      * @brief Construct a protocol handler with an IO handler
      * @param io IO handler to use for I/O operations
      *
-     * Creates a protocol handler that uses the given IO handler
-     * for reading and writing data.
+     * Creates a protocol handler that uses the given IO handler for reading and writing data.
      */
     explicit base(IO_Handler &io) noexcept
         : qb::io::async::AProtocol<IO_Handler>(io) {}
@@ -1266,15 +1266,15 @@ namespace qb::http {
  *          every chunked body of the protocol, every body of a Parser driven directly -- it is null, and the body's
  *          first write took the pipe's slow path: 8 KiB for a body of a few octets, twice what the first message's took
  *          (Huly QB-1248). A first write past the initial size grows from a null pipe as it would from that buffer, so
- *          it is left null; a message that declares no length allocates nothing (a HEAD response that declares one of
- *          at most the initial size gets the initial buffer, unwritten: 8 KiB before). qb's pipe now does the same:
- *          this keeps the parser apart.
+ *          it is left null; a message that declares no length allocates nothing (a HEAD response that declares one of at
+ *          most the initial size, read by a Parser driven directly, gets the initial buffer, unwritten: 8 KiB before).
+ *          qb's pipe now does the same: this keeps the parser apart.
  *
  *          body_buffer() keeps the test of the buffer in line and calls this only for a null one (Huly QB-1248: defined
  *          out of line, the test was a call on every message under g++). A write of 0 bytes gets nothing, and a declared
  *          length of 0 makes no call at all. The reserve of a declared length is written only by a Parser driven
- *          directly past its header section (resume(), then parse() over the body): the protocol, server and client,
- *          copies such a body from its input buffer and never writes `_chunked`.
+ *          directly past its header section (resume(), then parse() over the body); the protocol, server and client,
+ *          copies such a body from its input buffer, so its parser reserves none (`_reserve_declared_body`).
  */
 template <typename MessageType>
 void
