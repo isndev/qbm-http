@@ -8,8 +8,9 @@
  * middle of a body. This client is that: a blocking-connect TLS socket negotiating ALPN `h2`, the connection preface
  * and a SETTINGS frame of the test's choosing, requests as HPACK-encoded HEADERS, and a frame reader that keeps, per
  * stream, the decoded header blocks, every DATA payload in order, the END_STREAM, a RST_STREAM's code and a trailer
- * block. It answers SETTINGS with an ACK and PING with a PONG, and ignores the rest. No padding is expected from the
- * server (it sends none).
+ * block. It answers SETTINGS with an ACK and PING with a PONG, counts the PONGs, the SETTINGS ACKs and the resets it
+ * reads -- it can solicit them by the thousand in one write (Huly QB-1270) -- and ignores the rest. No padding is
+ * expected from the server (it sends none).
  *
  * Header-only, test-only. Contains no TEST()/main().
  *
@@ -100,6 +101,13 @@ public:
     std::uint32_t                      goaway_last_stream = 0;
     bool                               goaway_seen        = false;
     std::uint32_t                      goaway_code        = 0;
+    std::size_t                        pongs              = 0;    ///< the PING frames with ACK read (Huly QB-1270)
+    std::size_t                        settings_acks      = 0;    ///< the SETTINGS frames with ACK read, ours included
+    std::size_t                        resets             = 0;    ///< the RST_STREAM frames read
+    bool                               keep_frames        = true; ///< false: `frames` stays empty (a flood's replies are counted)
+    /// How long one write may take before it gives up. A client that floods a server sets it far past what a loaded
+    /// host can stall for: its writes then stop only when the connection is broken.
+    std::chrono::milliseconds write_budget = std::chrono::seconds(2);
 
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
@@ -143,6 +151,27 @@ public:
         std::vector<uint8_t> out;
         append_frame(out, HEADERS, END_STREAM | END_HEADERS, stream_id, block);
         return write_all(out) ? stream_id : 0;
+    }
+
+    /// What `solicit()` sends: each frame draws one reply of the server -- a PONG, a SETTINGS ACK, or the RST_STREAM
+    /// that answers a frame on a closed stream.
+    enum class soliciting { pings, settings, data_on_a_closed_stream };
+
+    /// `count` PING frames, empty SETTINGS frames, or empty DATA frames on `closed_stream`, in ONE write (Huly
+    /// QB-1270). `false` when the write did not finish within `write_budget`, or the connection is broken.
+    bool
+    solicit(int count, soliciting what = soliciting::pings, std::uint32_t closed_stream = 0) {
+        std::vector<uint8_t> out;
+        out.reserve(static_cast<std::size_t>(count) * 17u);
+        for (int i = 0; i < count; ++i) {
+            if (what == soliciting::settings)
+                append_frame(out, SETTINGS, 0, 0, {});
+            else if (what == soliciting::data_on_a_closed_stream)
+                append_frame(out, DATA, 0, closed_stream, {});
+            else
+                append_frame(out, PING, 0, 0, {0x51, 0x42, 0x31, 0x32, 0x37, 0x30, 0x00, 0x00});
+        }
+        return write_all(out);
     }
 
     bool
@@ -237,8 +266,8 @@ private:
     }
 
     bool
-    write_all(std::vector<uint8_t> const &bytes, std::chrono::milliseconds budget = std::chrono::seconds(2)) {
-        const auto  deadline = std::chrono::steady_clock::now() + budget;
+    write_all(std::vector<uint8_t> const &bytes) {
+        const auto  deadline = std::chrono::steady_clock::now() + write_budget;
         std::size_t sent     = 0;
         while (sent < bytes.size()) {
             const int n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
@@ -265,19 +294,24 @@ private:
         if (n == 0)
             return false;
         _in.insert(_in.end(), tmp, tmp + n);
-        while (_in.size() >= 9) {
-            const std::size_t length = (std::size_t{_in[0]} << 16) | (std::size_t{_in[1]} << 8) | _in[2];
-            if (_in.size() < 9 + length)
+        std::size_t at = 0; // one erase a read, not one a frame: a read of a flood's replies holds thousands of frames
+        while (_in.size() - at >= 9) {
+            const std::uint8_t *head   = _in.data() + at;
+            const std::size_t   length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
+            if (_in.size() - at < 9 + length)
                 break;
             RawFrame f;
-            f.type      = _in[3];
-            f.flags     = _in[4];
-            f.stream_id = ((std::uint32_t{_in[5]} << 24) | (std::uint32_t{_in[6]} << 16) | (std::uint32_t{_in[7]} << 8) | _in[8]) & 0x7FFFFFFFu;
-            f.payload.assign(_in.begin() + 9, _in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
-            _in.erase(_in.begin(), _in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+            f.type  = head[3];
+            f.flags = head[4];
+            f.stream_id =
+                ((std::uint32_t{head[5]} << 24) | (std::uint32_t{head[6]} << 16) | (std::uint32_t{head[7]} << 8) | head[8]) & 0x7FFFFFFFu;
+            f.payload.assign(head + 9, head + 9 + length);
+            at += 9 + length;
             dispatch(f);
-            frames.push_back(std::move(f));
+            if (keep_frames)
+                frames.push_back(std::move(f));
         }
+        _in.erase(_in.begin(), _in.begin() + static_cast<std::ptrdiff_t>(at));
         return true;
     }
 
@@ -287,6 +321,7 @@ private:
             case SETTINGS:
                 if (f.flags & ACK) {
                     settings_acked = true;
+                    ++settings_acks;
                 } else {
                     std::vector<uint8_t> out;
                     append_frame(out, SETTINGS, ACK, 0, {});
@@ -294,7 +329,9 @@ private:
                 }
                 break;
             case PING:
-                if (!(f.flags & ACK)) {
+                if (f.flags & ACK) {
+                    ++pongs;
+                } else {
                     std::vector<uint8_t> out;
                     append_frame(out, PING, ACK, 0, f.payload);
                     (void) write_all(out);
@@ -342,6 +379,7 @@ private:
                 break;
             }
             case RST_STREAM: {
+                ++resets;
                 auto &s = streams[f.stream_id];
                 s.reset = true;
                 if (f.payload.size() >= 4)

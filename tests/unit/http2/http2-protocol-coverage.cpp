@@ -404,8 +404,9 @@ TEST(HTTP2ProtocolCoverage, ClientPingFloodFromServerTriggersGoaway) {
     Http2ClientFakeIO io;
     Client            client(io);
 
-    // A flood of PING requests (no ACK) with no real response progress in between: each begets a
-    // PONG. Past MAX_QUEUED_CONTROL_REPLIES the client must GOAWAY(ENHANCE_YOUR_CALM).
+    // A flood of PING requests (no ACK) from a server that takes nothing -- the fake's output is never
+    // drained: each begets a PONG. Once MAX_QUEUED_CONTROL_REPLIES are queued the client must
+    // GOAWAY(ENHANCE_YOUR_CALM).
     const std::vector<uint8_t> ping_payload(8, 0x00);
     for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
         push_frame(io, FT::PING, 0 /*not ACK*/, 0, ping_payload);

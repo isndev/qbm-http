@@ -547,8 +547,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   sends for nothing, as an empty `DATA` -- and past them the connection is closed with `GOAWAY(ENHANCE_YOUR_CALM)`:
   on a client-to-server frame exchange, 1100 `DATA` or `HEADERS` frames on a closed stream drew 1100 resets and no
   `GOAWAY`; the 1001st closes the connection now, even with an empty `DATA` on an open upload after every 999, while
-  900 between requests, three times over, are answered (the resets sent before a request is dispatched joined that
-  budget in the entry below). A stream refused with `REFUSED_STREAM` -- the concurrency limit, a shutdown -- left its
+  900 between requests, three times over, are answered for a client that reads them (the resets sent before a request
+  is dispatched joined that budget, and a client that reads nothing is held to the count of the replies queued, in the
+  two entries below). A stream refused with `REFUSED_STREAM` -- the concurrency limit, a shutdown -- left its
   id idle: a `DATA`, `WINDOW_UPDATE` or `RST_STREAM` the client had sent on it before it saw the refusal closed the
   connection with `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §5.1.1), and a `HEADERS` on it was refused again or served as
   a new request reusing the id. The id is closed now, each of those a frame on a closed stream, a `GOAWAY` still names the last
@@ -564,23 +565,49 @@ All notable changes to the qbm-http module are documented here. The format is ba
   stream 0. A `PRIORITY` naming its own stream stays ignored: RFC 9113 deprecates priority signals and keeps no
   self-dependency error (§5.3.2; RFC 7540 §5.3.1 had one, which h2spec's RFC 7540 cases still check).
 
-- **Security: the HTTP/2 server bounds the resets it sends before a request is dispatched, and a frame that moves no
-  request forward no longer forgives the PING/SETTINGS budget, on the server and the client (Huly QB-1270; CVE-2019-9514,
-  CVE-2019-9512, CVE-2019-9515).** A reset the server sent on a new stream before its request was dispatched -- a
+- **Security: the HTTP/2 server bounds the resets it sends before a request is dispatched (Huly QB-1270;
+  CVE-2019-9514).** A reset the server sent on a new stream before its request was dispatched -- a
   malformed request or trailer section, a stream error on an upload (a body past or short of its `content-length`, DATA
   over the window, a `WINDOW_UPDATE` of 0, trailers that do not end the stream), a request refused for a limit (413, 414,
   431, then `RST_STREAM(NO_ERROR)`) -- was in no count: the published form of the reset flood, one reset per new stream
   id, 1100 malformed requests drawing 1100 resets and no `GOAWAY`. These resets share the budget of the resets on
   closed streams and of the streams refused: at most `MAX_QUEUED_CONTROL_REPLIES` (1000) between two streams the client
   opens, then `GOAWAY(ENHANCE_YOUR_CALM)`, the 1001st reset left unsent; a client whose requests are refused now and
-  then is never cut, a request served beside each of 2000 refusals keeping the connection open. The PONGs and SETTINGS
-  ACKs a peer solicits are bounded by `MAX_QUEUED_CONTROL_REPLIES` between two units of real progress, and a DATA frame
-  accepted on an open stream forgave the budget whatever it carried: an empty one, or one of padding alone, after every
-  999 `PING`s or `SETTINGS` held the guard at zero -- 5000 replies, no `GOAWAY`, on the server and on the client alike.
-  Only octets of a body the stream accepts forgive it now, past its rejections, with a stream the client opens on the
-  server (a request dispatched, or one it cancels) and a completed response on the client; on the server a `HEADERS` no longer forgives it either, since one
-  refused as malformed, or one that opens an upload never dispatched, moves no request forward. A `PRIORITY` naming its
-  own stream stays ignored, as RFC 9113 §5.3.2 has it.
+  then, and that reads the refusals, is never cut, a request served beside each of 2000 refusals keeping the connection
+  open (a client that reads nothing is held to the count of the replies queued, in the entry below). A `PRIORITY`
+  naming its own stream stays ignored, as RFC 9113 §5.3.2 has it.
+
+- **Security: the HTTP/2 guard of the replies a peer solicits counts those still queued in the output -- PONGs,
+  SETTINGS ACKs and, on the server, resets: a peer that reads nothing is closed at a thousand, one that reads never is
+  by this count (Huly QB-1270; CVE-2019-9512, CVE-2019-9515, CVE-2019-9514).** On the server and on the client alike.
+  The replies a peer solicits with `PING` and `SETTINGS` frames are exempt from flow control, and the guard bounded them
+  at `MAX_QUEUED_CONTROL_REPLIES` (1000) between two frames accepted onto a stream. A `DATA` or `HEADERS` frame the
+  server accepted forgave the count, as did a `DATA` or a completed response on the client -- an empty `DATA` after
+  every 999 `PING`s held it at zero -- so a peer that read nothing made the replies queue up to the write-buffer cap
+  (200 MiB by default): over real TLS sockets a client that read nothing and had a request served after every 999 drew
+  every reply it solicited, 64 MiB of them, and was still served. And a connection that only pinged, a keep-alive with
+  no request in flight, was closed at its 1001st `PING` whatever it read. The guard now counts what is queued, modelled
+  on nghttp2's `max_outbound_ack`: a reply counts from the moment it is written to the session's output until the socket
+  has taken its last byte, and once a thousand are queued the next is not written -- the connection is closed with
+  `GOAWAY(ENHANCE_YOUR_CALM)`. Nothing the peer sends forgives a queued reply: an octet of a body or a request served
+  after every 999 `PING`s no longer does, and neither does a completed response on the client. The output draining
+  does: 5000 `PING`s, or `SETTINGS`, each answered before the next, leave the connection open with no stream opened;
+  a slow reader with a thousand replies queued is served as long as one leaves for each one it solicits; a reply cut
+  by a partial write is forgiven when its last byte has left, not before. On the server the resets a client solicits
+  on streams it never opened -- a frame on a closed stream, a stream refused, a request reset or refused before its
+  dispatch -- are replies it draws for nothing too, and their budget between two streams the client opens is
+  forgiven by a request served: alone, it let a client that read nothing and had a request served after every 999 of
+  them queue them without a bound, as the PONGs. They are counted in the same queued count as well, a thousand replies
+  of any kind, and they keep that budget, which reading them does not forgive. A peer is closed by the queued count when a thousand of its
+  replies wait in the output at once, and only then; two things make them wait. A reply waits behind what the output
+  already holds, a large response included. And the replies to the frames of one read are written after that read, so
+  a thousand solicited within one read count as queued: a read is one `SSL_read`, one TLS record at most, which holds
+  963 `PING`s but 1820 empty `SETTINGS`. nghttp2 differs twice: it forgives an ACK when the frame leaves its queue to
+  be serialized, and it sends ACKs ahead of the data it has queued. A peer whose socket takes nothing is not handed
+  the `GOAWAY`: the session closes the connection without waiting for it. The position of a reply is read from the
+  session's own count of bytes written (`bytes_written()`) and the size of its output, when a reply is solicited and
+  nowhere on the write path; a protocol instantiated on an io handler without that count forgives its replies when
+  the handler's output is empty. On the client the count holds the PONGs and the SETTINGS ACKs.
 
 - **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
   as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list

@@ -654,6 +654,10 @@ private:
 };
 using client = Client;
 
+/// The protocol counts the PONGs and SETTINGS ACKs still queued in the client's output on what its socket took,
+/// `bytes_written()`: without it they would be forgiven only once the output is empty (Huly QB-1270).
+static_assert(qb::protocol::http2::counts_bytes_written<Client>, "the HTTP/2 client counts the bytes its socket took");
+
 /**
  * @brief Create a shared HTTP/2 client
  * @param base_uri Base URI for the connection

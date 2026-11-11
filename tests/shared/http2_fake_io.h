@@ -30,6 +30,7 @@
  *                                   @ref parse_emitted_frames, @ref peek_frame_header,
  *                                   @ref find_frame_offset, @ref count_frames,
  *                                   @ref output_has_frame, @ref pump, @ref drive,
+ *                                   @ref socket_takes, @ref socket_takes_everything,
  *                                   @ref do_handshake, @ref default_request_headers.
  *
  * Reconciled from the inline copies that previously lived in:
@@ -52,6 +53,7 @@
 #ifndef QBM_HTTP_TESTS_SHARED_HTTP2_FAKE_IO_H
 #define QBM_HTTP_TESTS_SHARED_HTTP2_FAKE_IO_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -114,6 +116,16 @@ struct Http2FakeIO {
     [[nodiscard]] std::size_t
     max_write_buffer_size() const noexcept {
         return write_cap;
+    }
+
+    /// What a socket took of the output, as a real io counts it (`bytes_written()`), and those bytes, kept for the
+    /// assertions (Huly QB-1270): nothing until a test calls @ref socket_takes -- a peer that never reads, everything
+    /// the protocol wrote still queued in `output`.
+    std::size_t               written = 0;
+    qb::allocator::pipe<char> wire;
+    [[nodiscard]] std::size_t
+    bytes_written() const noexcept {
+        return written;
     }
 
     template <typename Frame>
@@ -184,6 +196,14 @@ struct Http2ClientFakeIO {
     qb::allocator::pipe<char> &
     out() noexcept {
         return output;
+    }
+
+    /// What a socket took of the output and those bytes, as on @ref Http2FakeIO (Huly QB-1270).
+    std::size_t               written = 0;
+    qb::allocator::pipe<char> wire;
+    [[nodiscard]] std::size_t
+    bytes_written() const noexcept {
+        return written;
     }
 
     template <typename Frame>
@@ -454,6 +474,34 @@ pump(Protocol &protocol, ToHarness &to, FromHarness &from) {
 }
 
 /**
+ * @brief The socket takes the first @p n bytes of a harness's output, as `qb::io::stream::write()` does for a session:
+ *        a partial write advances the front of the pipe, a whole one resets it, and the io counts what left
+ *        (`bytes_written()`). The bytes go to `wire`, in order, for the assertions (Huly QB-1270).
+ */
+template <typename FakeIO>
+inline void
+socket_takes(FakeIO &io, std::size_t n) {
+    ASSERT_LE(n, io.output.size()) << "the socket cannot take more than the output holds";
+    if (n == 0) {
+        return;
+    }
+    std::memcpy(io.wire.allocate_back(n), io.output.cbegin(), n);
+    if (n == io.output.size()) {
+        io.output.reset();
+    } else {
+        io.output.free_front(n);
+    }
+    io.written += n;
+}
+
+/// The socket takes everything the output holds: a peer that reads.
+template <typename FakeIO>
+inline void
+socket_takes_everything(FakeIO &io) {
+    socket_takes(io, io.output.size());
+}
+
+/**
  * @brief Drive preface + an empty client SETTINGS through a server protocol.
  *
  * Leaves the server in a normal post-handshake state. Assertions live in the
@@ -567,6 +615,80 @@ count_frames(const qb::allocator::pipe<char> &output, h2::FrameType type) {
         }
     }
     return n;
+}
+
+// ===========================================================================
+// The replies a peer solicits: PONGs and SETTINGS ACKs (the PING/SETTINGS guard, Huly QB-1270)
+// ===========================================================================
+
+/// A reply a peer draws for nothing: the PONG of a PING, the ACK of a SETTINGS frame.
+enum class solicited_reply { pong, settings_ack };
+inline constexpr std::array<solicited_reply, 2> all_solicited_replies{solicited_reply::pong, solicited_reply::settings_ack};
+
+/// The octets of one such reply on the wire: a PONG carries the PING's 8, a SETTINGS ACK nothing.
+[[nodiscard]] constexpr std::size_t
+solicited_reply_size(solicited_reply what) noexcept {
+    return h2::FRAME_HEADER_SIZE + (what == solicited_reply::pong ? 8u : 0u);
+}
+
+/// Push @p n PING frames, or @p n empty SETTINGS frames, on a harness's input: each solicits one reply.
+template <typename FakeIO>
+inline void
+solicit_replies(FakeIO &io, solicited_reply what, int n = 1) {
+    static const std::vector<uint8_t> opaque(8, 0x5A);
+    for (int i = 0; i < n; ++i) {
+        if (what == solicited_reply::pong) {
+            push_frame(io, h2::FrameType::PING, 0, 0, opaque);
+        } else {
+            push_frame(io, h2::FrameType::SETTINGS, 0, 0, {});
+        }
+    }
+}
+
+/// Where each PONG and SETTINGS ACK of @p bytes ends, as an offset from its first byte, in order.
+[[nodiscard]] inline std::vector<std::size_t>
+solicited_reply_ends(const qb::allocator::pipe<char> &bytes) {
+    std::vector<std::size_t> ends;
+    for (const auto &f : parse_emitted_frames(bytes)) {
+        if ((f.type == h2::FrameType::PING || f.type == h2::FrameType::SETTINGS) && (f.flags & h2::FLAG_ACK) != 0) {
+            ends.push_back(f.payload_offset + f.payload_length);
+        }
+    }
+    return ends;
+}
+
+/// Everything a harness's protocol wrote, whether the socket took it (`wire`) or not (`output`), as one pipe to parse:
+/// after a partial @ref socket_takes neither half starts on a frame.
+template <typename FakeIO>
+[[nodiscard]] inline qb::allocator::pipe<char>
+written_and_queued(const FakeIO &io) {
+    qb::allocator::pipe<char> all;
+    if (io.wire.size() > 0) {
+        std::memcpy(all.allocate_back(io.wire.size()), io.wire.cbegin(), io.wire.size());
+    }
+    if (io.output.size() > 0) {
+        std::memcpy(all.allocate_back(io.output.size()), io.output.cbegin(), io.output.size());
+    }
+    return all;
+}
+
+/**
+ * @brief Solicit one reply at a time, at most @p at_most, until the protocol closes the connection.
+ * @return The replies it still queued before it closed: those the guard admitted.
+ */
+template <typename Protocol, typename FakeIO>
+[[nodiscard]] inline int
+replies_admitted_before_the_cut(Protocol &protocol, FakeIO &io, solicited_reply what, int at_most) {
+    int admitted = 0;
+    while (admitted < at_most) {
+        solicit_replies(io, what);
+        drive(protocol, io);
+        if (!protocol.ok()) {
+            break;
+        }
+        ++admitted;
+    }
+    return admitted;
 }
 
 } // namespace qb::http::test
