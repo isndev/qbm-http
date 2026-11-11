@@ -38,8 +38,11 @@
  */
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -862,6 +865,142 @@ TEST(WsFramingEdge, SerializingValidFrameSucceeds) {
     EXPECT_NO_THROW(out << msg);
     // 2-byte header (FIN+text, len=2) + 2-byte payload for an unmasked frame.
     EXPECT_EQ(out.size(), 4u);
+}
+
+// ===========================================================================
+// clear_protocols() from a WebSocket handler (Huly QB-1278). The decoder hands
+// the frame to the session, then writes its own state: `_message.reset()` and
+// `_data_opcode` after a data frame, `_expected_size`, `_parsed` and
+// `_fin_rsv_opcode` at the end of every frame. A handler that ended the
+// protocol made those writes land in freed memory (ASan: heap-use-after-free).
+// The session must end cleanly instead: no protocol left, the connection closed.
+// ===========================================================================
+
+std::atomic<int>  g_cleared_in_handler{0};
+std::atomic<int>  g_ws_destroyed{0};
+std::atomic<int>  g_ws_destroyed_in_handler{0};
+std::atomic<bool> g_ws_in_handler{false};
+
+/// The server framer, counting where its destructor runs: inside the handler that cleared it is the bug.
+template <typename IO>
+class CountingWsServer : public ::qb::protocol::ws_server<IO> {
+public:
+    using ::qb::protocol::ws_server<IO>::ws_server;
+
+    ~CountingWsServer() override {
+        ++g_ws_destroyed;
+        if (g_ws_in_handler)
+            ++g_ws_destroyed_in_handler;
+    }
+};
+
+class ClearingServer;
+
+class ClearingSession : public qb::io::use<ClearingSession>::tcp::client<ClearingServer> {
+public:
+    using Protocol    = qb::http::protocol<ClearingSession>;
+    using WS_Protocol = qb::http::ws::protocol<ClearingSession>;
+
+    explicit ClearingSession(IOServer &server)
+        : client(server) {}
+
+    void
+    on(Protocol::request &&request) {
+        if (!this->switch_protocol<CountingWsServer<ClearingSession>>(*this, request)) {
+            disconnect();
+        }
+    }
+
+    void
+    on(WS_Protocol::message &&) {
+        clear_in_handler();
+    }
+
+    void
+    on(WS_Protocol::ping &&) {
+        clear_in_handler();
+    }
+
+private:
+    void
+    clear_in_handler() {
+        ++g_cleared_in_handler;
+        g_ws_in_handler = true;
+        this->clear_protocols();
+        g_ws_in_handler = false;
+    }
+};
+
+class ClearingServer : public qb::io::use<ClearingServer>::tcp::server<ClearingSession> {
+public:
+    void
+    on(IOSession &) {}
+};
+
+/// Sends `frame` after the upgrade; true once the server has closed the connection, what it sent before in `received`.
+bool
+server_closes_after(qb::io::tcp::socket &sock, std::vector<std::uint8_t> const &frame, std::string &received) {
+    sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    char       buf[256];
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int n = sock.read(buf, sizeof(buf));
+        if (n > 0)
+            received.append(buf, static_cast<std::size_t>(n));
+        if (n == 0)
+            return true; // the server's FIN
+        if (n < 0) {
+            if (!qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
+                return true; // reset: closed with bytes unread
+            std::this_thread::sleep_for(5ms);
+        }
+    }
+    return false;
+}
+
+void
+reset_ws_counters() {
+    g_cleared_in_handler      = 0;
+    g_ws_destroyed            = 0;
+    g_ws_destroyed_in_handler = 0;
+    g_ws_in_handler           = false;
+}
+
+TEST(WsFramingEdge, ClearProtocolsFromTheMessageHandlerEndsTheSessionCleanly) {
+    reset_ws_counters();
+    EphemeralWsServer<ClearingServer> server;
+
+    qb::io::tcp::socket sock;
+    ASSERT_EQ(sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)}), 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/clear");
+
+    std::string received;
+    EXPECT_TRUE(server_closes_after(sock, make_client_frame(0x81u, "hello"), received)) << "the session ends: it has no protocol";
+    EXPECT_EQ(g_cleared_in_handler.load(), 1);
+    EXPECT_EQ(g_ws_destroyed.load(), 1) << "the cleared framer is destroyed once its dispatch has returned";
+    EXPECT_EQ(g_ws_destroyed_in_handler.load(), 0) << "destroyed inside the handler, under the framer's onMessage()";
+    sock.close();
+}
+
+TEST(WsFramingEdge, ClearProtocolsFromThePingHandlerEndsTheSessionCleanly) {
+    reset_ws_counters();
+    EphemeralWsServer<ClearingServer> server;
+
+    qb::io::tcp::socket sock;
+    ASSERT_EQ(sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)}), 0);
+    (void) sock.set_nonblocking(true);
+    perform_upgrade(sock, server.port, "/clear");
+
+    std::string received;
+    EXPECT_TRUE(server_closes_after(sock, make_client_frame(0x89u, "ping"), received)) << "the session ends: it has no protocol";
+    EXPECT_EQ(g_cleared_in_handler.load(), 1);
+    EXPECT_EQ(g_ws_destroyed.load(), 1) << "the cleared framer is destroyed once its dispatch has returned";
+    EXPECT_EQ(g_ws_destroyed_in_handler.load(), 0) << "destroyed inside the handler, under the framer's onMessage()";
+    ASSERT_GE(received.size(), 6u) << "the Pong the framer writes after the Ping handler (RFC 6455 5.5.2)";
+    EXPECT_EQ(static_cast<std::uint8_t>(received[0]), 0x8Au) << "FIN + Pong";
+    EXPECT_EQ(received.substr(2, 4), "ping") << "the Ping's payload, echoed";
+    sock.close();
 }
 
 } // namespace ws_framing_edge_test
