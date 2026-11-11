@@ -102,9 +102,9 @@ constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
  *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
 
-/** @brief Cap on peer-triggered replies: PING PONGs + SETTINGS ACKs between two units of request progress (the PING/
- *  SETTINGS floods, CVE-2019-9512 / CVE-2019-9515), and, on its own count, the server's RST_STREAMs on closed or refused
- *  streams between two streams the client opens (the reset flood, CVE-2019-9514; Huly QB-1270). */
+/** @brief Cap on peer-triggered replies: PING PONGs + SETTINGS ACKs between two units of real progress (the PING/SETTINGS
+ *  floods, CVE-2019-9512 / CVE-2019-9515), and, on its own count, the server's RST_STREAMs on closed or refused streams or
+ *  before a request's dispatch, between two streams the client opens (the reset flood, CVE-2019-9514; Huly QB-1270). */
 constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
 /** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not

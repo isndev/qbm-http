@@ -118,7 +118,7 @@ private:
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
     std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client resets, sent or provoked; streams opened (Rapid Reset)
-    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies since request progress (flood guard)
+    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies since real progress (flood guard)
     std::uint32_t _continuation_frame_count = 0;                     ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
@@ -287,6 +287,8 @@ public:
         _push_response_leaving = 0;
         _peer_goaway_received  = false;
 
+        _streams_opened_at_control_reply = 0; // the PING/SETTINGS budget forgiven from the first stream opened (Huly QB-1270)
+
         _hpack_decoder.reset();
         _hpack_encoder.reset();
         // Bound the DECODED header-list size we will accept. Without this the decoder
@@ -452,13 +454,6 @@ public:
 
         stream.local_window_size -= data_payload_size;
 
-        // Real request progress (a DATA frame ACCEPTED onto an open stream) forgives the queued
-        // control-reply flood budget. This MUST sit after every rejection / RST-and-return path above
-        // — mirroring the HEADERS reset, which was deliberately placed past its rejections — otherwise
-        // DATA on a closed/idle/reset stream (which sends RST but keeps the connection alive) could
-        // repeatedly zero the budget and defeat the PING/SETTINGS flood guard (CVE-2019-9512/9515).
-        _control_reply_count = 0;
-
         auto &body_pipe = stream.assembled_request.body().raw();
         // A body past its declared content-length is malformed (RFC 9113 §8.1.1) whatever the body limit: judged first,
         // before the frame is appended. It was answered 413 when the overrun passed the limit too (Huly QB-1197).
@@ -474,6 +469,13 @@ public:
             this->refuse_request(stream_id, qb::http::status::PAYLOAD_TOO_LARGE, "HTTP/2 request body exceeds configured limit");
             this->conditionally_send_connection_window_update();
             return;
+        }
+        // Octets of a request body accepted are real progress: they forgive the PING/SETTINGS budget (CVE-2019-9512/9515),
+        // past every rejection above. A frame that carries none -- empty, or padding alone -- moves no request forward
+        // and forgave it, an empty DATA after every 999 PINGs holding the guard at zero (Huly QB-1270); the end of the
+        // stream it may carry is progress once the request is dispatched (control_reply_over_budget()).
+        if (!data_event.payload.data_payload.empty()) {
+            _control_reply_count = 0;
         }
         body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
 
@@ -617,12 +619,10 @@ public:
             return;
         }
 
-        // The HEADERS is now accepted onto a valid, active stream (a new request or a trailers
-        // block) — genuine request progress. Reset the control-reply flood budget and start a
-        // fresh CONTINUATION budget for this header block HERE, past every rejection check above,
-        // so a REJECTED HEADERS (old/closed/refused stream) can no longer zero the flood counter
-        // and let an interleaved PING/SETTINGS flood slip through.
-        _control_reply_count      = 0;
+        // The HEADERS is now accepted onto a valid, active stream (a new request or a trailers block): a fresh
+        // CONTINUATION budget for this header block starts HERE, past every rejection check above. It no longer
+        // forgives the PING/SETTINGS budget: a block refused as malformed, or one that opens an upload never
+        // dispatched, moves no request forward -- the request it begins does, once dispatched (Huly QB-1270).
         _continuation_frame_count = 0;
 
         bool is_current_block_trailers = stream.headers_received_main;
@@ -862,7 +862,7 @@ public:
         // Bound SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from
         // flow control, so a flood of empty SETTINGS frames grows the output pipe without limit.
         // Same counter/reset discipline as the PING guard.
-        if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+        if (this->control_reply_over_budget()) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (flood)");
             return;
         }
@@ -1167,10 +1167,10 @@ public:
             // This is a PING from client, send PONG (PING with ACK).
             // Bound PONG amplification (CVE-2019-9512): control frames are exempt from HTTP/2
             // flow control, so a peer flooding PINGs while stalling its own reads makes the
-            // output pipe grow without limit. _control_reply_count is reset whenever the peer
-            // makes real request progress (HEADERS/DATA); if control replies pile up past the
+            // output pipe grow without limit. The budget is forgiven whenever the peer makes real
+            // request progress (control_reply_over_budget()); if control replies pile up past the
             // cap without any, treat it as a flood and close.
-            if (++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+            if (this->control_reply_over_budget()) {
                 this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (flood)");
                 return;
             }
@@ -1929,6 +1929,10 @@ private:
         auto it = _server_streams.find(stream_id);
         if (it == _server_streams.end())
             return;
+        // Its reset is one the client solicits on a stream it never opened: budgeted as a reset before dispatch is (Huly
+        // QB-1270). Past the budget the connection is closed, nothing answered.
+        if (!this->admit_solicited_reset("Excessive requests refused (HTTP/2 reset flood)"))
+            return;
         LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: request refused with " << status.code() << ": " << reason);
         it->second.assembled_request.body().clear(); // what was received of the refused body
         bool sent = false;
@@ -2125,58 +2129,59 @@ private:
                 std::string &value = hf.value; // (the value since QB-1215, the name since QB-1216 gave convert() an rvalue overload)
 
                 if (name.empty()) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
+                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
                     return false;
                 }
                 if (name[0] == ':') { // Pseudo-header
                     if (pseudo_headers_finished) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header.");
+                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header.");
                         return false;
                     }
                     if (!HeaderValidator::is_valid_header_value(value)) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header value format.");
+                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header value format.");
                         return false;
                     }
                     // Process pseudo-headers
                     if (name == ":method") {
                         if (method_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header.");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header.");
                             return false;
                         }
                         method_sv       = value;
                         temp_method_str = value; // Store for later conversion
                     } else if (name == ":scheme") {
                         if (scheme_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header.");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header.");
                             return false;
                         }
                         scheme_sv = value;
                     } else if (name == ":path") {
                         if (path_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header.");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header.");
                             return false;
                         }
                         path_sv = value;
                     } else if (name == ":authority") {
                         if (authority_sv) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header.");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header.");
                             return false;
                         }
                         authority_sv = value;
                     } else {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Unknown pseudo-header in request: " + name);
+                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Unknown pseudo-header in request: " + name);
                         return false;
                     }
                 } else { // Regular header
                     pseudo_headers_finished = true;
                     // SECURITY FIX: Validate header name/value format per RFC 9113
                     if (!is_valid_header_field(name, value)) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                              "Invalid header field name or value format (contains forbidden characters).");
+                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                       "Invalid header field name or value format (contains forbidden characters).");
                         return false;
                     }
                     if (HeaderValidator::is_forbidden_header(name) || (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
-                        this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden connection-specific header in request: " + name);
+                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                       "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
                     // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
@@ -2184,8 +2189,8 @@ private:
                     // authority: §8.3.1 sets Host aside only when :authority is present (Huly QB-1195).
                     if (name == "host") [[unlikely]] {
                         if (host_sv || (authority_sv && !qb::http::utility::iequals(value, *authority_sv))) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                  "A second host header field, or one not naming the :authority before it.");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                           "A second host header field, or one not naming the :authority before it.");
                             return false;
                         }
                         host_sv = value;
@@ -2195,11 +2200,13 @@ private:
                     if (name == "content-length") {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid content-length header in HTTP/2 request");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                           "Invalid content-length header in HTTP/2 request");
                             return false;
                         }
                         if (stream.expected_content_length && *stream.expected_content_length != *parsed) {
-                            this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers in HTTP/2 request");
+                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                           "Conflicting content-length headers in HTTP/2 request");
                             return false;
                         }
                         stream.expected_content_length = *parsed; // judged against the body cap once the block is valid
@@ -2220,11 +2227,12 @@ private:
             }
 
             if (!method_sv || !scheme_sv || !path_sv) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing mandatory pseudo-header (:method, :scheme, or :path).");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                               "Missing mandatory pseudo-header (:method, :scheme, or :path).");
                 return false;
             }
             if (path_sv.value().empty()) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
                 return false;
             }
             // The request's authority: :authority, else its `host` field, which RFC 9113 §8.3.1 sets aside only when
@@ -2232,13 +2240,13 @@ private:
             // composed without one, whatever the scheme; an empty one is no authority, below.
             const auto request_authority = authority_sv ? authority_sv : host_sv;
             if (!request_authority) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :authority and host header field.");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :authority and host header field.");
                 return false;
             }
 
             qb::http::Method method_from_string_view(temp_method_str);
             if (method_from_string_view == qb::http::Method::Value::UNINITIALIZED) {
-                this->send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :method value");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid :method value");
                 return false;
             }
             // CONNECT names a tunnel by :authority alone (RFC 9113 §8.5): a CONNECT carrying :scheme and :path is
@@ -2246,7 +2254,8 @@ private:
             // misses them. Both are a stream error, as on HTTP/3; the malformed one reached the router as a CONNECT on
             // an ordinary path (Huly QB-1177). HTTP/1.1 routes an authority-form CONNECT.
             if (method_from_string_view == qb::http::method::CONNECT) [[unlikely]] {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "CONNECT with :scheme and :path is malformed (RFC 9113 §8.5)");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                               "CONNECT with :scheme and :path is malformed (RFC 9113 §8.5)");
                 return false;
             }
             stream.assembled_request.method() = method_from_string_view;
@@ -2257,7 +2266,7 @@ private:
             auto uri = qb::http::origin::request_uri(scheme_sv.value(), *request_authority, path_sv.value(),
                                                      method_from_string_view == qb::http::method::OPTIONS);
             if (!uri) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority, host or :path field.");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority, host or :path field.");
                 return false;
             }
             stream.assembled_request.uri() = std::move(*uri);
@@ -2267,7 +2276,7 @@ private:
             // request beside a field or a :path over them was answered 431 or 414 (Huly QB-1197).
             if (stream.end_stream_received && stream.expected_content_length
                 && stream.assembled_request.body().size() != *stream.expected_content_length) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                 return false;
             }
 
@@ -2299,16 +2308,16 @@ private:
                 const std::string &name  = hf.name;
                 const std::string &value = hf.value;
                 if (name.empty() || name[0] == ':') {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                          "Invalid header field name in trailers (empty or pseudo-header).");
+                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
+                                                   "Invalid header field name in trailers (empty or pseudo-header).");
                     return false;
                 }
                 if (!is_valid_header_field(name, value)) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field name or value format.");
+                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field name or value format.");
                     return false;
                 }
                 if (qb::http::detail::is_forbidden_trailer_field(name)) {
-                    this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
+                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
                     return false;
                 }
                 if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
@@ -2327,7 +2336,7 @@ private:
                 return false;
             }
             if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
-                this->on_stream_error(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
                 return false;
             }
             if (fields_over_limits) [[unlikely]] {
@@ -3375,20 +3384,28 @@ private:
      * @brief Reset a stream because the client's own frame provoked it (MadeYouReset, CVE-2025-8671; Huly QB-1244): DATA
      *        or HEADERS after its END_STREAM, a WINDOW_UPDATE past 2^31-1 on a request in flight -- dispatched, unanswered,
      *        reset by neither side -- free its slot as a client RST_STREAM would while the application's work may go on,
-     *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)). Resets provoked before dispatch
-     *        (DATA over the window, a body against its content-length, trailers without END_STREAM) are not counted; a
-     *        WINDOW_UPDATE of 0 or a short PRIORITY on a request in flight comes here too (on_stream_frame_error). A stream
-     *        the server reset itself is not counted again (a handler that threw: closed). A client RST_STREAM on an id whose
-     *        reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling only.
+     *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)). A WINDOW_UPDATE of 0 or a
+     *        short PRIORITY on a request in flight comes here too (on_stream_frame_error). A reset provoked BEFORE
+     *        dispatch -- a malformed request or trailer section, DATA over the window, a body against its content-length,
+     *        trailers without END_STREAM, a stream error on an upload -- frees no application work, and the client gets one
+     *        per new stream id: the published form of the reset flood (CVE-2019-9514). It counts against the closed-stream
+     *        budget (admit_solicited_reset()); past it the connection is closed and the reset is not sent (Huly QB-1270). A
+     *        stream the server reset itself is not counted again (a handler that threw: closed). A client RST_STREAM on an
+     *        id whose reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling
+     *        only.
      */
     void
     send_provoked_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
         bool past_ceiling = false;
         if (const auto it = _server_streams.find(stream_id); it != _server_streams.end() && _connection_active) {
             const Http2ServerStream &stream = it->second;
-            if (stream.request_dispatched && !stream.end_stream_sent && !stream.rst_stream_sent && !stream.rst_stream_received) {
-                past_ceiling =
-                    ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > _client_streams_opened;
+            if (!stream.rst_stream_sent && !stream.rst_stream_received) {
+                if (stream.request_dispatched) {
+                    past_ceiling = !stream.end_stream_sent && ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS
+                                   && _rst_stream_count * 2u > _client_streams_opened;
+                } else if (!this->admit_solicited_reset("Excessive stream resets before dispatch (HTTP/2 reset flood)")) {
+                    return;
+                }
             }
         }
         this->send_rst_stream(stream_id, error_code, context_msg);
@@ -3448,21 +3465,54 @@ private:
     /**
      * @brief Answer a frame on a closed stream with RST_STREAM, at most MAX_QUEUED_CONTROL_REPLIES of them between two
      *        streams the client opens -- a request dispatched, or one it cancelled, which the Rapid Reset guard weighs --
-     *        never forgiven by a frame it can send for nothing (an empty DATA forgives the PING/SETTINGS budget): past
-     *        them the connection is closed with GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound
-     *        (the reset flood of CVE-2019-9514; Huly QB-1270).
+     *        never forgiven by a frame it can send for nothing, such as an empty DATA (admit_solicited_reset(), the budget
+     *        a stream refused and a request reset before its dispatch share): past them the connection is closed with
+     *        GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of CVE-2019-9514;
+     *        Huly QB-1270).
      */
     void
     send_closed_stream_rst(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
+        if (this->admit_solicited_reset("Excessive frames on closed streams (HTTP/2 reset flood)")) {
+            this->send_rst_stream(stream_id, error_code, context_msg);
+        }
+    }
+
+    /**
+     * @brief Count one RST_STREAM the client solicits on a stream it never opened -- a frame on a closed stream, a stream
+     *        refused, a request reset or refused before its dispatch -- against the closed-stream budget: at most
+     *        MAX_QUEUED_CONTROL_REPLIES between two streams the client opens (_client_streams_opened, what the Rapid Reset
+     *        guard weighs: a request dispatched, or one it cancels), which no frame it sends for nothing forgives. Past it
+     *        the connection is closed with GOAWAY(ENHANCE_YOUR_CALM), @p flood its debug data (Huly QB-1270).
+     * @return Whether the reset may be sent.
+     */
+    [[nodiscard]] bool
+    admit_solicited_reset(char const *flood) noexcept {
         if (_client_streams_opened != _streams_opened_at_closed_reply) { // a stream opened since: the budget is forgiven
             _streams_opened_at_closed_reply = _client_streams_opened;
             _closed_stream_reply_count      = 0;
         }
         if (++_closed_stream_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
-            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive frames on closed streams (HTTP/2 reset flood)");
-            return;
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, flood);
+            return false;
         }
-        this->send_rst_stream(stream_id, error_code, context_msg);
+        return true;
+    }
+
+    /**
+     * @brief Count one PONG or SETTINGS ACK the client solicits against the PING/SETTINGS budget (CVE-2019-9512/9515): at
+     *        most MAX_QUEUED_CONTROL_REPLIES between two units of real request progress -- a stream the client opens (a
+     *        request dispatched, or one it cancels: _client_streams_opened, read here) or octets of a request body accepted
+     *        (on(DataFrame) forgives them there). A frame that moves no request forward forgave it: an empty DATA, a DATA of
+     *        padding alone, a HEADERS refused as malformed or opening an upload never dispatched (Huly QB-1270).
+     * @return Whether the reply is past the budget: the caller closes the connection with GOAWAY(ENHANCE_YOUR_CALM).
+     */
+    [[nodiscard]] bool
+    control_reply_over_budget() noexcept {
+        if (_client_streams_opened != _streams_opened_at_control_reply) { // a stream opened since: the budget is forgiven
+            _streams_opened_at_control_reply = _client_streams_opened;
+            _control_reply_count             = 0;
+        }
+        return ++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES;
     }
 
     /**
@@ -3482,9 +3532,10 @@ public:
     /**
      * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets
      *        (§6.3) -- for which the frame layer ended the connection, without a GOAWAY (Huly QB-1270): the stream is reset
-     *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling
-     *        (send_provoked_rst_stream), a closed stream against the closed-stream budget (send_closed_stream_rst); an idle
-     *        stream, which no RST_STREAM may name (§6.4), or stream 0 makes it a connection error, with its GOAWAY (§5.4.1).
+     *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling, an upload
+     *        not yet dispatched against the closed-stream budget (send_provoked_rst_stream), a closed stream against that
+     *        budget too (send_closed_stream_rst); an idle stream, which no RST_STREAM may name (§6.4), or stream 0 makes it
+     *        a connection error, with its GOAWAY (§5.4.1).
      */
     void
     on_stream_frame_error(ErrorCode error_code, const std::string &message, uint32_t stream_id) noexcept {
@@ -3505,8 +3556,10 @@ private:
     /// The highest id the client used, a refused stream's too: above it a client stream is idle (RFC 9113 §5.1.1), at or
     /// below it closed or open; the last stream accepted -- the id a GOAWAY names -- is _last_client_initiated_stream_id.
     uint32_t _highest_client_stream_id = 0;
-    /// The resets send_closed_stream_rst() sent since the client last opened a stream (_client_streams_opened, as it was).
+    /// The resets admit_solicited_reset() let go since the client last opened a stream (_client_streams_opened, as it was).
     std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
+    /// _client_streams_opened when control_reply_over_budget() last forgave the PING/SETTINGS budget (Huly QB-1270).
+    std::uint32_t _streams_opened_at_control_reply = 0;
 
 }; // class ServerHttp2Protocol
 
