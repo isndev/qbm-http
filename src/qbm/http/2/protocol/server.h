@@ -2132,59 +2132,57 @@ private:
                 std::string &value = hf.value; // (the value since QB-1215, the name since QB-1216 gave convert() an rvalue overload)
 
                 if (name.empty()) {
-                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Empty header field name received.");
+                    this->reset_malformed_request(stream.id, "Empty header field name received.");
                     return false;
                 }
                 if (name[0] == ':') { // Pseudo-header
                     if (pseudo_headers_finished) {
-                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Pseudo-header received after regular header.");
+                        this->reset_malformed_request(stream.id, "Pseudo-header received after regular header.");
                         return false;
                     }
                     if (!HeaderValidator::is_valid_header_value(value)) {
-                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid pseudo-header value format.");
+                        this->reset_malformed_request(stream.id, "Invalid pseudo-header value format.");
                         return false;
                     }
                     // Process pseudo-headers
                     if (name == ":method") {
                         if (method_sv) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :method pseudo-header.");
+                            this->reset_malformed_request(stream.id, "Duplicate :method pseudo-header.");
                             return false;
                         }
                         method_sv       = value;
                         temp_method_str = value; // Store for later conversion
                     } else if (name == ":scheme") {
                         if (scheme_sv) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :scheme pseudo-header.");
+                            this->reset_malformed_request(stream.id, "Duplicate :scheme pseudo-header.");
                             return false;
                         }
                         scheme_sv = value;
                     } else if (name == ":path") {
                         if (path_sv) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :path pseudo-header.");
+                            this->reset_malformed_request(stream.id, "Duplicate :path pseudo-header.");
                             return false;
                         }
                         path_sv = value;
                     } else if (name == ":authority") {
                         if (authority_sv) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Duplicate :authority pseudo-header.");
+                            this->reset_malformed_request(stream.id, "Duplicate :authority pseudo-header.");
                             return false;
                         }
                         authority_sv = value;
                     } else {
-                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Unknown pseudo-header in request: " + name);
+                        this->reset_malformed_request(stream.id, "Unknown pseudo-header in request: " + name);
                         return false;
                     }
                 } else { // Regular header
                     pseudo_headers_finished = true;
                     // SECURITY FIX: Validate header name/value format per RFC 9113
                     if (!is_valid_header_field(name, value)) {
-                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                       "Invalid header field name or value format (contains forbidden characters).");
+                        this->reset_malformed_request(stream.id, "Invalid header field name or value format (contains forbidden characters).");
                         return false;
                     }
                     if (HeaderValidator::is_forbidden_header(name) || (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
-                        this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                       "Forbidden connection-specific header in request: " + name);
+                        this->reset_malformed_request(stream.id, "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
                     // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
@@ -2192,8 +2190,7 @@ private:
                     // authority: §8.3.1 sets Host aside only when :authority is present (Huly QB-1195).
                     if (name == "host") [[unlikely]] {
                         if (host_sv || (authority_sv && !qb::http::utility::iequals(value, *authority_sv))) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                           "A second host header field, or one not naming the :authority before it.");
+                            this->reset_malformed_request(stream.id, "A second host header field, or one not naming the :authority before it.");
                             return false;
                         }
                         host_sv = value;
@@ -2203,13 +2200,11 @@ private:
                     if (name == "content-length") {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                           "Invalid content-length header in HTTP/2 request");
+                            this->reset_malformed_request(stream.id, "Invalid content-length header in HTTP/2 request");
                             return false;
                         }
                         if (stream.expected_content_length && *stream.expected_content_length != *parsed) {
-                            this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                           "Conflicting content-length headers in HTTP/2 request");
+                            this->reset_malformed_request(stream.id, "Conflicting content-length headers in HTTP/2 request");
                             return false;
                         }
                         stream.expected_content_length = *parsed; // judged against the body cap once the block is valid
@@ -2230,12 +2225,11 @@ private:
             }
 
             if (!method_sv || !scheme_sv || !path_sv) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                               "Missing mandatory pseudo-header (:method, :scheme, or :path).");
+                this->reset_malformed_request(stream.id, "Missing mandatory pseudo-header (:method, :scheme, or :path).");
                 return false;
             }
             if (path_sv.value().empty()) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, ":path pseudo-header cannot be empty.");
+                this->reset_malformed_request(stream.id, ":path pseudo-header cannot be empty.");
                 return false;
             }
             // The request's authority: :authority, else its `host` field, which RFC 9113 §8.3.1 sets aside only when
@@ -2243,7 +2237,7 @@ private:
             // composed without one, whatever the scheme; an empty one is no authority, below.
             const auto request_authority = authority_sv ? authority_sv : host_sv;
             if (!request_authority) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Missing :authority and host header field.");
+                this->reset_malformed_request(stream.id, "Missing :authority and host header field.");
                 return false;
             }
 
@@ -2257,8 +2251,7 @@ private:
             // misses them. Both are a stream error, as on HTTP/3; the malformed one reached the router as a CONNECT on
             // an ordinary path (Huly QB-1177). HTTP/1.1 routes an authority-form CONNECT.
             if (method_from_string_view == qb::http::method::CONNECT) [[unlikely]] {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                               "CONNECT with :scheme and :path is malformed (RFC 9113 §8.5)");
+                this->reset_malformed_request(stream.id, "CONNECT with :scheme and :path is malformed (RFC 9113 §8.5)");
                 return false;
             }
             stream.assembled_request.method() = method_from_string_view;
@@ -2269,7 +2262,7 @@ private:
             auto uri = qb::http::origin::request_uri(scheme_sv.value(), *request_authority, path_sv.value(),
                                                      method_from_string_view == qb::http::method::OPTIONS);
             if (!uri) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Malformed :scheme, :authority, host or :path field.");
+                this->reset_malformed_request(stream.id, "Malformed :scheme, :authority, host or :path field.");
                 return false;
             }
             stream.assembled_request.uri() = std::move(*uri);
@@ -2279,7 +2272,7 @@ private:
             // request beside a field or a :path over them was answered 431 or 414 (Huly QB-1197).
             if (stream.end_stream_received && stream.expected_content_length
                 && stream.assembled_request.body().size() != *stream.expected_content_length) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                this->reset_malformed_request(stream.id, "HTTP/2 request content-length mismatch");
                 return false;
             }
 
@@ -2311,16 +2304,15 @@ private:
                 const std::string &name  = hf.name;
                 const std::string &value = hf.value;
                 if (name.empty() || name[0] == ':') {
-                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR,
-                                                   "Invalid header field name in trailers (empty or pseudo-header).");
+                    this->reset_malformed_request(stream.id, "Invalid header field name in trailers (empty or pseudo-header).");
                     return false;
                 }
                 if (!is_valid_header_field(name, value)) {
-                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Invalid trailer header field name or value format.");
+                    this->reset_malformed_request(stream.id, "Invalid trailer header field name or value format.");
                     return false;
                 }
                 if (qb::http::detail::is_forbidden_trailer_field(name)) {
-                    this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Forbidden header in trailers: " + name);
+                    this->reset_malformed_request(stream.id, "Forbidden header in trailers: " + name);
                     return false;
                 }
                 if (name.size() > limits.max_header_name_length || value.size() > limits.max_header_value_length
@@ -2339,7 +2331,7 @@ private:
                 return false;
             }
             if (stream.expected_content_length && stream.assembled_request.body().size() != *stream.expected_content_length) {
-                this->send_provoked_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 request content-length mismatch");
+                this->reset_malformed_request(stream.id, "HTTP/2 request content-length mismatch");
                 return false;
             }
             if (fields_over_limits) [[unlikely]] {
@@ -3415,6 +3407,18 @@ private:
         if (past_ceiling) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets provoked (HTTP/2 MadeYouReset)");
         }
+    }
+
+    /**
+     * @brief A malformed request or trailer section (RFC 9113 §8.1.1): logged as on_stream_error() logged it, then reset
+     *        as a stream error the client provoked -- before its dispatch, counted against the closed-stream budget
+     *        (send_provoked_rst_stream(); Huly QB-1270).
+     */
+    void
+    reset_malformed_request(uint32_t stream_id, const std::string &message) noexcept {
+        LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Stream error detected - "
+                                         << message << " (code: " << static_cast<int>(ErrorCode::PROTOCOL_ERROR) << ")");
+        this->send_provoked_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, message);
     }
 
     /**
