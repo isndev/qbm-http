@@ -4,8 +4,9 @@
  *        QB-1270).
  *
  * The guard counts the replies a peer solicited for nothing that are still QUEUED in the session's output -- a PONG, a
- * SETTINGS ACK and, on the server, the reset of a stream the client never opened, from the moment each is written until
- * the socket has taken its last byte -- and closes the connection with GOAWAY(ENHANCE_YOUR_CALM) at the 1001st. What the protocol reads for
+ * SETTINGS ACK, on the server the reset of a stream the client never opened and on the client the reset of anything but
+ * a request in flight, from the moment each is written until the socket has taken its last byte -- and closes the
+ * connection with GOAWAY(ENHANCE_YOUR_CALM) at the 1001st. What the protocol reads for
  * that is its session's own count of bytes written
  * (`qb::io::async::io::bytes_written()`) and the size of its output: the unit suites prove the arithmetic on a fake io,
  * and this file proves the wiring -- that a real session's socket, a real partial write and a real peer that stops
@@ -21,7 +22,12 @@
  *     than a thousand replies and, behind them, the guard's GOAWAY, which a client whose buffers are full cannot be
  *     handed;
  *   - the client (`qb::http2::Client`), a server that pings it 3000 times and reads each batch of PONGs: never closed.
- *     With no response in progress the client closed the connection at the 1001st.
+ *     With no response in progress the client closed the connection at the 1001st;
+ *   - the client, a server whose HEADERS fall on a stream that has closed, 3000 of them, and that reads each batch of
+ *     resets: never closed;
+ *   - the client, a server that sends such HEADERS and reads nothing: the resets were in no count and queued for as
+ *     long as the server sent. Once the socket's buffers are full a thousand queue and the client closes the
+ *     connection: the request it had in flight fails with the guard's reason.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -290,14 +296,26 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
 }
 
 /// One-connection TLS + HTTP/2 server peer on its own thread (non-blocking sockets, polled, every wait bounded): it
-/// negotiates ALPN h2, sends its SETTINGS and acknowledges the client's, then pings the client -- `batches` rounds of
-/// `per_batch` PING frames in one write, each round sent once every PONG of the rounds before it was read. It records
-/// the PONGs, a GOAWAY the client sends, and the end of the connection.
-class PingingPeer {
+/// negotiates ALPN h2, sends its SETTINGS and acknowledges the client's, then solicits replies from the client -- PONGs
+/// with PING frames, or RST_STREAMs with HEADERS frames on stream 1, once it has answered the client's request there
+/// (204, END_STREAM: the stream is closed) and seen as many requests as its plan waits for; it answers no other. A
+/// peer that reads sends `batches` rounds of `per_batch` frames in one write, each round once every reply of the
+/// rounds before it was read; one that does not read writes every round first -- or until the client ends the
+/// connection, or the test tells it to stop (stop_writing()) -- and only then reads what the client had sent. It
+/// records the replies, a GOAWAY the client sends, and the end of the connection.
+class SolicitingPeer {
 public:
-    PingingPeer(int batches, int per_batch)
-        : _batches(batches)
-        , _per_batch(per_batch) {
+    enum class soliciting { pongs, resets };
+    struct plan {
+        soliciting  what;
+        std::size_t batches;
+        std::size_t per_batch;
+        bool        reads    = true; ///< false: every round is written before the first reply is read
+        std::size_t requests = 0;    ///< the client's requests to see before the first round (resets: 1 at least)
+    };
+
+    explicit SolicitingPeer(plan what)
+        : _plan(what) {
         _listener.init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()).alpn({"h2"}));
         if (_listener.listen_v4(0, "127.0.0.1") != 0)
             return;
@@ -305,23 +323,36 @@ public:
         _port   = _listener.local_endpoint().port();
         _thread = std::thread([this] { run(); });
     }
-    ~PingingPeer() {
+    ~SolicitingPeer() {
         _release = true;
         if (_thread.joinable())
             _thread.join();
     }
-    PingingPeer(const PingingPeer &)            = delete;
-    PingingPeer &operator=(const PingingPeer &) = delete;
+    SolicitingPeer(const SolicitingPeer &)            = delete;
+    SolicitingPeer &operator=(const SolicitingPeer &) = delete;
 
     [[nodiscard]] std::uint16_t
     port() const noexcept {
         return _port;
     }
+    /// The replies read: PONGs, or RST_STREAMs.
     [[nodiscard]] std::size_t
-    pongs() const noexcept {
-        return _pongs.load();
+    replies() const noexcept {
+        return _replies.load();
     }
-    /// Every PING of every round was answered.
+    /// The frames written that each solicit one reply.
+    [[nodiscard]] std::size_t
+    solicited() const noexcept {
+        return _solicited.load();
+    }
+    /// A peer that does not read stops offering frames and reads what the client had sent: the test calls it once the
+    /// client has closed the connection, which a peer that only writes cannot learn on every platform (a write to a
+    /// connection its other end closed fails at once on Linux and blocks on Windows).
+    void
+    stop_writing() noexcept {
+        _stop_writing = true;
+    }
+    /// Every frame of every round was written and answered.
     [[nodiscard]] bool
     done() const noexcept {
         return _done.load();
@@ -341,24 +372,28 @@ public:
 
 private:
     static void
-    append_frame(std::vector<uint8_t> &out, std::uint8_t type, std::uint8_t flags, std::vector<uint8_t> const &payload) {
+    append_frame(std::vector<uint8_t> &out, std::uint8_t type, std::uint8_t flags, std::uint32_t stream, std::vector<uint8_t> const &payload) {
         const auto n = static_cast<std::uint32_t>(payload.size());
-        out.insert(out.end(), {static_cast<uint8_t>(n >> 16), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n), type, flags, 0, 0, 0, 0});
+        out.insert(out.end(), {static_cast<uint8_t>(n >> 16), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n), type, flags,
+                               static_cast<uint8_t>(stream >> 24), static_cast<uint8_t>(stream >> 16), static_cast<uint8_t>(stream >> 8),
+                               static_cast<uint8_t>(stream)});
         out.insert(out.end(), payload.begin(), payload.end());
     }
 
-    bool
-    write_all(qb::io::tcp::ssl::socket &sock, std::vector<uint8_t> const &bytes) {
+    enum class written { all, stopped, failed };
+
+    written
+    write_all(qb::io::tcp::ssl::socket &sock, std::vector<uint8_t> const &bytes, std::chrono::steady_clock::time_point deadline) {
         std::size_t off = 0;
-        while (off < bytes.size() && !_release) {
+        while (off < bytes.size() && !_release && !_stop_writing && std::chrono::steady_clock::now() < deadline) {
             const int n = sock.write(reinterpret_cast<char const *>(bytes.data() + off), bytes.size() - off);
             if (n < 0)
-                return false;
+                return written::failed;
             if (n == 0)
                 std::this_thread::sleep_for(1ms);
             off += static_cast<std::size_t>(n);
         }
-        return off == bytes.size();
+        return off == bytes.size() ? written::all : written::stopped;
     }
 
     void
@@ -375,22 +410,37 @@ private:
         sock.set_nonblocking(true);
 
         constexpr std::size_t preface_size = 24;
-        std::vector<uint8_t>  in;
-        bool                  preface_seen = false;
-        bool                  answered     = false; // our SETTINGS and the ACK of the client's are sent
-        bool                  acked        = false; // the client acknowledged our SETTINGS
-        std::size_t           sent         = 0;     // PINGs written
-        char                  buffer[16384];
+        const std::size_t     total        = _plan.batches * _plan.per_batch;
+        std::vector<uint8_t>  round; // the frames of one round
+        for (std::size_t i = 0; i < _plan.per_batch; ++i) {
+            if (_plan.what == soliciting::pongs)
+                append_frame(round, 0x6, 0, 0, {0x70, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00});
+            else
+                append_frame(round, 0x1, 0x4, 1, {0x88}); // HEADERS, END_HEADERS, stream 1: `:status: 200`
+        }
+        std::vector<uint8_t> in;
+        bool                 preface_seen = false;
+        bool                 answered     = false; // our SETTINGS and the ACK of the client's are sent
+        bool                 acked        = false; // the client acknowledged our SETTINGS
+        bool                 closed_one   = false; // the client's request on stream 1 is answered: the stream is closed
+        std::size_t          requests     = 0;     // the client's HEADERS frames seen
+        std::size_t          sent         = 0;     // frames written that each solicit a reply
+        bool                 gave_up      = false; // told to stop, or out of time: nothing more is written
+        char                 buffer[16384];
         while (!_release && std::chrono::steady_clock::now() < deadline) {
-            if (acked && !_goaway && _pongs == sent && sent < static_cast<std::size_t>(_batches) * static_cast<std::size_t>(_per_batch)) {
-                std::vector<uint8_t> pings;
-                for (int i = 0; i < _per_batch; ++i)
-                    append_frame(pings, 0x6, 0, {0x70, 0x69, 0x6e, 0x67, 0x00, 0x00, 0x00, 0x00});
-                if (!write_all(sock, pings)) {
-                    _eof = true;
+            const bool ready = acked && requests >= _plan.requests && (_plan.what == soliciting::pongs || closed_one);
+            gave_up          = gave_up || _stop_writing;
+            if (ready && !gave_up && !_goaway && sent < total && (!_plan.reads || _replies == sent)) {
+                const written round_written = write_all(sock, round, deadline);
+                if (round_written == written::failed) {
+                    _eof = true; // the client ended the connection
                     break;
                 }
-                sent += static_cast<std::size_t>(_per_batch);
+                sent += _plan.per_batch; // a round cut short counts whole: an upper bound on what was solicited
+                _solicited = sent;
+                gave_up    = round_written == written::stopped;
+                if (!_plan.reads && !gave_up && sent < total)
+                    continue; // a peer that does not read: the next round, nothing read
             }
             const int n = sock.read(buffer, sizeof(buffer));
             if (n < 0) {
@@ -414,20 +464,33 @@ private:
                 const std::size_t   length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
                 if (in.size() - at < 9 + length)
                     break;
-                const std::uint8_t type = head[3], flags = head[4];
+                const std::uint8_t  type = head[3], flags = head[4];
+                const std::uint32_t stream =
+                    ((std::uint32_t{head[5]} << 24) | (std::uint32_t{head[6]} << 16) | (std::uint32_t{head[7]} << 8) | head[8]) & 0x7fffffffu;
                 if (type == 0x4 && (flags & 0x1) != 0) {
                     acked = true;
                 } else if (type == 0x4 && !answered) {
                     std::vector<uint8_t> reply;
-                    append_frame(reply, 0x4, 0, {});   // our SETTINGS
-                    append_frame(reply, 0x4, 0x1, {}); // the ACK of the client's
-                    if (!write_all(sock, reply)) {
+                    append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
+                    append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
+                    if (write_all(sock, reply, deadline) != written::all) {
                         _eof = true;
                         return;
                     }
                     answered = true;
-                } else if (type == 0x6 && (flags & 0x1) != 0) {
-                    ++_pongs;
+                } else if (type == 0x1) {
+                    ++requests;
+                    if (stream == 1 && !closed_one) {
+                        std::vector<uint8_t> response;
+                        append_frame(response, 0x1, 0x5, 1, {0x89}); // HEADERS, END_STREAM | END_HEADERS: `:status: 204`
+                        if (write_all(sock, response, deadline) != written::all) {
+                            _eof = true;
+                            return;
+                        }
+                        closed_one = true;
+                    }
+                } else if (_plan.what == soliciting::pongs ? (type == 0x6 && (flags & 0x1) != 0) : type == 0x3) {
+                    ++_replies;
                 } else if (type == 0x7 && length >= 8) {
                     _goaway_code =
                         (std::uint32_t{head[13]} << 24) | (std::uint32_t{head[14]} << 16) | (std::uint32_t{head[15]} << 8) | head[16];
@@ -436,19 +499,20 @@ private:
                 at += 9 + length;
             }
             in.erase(in.begin(), in.begin() + static_cast<std::ptrdiff_t>(at));
-            if (_pongs == static_cast<std::size_t>(_batches) * static_cast<std::size_t>(_per_batch))
+            if (!gave_up && sent == total && _replies == total)
                 _done = true;
         }
         sock.disconnect();
         sock.close();
     }
 
-    int                        _batches;
-    int                        _per_batch;
+    plan                       _plan;
     qb::io::tcp::ssl::listener _listener;
     std::uint16_t              _port = 0;
     std::atomic<bool>          _release{false};
-    std::atomic<std::size_t>   _pongs{0};
+    std::atomic<bool>          _stop_writing{false};
+    std::atomic<std::size_t>   _replies{0};
+    std::atomic<std::size_t>   _solicited{0};
     std::atomic<bool>          _done{false};
     std::atomic<bool>          _goaway{false};
     std::atomic<std::uint32_t> _goaway_code{0};
@@ -472,7 +536,7 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatPingsItsClientPastTheThousa
     static_assert(
         requires(qb::http2::Client const &client) { client.bytes_written(); },
         "the client's session counts what its socket took: the protocol reads it (Huly QB-1270)");
-    PingingPeer peer(6, 500);
+    SolicitingPeer peer({SolicitingPeer::soliciting::pongs, 6, 500});
     ASSERT_NE(peer.port(), 0);
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false); // self-signed test cert
@@ -481,13 +545,87 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatPingsItsClientPastTheThousa
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.done() || peer.goaway() || peer.eof(); }, 60s))
-        << peer.pongs() << " PONGs read";
-    EXPECT_FALSE(peer.goaway()) << "the client closed the connection with GOAWAY code " << peer.goaway_code() << " after " << peer.pongs()
+        << peer.replies() << " PONGs read";
+    EXPECT_FALSE(peer.goaway()) << "the client closed the connection with GOAWAY code " << peer.goaway_code() << " after " << peer.replies()
                                 << " PONGs";
-    EXPECT_EQ(peer.pongs(), 3000u);
+    EXPECT_EQ(peer.replies(), 3000u);
     EXPECT_TRUE(client->is_connected());
     client->disconnect();
     EXPECT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.eof(); }, 10s));
+}
+
+// The module's client, a server whose frames fall on a stream that has closed -- and that reads: the client's request
+// on stream 1 is answered and the stream closed, then 500 HEADERS on it in one write, their 500 resets read, six times
+// over. The client's resets leave its output between two rounds: 3000 are sent, no GOAWAY, and the client stays
+// connected. The resets a server solicits count while they are QUEUED (Huly QB-1270): one that reads is never cut.
+TEST_F(Http2ClientControlRepliesWireTest, AServerWhoseFramesFallOnAClosedStreamIsNeverCutWhileItReads) {
+    SolicitingPeer peer({SolicitingPeer::soliciting::resets, 6, 500, true, 1});
+    ASSERT_NE(peer.port(), 0);
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    client->set_verify_peer(false); // self-signed test cert
+    client->set_connect_timeout(5s);
+    client->disable_auto_reconnect();
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
+    bool answered = false;
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/closed")},
+                                     [&](qb::http::Response response) { answered = response.status() == qb::http::status::NO_CONTENT; }));
+    ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.done() || peer.goaway() || peer.eof(); }, 60s))
+        << peer.replies() << " resets read of " << peer.solicited() << " solicited";
+    EXPECT_TRUE(answered) << "the request on stream 1 was not answered 204";
+    EXPECT_FALSE(peer.goaway()) << "the client closed the connection with GOAWAY code " << peer.goaway_code() << " after " << peer.replies()
+                                << " resets";
+    EXPECT_EQ(peer.replies(), 3000u);
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    EXPECT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.eof(); }, 10s));
+}
+
+// The attack on the client, over real sockets: a server that answers a request, then sends HEADERS on that closed
+// stream and reads nothing -- 64 MiB of resets solicited, a 13-octet RST_STREAM for each 10-octet frame. They were in
+// no count: the client queued every one of them and stayed connected, its second request still waiting. Once the
+// server's side of the socket takes no more, a thousand resets wait in the client's output and the next one closes the
+// connection: the request in flight fails with the guard's reason, and the server -- told then to stop writing and
+// read at last, where its write has not failed already -- finds the connection ended and fewer resets than it
+// solicited.
+TEST_F(Http2ClientControlRepliesWireTest, AServerThatNeverReadsIsCutOnceAThousandResetsAreQueued) {
+    // One write of the server is one TLS record, one read of the client: fewer than a thousand frames in it, since the
+    // frames of one read are answered before the output is written -- a thousand solicited within one read would close
+    // the connection whatever the server had read. What closes it here is what the socket no longer takes.
+    constexpr std::size_t per_round = 999;
+    constexpr std::size_t rounds    = (std::size_t{64} << 20) / 13 / per_round + 1; // 64 MiB of RST_STREAM frames
+    SolicitingPeer        peer({SolicitingPeer::soliciting::resets, rounds, per_round, false, 2});
+    ASSERT_NE(peer.port(), 0);
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    client->set_verify_peer(false); // self-signed test cert
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(120s); // the request in flight ends with the connection, not on its own
+    client->disable_auto_reconnect();
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
+    bool                       answered = false;
+    std::optional<std::string> in_flight; // how the request the server never answers ended
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/closed")},
+                                     [&](qb::http::Response response) { answered = response.status() == qb::http::status::NO_CONTENT; }));
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/in-flight")},
+                                     [&](qb::http::Response response) { in_flight = response.body().as<std::string>(); }));
+    ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return in_flight.has_value() || peer.done() || peer.eof(); }, 60s))
+        << peer.replies() << " resets read of " << peer.solicited() << " solicited";
+    EXPECT_TRUE(answered) << "the request on stream 1 was not answered 204";
+    EXPECT_FALSE(peer.done()) << "a server that never read drew " << peer.replies() << " resets of " << peer.solicited()
+                              << " solicited and the client is still connected: they queued in the client's output";
+    ASSERT_TRUE(in_flight.has_value()) << "the connection was not closed: the request in flight is still waiting";
+    EXPECT_NE(in_flight->find("Excessive stream resets solicited"), std::string::npos)
+        << "the connection was closed for another reason: " << *in_flight;
+    EXPECT_FALSE(client->is_connected());
+    peer.stop_writing(); // the client is gone: the server reads what it had been sent
+    EXPECT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.eof(); }, 30s)) << "the server did not see the connection end";
+    EXPECT_LT(peer.replies(), peer.solicited());
+    RecordProperty("resets_solicited", std::to_string(peer.solicited())); // an upper bound: a round cut short counts whole
+    RecordProperty("resets_read", std::to_string(peer.replies()));
+    client->disconnect();
 }
 
 } // namespace http2_control_replies_test

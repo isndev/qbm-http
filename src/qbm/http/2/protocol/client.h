@@ -153,8 +153,10 @@ private:
     // PING / empty-SETTINGS frames — each begets a PONG / ACK that is exempt from flow control, so
     // the output pipe grows without bound when the server does not read (CVE-2019-9512/9515) — or
     // with many tiny CONTINUATION frames that stay under the header-block byte cap. Bound both: the
-    // PONGs and ACKs are counted while the output holds them (queue_control_reply(), Huly QB-1270);
-    // _continuation_frame_count is per-header-block (reset in clear_header_assembly_state).
+    // PONGs and ACKs are counted while the output holds them (queue_control_reply(), Huly QB-1270),
+    // and so are the resets the server draws on streams that are not requests in flight
+    // (send_rst_stream()); _continuation_frame_count is per-header-block (reset in
+    // clear_header_assembly_state).
     /// Highest even (server-initiated) stream id ever promised to us. RFC 9113 §5.1.1 requires
     /// promised ids to increase monotonically; closed streams are erased from `_client_streams`,
     /// so that map alone cannot detect a re-promised id. Mirrors the server's
@@ -399,7 +401,7 @@ public:
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
                 return;
             }
-            // Nothing here forgives the PONGs and SETTINGS ACKs the server solicited: they are counted while the
+            // Nothing here forgives the PONGs, SETTINGS ACKs and resets the server solicited: they are counted while the
             // output holds them, whatever the server sends (queue_control_reply()). A DATA accepted forgave them -- an
             // empty one first, then one carrying an octet of the body after every 999 PINGs, which held the guard at
             // zero, and so did a completed response (Huly QB-1270).
@@ -484,12 +486,18 @@ public:
             }
 
             const auto stream_id = headers_event.header.get_stream_id();
-            if (stream_id % 2 != 0 && stream_id > _last_initiated_stream_id) {
-                this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "HEADERS frame received on idle client stream");
+            if (is_idle_stream(stream_id)) {
+                // An unexpected stream identifier (RFC 9113 §5.1.1): an odd id past the last request is not the server's
+                // to use, and an even one is its own only once promised (§8.4.1) -- it was reset, each HEADERS for a
+                // 13-octet reply (Huly QB-1270).
+                this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, (stream_id & 1u) != 0u
+                                                                           ? "HEADERS frame received on idle client stream"
+                                                                           : "HEADERS frame received on idle stream (never promised)");
                 return;
             }
 
-            // Unknown stream - send RST_STREAM, and still decode the block (HPACK state, QB-534)
+            // A closed stream - send RST_STREAM (counted while queued, send_rst_stream()), and still decode the block
+            // (HPACK state, QB-534)
             LOG_HTTP_WARN_PA(headers_event.header.get_stream_id(), "Client: Received HEADERS for unknown/closed stream. Sending RST_STREAM.");
             this->send_rst_stream(headers_event.header.get_stream_id(), ErrorCode::STREAM_CLOSED, "HEADERS on unknown/closed stream");
             begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment,
@@ -738,7 +746,7 @@ public:
             // synchronously send_request() → _client_streams.emplace(), relocating the flat
             // (ska) map in release builds and dangling `stream` (UAF, ASan-invisible).
             try_close_stream_context_by_id(stream_id, ErrorCode::STREAM_CLOSED, "RST_STREAM received from peer");
-        } else if (stream_id % 2 != 0 && stream_id > _last_initiated_stream_id) {
+        } else if (is_idle_stream(stream_id)) { // either parity (RFC 9113 §6.4)
             send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
         // If stream not found, RST is for an unknown/already closed stream. Can be ignored.
@@ -1068,7 +1076,7 @@ public:
         } else { // Stream-level window update
             auto *stream_ptr = get_stream_by_id(wu_event.header.get_stream_id());
             if (!stream_ptr) {
-                if (wu_event.header.get_stream_id() % 2 != 0 && wu_event.header.get_stream_id() > _last_initiated_stream_id) {
+                if (is_idle_stream(wu_event.header.get_stream_id())) { // either parity (RFC 9113 §5.1)
                     this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE frame received on idle stream");
                 }
                 // LOG_WARN_PA("ClientHttp2Protocol", "[HTTP/2 Client] WINDOW_UPDATE for unknown or closed stream " <<
@@ -1623,6 +1631,10 @@ private:
             if (it != _pending_pushed_streams.end()) {
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "DATA before HEADERS on pushed stream");
                 _pending_pushed_streams.erase(it);
+            } else if (is_idle_stream(stream_id)) {
+                // Never promised: idle, where only HEADERS and PRIORITY are frames at all (RFC 9113 §5.1). It was reset,
+                // each DATA for a 13-octet reply (Huly QB-1270).
+                send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA frame received on idle stream (never promised)");
             } else {
                 send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA for unknown pushed stream");
             }
@@ -1848,6 +1860,13 @@ private:
 
     /**
      * @brief Send RST_STREAM frame
+     * @details The reset of a request in flight retires it: the server draws one for each request this client opened,
+     *          no more. Any other reset -- of a stream that is closed, of one the server opened -- is a reply the
+     *          server draws for nothing, as a PONG or a SETTINGS ACK is, and counts with them while the output holds it
+     *          (control_replies_at_bound(), control_reply_written()): with MAX_QUEUED_CONTROL_REPLIES of them queued it
+     *          is not written and the connection is closed with GOAWAY(ENHANCE_YOUR_CALM). They had no bound: a server
+     *          that read nothing and sent HEADERS on a closed stream queued a reset for each, up to the write-buffer
+     *          cap (Huly QB-1270; CVE-2019-9514 from the client's side).
      * @param stream_id Stream ID
      * @param error_code Error code
      * @param debug_message Optional debug message
@@ -1857,6 +1876,13 @@ private:
         if (!this->ok() || stream_id == 0)
             return;
 
+        const auto it        = _client_streams.find(stream_id);
+        const bool solicited = (stream_id & 1u) == 0u || it == _client_streams.end(); // not a request in flight
+        if (solicited && this->control_replies_at_bound()) [[unlikely]] {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets solicited (server flood)");
+            return;
+        }
+
         Http2FrameData<RstStreamFrame> rst_frame;
         rst_frame.header.type  = static_cast<uint8_t>(FrameType::RST_STREAM);
         rst_frame.header.flags = 0;
@@ -1864,11 +1890,13 @@ private:
         rst_frame.payload.error_code = error_code;
 
         this->_io << rst_frame;
+        if (solicited) {
+            this->control_reply_written(); // counted while it is queued, as control_replies_at_bound() admitted it
+        }
 
         // Retire before notifying: an error handler can re-enter RST/reset/send_request.
         // Keeping this node through the callback both permits duplicate notification and
         // leaves a dangling iterator if that callback erases it. Touch no stream afterwards.
-        auto it = _client_streams.find(stream_id);
         if (it != _client_streams.end()) {
             const bool notify_error = !it->second.response_dispatched;
             _client_streams.erase(it);
@@ -2060,6 +2088,19 @@ private:
     on_connection_error(ErrorCode error_code, const std::string &debug_message) noexcept {
         // Send GOAWAY and close the connection
         this->send_goaway_and_close(error_code, debug_message);
+    }
+
+    /**
+     * @brief Whether @p stream_id names a stream that is still idle on this connection (RFC 9113 §5.1.1): an odd one
+     *        past the last request this client opened, or an even one past the last the server promised -- every even
+     *        one while SETTINGS_ENABLE_PUSH stays 0, since the server can then reserve none (§6.6). Only HEADERS and
+     *        PRIORITY are frames an idle stream may receive (§5.1; no RST_STREAM names one, §6.4), and a server opens a
+     *        stream with PUSH_PROMISE alone (§8.4.1): any other frame there, and a server's HEADERS -- an unexpected
+     *        stream identifier (§5.1.1) -- are connection errors (PROTOCOL_ERROR). Stream 0 is not idle.
+     */
+    [[nodiscard]] bool
+    is_idle_stream(uint32_t stream_id) const noexcept {
+        return stream_id > ((stream_id & 1u) == 0u ? _last_promised_stream_id : _last_initiated_stream_id);
     }
 
     /**
