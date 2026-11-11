@@ -864,7 +864,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   response, by a reset of either side -- drew a `RST_STREAM(STREAM_CLOSED)`, in no count at all: over real TLS sockets a
   server that answered one request, then sent `HEADERS` on that stream and read nothing drew every reset it solicited,
   5 162 832 of them (64 MiB), the client still connected and its next request still waiting. They are replies the
-  server draws for nothing and count with the PONGs and the ACKs now: the 1001st queued is not written and the client
+  server draws for nothing -- on a stream the client reset itself, none is drawn since the entry below -- and count with
+  the PONGs and the ACKs now: the 1001st queued is not written and the client
   closes the connection with `GOAWAY(ENHANCE_YOUR_CALM)`, the request in flight failing with that reason, while a server
   that reads them -- 3000 in rounds of 500 over the same sockets -- is never cut. The reset of a request in flight, a
   response the client refuses, is not counted: it retires the request, so a server draws one for each request the
@@ -872,10 +873,42 @@ All notable changes to the qbm-http module are documented here. The format is ba
   parity (RFC 9113 §5.1, §5.1.1, §6.4): the client disables push, so a server can reserve no stream and every even id
   stays idle, yet a `HEADERS` or a `DATA` on one was reset and the connection kept -- a 13-octet reply for each -- and
   a `WINDOW_UPDATE` or a `RST_STREAM` there was ignored. Each closes the connection with `GOAWAY(PROTOCOL_ERROR)` now,
-  as on an odd id past the client's last request; a `PRIORITY`, which an idle stream may receive, stays read and
-  ignored, and a frame the frame layer refuses first -- a `WINDOW_UPDATE` of 0, a `PRIORITY` that is not 5 octets --
-  still ends the client's connection without a `GOAWAY`. The client keeps no second budget for its resets, as the
-  server does: a server that reads them is held to no number of them, as with its `PING`s.
+  as on an odd id past the client's last request -- the `DATA`, the `WINDOW_UPDATE` and the `RST_STREAM` beside the
+  `HEADERS` the maintainer's decision named, which he signed off on 2026-11-11; a `PRIORITY`, which an idle stream may
+  receive, stays read and ignored, and a frame the frame layer refuses first -- a `WINDOW_UPDATE` of 0, a `PRIORITY`
+  that is not 5 octets -- ends the connection with a `GOAWAY` since the entry below. The client keeps no second budget
+  for its resets, as the server does: a server that reads them is held to no number of them, as with its `PING`s.
+
+- **The HTTP/2 client serves on when a response it resets has more frames in flight, sends a GOAWAY for the errors
+  its frame layer reports, bounds its log of HEADERS on closed streams and names its own reason once (Huly QB-1270).**
+  A server whose response passed what the client accepts on one stream -- a legitimate body past `MAX_BODY_SIZE`, a
+  body past its `content-length` -- had that stream reset, and the `DATA` it had already sent behind it closed the connection with
+  `GOAWAY(PROTOCOL_ERROR)`: over real TLS sockets a body streamed past 100 MiB on stream 1 failed the request answered
+  next on stream 3 with « Server sent GOAWAY: GOAWAY sent by client: DATA for unknown client stream ». The client now
+  remembers the streams it reset while the server could still send on them, the last `MAX_RESET_STREAMS_REMEMBERED`
+  (1000) -- only its own resets of the streams it holds add to that memory, at most one per request it opens; a frame on
+  a stream it does not hold adds nothing -- and discards what the server sent on them before it read the reset (RFC 9113
+  §5.1): a `DATA` still counts against the connection window and is given back with the connection `WINDOW_UPDATE`
+  (§6.9), and a header block is still decoded, so the HPACK table keeps step (§4.3). The request on stream 3 is answered
+  on the same connection, its field named by an index the discarded trailers put in the table. A `HEADERS` on such a
+  stream drew a `RST_STREAM`, one more reply the server drew for nothing: it draws none. A frame on a stream the server
+  had ended stays the error it was. The octets of the frame a stream is reset for count at the reset, so a `WINDOW_UPDATE`
+  they make due leaves with it, not with the next `DATA` read. `HEADERS` and `DATA` on stream 0 are connection errors,
+  `GOAWAY(PROTOCOL_ERROR)` (§6.1, §6.2): they were taken for frames on a closed stream and the connection kept. A
+  `WINDOW_UPDATE` of 0 on a stream and a `PRIORITY` that is not 5 octets are stream errors on the client too (§6.9,
+  §6.3), as they are on the server since the first QB-1270 entry above: the stream is reset and the connection serves on
+  -- the reset counted as a reply the server draws for nothing on a stream that has closed, the frame ignored on a
+  stream the client reset -- and on an idle stream or on stream 0 the connection ends with a `GOAWAY`. Every other
+  error the frame layer reports once it has read a frame -- a frame of the wrong size, a padding past its payload, a
+  missing `CONTINUATION` -- ends the connection with a `GOAWAY` of the error's code (§5.4.1): each ended it without one,
+  the protocol no longer ok() when the frame layer reported the error, and over real sockets a `PING` of 7 octets failed
+  the request in flight with « Connection lost (reason: -1) ». Three of the checks the frame layer makes before it
+  dispatches a frame -- a frame longer than `SETTINGS_MAX_FRAME_SIZE`, a `SETTINGS`, `PING` or `GOAWAY` on a stream
+  other than 0 -- still end the connection without one, on the client as on the server. A `HEADERS` on a closed stream wrote one `WARN`
+  line each, without a bound -- 5000 lines for 5000 frames of a server that read its resets: the first is logged, then
+  one line each time their count on the connection reaches a power of two, with its stream and the count, 13 lines for
+  5000. And a request the client's own `GOAWAY` fails names the client's reason once, « GOAWAY sent by client:
+  <reason> », where it read « Server sent GOAWAY: GOAWAY sent by client: <reason> ».
 
 - **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
   as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list

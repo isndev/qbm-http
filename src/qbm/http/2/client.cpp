@@ -28,6 +28,7 @@
 #include <limits>
 #include <random>
 #include <sstream>
+#include <string_view>
 
 #include "../origin.h"
 
@@ -978,9 +979,14 @@ Client::on(const qb::protocol::http2::Http2StreamErrorEvent &event) {
 
 void
 Client::on(const qb::protocol::http2::Http2GoAwayEvent &event) {
-    LOG_HTTP_WARN_PA(_client_id, "Received GOAWAY frame: " << event.debug_data);
-
-    std::string error_msg = "Server sent GOAWAY: " + event.debug_data;
+    // The protocol dispatches the GOAWAY it sends as well as the server's, its own reason behind this prefix
+    // (ClientHttp2Protocol::write_goaway_and_close()): a request that GOAWAY fails names that reason once. It was taken
+    // for the server's -- « Server sent GOAWAY: GOAWAY sent by client: ... » (Huly QB-1270). A server whose debug data
+    // begins with the same words reads as the client: they name the reason all the same.
+    static constexpr std::string_view own_goaway = "GOAWAY sent by client: ";
+    const bool                        sent       = std::string_view(event.debug_data).starts_with(own_goaway);
+    std::string                       error_msg  = sent ? event.debug_data : "Server sent GOAWAY: " + event.debug_data;
+    LOG_HTTP_WARN_PA(_client_id, error_msg);
     if (event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR) {
         _received_graceful_goaway = true;
         fail_active_requests_after_goaway(event.last_stream_id, error_msg);

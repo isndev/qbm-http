@@ -113,6 +113,14 @@ constexpr std::uint32_t MAX_RAPID_RESETS = 100;
  *  between two streams the client opens (ServerHttp2Protocol::admit_solicited_reset(); Huly QB-1270). */
 constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
+/** @brief How many of the streams it reset the HTTP/2 client remembers, the most recent resets: a frame the server sent
+ *  on one before it read the reset is discarded -- a DATA counted against the connection window and given back, a header
+ *  block decoded for the HPACK table -- not answered (RFC 9113 §5.1, ClientHttp2Protocol::send_rst_stream(); Huly
+ *  QB-1270). Only the client's resets of streams it holds and the server has not ended add to it -- a request in flight,
+ *  at most one per request it opens; a frame on a stream it does not hold adds nothing. Past the bound the oldest reset
+ *  is forgotten, and a frame on it is one on a closed stream again. */
+constexpr std::uint32_t MAX_RESET_STREAMS_REMEMBERED = 1000;
+
 /** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not
  *  bound a flood of ZERO-length CONTINUATION frames (each adds 0 bytes yet keeps the block open),
  *  so a peer could stream them forever (CONTINUATION-flood variant of CVE-2024-27316). A full

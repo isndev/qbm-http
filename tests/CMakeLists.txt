@@ -176,6 +176,9 @@ qhttp_test(unit options-algorithm unit/auth/options-algorithm.cpp    REQUIRES ss
 qhttp_test(unit http2-frame-layer      unit/http2/http2-frame-layer.cpp      EXTRA_LABELS http2)
 qhttp_test(unit http2-server-protocol  unit/http2/http2-server-protocol.cpp  EXTRA_LABELS http2)
 qhttp_test(unit http2-client-protocol  unit/http2/http2-client-protocol.cpp  EXTRA_LABELS http2)
+# What crosses the client's reset of a response body past MAX_BODY_SIZE (Huly QB-1270): 100 MiB through the harness,
+# so a binary of its own, labelled `huge-body` like the others (`ctest -LE huge-body` drops it).
+qhttp_test(unit http2-client-huge-body unit/http2/http2-client-huge-body.cpp EXTRA_LABELS http2 huge-body)
 qhttp_test(unit hpack-codec            unit/http2/hpack-codec.cpp            EXTRA_LABELS http2)
 qhttp_test(unit hpack-encoder-strategy unit/http2/hpack-encoder-strategy.cpp EXTRA_LABELS http2)
 qhttp_test(unit http2-header-validation unit/http2/http2-header-validation.cpp EXTRA_LABELS http2)
@@ -216,6 +219,9 @@ qhttp_test(system response-stream      system/routing/response-stream.cpp      R
 qhttp_test(system response-stream-huge-body system/routing/response-stream.cpp REQUIRES live
            DEFINES QBM_TEST_RESPONSE_STREAM_HUGE_BODY EXTRA_LABELS http1 routing huge-body)
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
+# The same over real TLS sockets: a server streams 100 MiB past the limit (Huly QB-1270), a binary labelled `huge-body`.
+qhttp_test(system http2-client-huge-body system/http2/http2-client-huge-body.cpp REQUIRES ssl live
+           EXTRA_LABELS http2 ssl huge-body)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system http2-response-stream system/http2/http2-response-stream.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl routing) # Huly QB-86
 qhttp_test(system http2-control-replies system/http2/http2-control-replies.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl) # Huly QB-1270: the PING/SETTINGS guard over real sockets
