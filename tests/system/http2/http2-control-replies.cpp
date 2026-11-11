@@ -15,7 +15,7 @@
  *   - the server, a client that reads (the raw HTTP/2 client of `shared/http2_raw_client.h`): 3000 PINGs, then 3000
  *     SETTINGS, in batches whose replies it reads before it asks again -- every one answered, no GOAWAY, and a request
  *     is still served. Between two units of progress the 1001st closed the connection;
- *   - the server, a client that never reads: rounds of 999 PINGs (then SETTINGS, then empty DATA on a closed stream,
+ *   - the server, a client that never reads: rounds of 999 PINGs (then SETTINGS, then DATA on a closed stream,
  *     each of which draws a reset) and a request the server answers, which forgave the budget -- the replies queued for
  *     as long as the client sent, up to qb-io's write cap. Once the socket's buffers are full a thousand replies queue
  *     and the connection is closed: what the session's output held at that moment is read on the server -- no more
@@ -213,11 +213,11 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatReadsMaySolicitRepliesPastTheThou
 }
 
 // A client that never reads: rounds of 999 PINGs and one request, each round in the two writes of a client that reads
-// nothing back -- then the same with SETTINGS, and with empty DATA frames on a closed stream, each of which draws a
-// reset. The request is served -- a stream the client opened, which forgave every budget -- so the server answered for
-// as long as the client sent: 64 MiB of replies solicited, every one of them written to an output nobody drained, and
-// the connection still serving. The socket's buffers take what they can hold; past them the replies queue in the
-// session's output, and the thousandth queued is the last: the protocol writes its GOAWAY behind them and the session
+// nothing back -- then the same with SETTINGS, and with DATA frames of one octet on a closed stream, each of which draws
+// a reset (empty ones would meet the bucket of the frames that make no progress first, at its 10001st). The request is served -- a stream the
+// client opened, which forgave every budget -- so the server answered for as long as the client sent: 64 MiB of replies solicited, every one of
+// them written to an output nobody drained, and the connection still serving. The socket's buffers take what they can hold; past them the
+// replies queue in the session's output, and the thousandth queued is the last: the protocol writes its GOAWAY behind them and the session
 // closes the connection -- without waiting for a client that takes nothing, so the GOAWAY stays in the output it closed
 // with. That output is read on the server: no more than a thousand replies, then GOAWAY(ENHANCE_YOUR_CALM) naming the
 // flood. (How many of the thousand are still there is the socket's business: it may take a few more between the

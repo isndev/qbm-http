@@ -409,23 +409,31 @@ struct Http2StreamErrorEvent {
 };
 
 /**
- * @brief Event for GOAWAY frame reception
+ * @brief Event for a GOAWAY frame: one the peer sent, or one this endpoint sent (`sent`)
+ * @details The client and server protocols dispatch it for the GOAWAY they receive and for the GOAWAY with an error they
+ *          send themselves -- a connection error they found, one of their guards. `sent` tells the two apart, and
+ *          `debug_data` is the frame's debug data as it is on the wire either way. The protocol's own GOAWAY was told by a
+ *          text prefix in `debug_data` (« GOAWAY sent by client: », « GOAWAY sent by server: »), which a peer's debug data
+ *          could carry as well (Huly QB-1270).
  */
 struct Http2GoAwayEvent {
     ErrorCode   error_code;     ///< Error code from GOAWAY
     uint32_t    last_stream_id; ///< Last stream ID processed by sender
     std::string debug_data;     ///< Additional debug information
+    bool        sent;           ///< true: this endpoint sent the GOAWAY; false: the peer did (Huly QB-1270)
 
     /**
      * @brief Construct a GOAWAY event
      * @param ec Error code
      * @param lsid Last stream ID
      * @param dbg Debug data
+     * @param sent_here true for a GOAWAY this endpoint sent, false (the default) for one it received
      */
-    Http2GoAwayEvent(ErrorCode ec, uint32_t lsid, std::string dbg = "")
+    Http2GoAwayEvent(ErrorCode ec, uint32_t lsid, std::string dbg = "", bool sent_here = false)
         : error_code(ec)
         , last_stream_id(lsid)
-        , debug_data(std::move(dbg)) {}
+        , debug_data(std::move(dbg))
+        , sent(sent_here) {}
 };
 
 /**

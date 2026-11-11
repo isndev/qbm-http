@@ -72,6 +72,18 @@ namespace qb::http::test {
 
 namespace h2 = qb::protocol::http2;
 
+/// Whether a GOAWAY event says this endpoint sent the GOAWAY (`Http2GoAwayEvent::sent`, Huly QB-1270): std::nullopt for
+/// an event type without the field -- the code before it -- so that a witness fails there rather than not compile.
+template <typename Event>
+[[nodiscard]] std::optional<bool>
+goaway_sent_by_this_endpoint(const Event &event) {
+    if constexpr (requires { event.sent; }) {
+        return event.sent;
+    } else {
+        return std::nullopt;
+    }
+}
+
 // ===========================================================================
 // FakeIO harnesses
 // ===========================================================================
@@ -97,6 +109,9 @@ struct Http2FakeIO {
     int           push_promise_count = 0;
     h2::ErrorCode last_stream_error  = h2::ErrorCode::NO_ERROR;
     h2::ErrorCode last_goaway_error  = h2::ErrorCode::NO_ERROR;
+    /// The last GOAWAY event's debug data and whether this endpoint sent that GOAWAY (Huly QB-1270).
+    std::string         last_goaway_debug;
+    std::optional<bool> last_goaway_sent;
 
     /// Last request seen by @c on(Request&&, stream_id), captured for assertions.
     std::optional<qb::http::Request> last_request;
@@ -152,6 +167,8 @@ struct Http2FakeIO {
     on(const h2::Http2GoAwayEvent &event) {
         ++goaway_count;
         last_goaway_error = event.error_code;
+        last_goaway_debug = event.debug_data;
+        last_goaway_sent  = goaway_sent_by_this_endpoint(event);
     }
 
     void
@@ -181,6 +198,9 @@ struct Http2ClientFakeIO {
     h2::ErrorCode last_response_error = h2::ErrorCode::NO_ERROR;
     h2::ErrorCode last_stream_error   = h2::ErrorCode::NO_ERROR;
     h2::ErrorCode last_goaway_error   = h2::ErrorCode::NO_ERROR;
+    /// The last GOAWAY event's debug data and whether this endpoint sent that GOAWAY (Huly QB-1270).
+    std::string         last_goaway_debug;
+    std::optional<bool> last_goaway_sent;
 
     std::optional<int>                last_status;
     std::optional<std::string>        last_body;
@@ -245,6 +265,8 @@ struct Http2ClientFakeIO {
     on(const h2::Http2GoAwayEvent &event) {
         ++goaway_count;
         last_goaway_error = event.error_code;
+        last_goaway_debug = event.debug_data;
+        last_goaway_sent  = goaway_sent_by_this_endpoint(event);
     }
 
     void

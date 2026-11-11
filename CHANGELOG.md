@@ -265,7 +265,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the way past it; the HTTP/3 client's `set_max_body_size` takes 0 for none too, now written. Witnesses in the entry
   "The HTTP/1.1 clients read a body of exactly their limit" below.
 
+- **`Http2GoAwayEvent::sent` says who sent an HTTP/2 GOAWAY (Huly QB-1270).** The client and server protocols dispatch
+  `qb::protocol::http2::Http2GoAwayEvent` for the `GOAWAY` they receive and for the `GOAWAY` with an error they send
+  themselves; the new `bool sent` is `true` for the latter, and the constructor's new trailing parameter defaults to
+  `false`, so code that builds the event as before compiles unchanged. `debug_data` is now the frame's debug data as
+  on the wire on both sides: for its own `GOAWAY` the protocol prefixed it with « GOAWAY sent by client: » or « GOAWAY
+  sent by server: », the only way a handler could tell it from the peer's -- and a peer's debug data could carry the
+  same words. A handler of the event sees the reason alone now, and `sent` (Changed, below). The struct gains a
+  member: rebuild what includes it (qb promises no binary compatibility between versions).
+
 ### Changed
+
+- **The `debug_data` of a GOAWAY an HTTP/2 protocol sends itself is the frame's debug data alone (Huly QB-1270).** The
+  client and server protocols dispatch `Http2GoAwayEvent` for their own `GOAWAY` with an error; its `debug_data` was
+  the reason behind « GOAWAY sent by client: » or « GOAWAY sent by server: », and is the reason alone now, as on the
+  wire, the new `sent` member telling the two apart (Added, above). A handler that recognised its endpoint's own
+  `GOAWAY` by that prefix reads `sent` instead: it would take its own for the peer's without a word. The
+  `qb::http2::Client`'s failure text is unchanged, « GOAWAY sent by client: <reason> », and the server session logs
+  its own as « Sent GOAWAY to client », no longer as received.
 
 - **Every chunked body of a kept HTTP/1.1 connection starts from the pipe's initial buffer, and the protocol reserves
   nothing for a declared body it copies (Huly QB-1248).** The parser reads a chunked body -- and any body when it is
@@ -892,7 +909,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (§6.9), and a header block is still decoded, so the HPACK table keeps step (§4.3). The request on stream 3 is answered
   on the same connection, its field named by an index the discarded trailers put in the table. A `HEADERS` on such a
   stream drew a `RST_STREAM`, one more reply the server drew for nothing: it draws none. A frame on a stream the server
-  had ended stays the error it was. The octets of the frame a stream is reset for count at the reset, so a `WINDOW_UPDATE`
+  had ended stays an error (of type `STREAM_CLOSED` since the frame-layer GOAWAY entry below). The octets of the frame a stream is reset for count at the reset, so a `WINDOW_UPDATE`
   they make due leaves with it, not with the next `DATA` read. `HEADERS` and `DATA` on stream 0 are connection errors,
   `GOAWAY(PROTOCOL_ERROR)` (§6.1, §6.2): they were taken for frames on a closed stream and the connection kept. A
   `WINDOW_UPDATE` of 0 on a stream and a `PRIORITY` that is not 5 octets are stream errors on the client too (§6.9,
@@ -904,11 +921,56 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the protocol no longer ok() when the frame layer reported the error, and over real sockets a `PING` of 7 octets failed
   the request in flight with « Connection lost (reason: -1) ». Three of the checks the frame layer makes before it
   dispatches a frame -- a frame longer than `SETTINGS_MAX_FRAME_SIZE`, a `SETTINGS`, `PING` or `GOAWAY` on a stream
-  other than 0 -- still end the connection without one, on the client as on the server. A `HEADERS` on a closed stream wrote one `WARN`
+  other than 0 -- ended the connection without one too, on the client as on the server, until the frame-layer GOAWAY entry below. A `HEADERS` on a closed stream wrote one `WARN`
   line each, without a bound -- 5000 lines for 5000 frames of a server that read its resets: the first is logged, then
   one line each time their count on the connection reaches a power of two, with its stream and the count, 13 lines for
   5000. And a request the client's own `GOAWAY` fails names the client's reason once, « GOAWAY sent by client:
   <reason> », where it read « Server sent GOAWAY: GOAWAY sent by client: <reason> ».
+
+- **Security: the HTTP/2 client and server bound the frames that make no progress and draw no reply (Huly QB-1270;
+  CVE-2019-9518).** The maintainer's mandate of 2026-11-11. An empty `DATA` without `END_STREAM`, a `DATA` of padding
+  alone, a `HEADERS` of an empty block without `END_STREAM`, a `CONTINUATION` of an empty fragment without
+  `END_HEADERS`, a `PRIORITY`, a frame of an unknown type and a `SETTINGS` or `PING` ACK that answers nothing the
+  endpoint sent each cost their receiver a dispatch and draw no reply; so do, on the client, every `HEADERS` it
+  discards on a stream it reset, a stream error of the frame layer it ignores there and an empty `DATA` with
+  `END_STREAM` there. Unless another count met them first -- on the server an empty `HEADERS` is a malformed
+  request, whose reset is counted, and a block takes at most `MAX_CONTINUATION_FRAMES` `CONTINUATION` frames -- a
+  peer could send them for as long as it liked. Each now takes a token from a bucket of
+  `qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST` (10000) that regains `NO_PROGRESS_FRAME_RATE` (330) tokens a
+  second, on both sides; with none left the connection ends with `GOAWAY(ENHANCE_YOUR_CALM)`, « Excessive frames
+  making no progress (flood) ». It is nghttp2's glitch rate limiter (added in 1.67.0 at 1000 and 33, these values
+  since 1.69.0), which charges an empty `DATA`, a `PRIORITY`, an unknown frame and an ignored header block alike; qb
+  also charges an empty `HEADERS` or `CONTINUATION`, which nghttp2 bounds otherwise, and an ACK that answers
+  nothing, which nghttp2 makes a connection error at once (a `SETTINGS` ACK). A peer that sends fewer than that
+  rate, beyond the burst, is never cut; elsewhere an empty `DATA` or `HEADERS` that ends its stream takes no token,
+  nor does a `WINDOW_UPDATE` or a `RST_STREAM` on a stream that has closed, which RFC 9113 §5.1 lets cross its end.
+
+- **Every connection error the HTTP/2 frame layer finds ends the connection with its GOAWAY, on the server whatever
+  stream the frame names; a frame after END_STREAM is STREAM_CLOSED on the client; the server no longer logs its own
+  GOAWAY as received (Huly QB-1270).** The maintainer's « Yes, as recommended » of 2026-11-11. Three checks the frame
+  layer makes on a frame's header alone, before it dispatches the frame -- a `SETTINGS`, `PING` or `GOAWAY` on a stream
+  other than 0, a frame longer than the `SETTINGS_MAX_FRAME_SIZE` the endpoint advertised (RFC 9113 §6.5, §6.7, §6.8,
+  §4.2) -- closed the connection without a `GOAWAY`, on the client and on the server: each sends the `GOAWAY` the
+  connection error owes now (§5.4.1), its code and the reason as debug data, and a request of `qb::http2::Client`
+  such a frame fails reads « GOAWAY sent by client: <reason> », not « Connection lost (reason: -1) ». So does a `DATA`
+  or a `HEADERS` of no octet whose `PADDED` or `PRIORITY` flag calls for some, `FRAME_SIZE_ERROR` (§4.2): it was
+  dispatched as an empty frame. The server answered a connection error
+  the frame layer reports on a stream other than 0 -- a `RST_STREAM` or a `WINDOW_UPDATE` of the wrong size, a padding
+  past its payload, a frame where a `CONTINUATION` is due (§6.4, §6.9, §6.1, §6.10) -- with a `RST_STREAM` of that
+  stream, an idle one's included, which §6.4 forbids, and closed without a `GOAWAY`: it ends the connection with the
+  `GOAWAY` and resets nothing, as the client does; the stream errors the frame layer finds (a `WINDOW_UPDATE` of 0, a
+  `PRIORITY` that is not 5 octets) still reset their stream alone. On the client, a frame the server sends on a
+  stream it ended gets the code §5.1 names: a `DATA` on a stream that has closed -- its response completed, or the
+  server reset it -- ends the connection with `GOAWAY(STREAM_CLOSED)`, the connection error §5.1 permits, not
+  `PROTOCOL_ERROR`; in half-closed (remote), a request whose body or trailer section is still on its way, a `HEADERS`
+  is reset `STREAM_CLOSED`, the stream error §5.1 requires, not `PROTOCOL_ERROR`, and after a
+  trailer section it was not refused at all -- decoded as a second trailer section of a response already delivered --,
+  and a `DATA` is reset with its octets counted in the connection window and given back (§6.9): they were left out,
+  and the server's view of the window shrank by them for good. The server already answered both so (Huly QB-1058,
+  QB-1244). The server session logged the `GOAWAY` its protocol sent as « Received GOAWAY from client ... Debug:
+  GOAWAY sent by server: ... »: it logs « Sent GOAWAY to client » for its own now, told by `Http2GoAwayEvent::sent`
+  (Added). A request the client's own `GOAWAY` fails still reads « GOAWAY sent by client: <reason> », told by the same
+  field: a server's debug data that began with those words read as the client's.
 
 - **The HTTP/2 server holds a promised request and a trailer section to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`,
   as it holds a response's header list (Huly QB-1240).** Since Huly QB-1235 `send_response()` judges a response's list

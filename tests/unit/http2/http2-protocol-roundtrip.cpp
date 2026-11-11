@@ -710,16 +710,16 @@ TEST(HTTP2RoundTrip, ServerPingIsAnsweredByClientPong) {
 // ===========================================================================
 // Error GOAWAY initiated by the SERVER reaches the client and tears its
 // connection down. There is no public send_goaway API; the connection-error
-// path is the only trigger. Three of the checks the frame layer makes before it
-// dispatches a frame (PING/SETTINGS/GOAWAY on a non-zero stream, a frame past
-// the max frame size) call not_ok() and write NO GOAWAY, on either side; the
-// other errors it reports to handle_framer_detected_error() after its not_ok().
-// The client answers those with a GOAWAY (Huly QB-1270: it short-circuited on
-// `!ok()` and wrote none); the server answers one on a stream other than 0 with
-// a RST_STREAM and closes without a GOAWAY. A zero-increment WINDOW_UPDATE on a
-// stream is a stream error on both (on_stream_frame_error). We use a HEADERS
-// frame on an even (server-parity) stream id, which reaches server
-// on(HeadersFrame) and emits a real GOAWAY(PROTOCOL_ERROR).
+// path is the only trigger. Every error the frame layer reports after its
+// not_ok() -- the three checks on a frame's header alone (PING/SETTINGS/GOAWAY
+// on a non-zero stream, a frame past the max frame size) included -- reaches
+// handle_framer_detected_error(), and both sides answer it with a GOAWAY of its
+// code, whatever stream the frame names (Huly QB-1270: the three checks wrote
+// none on either side, the client short-circuited on `!ok()`, and the server
+// answered one on a stream other than 0 with a RST_STREAM). A zero-increment
+// WINDOW_UPDATE on a stream is a stream error on both (on_stream_frame_error).
+// We use a HEADERS frame on an even (server-parity) stream id, which reaches
+// server on(HeadersFrame) and emits a real GOAWAY(PROTOCOL_ERROR).
 // ===========================================================================
 
 TEST(HTTP2RoundTrip, ServerDetectedProtocolErrorGoawayMarksClientNotOk) {

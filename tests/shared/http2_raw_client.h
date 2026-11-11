@@ -101,10 +101,11 @@ public:
     std::uint32_t                      goaway_last_stream = 0;
     bool                               goaway_seen        = false;
     std::uint32_t                      goaway_code        = 0;
-    std::size_t                        pongs              = 0;    ///< the PING frames with ACK read (Huly QB-1270)
-    std::size_t                        settings_acks      = 0;    ///< the SETTINGS frames with ACK read, ours included
-    std::size_t                        resets             = 0;    ///< the RST_STREAM frames read
-    bool                               keep_frames        = true; ///< false: `frames` stays empty (a flood's replies are counted)
+    std::string                        goaway_debug;         ///< the debug data of the last GOAWAY read (Huly QB-1270)
+    std::size_t                        pongs         = 0;    ///< the PING frames with ACK read (Huly QB-1270)
+    std::size_t                        settings_acks = 0;    ///< the SETTINGS frames with ACK read, ours included
+    std::size_t                        resets        = 0;    ///< the RST_STREAM frames read
+    bool                               keep_frames   = true; ///< false: `frames` stays empty (a flood's replies are counted)
     /// How long one write may take before it gives up. A client that floods a server sets it far past what a loaded
     /// host can stall for: its writes then stop only when the connection is broken.
     std::chrono::milliseconds write_budget = std::chrono::seconds(2);
@@ -157,8 +158,10 @@ public:
     /// that answers a frame on a closed stream.
     enum class soliciting { pings, settings, data_on_a_closed_stream };
 
-    /// `count` PING frames, empty SETTINGS frames, or empty DATA frames on `closed_stream`, in ONE write (Huly
-    /// QB-1270). `false` when the write did not finish within `write_budget`, or the connection is broken.
+    /// `count` PING frames, empty SETTINGS frames, or DATA frames of one octet on `closed_stream`, in ONE write (Huly
+    /// QB-1270) -- an octet, so that they meet the reset guards, not the bucket of the frames that make no progress an
+    /// empty DATA takes a token of. `false` when the write did not finish within `write_budget`, or the connection is
+    /// broken.
     bool
     solicit(int count, soliciting what = soliciting::pings, std::uint32_t closed_stream = 0) {
         std::vector<uint8_t> out;
@@ -167,7 +170,7 @@ public:
             if (what == soliciting::settings)
                 append_frame(out, SETTINGS, 0, 0, {});
             else if (what == soliciting::data_on_a_closed_stream)
-                append_frame(out, DATA, 0, closed_stream, {});
+                append_frame(out, DATA, 0, closed_stream, {'x'});
             else
                 append_frame(out, PING, 0, 0, {0x51, 0x42, 0x31, 0x32, 0x37, 0x30, 0x00, 0x00});
         }
@@ -192,6 +195,32 @@ public:
             append_frame(out, WINDOW_UPDATE, 0, stream_id,
                          {static_cast<uint8_t>(increment >> 24), static_cast<uint8_t>(increment >> 16), static_cast<uint8_t>(increment >> 8),
                           static_cast<uint8_t>(increment)});
+        return write_all(out);
+    }
+
+    /// Any frame, as given: a frame the server must refuse, say (Huly QB-1270). `false` when the write did not finish.
+    bool
+    frame(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::vector<uint8_t> const &payload) {
+        std::vector<uint8_t> out;
+        append_frame(out, type, flags, stream_id, payload);
+        return write_all(out);
+    }
+
+    /// The 9 octets of a frame header declaring `length` octets of payload, and no payload: a frame the server refuses on
+    /// its header alone, with nothing of it left unread when the server closes (Huly QB-1270).
+    bool
+    frame_header(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::uint32_t length) {
+        const std::vector<uint8_t> out{
+            static_cast<uint8_t>(length >> 16),
+            static_cast<uint8_t>(length >> 8),
+            static_cast<uint8_t>(length),
+            type,
+            flags,
+            static_cast<uint8_t>((stream_id >> 24) & 0x7F),
+            static_cast<uint8_t>(stream_id >> 16),
+            static_cast<uint8_t>(stream_id >> 8),
+            static_cast<uint8_t>(stream_id)
+        };
         return write_all(out);
     }
 
@@ -345,6 +374,7 @@ private:
                                          & 0x7FFFFFFFu;
                     goaway_code = (std::uint32_t{f.payload[4]} << 24) | (std::uint32_t{f.payload[5]} << 16) | (std::uint32_t{f.payload[6]} << 8)
                                   | f.payload[7];
+                    goaway_debug.assign(f.payload.begin() + 8, f.payload.end());
                 }
                 break;
             case DATA: {

@@ -18,6 +18,7 @@
 #ifndef QBM_HTTP_TESTS_SHARED_HTTP2_PLANNED_PEER_H
 #define QBM_HTTP_TESTS_SHARED_HTTP2_PLANNED_PEER_H
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -60,6 +61,23 @@ public:
         data_on_stream_zero,
         /// A PING of 7 octets, which the client's frame layer refuses.
         ping_of_seven_octets,
+        /// A SETTINGS on stream 1, refused on its header alone (Huly QB-1270): so are the next three.
+        settings_on_a_stream,
+        /// A PING on stream 1.
+        ping_on_a_stream,
+        /// A GOAWAY on stream 1.
+        goaway_on_a_stream,
+        /// The header of a DATA on stream 1 one octet past the client's SETTINGS_MAX_FRAME_SIZE (16384), and no payload: the
+        /// client refuses it on its header alone, and nothing of it is left unread when it closes.
+        frame_past_max_frame_size,
+        /// Stream 1 answered and ended (a 200, END_STREAM), then a DATA on it, while stream 3 waits.
+        data_after_the_response_completed,
+        /// Stream 1: a 200, then 10000 empty DATA frames without END_STREAM and a PING in one write (the empty-frame flood,
+        /// CVE-2019-9518); once the PONG is back, one empty DATA and a PING at a time, until the client's GOAWAY.
+        empty_data_flood,
+        /// Stream 1: a 200, then 200 chunks of "abc", three empty DATA frames after each, then an empty DATA that ends the
+        /// stream: a legitimate stream of chunks.
+        empty_data_between_chunks,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -210,6 +228,8 @@ private:
             } else if (type == 0x3 && length == 4) {
                 std::lock_guard lock(_mutex);
                 _resets.emplace_back(stream_id, be32(payload));
+            } else if (type == 0x6 && (flags & 0x1) != 0) {
+                ++_pongs;
             } else if (type == 0x7 && length >= 8 && !_goaway) {
                 std::lock_guard lock(_mutex);
                 _goaway_code = be32(payload + 4);
@@ -296,6 +316,39 @@ private:
         static_cast<void>(send(burst));
     }
 
+    /// Stream 1: a 200, then 10000 empty DATA frames and a PING in one write; once the PONG is back, one empty DATA and a
+    /// PING at a time until the client's GOAWAY. Each frame the client refuses shares its write with the PING behind it,
+    /// so the client leaves nothing of it unread in the kernel, whatever it does with its socket once it has closed.
+    void
+    play_empty_data_flood() {
+        static constexpr std::array<uint8_t, 8> opaque{'q', 'b', '-', '1', '2', '7', '0', 0};
+        const std::vector<uint8_t>              ping(opaque.begin(), opaque.end());
+        std::vector<uint8_t>                    burst;
+        append_frame(burst, 0x1, 0x4, 1, {0x88}); // HEADERS, END_HEADERS, stream 1: `:status: 200`
+        for (int i = 0; i < 10000; ++i) {
+            append_frame(burst, 0x0, 0, 1, {});
+        }
+        append_frame(burst, 0x6, 0, 0, ping);
+        std::size_t pongs = _pongs;
+        if (!send(burst)) {
+            return;
+        }
+        while (!_goaway) {
+            while (_pongs == pongs && !_goaway) {
+                if (!read_some()) {
+                    return;
+                }
+            }
+            pongs = _pongs;
+            std::vector<uint8_t> one;
+            append_frame(one, 0x0, 0, 1, {});
+            append_frame(one, 0x6, 0, 0, ping);
+            if (!_goaway && !send(one)) {
+                return;
+            }
+        }
+    }
+
     void
     run() {
         _deadline = std::chrono::steady_clock::now() + _budget;
@@ -309,7 +362,10 @@ private:
             return;
         }
         _sock.set_nonblocking(true);
-        const std::size_t requests = _plan == Plan::body_past_the_limit || _plan == Plan::body_past_its_content_length ? 2u : 1u;
+        const std::size_t requests = _plan == Plan::body_past_the_limit || _plan == Plan::body_past_its_content_length
+                                             || _plan == Plan::data_after_the_response_completed
+                                         ? 2u
+                                         : 1u;
         while (_requests.size() < requests) {
             if (!read_some()) {
                 break;
@@ -326,10 +382,34 @@ private:
                     append_frame(frame, 0x1, 0x5, 5, {0x88}); // HEADERS, END_STREAM | END_HEADERS, stream 5: `:status: 200`
                 } else if (_plan == Plan::data_on_stream_zero) {
                     append_frame(frame, 0x0, 0, 0, {'z', 'e', 'r', 'o'}); // DATA on stream 0
-                } else {
+                } else if (_plan == Plan::ping_of_seven_octets) {
                     append_frame(frame, 0x6, 0, 0, {1, 2, 3, 4, 5, 6, 7}); // PING, 7 octets
+                } else if (_plan == Plan::settings_on_a_stream) {
+                    append_frame(frame, 0x4, 0, 1, {}); // SETTINGS, stream 1
+                } else if (_plan == Plan::ping_on_a_stream) {
+                    append_frame(frame, 0x6, 0, 1, {1, 2, 3, 4, 5, 6, 7, 8}); // PING, stream 1
+                } else if (_plan == Plan::goaway_on_a_stream) {
+                    append_frame(frame, 0x7, 0, 1, {0, 0, 0, 0, 0, 0, 0, 0}); // GOAWAY, stream 1
+                } else if (_plan == Plan::frame_past_max_frame_size) {
+                    frame = {0x00, 0x40, 0x01, 0x0, 0, 0, 0, 0, 1}; // a DATA header declaring 16385 octets, stream 1
+                } else if (_plan == Plan::data_after_the_response_completed) {
+                    append_frame(frame, 0x1, 0x5, 1, {0x88});             // HEADERS, END_STREAM | END_HEADERS, stream 1: `:status: 200`
+                    append_frame(frame, 0x0, 0, 1, {'l', 'a', 't', 'e'}); // a DATA after it
+                } else if (_plan == Plan::empty_data_flood) {
+                    play_empty_data_flood();
+                } else {
+                    append_frame(frame, 0x1, 0x4, 1, {0x88});
+                    for (int chunk = 0; chunk < 200; ++chunk) {
+                        append_frame(frame, 0x0, 0, 1, {'a', 'b', 'c'});
+                        for (int empty = 0; empty < 3; ++empty) {
+                            append_frame(frame, 0x0, 0, 1, {});
+                        }
+                    }
+                    append_frame(frame, 0x0, 0x1, 1, {});
                 }
-                static_cast<void>(send(frame));
+                if (!frame.empty()) {
+                    static_cast<void>(send(frame));
+                }
             }
         }
         while (read_some()) {
@@ -353,6 +433,7 @@ private:
     std::atomic<bool>                          _release{false};
     std::atomic<bool>                          _eof{false};
     std::atomic<bool>                          _goaway{false};
+    std::size_t                                _pongs = 0;
     mutable std::mutex                         _mutex;
     uint32_t                                   _goaway_code = 0;
     std::string                                _goaway_debug;
