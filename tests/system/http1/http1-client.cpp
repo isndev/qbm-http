@@ -2791,3 +2791,61 @@ TEST(Http1ClientTest, ASwitchWithNoRequestInFlightRetiresTheConnection) {
     EXPECT_EQ(peer.connections.load(), 2) << "a connection that switched protocols with no request in flight was kept";
     drain_client_callbacks();
 }
+
+// What qb writes, qb reads, at the default limits (Huly QB-1248): a chunked body past the 16 MiB chunk limit -- which the
+// serializers write as one chunk, the chunk serializer as frames of at most the limit -- goes from a qb client to a qb
+// server and back. With the chunk limit checked at the chunk-size line and the serializer writing one chunk, the
+// server answered 413 and the client failed the response.
+namespace http1_chunked_round_trip_test {
+constexpr std::size_t kSize = qb::http::protocol_limits::MAX_CHUNK_SIZE + 5;
+
+class Server;
+class Session : public qb::http::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http::use<Server>::server<Session> {
+public:
+    Server() {
+        router().post("/size", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(ctx->request().body().size());
+            ctx->complete();
+        });
+        router().get("/big", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().set_header("Transfer-Encoding", "chunked");
+            ctx->response().body() = std::string(kSize, 'b');
+            ctx->complete();
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {}
+} // namespace http1_chunked_round_trip_test
+
+TEST(Http1ClientTest, AChunkedBodyPastTheChunkLimitGoesFromQbToQbBothWays) {
+    using namespace http1_chunked_round_trip_test;
+    qb::http::test::ServerThread<Server> thread([](Server &server) {
+        if (server.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        server.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    auto client = qb::http1::make_client("http://127.0.0.1:" + std::to_string(thread.port()) + "/");
+    client->set_request_timeout(std::chrono::seconds(20));
+
+    auto upload = request(qb::http::method::POST, "/size");
+    upload.set_header("Transfer-Encoding", "chunked");
+    upload.body() = std::string(kSize, 'u');
+    auto sized    = qb::http::run_sync(client->push_request(std::move(upload)));
+    EXPECT_EQ(sized.status(), qb::http::status::OK) << "the server refused a qb client's chunked body";
+    EXPECT_EQ(sized.body().template as<std::string>(), std::to_string(kSize));
+
+    auto big = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/big")));
+    EXPECT_EQ(big.status(), qb::http::status::OK) << "the client refused a qb server's chunked body";
+    EXPECT_EQ(big.body().size(), kSize);
+    drain_client_callbacks();
+}

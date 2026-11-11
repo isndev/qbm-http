@@ -545,6 +545,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   offered one, one to another protocol and one naming none, two connections each; a `101` with no request in flight;
   the one-shot session, unasked, offered and to another protocol).
 
+- **`max_chunk_size` holds a request's chunk by the size it declares, before a byte of it is read (Huly QB-1248).**
+  The HTTP/1.1 parser compared the chunk limit with each piece of the body llhttp handed `on_body`, and a reader hands
+  the pieces it reads: the server's are no larger than a read (64 KiB), so a chunk of any size passed a limit of 64 KiB
+  or more -- with the default 16 MiB limit a 20 MiB chunk was served, with a 64 KiB limit a 128 KiB one. The parser
+  now checks the size a request's chunk-size line declares when the line ends (`on_chunk_header`, llhttp's chunk
+  length): past the limit the request is refused with `413 Content Too Large`, as the body limit refuses it, before a
+  byte of the chunk is read. A response's chunk is held by the body limit alone, as it was in practice: nothing is
+  sized from a chunk's size, a client sets no limit of its own, and a server may write a buffer of any size as one
+  chunk. qb's serializers write a whole chunked body as one chunk, and the chunk serializer now writes one past 64 KiB
+  -- a server's read -- as frames of 64 KiB, so a qb server whose chunk limit is at least that takes a chunked request
+  of any size under its body limit from a qb client. The comparison with each piece is gone: it no longer stopped anything a chunk
+  could carry, and it refused a `Content-Length` body a `Parser` driven directly was handed in one piece larger than
+  the chunk limit, as if that body were a chunk. llhttp reports a refusal from `on_chunk_header` as
+  `HPE_CB_CHUNK_HEADER` (it reported `HPE_USER` from `on_body`); the refusal status is what the protocol answers.
+  Witnesses: `qbm-http-test-unit-http1-parse-limits` (a chunk declaring past the limit refused at its size line, its
+  data handed in pieces of 1 KiB; the controls: a chunk at the limit read in pieces and whole, the body limit across
+  chunks; a `Content-Length` body in one piece past the chunk limit), `qbm-http-test-unit-http1-protocol-framing` (a
+  128 KiB chunk under a 64 KiB limit refused with 413 whatever pieces it arrives in, one at the limit dispatched; a
+  response's chunk past the default limit read; a chunked request of 16 MiB + 5 written in frames of 64 KiB a server
+  dispatches at its default limit and at 1 MiB, a chunk of 64 KiB one frame) and `qbm-http-test-system-http1-client` (a qb client's
+  chunked upload and a qb server's chunked response of 16 MiB + 5, both ways at the default limits).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

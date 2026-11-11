@@ -110,10 +110,10 @@ TEST_F(IncomingParserLimitsTest, OversizedContentLengthIsRejectedBeforeBodyAlloc
     EXPECT_EQ(result, HPE_CB_HEADERS_COMPLETE);
 }
 
-// MAX_CHUNK_SIZE parse-path: a single chunked-transfer chunk larger than the
-// configured limit is rejected by on_body before it can accumulate. Allocating
-// >16MB once is acceptable for a unit run; the chunk is fed in one buffer so a
-// single on_body call sees length > MAX_CHUNK_SIZE.
+// MAX_CHUNK_SIZE parse-path: a chunked-transfer chunk declaring more than the
+// configured limit is refused by on_chunk_header at its chunk-size line, before
+// on_body sees a byte of it (Huly QB-1248); llhttp reports a refusal from that
+// callback as HPE_CB_CHUNK_HEADER. The 16MB that follow the line are not read.
 TEST_F(IncomingParserLimitsTest, OversizedChunkIsRejectedWhileParsing) {
     qb::http::Parser<Request> parser;
 
@@ -131,7 +131,7 @@ TEST_F(IncomingParserLimitsTest, OversizedChunkIsRejectedWhileParsing) {
     std::string chunk = chunk_size_line + std::string(chunk_len, 'Z') + "\r\n0\r\n\r\n";
 
     parser.resume();
-    EXPECT_EQ(parser.parse(chunk.data(), chunk.size()), HPE_USER);
+    EXPECT_EQ(parser.parse(chunk.data(), chunk.size()), HPE_CB_CHUNK_HEADER);
 }
 
 TEST_F(IncomingParserLimitsTest, HeaderOnlyRequestNormalizesUnknownLengthToZero) {
@@ -664,4 +664,95 @@ TEST(TransferCodingScan, EveryShapeGetsTheVerdictOfTheSplit) {
         }
     }
     EXPECT_GT(checked, 1000u);
+}
+
+// A chunk is held to max_chunk_size by the size it declares, at the end of its chunk-size line, before a byte of it is
+// read (Huly QB-1248). The limit was compared with each piece of the body the parser was handed: a reader hands the
+// pieces it reads -- no larger than a read, 64 KiB on the server -- so a chunk of any size passed a limit of a read or
+// more, and a Content-Length body handed in one piece larger than the chunk limit was refused as a chunk.
+namespace http1_chunk_limit_test {
+constexpr std::size_t kLimit = 64 * 1024;
+
+struct Fed {
+    bool         refused_at_size_line = false;
+    http_errno_t err                  = HPE_OK;
+    int          refusal              = 0;
+    std::size_t  body                 = 0;
+};
+
+/// A chunked request of one chunk declaring @p declared bytes and holding them, handed in pieces of @p piece bytes, under
+/// a chunk limit of 64 KiB and a body limit of @p body_limit (0: none); then the last chunk.
+Fed
+one_chunk(std::size_t declared, std::size_t piece, std::size_t body_limit = 0) {
+    Parser<Request>          parser;
+    qb::http::request_limits limits;
+    limits.max_chunk_size = kLimit;
+    limits.max_body_size  = body_limit;
+    parser.set_request_limits(limits);
+    const std::string head = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    EXPECT_EQ(parser.parse(head.data(), head.size()), HPE_PAUSED);
+    parser.resume();
+    char line[32];
+    std::snprintf(line, sizeof line, "%zx\r\n", declared);
+    Fed out;
+    out.err                  = parser.parse(line, std::strlen(line));
+    out.refused_at_size_line = out.err != HPE_OK;
+    const std::string data(piece, 'x');
+    for (std::size_t fed = 0; out.err == HPE_OK && fed < declared; fed += piece)
+        out.err = parser.parse(data.data(), std::min(piece, declared - fed));
+    if (out.err == HPE_OK)
+        out.err = parser.parse("\r\n0\r\n\r\n", 7);
+    out.refusal = parser.refusal_status();
+    out.body    = parser.get_parsed_message().body().size();
+    return out;
+}
+} // namespace http1_chunk_limit_test
+
+TEST(ChunkLimit, AChunkDeclaredPastTheLimitIsRefusedAtItsSizeLine) {
+    using namespace http1_chunk_limit_test;
+    for (const std::size_t declared : {kLimit + 1, 2 * kLimit, std::size_t{16} * 1024 * 1024 + 1}) {
+        const auto fed = one_chunk(declared, 1024);
+        EXPECT_TRUE(fed.refused_at_size_line) << declared << ": the chunk was read, in pieces under the limit";
+        EXPECT_EQ(fed.refusal, 413) << declared;
+        EXPECT_EQ(fed.body, 0u) << declared;
+    }
+}
+
+TEST(ChunkLimit, AChunkAtTheLimitIsReadInPiecesOrWhole) {
+    using namespace http1_chunk_limit_test;
+    for (const std::size_t piece : {std::size_t{1024}, kLimit}) {
+        const auto fed = one_chunk(kLimit, piece);
+        EXPECT_EQ(fed.err, HPE_CB_MESSAGE_COMPLETE) << piece;
+        EXPECT_EQ(fed.refusal, 0) << piece;
+        EXPECT_EQ(fed.body, kLimit) << piece;
+    }
+}
+
+TEST(ChunkLimit, TheBodyLimitStillHoldsAcrossChunks) {
+    Parser<Request>          parser;
+    qb::http::request_limits limits;
+    limits.max_chunk_size = 64 * 1024;
+    limits.max_body_size  = 100 * 1024;
+    parser.set_request_limits(limits);
+    const std::string head = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    ASSERT_EQ(parser.parse(head.data(), head.size()), HPE_PAUSED);
+    parser.resume();
+    const std::string chunk = "f000\r\n" + std::string(0xf000, 'x') + "\r\n"; // 60 KiB, under the chunk limit
+    EXPECT_EQ(parser.parse(chunk.data(), chunk.size()), HPE_OK);
+    EXPECT_NE(parser.parse(chunk.data(), chunk.size()), HPE_OK) << "120 KiB passed a body limit of 100 KiB";
+    EXPECT_EQ(parser.refusal_status(), 413);
+}
+
+TEST(ChunkLimit, AContentLengthBodyIsNoChunk) {
+    Parser<Request>          parser;
+    qb::http::request_limits limits;
+    limits.max_chunk_size = 1024;
+    parser.set_request_limits(limits);
+    const std::string head = "POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 4096\r\n\r\n";
+    ASSERT_EQ(parser.parse(head.data(), head.size()), HPE_PAUSED);
+    parser.resume();
+    const std::string body(4096, 'x');
+    EXPECT_EQ(parser.parse(body.data(), body.size()), HPE_CB_MESSAGE_COMPLETE) << "a body handed in one piece was refused as a chunk";
+    EXPECT_EQ(parser.refusal_status(), 0);
+    EXPECT_EQ(parser.get_parsed_message().body().size(), 4096u);
 }

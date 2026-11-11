@@ -1821,3 +1821,80 @@ TEST(Http1ProtocolFraming, InformationalResponsesLlhttpAlreadyEndedFrameAsTheyDi
     ASSERT_TRUE(chunked.first.has_value());
     EXPECT_EQ(chunked.first->body().as<std::string>(), "ok");
 }
+
+// The chunk limit on the wire (Huly QB-1248): a request's chunk declaring past the server's max_chunk_size is refused
+// with 413 at its chunk-size line, before a byte of it is read, whatever pieces it arrives in; it was dispatched, the
+// limit compared with pieces no larger than a read. A response's chunk is held by the body limit alone: a client sets
+// no chunk limit, and nothing is sized from a chunk's size.
+TEST(Http1ProtocolFraming, AChunkDeclaredPastTheLimitIsRefusedWith413AtItsSizeLine) {
+    for (const std::size_t piece : {std::size_t{1}, std::size_t{1024}, std::size_t{1} << 20}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        io.limits.max_chunk_size = 64 * 1024;
+        const std::string wire =
+            "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n20000\r\n" + std::string(0x20000, 'x') + "\r\n0\r\n\r\n";
+        for (std::size_t at = 0; at < wire.size() && io.refusals.empty() && io.request_count == 0; at += piece) {
+            feed(io, std::string_view(wire).substr(at, piece));
+            (void) step(proto, io);
+        }
+        EXPECT_EQ(io.request_count, 0) << piece << ": a chunk of 128 KiB passed a limit of 64 KiB";
+        EXPECT_EQ(io.refusals, std::vector<int>{413}) << piece;
+        EXPECT_TRUE(proto.ok()) << piece << ": the io answers before the connection ends";
+    }
+    RefusingServerFakeIO                             io; // the control: a chunk at the limit is dispatched
+    qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+    io.limits.max_chunk_size = 64 * 1024;
+    feed(io, "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n10000\r\n" + std::string(0x10000, 'x') + "\r\n0\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_TRUE(io.refusals.empty());
+}
+
+TEST(Http1ProtocolFraming, AResponseChunkIsHeldByTheBodyLimitAlone) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    const std::size_t                        size = qb::http::protocol_limits::MAX_CHUNK_SIZE + 1; // past the default chunk limit
+    char                                     line[32];
+    std::snprintf(line, sizeof line, "%zx\r\n", size);
+    feed(io, std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n") + line + std::string(size, 'x') + "\r\n0\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_TRUE(proto.ok()) << "a response's chunk was refused by the chunk limit";
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_EQ(io.last_response->body().size(), size);
+}
+
+// What qb writes, qb reads (Huly QB-1248): the serializers write a whole chunked body as one chunk, and the chunk
+// serializer writes one past 64 KiB -- a server's read -- as frames of 64 KiB, so a server whose chunk limit is at least
+// that takes a qb client's chunked request of any size under its body limit, and a response the same way.
+TEST(Http1ProtocolFraming, AChunkedBodyPastTheChunkLimitIsWrittenInFramesAServerTakes) {
+    const std::size_t size  = qb::http::protocol_limits::MAX_CHUNK_SIZE + 5;
+    const std::size_t frame = 64 * 1024;
+    qb::http::Request request(qb::http::method::POST, qb::io::uri("/up"));
+    request.set_header("Host", "h");
+    request.set_header("Transfer-Encoding", "chunked");
+    request.body() = std::string(size, 'y');
+    qb::allocator::pipe<char> wire;
+    wire << request;
+    const std::string_view written(wire.begin(), wire.size());
+    EXPECT_NE(written.find("\r\n\r\n10000\r\n"), std::string_view::npos) << "the first frame is not 64 KiB";
+    EXPECT_NE(written.find("y\r\n5\r\nyyyyy\r\n0\r\n\r\n"), std::string_view::npos) << "the rest is not a frame of its own";
+    EXPECT_EQ(written.size() - written.find("\r\n\r\n") - 4, size + (size / frame) * (5 + 2 + 2) + (1 + 2 + 2) + 5) << "not frames of 64 KiB";
+
+    for (const std::size_t chunk_limit : {std::size_t{0}, std::size_t{1024 * 1024}, frame}) { // the default, 1 MiB, 64 KiB
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        if (chunk_limit)
+            io.limits.max_chunk_size = chunk_limit;
+        feed(io, written);
+        EXPECT_GT(step(proto, io), 0u) << chunk_limit;
+        EXPECT_TRUE(io.refusals.empty()) << chunk_limit << ": a server refused what qb wrote";
+        ASSERT_EQ(io.request_count, 1) << chunk_limit;
+        EXPECT_EQ(io.last_request->body().size(), size) << chunk_limit;
+    }
+
+    const std::string         at_frame(frame, 'z');
+    qb::http::Chunk           exact(at_frame.data(), at_frame.size()); // a chunk of 64 KiB stays one frame
+    qb::allocator::pipe<char> one;
+    one << exact;
+    EXPECT_EQ(std::count(one.begin(), one.end(), '\n'), 2) << "a chunk of 64 KiB was split";
+}

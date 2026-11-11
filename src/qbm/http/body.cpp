@@ -29,35 +29,35 @@ namespace qb::allocator {
  * @param c HTTP Chunk to serialize
  * @return Reference to this pipe
  *
- * Formats an HTTP chunk according to the chunked transfer encoding
- * specification (RFC 7230).
- *
- * The format is:
- * - Chunk size in hexadecimal
- * - CRLF
+ * Formats an HTTP chunk according to the chunked transfer encoding specification (RFC 9112 section 7.1):
+ * - Chunk size in hexadecimal, then CRLF
  * - Chunk data
  * - CRLF
  *
- * A zero-length chunk (with size "0") represents the end of the
- * chunked data stream.
+ * A zero-length chunk (with size "0") represents the end of the chunked data stream.
+ *
+ * A chunk past 64 KiB -- a server's read -- is written as frames of 64 KiB, so a qb server whose chunk limit is at least that takes
+ * every chunk qb writes, whatever its size: the serializers write a whole chunked body as one chunk (Huly QB-1248).
  */
 template <>
 pipe<char> &
 pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
-    if (c.size()) {
-        constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
-        char                  hex[hex_len]{};
-        const auto [ptr, ec] = std::to_chars(hex, hex + hex_len, c.size(), 16);
+    constexpr std::size_t frame   = std::size_t{64} * 1024;
+    constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
+    for (std::size_t at = 0; at < c.size(); at += frame) {
+        const std::size_t size = std::min(frame, c.size() - at);
+        char              hex[hex_len]{};
+        const auto [ptr, ec] = std::to_chars(hex, hex + hex_len, size, 16);
         if (ec != std::errc{}) {
             throw std::length_error("qb::http::Chunk serialization: chunk size conversion failed.");
         }
-        std::string_view hex_view(hex, static_cast<std::size_t>(ptr - hex));
-        *this << hex_view << qb::http::endl;
-        put(c.data(), c.size());
-    } else {
-        *this << '0' << qb::http::endl;
+        *this << std::string_view(hex, static_cast<std::size_t>(ptr - hex)) << qb::http::endl;
+        put(c.data() + at, size);
+        if (at + size != c.size())
+            *this << qb::http::endl; // the CRLF that ends this frame: the next one follows
     }
-
+    if (!c.size())
+        *this << '0' << qb::http::endl;
     *this << qb::http::endl;
     return *this;
 }

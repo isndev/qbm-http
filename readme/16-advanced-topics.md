@@ -24,9 +24,9 @@ qb::http::Chunk last;                                // size 0 -> end of stream
 
 Because `Chunk` does not own its bytes, the referenced memory must stay valid for as long as the chunk is serialized — exactly the lifetime discipline described under [`string_view` lifetime](#string_view-and-lifetime) below.
 
-**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk) and the overall body cap; a chunk over the limit fails the connection, and a body over the server's cap (`set_max_body_size`) is answered `413` (`qbm/http/src/qbm/http/1.1/protocol/base.h:64-65,666-674`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message's `trailers()`, every one of them, and, for 3.x, the ordinary header API too, as HTTP/2's and HTTP/3's trailers do (Huly QB-1073); a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
+**Inbound (parsing).** The HTTP/1.1 parser handles `Transfer-Encoding: chunked` transparently. It de-chunks the body into the message's `qb::allocator::pipe<char>` as fragments arrive, bounded by `protocol_limits::MAX_CHUNK_SIZE` (16 MB per chunk, the size each chunk-size line declares) and the overall body cap; a chunk declaring past the server's chunk limit and a body over its cap (`set_max_body_size`) are answered `413`, the chunk before a byte of it is read (`qbm/http/src/qbm/http/1.1/protocol/base.h:64-65,653-660,669-674`). By the time your handler runs, `ctx->request().body()` holds the fully reassembled body. You never see individual chunks at the routing layer. The fields of a trailer section — after the last chunk — reach the message's `trailers()`, every one of them, and, for 3.x, the ordinary header API too, as HTTP/2's and HTTP/3's trailers do (Huly QB-1073); a trailer field that frames, routes or manages the connection (`content-length`, `transfer-encoding`, `host`, `connection`, ...) refuses the message, as those protocols refuse their stream (Huly QB-1067).
 
-**Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as a *single* chunk followed by the terminating chunk, in one write:
+**Outbound (serialization).** This is the part that surprises people. When you set `Transfer-Encoding: chunked` on a `Response`, the serializer in `pipe<char>::put<Response>` emits the response body as one chunk -- written as frames of 64 KiB past that size (Huly QB-1248) -- followed by the terminating chunk, in one write:
 
 ```cpp
 // src: qbm/http/src/qbm/http/response.cpp:320-326
@@ -34,7 +34,7 @@ if (transfer.chunked) {
     out << qb::http::endl;
     if (!content_suppressed) {                                       // false unless a MessageHead
         if (length)
-            out << qb::http::Chunk(r.body().raw().begin(), length); // whole body, one chunk
+            out << qb::http::Chunk(r.body().raw().begin(), length); // whole body, one chunk (frames of 64 KiB)
         out << qb::http::Chunk();                                   // terminator, an empty body included
     }
 }
@@ -272,7 +272,7 @@ The retired `RequestView`/`ResponseView` types are not part of this API. For a p
 
 ## Pitfalls
 
-- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk at `complete()` (`qbm/http/src/qbm/http/response.cpp:320-326`). To deliver a body while it is produced, begin a stream with `ctx->begin_stream()`.
+- **Expecting `Transfer-Encoding: chunked` to stream incrementally from one handler.** It changes framing, not timing — the whole body is emitted as one chunk (in frames of 64 KiB) at `complete()` (`qbm/http/src/qbm/http/response.cpp:320-326`). To deliver a body while it is produced, begin a stream with `ctx->begin_stream()`.
 - **Ignoring `needs_drain()` on a stream.** `write()` takes pieces up to the transport's hard cap, so a producer that never waits can queue 200 MiB for one slow client before it sees `wait`. Wait on `drain()` when `needs_drain()` says so.
 - **Completing a streamed context by hand.** Once `begin_stream()` returned a stream, `ctx->complete()` and the terminal helpers complete nothing until the stream ends: the stream owns the completion. End it with `stream->end()`, or `abort()` it.
 - **Reading a streamed response's size from its body.** `response().body()` is empty once the head left at `begin_stream()`; `ctx.streamed_bytes()` holds what the stream handed to the session.

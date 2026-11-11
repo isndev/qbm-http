@@ -650,24 +650,24 @@ private:
         return refuse_for_exception(parser);
     }
 
+    /// llhttp's on_chunk_header: a request's chunk declared past the chunk limit, 413 before a byte is read; a response has none (QB-1248)
+    static int
+    on_chunk_header([[maybe_unused]] http_t *parser) noexcept {
+        if constexpr (MessageType::type == HTTP_REQUEST)
+            if (parser->content_length > self_of(parser)->_limits.max_chunk_size) [[unlikely]]
+                return refuse_with_status(parser, "HTTP chunk exceeds configured chunk size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
+        return 0;
+    }
+
     /**
-     * @brief Message body parsing callback
+     * @brief Message body parsing callback: a piece of the body, accumulated in the chunked buffer under the body limit; 0 or a refusal
      * @param parser Parser instance
      * @param at Pointer to body data
      * @param length Length of body data
-     * @return Result code (0 for success)
-     *
-     * Called when a portion of the message body is parsed.
-     * Accumulates the body data in the chunked buffer.
-     * This is efficient for handling large bodies or
-     * chunked transfer encoding.
      */
     static int
     on_body(http_t *parser, const char *at, size_t length) noexcept try {
-        auto *self = self_of(parser);
-        if (length > self->_limits.max_chunk_size) {
-            return refuse_with_status(parser, "HTTP chunk exceeds configured chunk size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
-        }
+        auto      *self       = self_of(parser);
         const auto next_total = self->_body_bytes_seen + length;
         if (next_total > self->_limits.max_body_size) {
             return refuse_with_status(parser, "HTTP body exceeds configured size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
@@ -733,7 +733,7 @@ private:
         &Parser::default_http_cb,      // on header value complete
         &Parser::default_http_cb,      // on chunk extention name complete
         &Parser::default_http_cb,      // on chunk extension value complete
-        &Parser::default_http_cb,      // on chunk header
+        &Parser::on_chunk_header,      // on chunk header: a chunk declared past the limit is refused
         &Parser::default_http_cb,      // on chunk complete
         &Parser::default_http_cb       // on reset
     };
@@ -766,7 +766,7 @@ private:
         &Parser::on_value_end,         // on header value complete: stores the trailer field
         &Parser::default_http_cb,      // on chunk extention name complete
         &Parser::default_http_cb,      // on chunk extension value complete
-        &Parser::default_http_cb,      // on chunk header
+        &Parser::on_chunk_header,      // on chunk header: a chunk declared past the limit is refused
         &Parser::default_http_cb,      // on chunk complete
         &Parser::default_http_cb       // on reset
     };
