@@ -585,6 +585,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-system-http1-client` (a `Content-Length` of 2^64, `abc` and given twice answered 400 with
   `Connection: close` on the wire, then the close).
 
+- **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
+  callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
+  itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,
+  `` `on_header_value_complete` callback error `` (a trailer field), `` `on_chunk_header` callback error ``. Ten of the
+  parser's refusals read as llhttp's through `http_get_error_reason()`: the version, the three `Host` refusals, a
+  declared length past the body limit, an unsupported coding, a target that names no resource, a trailer field the
+  section must not carry or past the value limit, a chunk past the chunk limit -- readme/15 quoted two of them. The
+  parser now keeps the reason it gives (`fail_with_reason()`) and `Parser::parse()` sets it again after llhttp
+  returns; `reset()` clears it. The error code is llhttp's, as before (`HPE_USER` from a span callback, the
+  callback's own `HPE_CB_*` code otherwise), and so is the status the peer is answered (`refusal_status()`): only the
+  reason read locally changes. Witnesses: `qbm-http-test-unit-http1-parse-limits` (each of the ten reasons read back
+  after its refusal; a span callback's three kept as before, the controls; a failed parser's next call keeps the
+  reason and `reset()` clears it).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

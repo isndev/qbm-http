@@ -206,7 +206,7 @@ After `_io.on(...)`, server sessions apply pipelining and keep-alive: while a re
 
 ## Security limits and rejected messages
 
-The parser is hardened against framing attacks. Its limits are a `qb::http::request_limits` value -- the server's own, `set_request_limits()`, read when each request begins; their defaults are the constants of `namespace qb::http::protocol_limits` (`src/qbm/http/1.1/protocol/base.h`), and 0 in any of them means no limit of that kind. Each is enforced *during* parsing: a message over one fails with `HPE_USER` (via `http_set_error_reason`) and records the status that answers it as the parser's `refusal_status()` -- `414 URI Too Long` for the target, `431 Request Header Fields Too Large` for a field name, a field value or the number of regular fields of a section, `413 Content Too Large` for a chunk or the body. The server's session answers it with `Connection: close`, after every request received before it, then the connection closes after that delivery (Huly QB-168, QB-94); until 3.3 every breach but the body's closed the connection with no answer, against constants.
+The parser is hardened against framing attacks. Its limits are a `qb::http::request_limits` value -- the server's own, `set_request_limits()`, read when each request begins; their defaults are the constants of `namespace qb::http::protocol_limits` (`src/qbm/http/1.1/protocol/base.h`), and 0 in any of them means no limit of that kind. Each is enforced *during* parsing: a message over one fails -- `HPE_USER`, or llhttp's own code after a callback it checks itself (`HPE_CB_HEADERS_COMPLETE`, `HPE_CB_URL_COMPLETE`, `HPE_CB_HEADER_VALUE_COMPLETE`, `HPE_CB_CHUNK_HEADER`) -- with the reason the parser gave it, which `http_get_error_reason()` reads (llhttp wrote its own reason over the parser's after those callbacks, `User callback error` among them, until 3.4: Huly QB-1279), and records the status that answers it as the parser's `refusal_status()` -- `414 URI Too Long` for the target, `431 Request Header Fields Too Large` for a field name, a field value or the number of regular fields of a section, `413 Content Too Large` for a chunk or the body. The server's session answers it with `Connection: close`, after every request received before it, then the connection closes after that delivery (Huly QB-168, QB-94); until 3.3 every breach but the body's closed the connection with no answer, against constants.
 
 <!-- src: src/qbm/http/1.1/protocol/base.h:51-69 -->
 
@@ -261,6 +261,7 @@ parser.reset();
 std::string bad_te = "POST /u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
 auto err = parser.parse(bad_te.data(), bad_te.size());
 assert(err != HPE_OK && err != HPE_PAUSED);
+assert(std::string_view(http_get_error_reason(&parser)) == "Unsupported HTTP Transfer-Encoding"); // QB-1279
 ```
 
 ## Serialization (the reverse direction)

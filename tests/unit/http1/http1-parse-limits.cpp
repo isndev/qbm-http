@@ -756,3 +756,85 @@ TEST(ChunkLimit, AContentLengthBodyIsNoChunk) {
     EXPECT_EQ(parser.refusal_status(), 0);
     EXPECT_EQ(parser.get_parsed_message().body().size(), 4096u);
 }
+
+// Every refusal keeps the reason the parser gave it, read by http_get_error_reason() (Huly QB-1279). llhttp keeps the
+// reason a span callback gives (the target, a field line, a body piece), but writes its own over the reason of a callback
+// it checks itself -- `User callback error` after on_headers_complete, ``on_url_complete` callback error` and the like --
+// so the version, Host, length, coding, target, trailer and chunk refusals all read as llhttp's. The status the peer is
+// answered was right: only the reason read locally was lost.
+namespace http1_failure_reason_test {
+struct Case {
+    const char              *label;
+    std::string              wire;
+    const char              *reason;
+    qb::http::request_limits limits = {};
+};
+
+std::string
+reason_after(Case const &c) {
+    Parser<Request> parser;
+    parser.set_request_limits(c.limits);
+    auto err = parser.parse(c.wire.data(), c.wire.size());
+    if (err == HPE_PAUSED) { // the header section passed: the body
+        const auto at = static_cast<std::size_t>(parser.error_pos - c.wire.data());
+        parser.resume();
+        err = parser.parse(c.wire.data() + at, c.wire.size() - at);
+    }
+    EXPECT_NE(err, HPE_OK) << c.label;
+    EXPECT_NE(err, HPE_CB_MESSAGE_COMPLETE) << c.label;
+    const char *reason = http_get_error_reason(static_cast<http_t *>(&parser));
+    return reason ? reason : "(none)";
+}
+
+qb::http::request_limits
+limits_with(std::size_t qb::http::request_limits::*field, std::size_t value) {
+    qb::http::request_limits limits;
+    limits.*field = value;
+    return limits;
+}
+} // namespace http1_failure_reason_test
+
+TEST(FailureReason, EveryRefusalKeepsTheReasonItGave) {
+    using namespace http1_failure_reason_test;
+    using L                       = qb::http::request_limits;
+    const std::string       chunk = "POST /u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const std::vector<Case> cases = {
+        // a callback llhttp checks itself: its reason was lost
+        {"version", "GET / HTTP/2.0\r\nHost: h\r\n\r\n", "HTTP request version is not 1.x"},
+        {"no Host", "GET / HTTP/1.1\r\n\r\n", "HTTP/1.1 request has no Host field"},
+        {"two Host", "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", "HTTP request has more than one Host field"},
+        {"Host", "GET / HTTP/1.1\r\nHost: a b\r\n\r\n", "HTTP Host field is not a host and an optional port"},
+        {"length", "POST /u HTTP/1.1\r\nHost: h\r\nContent-Length: 9\r\n\r\n", "HTTP Content-Length exceeds configured body size limit",
+         limits_with(&L::max_body_size, 4)},
+        {"coding", "POST /u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", "Unsupported HTTP Transfer-Encoding"},
+        {"target", "GET * HTTP/1.1\r\nHost: h\r\n\r\n", "HTTP request target names no resource"},
+        {"trailer field", chunk + "1\r\na\r\n0\r\nHost: b\r\n\r\n",
+         "HTTP trailer section carries a field it must not (framing, connection, routing)"},
+        {"trailer value", chunk + "1\r\na\r\n0\r\nX: 123456789\r\n\r\n", "HTTP header value exceeds configured size limit",
+         limits_with(&L::max_header_value_length, 8)},
+        {"chunk", chunk + "3\r\nabc\r\n", "HTTP chunk exceeds configured chunk size limit", limits_with(&L::max_chunk_size, 2)},
+        // a span callback: its reason was kept (the controls)
+        {"url", "GET /aaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\nHost: h\r\n\r\n", "HTTP URL exceeds configured size limit",
+         limits_with(&L::max_url_length, 8)},
+        {"field name", "GET / HTTP/1.1\r\nHost: h\r\nXxxxxxxxxxx: 1\r\n\r\n", "HTTP header name exceeds configured size limit",
+         limits_with(&L::max_header_name_length, 8)},
+        {"body", chunk + "2\r\nab\r\n2\r\nab\r\n2\r\nab\r\n0\r\n\r\n", "HTTP body exceeds configured size limit",
+         limits_with(&L::max_body_size, 4)},
+    };
+    for (auto const &c : cases)
+        EXPECT_EQ(reason_after(c), c.reason) << c.label;
+}
+
+TEST(FailureReason, TheReasonOutlivesTheNextCallAndResetClearsIt) {
+    Parser<Request>   parser;
+    const std::string refused = "GET / HTTP/2.0\r\nHost: h\r\n\r\n";
+    EXPECT_NE(parser.parse(refused.data(), refused.size()), HPE_OK);
+    EXPECT_NE(parser.parse("x", 1), HPE_OK) << "a failed parser fails every call";
+    EXPECT_STREQ(http_get_error_reason(static_cast<http_t *>(&parser)), "HTTP request version is not 1.x");
+    parser.reset();
+    const std::string good = "GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+    EXPECT_EQ(parser.parse(good.data(), good.size()), HPE_PAUSED);
+    EXPECT_EQ(parser.refusal_status(), 0);
+    const char *reason = http_get_error_reason(static_cast<http_t *>(&parser)); // llhttp's own, for the pause at the header section
+    EXPECT_STRNE(reason ? reason : "", "HTTP request version is not 1.x") << "the last message's reason survived reset()";
+}

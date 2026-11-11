@@ -195,7 +195,7 @@ private:
 
     static int
     fail_with_reason(http_t *parser, const char *reason) noexcept {
-        http_set_error_reason(parser, reason);
+        http_set_error_reason(parser, self_of(parser)->_failure_reason = reason); // kept: parse() restores it (Huly QB-1279)
         return HPE_USER;
     }
 
@@ -739,9 +739,8 @@ private:
     };
 
     /**
-     * @brief The settings of a chunked message's body and trailer section: settings, with on_value_end
-     *        storing each trailer field when its value ends. on_headers_complete installs them for a
-     *        chunked message; reset() restores settings (Huly QB-1067).
+     * @brief The settings of a chunked message's body and trailer section: settings, with on_value_end storing each trailer field
+     *        when its value ends. on_headers_complete installs them for a chunked message; reset() restores settings (Huly QB-1067).
      */
     static const http_settings_s inline trailer_settings{
         &Parser::default_http_cb,      // on message begin
@@ -782,9 +781,10 @@ private:
     std::size_t               _url_bytes_seen    = 0;     ///< Total URL bytes seen across fragmented on_url callbacks
     /// The next message's limits: set_request_limits(), normalized (0 = the largest size: one comparison each); kept by reset().
     qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
-    int                      _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
-    std::size_t              _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
-    bool                     _host_malformed = false; ///< One of them names no authority (note_host_field())
+    int                      _refusal_status = 0;       ///< The status a refusal of the current message answers (refusal_status())
+    const char              *_failure_reason = nullptr; ///< The reason a refusal of the current message gave, restored by parse() (QB-1279)
+    std::size_t              _host_fields    = 0;       ///< Host field lines of the current request's header section (check_host_field())
+    bool                     _host_malformed = false;   ///< One of them names no authority (note_host_field())
     QB_MSVC_FORCEINLINE      qb::allocator::pipe<char> &
     body_buffer(std::size_t expected) { // `_chunked`; restored when null and a first write of `expected` fits: the test in line (QB-1248)
         if (_chunked.capacity() == 0) [[unlikely]]
@@ -818,18 +818,18 @@ public:
      */
     http_errno_t
     parse(const char *buffer, std::size_t const size) {
-        return http_execute(static_cast<http_t *>(this), buffer, size);
+        const auto result = http_execute(static_cast<http_t *>(this), buffer, size);
+        if (_failure_reason) [[unlikely]] // llhttp writes its own over it after a callback it checks itself (Huly QB-1279)
+            http_set_error_reason(static_cast<http_t *>(this), _failure_reason);
+        return result;
     }
 
     /**
      * @brief Reset the parser state
      *
-     * Clears all parser state and prepares it for parsing a new message.
-     * This includes:
-     * 1. Reinitializing the parser with the appropriate message type
-     * 2. Resetting the message object
-     * 3. Clearing the headers_completed flag
-     * 4. Clearing any accumulated body data
+     * Clears all parser state and prepares it for parsing a new message: llhttp's (http_init(), its error and
+     * reason with it), the message object, the headers_completed flag, any accumulated body data, the refusal
+     * status and the reason a refusal gave.
      *
      * `http_t::data` is left as http_init() sets it: the callbacks find this object through
      * the state llhttp executes, never through a stored self-pointer (Huly QB-510).
@@ -858,6 +858,7 @@ public:
         _last_header_token = HeaderToken::NONE;
         _url_bytes_seen    = 0;
         _refusal_status    = 0;
+        _failure_reason    = nullptr;
         _host_fields       = 0;
         _host_malformed    = false;
     }
@@ -866,12 +867,11 @@ public:
      * @brief Set the limits of the messages parsed from now on (Huly QB-94).
      * @param limits The limits; a 0 in any of them means no limit of that kind.
      *
-     * A breach fails the message and records the status that answers it as the refusal_status():
-     * 414 for the request target, 431 for a field name, a field value or the field count (trailer
-     * fields included), 413 for a chunk or the body -- a declared `Content-Length` above the body
-     * limit at the end of the header section, before a body byte is read; a chunked body when the
-     * bytes it delivered pass it. The defaults are `protocol_limits`' constants. A server installs
-     * its own before each request (`set_request_limits`); reset() keeps them.
+     * A breach fails the message and records the status that answers it as the refusal_status(): 414 for the request target,
+     * 431 for a field name, a field value or the field count (trailer fields included), 413 for a chunk -- the size its line
+     * declares -- or the body: a declared `Content-Length` above the body limit at the end of the header section, before a body
+     * byte is read; a chunked body when the bytes it delivered pass it. The defaults are `protocol_limits`' constants. A server
+     * installs its own before each request (`set_request_limits`); reset() keeps them.
      */
     void
     set_request_limits(qb::http::request_limits const &limits) noexcept {
