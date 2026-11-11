@@ -4619,3 +4619,29 @@ TEST(HTTP2ClientProtocol, AnEmptyDataDoesNotForgiveTheControlReplyBudget) {
         }
     }
 }
+
+// A DATA the stream is reset for -- its body past the response's content-length -- moves nothing forward either: it
+// forgave the control-reply budget before the client found the overrun, so a hostile server answering each request
+// with one held the guard at zero across rounds of 999 PINGs. The budget is forgiven past the rejections now, as on
+// the server (Huly QB-1270, review of the train-7 lot).
+TEST(HTTP2ClientProtocol, ADataTheStreamIsResetForDoesNotForgiveTheControlReplyBudget) {
+    const int                                  budget = static_cast<int>(qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES);
+    const std::vector<uint8_t>                 ping_payload(8, 0x00);
+    Http2ClientFakeIO                          io;
+    h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+    uint32_t                                   sid = 1;
+    for (int round = 0; round < 3 && io.goaway_count == 0; ++round, sid += 2) {
+        qb::http::Request req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/overrun");
+        ASSERT_TRUE(protocol.send_request(std::move(req), 17 + round));
+        push_frame(io, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, sid, encode_hpack_headers({{":status", "200"}, {"content-length", "1"}}));
+        for (int i = 0; i < budget - 1; ++i) {
+            push_frame(io, h2::FrameType::PING, 0, 0, ping_payload);
+        }
+        push_frame(io, h2::FrameType::DATA, 0, sid, {'a', 'b'}); // past the content-length: the stream is reset
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "a DATA the stream was reset for forgave the budget";
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+}

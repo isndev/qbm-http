@@ -829,8 +829,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ACKs a peer solicits are bounded by `MAX_QUEUED_CONTROL_REPLIES` between two units of real progress, and a DATA frame
   accepted on an open stream forgave the budget whatever it carried: an empty one, or one of padding alone, after every
   999 `PING`s or `SETTINGS` held the guard at zero -- 5000 replies, no `GOAWAY`, on the server and on the client alike.
-  Only octets of a body forgive it now, with a stream the client opens on the server (a request dispatched, or one it
-  cancels) and a completed response on the client; on the server a `HEADERS` no longer forgives it either, since one
+  Only octets of a body the stream accepts forgive it now, past its rejections, with a stream the client opens on the
+  server (a request dispatched, or one it cancels) and a completed response on the client; on the server a `HEADERS` no longer forgives it either, since one
   refused as malformed, or one that opens an upload never dispatched, moves no request forward. A `PRIORITY` naming its
   own stream stays ignored, as RFC 9113 §5.3.2 has it.
 

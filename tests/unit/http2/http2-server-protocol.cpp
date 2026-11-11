@@ -7449,6 +7449,9 @@ TEST(HTTP2ServerProtocol, ResetsBeforeDispatchPastTheBudgetCloseTheConnection) {
         EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
         EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
         EXPECT_EQ(io.request_count, 0) << "nothing of it reached the application";
+        const auto frames = parse_emitted_frames(io.output);
+        ASSERT_FALSE(frames.empty());
+        EXPECT_EQ(frames.back().type, FrameType::GOAWAY) << "a frame left after the GOAWAY: the reset, a WINDOW_UPDATE";
     }
 }
 
