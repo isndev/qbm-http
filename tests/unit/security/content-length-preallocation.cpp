@@ -353,4 +353,28 @@ TEST(ContentLengthPreallocation, TheClientReservesNothingForADeclaredBodyItCopie
         "HTTP/1.1 200 OK\r\nContent-Length: ", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
 }
 
+// A Transfer-Encoding field is checked without an allocation (Huly QB-1248): the check split the field into a vector of
+// strings, two allocations or more for every message that named a coding. Read as the difference between two header
+// sections that differ by one field's name alone -- `Transfer-Encoding: chunked` against a field of the same length
+// that names nothing -- on a warm parser.
+TEST(ContentLengthPreallocation, ATransferEncodingFieldIsCheckedWithoutAnAllocation) {
+    if (!allocation_counter_is_live())
+        GTEST_SKIP() << "the operator new replacement is not observing allocations on this toolchain";
+    const auto cost = [](std::string_view field) {
+        const std::string          wire = "HTTP/1.1 200 OK\r\n" + std::string(field) + "\r\n\r\n";
+        qb::http::Parser<Response> parser;
+        EXPECT_EQ(parser.parse(wire.data(), wire.size()), HPE_PAUSED) << field; // warm
+        parser.reset();
+        AllocScope scope;
+        EXPECT_EQ(parser.parse(wire.data(), wire.size()), HPE_PAUSED) << field;
+        return AllocScope::count();
+    };
+    const auto coded = cost("Transfer-Encoding: chunked");
+    const auto plain = cost("X-Transfer-Encode: chunked");
+    std::printf("[ alloc    ] a header section naming Transfer-Encoding: chunked: %zu allocation(s); the same with a field "
+                "that names nothing: %zu\n",
+                coded, plain);
+    EXPECT_EQ(coded, plain) << "the Transfer-Encoding check allocated";
+}
+
 } // namespace

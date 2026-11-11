@@ -282,6 +282,18 @@ All notable changes to the qbm-http module are documented here. The format is ba
   chunked one allocated a buffer it never wrote (8 KiB in 3.3.0; one allocation more than after a declared one, server
   and client alike).
 
+- **The HTTP/1.1 parser checks a `Transfer-Encoding` field without an allocation (Huly QB-1248).** The check --
+  exactly one non-empty token across the field lines, `chunked` in any case, HTTP whitespace trimmed -- split the
+  field into a vector of strings, two allocations or more for every message that named a coding, chunked bodies
+  included (a token past the small-string buffer adds up to two); it now scans the field lines in place over views.
+  The verdict is the same for every shape: `qbm-http-test-unit-http1-parse-limits` (`TransferCodingScan`) holds the
+  parser to the split, kept in the test as the oracle, over a table, every join of one to three pieces (tokens,
+  whitespace, nothing) on one field line and a stride sample of pairs of them on two, green before and after.
+  `qbm-http-test-unit-content-length-preallocation` counts the allocations of a header section that names
+  `Transfer-Encoding: chunked` against the same section with a field of the same length that names nothing: on macOS
+  with libc++, 5 against 3 before, 3 against 3 now. `qbm-http-bench-http1-parser` gains `BM_Http1Parse_Chunked`, a
+  chunked POST parsed whole.
+
 - **The WebSocket frame decoder allocates nothing per frame (Huly QB-1247).** `onMessage()` built a local
   `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed it at the end of the frame --
   an allocation and a free for a 16-byte text frame or an empty Ping. The frame's payload lands in a buffer the

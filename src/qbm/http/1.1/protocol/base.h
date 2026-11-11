@@ -244,18 +244,18 @@ private:
         if (it == msg.headers().end()) {
             return true;
         }
-
-        std::vector<std::string> tokens;
+        std::size_t tokens  = 0; // the non-empty tokens of every field line, scanned in place: nothing allocated (Huly QB-1248)
+        bool        chunked = false;
         for (const auto &value : it->second) {
-            for (auto token : utility::split_string<std::string>(value, ",")) {
-                token = std::string(utility::trim_http_whitespace(token));
-                if (!token.empty()) {
-                    tokens.emplace_back(std::move(token));
-                }
+            for (std::size_t from = 0; from != std::string_view::npos;) {
+                const auto comma = value.find(',', from);
+                const auto token = utility::trim_http_whitespace(std::string_view(value).substr(from, comma - from));
+                if (!token.empty())
+                    chunked = ++tokens == 1 && utility::iequals(token, "chunked");
+                from = comma == std::string_view::npos ? comma : comma + 1;
             }
         }
-
-        return tokens.size() == 1 && utility::iequals(tokens.front(), "chunked");
+        return tokens == 1 && chunked;
     }
 
     /**

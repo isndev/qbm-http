@@ -20,7 +20,9 @@
  *
  * Corpus is lifted from http1-parse-limits.cpp (happy-path branches): a header-only
  * GET, a multi-header GET with keep-alive/upgrade derivation, and a POST with a
- * Content-Length body captured + message-completed.
+ * Content-Length body captured + message-completed. BM_Http1Parse_Chunked parses a
+ * chunked POST whole, apart from the corpus: its header section swaps the parser's
+ * callback table, which the corpus probe does not follow (Huly QB-1248).
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -407,11 +409,55 @@ BM_Http1Parse_Fragmented(benchmark::State &state) {
     state.SetItemsProcessed(state.iterations());
 }
 
+// The chunked driver: the header section, then resume() over the chunks -- parse_whole() stops at the header pause
+// when no length is declared, which a chunked message never does.
+http_errno_t
+parse_chunked(Parser<Request> &parser, const std::string &raw) {
+    const auto err = parser.parse(raw.data(), raw.size());
+    if (err != HPE_PAUSED || !parser.headers_completed())
+        return err;
+    const std::size_t body_offset = static_cast<std::size_t>(parser.error_pos - raw.data());
+    parser.resume();
+    return parser.parse(raw.data() + body_offset, raw.size() - body_offset);
+}
+
+http_errno_t
+parse_chunked(const std::string &raw) {
+    Parser<Request> parser;
+    return parse_chunked(parser, raw);
+}
+
+// A chunked POST, parsed whole (Huly QB-1248): its header section names `Transfer-Encoding: chunked`, whose check split
+// the field into a vector of strings on every message. The body is read through resume(), into the parser's buffer.
+void
+BM_Http1Parse_Chunked(benchmark::State &state) {
+    static const std::string raw = "POST /x HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    {
+        Parser<Request> parser;
+        const auto      err     = parse_chunked(parser, raw);
+        auto           &message = parser.get_parsed_message();
+        if (err != HPE_CB_MESSAGE_COMPLETE || parser.error_pos != raw.data() + raw.size() || message.method() != HTTP_POST
+            || message.uri().source() != "/x" || !message.keep_alive || message.has_trailers()
+            || message.body().as<std::string_view>() != "hello") {
+            state.SkipWithError("chunked preflight failed: terminal code, consumption, message or body");
+            return;
+        }
+    }
+    for (auto _ : state) {
+        auto err = parse_chunked(raw);
+        benchmark::DoNotOptimize(err);
+    }
+    state.SetLabel("chunked-complete; driver-v2");
+    state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(raw.size()));
+    state.SetItemsProcessed(state.iterations());
+}
+
 } // namespace
 
 // corpus: 0=header-only GET, 1=multi-header GET (keep-alive/upgrade), 2=POST+body.
 BENCHMARK(BM_Http1Parse_WholeBuffer)->Arg(0)->Arg(1)->Arg(2)->ArgNames({"corpus"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Http1Parse_ByteAtATime)->Arg(0)->Arg(1)->Arg(2)->ArgNames({"corpus"})->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_Http1Parse_Fragmented)->Arg(0)->Arg(1)->Arg(2)->ArgNames({"corpus"})->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_Http1Parse_Chunked)->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();

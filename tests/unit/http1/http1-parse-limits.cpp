@@ -567,3 +567,101 @@ TEST_F(ParserCopyMoveTest, ACopyTakenMidBodyFinishesTheBodyItself) {
     EXPECT_EQ(copy.get_parsed_message().body().as<std::string>(), "hello");
     EXPECT_EQ(source.get_parsed_message().body().size(), 0u) << "the copy completed the SOURCE's message";
 }
+
+// ====================================================================
+// The Transfer-Encoding check scans the field in place (Huly QB-1248): its verdict is the one of the split into a
+// vector of strings it replaced, for every shape -- exactly one non-empty token across the field lines, `chunked` in
+// any case, HTTP whitespace trimmed. The split is kept here as the oracle; a 200 carries the field, so no exemption of
+// a bodyless response applies. A field line of whitespace alone reaches the check as an empty value: no token.
+// ====================================================================
+
+namespace http1_transfer_coding_scan_test {
+[[nodiscard]] bool
+split_verdict(std::vector<std::string> const &lines) {
+    std::vector<std::string> tokens;
+    for (auto const &value : lines) {
+        for (auto token : qb::http::utility::split_string<std::string>(value, ",")) {
+            token = std::string(qb::http::utility::trim_http_whitespace(token));
+            if (!token.empty())
+                tokens.emplace_back(std::move(token));
+        }
+    }
+    return tokens.size() == 1 && qb::http::utility::iequals(tokens.front(), "chunked");
+}
+
+[[nodiscard]] bool
+parser_accepts(std::vector<std::string> const &lines) {
+    std::string wire = "HTTP/1.1 200 OK\r\n";
+    for (auto const &value : lines)
+        wire += "Transfer-Encoding: " + value + "\r\n";
+    wire += "\r\n";
+    qb::http::Parser<Response> parser;
+    return parser.parse(wire.data(), wire.size()) == HPE_PAUSED && parser.headers_completed();
+}
+} // namespace http1_transfer_coding_scan_test
+
+TEST(TransferCodingScan, EveryShapeGetsTheVerdictOfTheSplit) {
+    using namespace http1_transfer_coding_scan_test;
+    const std::vector<std::pair<std::vector<std::string>, bool>> table = {
+        {{""}, false},
+        {{" "}, false},
+        {{","}, false},
+        {{", ,"}, false},
+        {{"chunked"}, true},
+        {{"CHUNKED"}, true},
+        {{" chunked "}, true},
+        {{"chunked,"}, true},
+        {{",chunked"}, true},
+        {{"gzip, chunked"}, false},
+        {{"chunked, chunked"}, false},
+        {{"chunked", "chunked"}, false},
+        {{"gzip", "chunked"}, false},
+        {{",", "chunked"}, true},
+        {{"chunked", ""}, true},
+        {{"chunked", " , "}, true},
+        {{"\tchunked\t"}, true},
+        {{"chunked\t,\t"}, true},
+        {{"gzip"}, false},
+        {{"chunk"}, false},
+        {{"chunkeds"}, false},
+        {{"ChUnKeD , "}, true},
+    };
+    for (auto const &[lines, expected] : table) {
+        std::string shown;
+        for (auto const &line : lines)
+            shown += "[" + line + "]";
+        EXPECT_EQ(split_verdict(lines), expected) << "the oracle disagrees with the table: " << shown;
+        EXPECT_EQ(parser_accepts(lines), expected) << shown;
+    }
+
+    // Every join of one to three pieces (tokens, whitespace, nothing) on one field line, then a stride sample of pairs
+    // of them on two.
+    const std::vector<std::string> pieces = {"chunked", "CHUNKED", "gzip", " ", "\tchunked\t", ""};
+    std::vector<std::string>       lines;
+    for (std::size_t n = 1; n <= 3; ++n) {
+        std::vector<std::size_t> at(n, 0);
+        while (true) {
+            std::string line;
+            for (std::size_t i = 0; i < n; ++i)
+                line += (i ? "," : "") + pieces[at[i]];
+            lines.push_back(line);
+            std::size_t i = 0;
+            while (i < n && ++at[i] == pieces.size())
+                at[i++] = 0;
+            if (i == n)
+                break;
+        }
+    }
+    std::size_t checked = 0;
+    for (auto const &line : lines) {
+        EXPECT_EQ(parser_accepts({line}), split_verdict({line})) << "[" << line << "]";
+        ++checked;
+    }
+    for (std::size_t a = 0; a < lines.size(); a += 7) {
+        for (std::size_t b = 0; b < lines.size(); b += 11) {
+            EXPECT_EQ(parser_accepts({lines[a], lines[b]}), split_verdict({lines[a], lines[b]})) << "[" << lines[a] << "][" << lines[b] << "]";
+            ++checked;
+        }
+    }
+    EXPECT_GT(checked, 1000u);
+}
