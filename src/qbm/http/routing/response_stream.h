@@ -100,7 +100,7 @@ status_carries_no_body(int code) noexcept {
  * - `stream_pending(stream)`: the bytes queued for the peer that it has not taken -- the socket's output; on HTTP/2
  *   the pieces the stream's windows hold back too; on HTTP/3 the bytes the peer has not acknowledged.
  * - `stream_high_watermark()`: the bytes a producer may queue before it should wait for `drain()`.
- * - `stream_write_cap()`: the hard cap of the output (qb-io's write-buffer cap: `publish()` DISCONNECTS past it).
+ * - `stream_write_cap()`: the hard cap of the output (the session's write-buffer cap: `publish()` DISCONNECTS past it).
  * - `stream_end(stream, chunked)`: the terminator when chunked, then what follows any response's last byte.
  * - `stream_abort(stream)`: the message cannot be completed correctly any more: the connection closes (HTTP/1.1),
  *   the stream is reset (HTTP/2, HTTP/3).

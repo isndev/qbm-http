@@ -767,18 +767,18 @@ public:
     }
 
     /// The bytes queued for the socket, not yet written: the session's output buffer (what `pendingWrite()` reads --
-    /// the transport is a private base of the tcp client, `out()` is the part of it a session sees).
+    /// the transport is a private base of the tcp client, `out()` the part of its buffers a session sees).
     [[nodiscard]] std::size_t
     stream_pending(ResponseStream<Derived> const &) noexcept {
         return this->out().size();
     }
 
-    /// The hard cap of the output: qb-io's write-buffer cap, which `publish()` enforces by disconnecting. A tcp
-    /// session cannot change it (`set_max_write_buffer_size` belongs to its transport, a private base), so it is the
-    /// transport's default, `QB_MAX_WRITE_BUFFER_SIZE`.
-    [[nodiscard]] static constexpr std::size_t
-    stream_write_cap() noexcept {
-        return QB_MAX_WRITE_BUFFER_SIZE;
+    /// The hard cap of the output: the session's write-buffer cap (`max_write_buffer_size()`, its transport's:
+    /// `QB_MAX_WRITE_BUFFER_SIZE` unless `set_max_write_buffer_size()` changed it; Huly QB-86), which `publish()` enforces
+    /// by disconnecting.
+    [[nodiscard]] std::size_t
+    stream_write_cap() const noexcept {
+        return this->max_write_buffer_size();
     }
 
     /// The bytes a producer may leave queued before it should wait (1 MiB by default).

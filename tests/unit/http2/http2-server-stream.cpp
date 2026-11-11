@@ -573,4 +573,38 @@ TEST(Http2ServerStream, AStreamedTrailerSectionIsJudgedByTheBoundInForceWhenItLe
     EXPECT_TRUE(h.protocol.is_stream_closed(id));
 }
 
+// The protocol's reset() returns it to its first state, the socket's wait included (Huly QB-86, review round 2): a flush
+// stopped at the io's write cap sets streams_wait_for_socket(), and reset() -- which drops every stream -- kept it, so
+// the protocol said streams wait for the socket while it had none, and the session's next write pass resumed nothing.
+TEST(Http2ServerStream, AResetForgetsThatStreamsWaitedForTheSocket) {
+    Harness    h;
+    const auto id = h.open("/stream");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
+    h.clear();
+    h.io.write_cap = 1024; // a quarter kept: 768 of room, a 4 KiB piece stops at it
+    ASSERT_TRUE(h.protocol.write_streamed_body(id, std::string(4096, 'x')));
+    ASSERT_TRUE(h.protocol.streams_wait_for_socket()) << "the flush stopped at the io's write cap";
+    h.protocol.reset();
+    EXPECT_FALSE(h.protocol.streams_wait_for_socket()) << "reset() kept the wait of streams it dropped";
+    EXPECT_FALSE(h.protocol.is_streaming_response(id));
+}
+
+// A connection that is closing takes nothing more of a streamed response, its end included (Huly QB-86, review round 2):
+// write_streamed_body() refused a piece once the connection had failed, and end_streamed_response() went on -- its
+// END_STREAM left after the GOAWAY, on a connection the server had ended.
+TEST(Http2ServerStream, AConnectionThatFailedTakesNoEndOfAStreamedResponse) {
+    Harness    h;
+    const auto id = h.open("/stream");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
+    ASSERT_TRUE(h.protocol.write_streamed_body(id, "abc"));
+    push_frame(h.io, FrameType::DATA, 0, 99, {'x'}); // DATA on an idle stream: GOAWAY(PROTOCOL_ERROR), the connection ends
+    drive(h.protocol, h.io);
+    ASSERT_EQ(h.io.goaway_count, 1);
+    ASSERT_FALSE(h.protocol.ok());
+    const auto after_goaway = h.io.output.size();
+    EXPECT_FALSE(h.protocol.write_streamed_body(id, "def")) << "a piece is refused";
+    EXPECT_FALSE(h.protocol.end_streamed_response(id, nullptr)) << "and so is the end";
+    EXPECT_EQ(h.io.output.size(), after_goaway) << "a frame left after the GOAWAY";
+}
+
 } // namespace http2_server_stream_test
