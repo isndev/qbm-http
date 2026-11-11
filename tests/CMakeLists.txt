@@ -218,6 +218,7 @@ qhttp_test(system response-stream-huge-body system/routing/response-stream.cpp R
 qhttp_test(system http2-client         system/http2/http2-client.cpp         REQUIRES ssl live EXTRA_LABELS http2 ssl)
 qhttp_test(system http2-client-coro system/http2/http2-client-coro.cpp REQUIRES ssl live EXTRA_LABELS http2 coro ssl)
 qhttp_test(system http2-response-stream system/http2/http2-response-stream.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl routing) # Huly QB-86
+qhttp_test(system http2-control-replies system/http2/http2-control-replies.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl) # Huly QB-1270: the PING/SETTINGS guard over real sockets
 qhttp_test(system sse-stream system/routing/sse-stream.cpp REQUIRES live EXTRA_LABELS routing) # Huly QB-86: SSE on h1 (h2 under ssl, h3 under http3 inside)
 qhttp_test(system make-server-factory-http1 system/server/make-server-factory.cpp REQUIRES live
            DEFINES QBM_TEST_FACTORY_PLAINTEXT_ONLY EXTRA_LABELS http1)

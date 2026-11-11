@@ -151,16 +151,15 @@ private:
 
     // Server-flood guards (mirror the server, hostile-server threat): a peer can flood a client with
     // PING / empty-SETTINGS frames — each begets a PONG / ACK that is exempt from flow control, so
-    // the output pipe grows without bound (CVE-2019-9512/9515) — or with many tiny CONTINUATION
-    // frames that stay under the header-block byte cap. Bound both: _control_reply_count is forgiven
-    // on real response progress; _continuation_frame_count is per-header-block (reset in
-    // clear_header_assembly_state).
+    // the output pipe grows without bound when the server does not read (CVE-2019-9512/9515) — or
+    // with many tiny CONTINUATION frames that stay under the header-block byte cap. Bound both: the
+    // PONGs and ACKs are counted while the output holds them (queue_control_reply(), Huly QB-1270);
+    // _continuation_frame_count is per-header-block (reset in clear_header_assembly_state).
     /// Highest even (server-initiated) stream id ever promised to us. RFC 9113 §5.1.1 requires
     /// promised ids to increase monotonically; closed streams are erased from `_client_streams`,
     /// so that map alone cannot detect a re-promised id. Mirrors the server's
     /// `_last_client_initiated_stream_id`.
     std::uint32_t _last_promised_stream_id  = 0;
-    std::uint32_t _control_reply_count      = 0;
     std::uint32_t _continuation_frame_count = 0;
 
     bool _initial_settings_ack_received_placeholder = false; // Placeholder for actual ACK tracking.
@@ -231,7 +230,6 @@ public:
         _graceful_shutdown_initiated = false;
         _initial_settings_sent       = false;
         _last_promised_stream_id     = 0;
-        _control_reply_count         = 0;
         _continuation_frame_count    = 0;
 
         // Reset our settings and derived values
@@ -401,12 +399,10 @@ public:
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
                 return;
             }
-            // Octets of the response accepted -- past the rejections above, as the server does -- are real progress:
-            // they forgive the flood budget. A DATA that carries none (empty, or padding alone) moves nothing forward
-            // and forgave it, an empty DATA after every 999 PINGs holding the guard at zero, and so did one the stream
-            // was then reset for (Huly QB-1270); the end of the stream it may carry completes the response, which
-            // forgives it there (process_complete_response_if_ready).
-            _control_reply_count = 0;
+            // Nothing here forgives the PONGs and SETTINGS ACKs the server solicited: they are counted while the
+            // output holds them, whatever the server sends (queue_control_reply()). A DATA accepted forgave them -- an
+            // empty one first, then one carrying an octet of the body after every 999 PINGs, which held the guard at
+            // zero, and so did a completed response (Huly QB-1270).
         }
 
         if (data_event.header.flags & FLAG_END_STREAM) {
@@ -696,20 +692,20 @@ public:
             }
         }
 
-        // Bound SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from flow
-        // control, so a flood of empty SETTINGS grows the output pipe without limit. Same budget.
-        if (++_control_reply_count > qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
-            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (server flood)");
-            return;
-        }
-        // Send SETTINGS ACK
+        // Send the SETTINGS ACK -- unless a thousand ACKs and PONGs the server solicited are still queued. Bound
+        // SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from flow control, so a flood of
+        // empty SETTINGS from a server that does not read grows the output pipe without limit. One count with the
+        // PONGs, of the replies the output still holds (queue_control_reply()).
         LOG_HTTP_DEBUG_PA(0, "Client: Sending SETTINGS ACK to server");
         Http2FrameData<SettingsFrame> ack_frame;
         ack_frame.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
         ack_frame.header.flags = FLAG_ACK;
         ack_frame.header.set_stream_id(0);
         // ack_frame.header.set_payload_length(0); // Payload is empty, length is 0 (implicit in struct)
-        this->_io << ack_frame;
+        if (!this->queue_control_reply(ack_frame)) [[unlikely]] {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (server flood)");
+            return;
+        }
         LOG_HTTP_DEBUG_PA(0, "Client: SETTINGS ACK sent to server");
     }
 
@@ -2140,7 +2136,6 @@ private:
 
         // Response is complete - dispatch it.
         stream.response_dispatched = true;
-        _control_reply_count       = 0; // a completed response is real progress — forgive the flood budget
         stream.assembled_response.parse_set_cookie_headers();
 
         // CAUTION: the user handler below runs arbitrary code and can synchronously re-enter this
@@ -2629,18 +2624,18 @@ private:
         // If this is a PING request (ACK flag not set), send PING response
         if (!(ping_event.header.flags & 0x01)) { // ACK flag is bit 0
             // A PING flood (each begets an exempt-from-flow-control PONG) must not grow the output
-            // pipe without bound (CVE-2019-9512). Bound it; the budget is forgiven on real progress.
-            if (++_control_reply_count > qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
-                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (server flood)");
-                return;
-            }
+            // pipe without bound (CVE-2019-9512). The PONGs are counted while the output holds them,
+            // with the SETTINGS ACKs, and forgiven as the socket takes them (queue_control_reply());
+            // when a thousand are queued this one is not written, and the connection closes.
             Http2FrameData<PingFrame> ping_response;
             ping_response.header.type  = static_cast<uint8_t>(FrameType::PING);
             ping_response.header.flags = 0x01; // ACK flag
             ping_response.header.set_stream_id(0);
             ping_response.payload.opaque_data = ping_event.payload.opaque_data;
 
-            this->_io << ping_response;
+            if (!this->queue_control_reply(ping_response)) [[unlikely]] {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (server flood)");
+            }
         }
         // If this is a PING response (ACK flag set), we can ignore it or handle it
         // For now, we just ignore PING responses

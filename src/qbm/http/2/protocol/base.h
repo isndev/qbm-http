@@ -26,8 +26,10 @@
 
 #include <algorithm> // For std::min
 #include <array>
-#include <cstdint> // For uintN_t types
-#include <cstring> // For memcpy
+#include <concepts> // std::same_as: counts_bytes_written (Huly QB-1270)
+#include <cstddef>  // std::size_t
+#include <cstdint>  // For uintN_t types
+#include <cstring>  // For memcpy
 #include <limits>
 #include <memory> // For std::shared_ptr
 #include <optional>
@@ -102,9 +104,12 @@ constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
  *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
 
-/** @brief Cap on peer-triggered replies: PING PONGs + SETTINGS ACKs between two units of real progress (the PING/SETTINGS
- *  floods, CVE-2019-9512 / CVE-2019-9515), and, on its own count, the server's RST_STREAMs on closed or refused streams or
- *  before a request's dispatch, between two streams the client opens (the reset flood, CVE-2019-9514; Huly QB-1270). */
+/** @brief Cap on peer-triggered replies still QUEUED in the output: the PING PONGs, the SETTINGS ACKs and, on the server,
+ *  the RST_STREAMs on closed or refused streams or before a request's dispatch, in one count, each from the moment it is
+ *  written until the socket has taken its last byte (the PING/SETTINGS floods, CVE-2019-9512 / CVE-2019-9515, and the
+ *  reset flood, CVE-2019-9514; modelled on nghttp2's max_outbound_ack -- Http2Protocol::queue_control_reply()). Those
+ *  RST_STREAMs are bounded by the same number on a count of their own as well, between two streams the client opens
+ *  (ServerHttp2Protocol::admit_solicited_reset(); Huly QB-1270). */
 constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
 /** @brief Cap on CONTINUATION frames per header block. The 1 MB header-block BYTE cap does not
@@ -115,6 +120,69 @@ constexpr std::uint32_t MAX_CONTINUATION_FRAMES = 512;
 } // namespace qb::http2::protocol_limits
 
 namespace qb::protocol::http2 {
+
+/// An IO handler that counts the bytes its socket ever took of the output (`bytes_written()`, as every qb-io session
+/// does): with what the output still holds (`out().size()`), where a frame ends in the output and whether it has left
+/// -- what the PING/SETTINGS guard counts its queued replies on (Http2Protocol::queue_control_reply(), Huly QB-1270).
+/// The count is a `std::size_t`, no narrower type: positions are compared modulo its width, which must be the width
+/// the count itself wraps at. A handler without such a count shows only what it queues, and is forgiven its replies
+/// when its output is empty. (The stock session also keeps `appended_total()`, the bytes the protocol's frames
+/// appended, for its stall watch -- Huly QB-1212; `bytes_written()` is what the socket took, whoever wrote it.)
+template <typename IO>
+concept counts_bytes_written = requires(IO const &io) {
+    { io.bytes_written() } -> std::same_as<std::size_t>;
+};
+
+namespace detail {
+/// Where each reply the peer solicited ends in the output, for those the output still holds, oldest first
+/// (Http2Protocol::queue_control_reply(), Huly QB-1270): a ring, so that the reply a slow reader takes and the one it
+/// solicits next each cost O(1) however long that goes on. It holds no more than MAX_QUEUED_CONTROL_REPLIES ends -- the
+/// guard closes the connection there, so 1024 positions at most -- and its first allocation, eight positions, comes
+/// with the connection's first reply: the ACK of the peer's first SETTINGS, so one a connection.
+class control_reply_queue {
+public:
+    [[nodiscard]] std::uint32_t
+    size() const noexcept {
+        return _count;
+    }
+    /// The end of the oldest reply queued; size() is not 0.
+    [[nodiscard]] std::size_t
+    front() const noexcept {
+        return _ends[_first & (_ends.size() - 1)];
+    }
+    void
+    pop_front() noexcept {
+        ++_first;
+        --_count;
+    }
+    void
+    push_back(std::size_t end) {
+        if (_count == _ends.size()) {
+            grow();
+        }
+        _ends[(_first + _count) & (_ends.size() - 1)] = end;
+        ++_count;
+    }
+    void
+    clear() noexcept {
+        _first = _count = 0;
+    }
+
+private:
+    void
+    grow() {
+        std::vector<std::size_t> wider(_ends.empty() ? 8u : _ends.size() * 2u);
+        for (std::uint32_t i = 0; i < _count; ++i) {
+            wider[i] = _ends[(_first + i) & (_ends.size() - 1)];
+        }
+        _ends.swap(wider);
+        _first = 0;
+    }
+
+    std::vector<std::size_t> _ends; ///< Empty, or a power of two long: an index is taken modulo its size
+    std::uint32_t            _first = 0, _count = 0;
+};
+} // namespace detail
 
 // --- Binary Utilities ---
 
@@ -623,6 +691,9 @@ protected:
     uint32_t                 _peer_max_frame_size                               = qb::protocol::http2::DEFAULT_MAX_FRAME_SIZE;
     bool                     _continuation_required                             = false;
     uint32_t                 _continuation_stream_id                            = 0;
+    /// The replies the peer solicited that the output still holds: PONGs, SETTINGS ACKs and, on the server, the resets
+    /// of streams the client never opened (queue_control_reply(), Huly QB-1270).
+    detail::control_reply_queue _queued_control_replies;
 
 public:
     /**
@@ -861,6 +932,89 @@ public:
         _last_error_code.reset();
         _continuation_required  = false;
         _continuation_stream_id = 0;
+        _queued_control_replies.clear(); // a new connection's output holds none of the last one's replies (Huly QB-1270)
+    }
+
+protected:
+    /**
+     * @brief Write one PONG or SETTINGS ACK the peer solicited, unless MAX_QUEUED_CONTROL_REPLIES replies it solicited
+     *        are still queued in the output (the PING and SETTINGS floods, CVE-2019-9512 / CVE-2019-9515; Huly
+     *        QB-1270). Such a reply is exempt from flow control and costs the peer nothing, so a peer that solicits them
+     *        and never reads would grow the output up to the io's write-buffer cap. A reply counts from the moment it is
+     *        written until the socket has taken its LAST byte, and nothing the peer sends forgives it: a peer is cut
+     *        when a thousand of its replies wait in the output at once, and only then -- one that reads them as they
+     *        come never is, however many it solicits and whatever else it does. The guard counted the replies between
+     *        two units of request (or response) progress: an octet of a body after every 999 PINGs held it at zero,
+     *        and a connection kept alive by PINGs alone was closed at the 1001st.
+     * @details The position of a reply is the io's count of bytes written plus what its output holds once the reply
+     *          is in it (control_reply_end()): every frame the protocol writes moves the output, not the replies alone,
+     *          and that count is the same across a partial write, a TLS record boundary and a compaction of the pipe.
+     *          It is read here, when a reply is solicited -- the only moment the count decides anything -- and nowhere
+     *          on the write path. Two consequences of counting what the OUTPUT holds: a reply waits behind whatever was
+     *          written before it, a large response included, and the frames of one read are answered before the
+     *          output is written, so the replies solicited within one read queue together. Modelled on nghttp2's
+     *          max_outbound_ack (1000 too), which differs twice: it forgives an ACK when the frame leaves its queue to
+     *          be serialized, not when the socket has taken it, and it sends ACKs ahead of the data it has queued.
+     * @return Whether the reply was written. `false`: the bound is reached and this reply is NOT written; the caller
+     *         closes the connection with GOAWAY(ENHANCE_YOUR_CALM).
+     */
+    template <typename Reply>
+    [[nodiscard]] bool
+    queue_control_reply(const Reply &reply) noexcept {
+        if (control_replies_at_bound()) [[unlikely]] {
+            return false;
+        }
+        this->_io << reply;
+        control_reply_written();
+        return true;
+    }
+
+    /// The two halves of queue_control_reply(), for a reply its caller writes itself -- the server's reset of a stream
+    /// the client never opened, which may follow a response: whether MAX_QUEUED_CONTROL_REPLIES replies are still
+    /// queued, once those the socket has taken are forgiven -- the next one is then not to be written.
+    [[nodiscard]] bool
+    control_replies_at_bound() noexcept {
+        forgive_control_replies_taken();
+        return _queued_control_replies.size() >= ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES;
+    }
+
+    /// The reply just written is queued: it ends where the output ends now.
+    void
+    control_reply_written() noexcept {
+        _queued_control_replies.push_back(control_reply_end());
+    }
+
+private:
+    /// Forgive the replies the socket has taken whole. The output holds the bytes at the positions
+    /// (taken, taken + queued] of what the io ever wrote: a reply whose end lies there is still queued, wholly or for
+    /// its last bytes; any other has left. The difference is taken modulo the width of std::size_t, the type of the
+    /// io's count (counts_bytes_written), so the test holds when that count wraps (a 32-bit one does every 4 GiB), and
+    /// when the output was emptied without a write. An io that does not count what its socket took is forgiven all of
+    /// them once its output is empty.
+    void
+    forgive_control_replies_taken() noexcept {
+        if (_queued_control_replies.size() == 0) {
+            return;
+        }
+        const std::size_t queued = this->_io.out().size();
+        if constexpr (counts_bytes_written<IO_Handler>) {
+            const std::size_t taken = static_cast<std::size_t>(this->_io.bytes_written());
+            while (_queued_control_replies.size() != 0 && _queued_control_replies.front() - taken - 1 >= queued) {
+                _queued_control_replies.pop_front();
+            }
+        } else if (queued == 0) {
+            _queued_control_replies.clear();
+        }
+    }
+
+    /// Where the frame just written ends: what the socket took so far plus what the output holds, the frame included.
+    [[nodiscard]] std::size_t
+    control_reply_end() noexcept {
+        std::size_t end = this->_io.out().size();
+        if constexpr (counts_bytes_written<IO_Handler>) {
+            end += static_cast<std::size_t>(this->_io.bytes_written());
+        }
+        return end;
     }
 
 protected:

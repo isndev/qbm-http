@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
@@ -3772,7 +3773,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the response's header list, counted uncompressed, exceeds it, the stream
-// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1296-1299).
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1286-1289).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3800,7 +3801,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1280-1285).
+// (2/protocol/server.h:1270-1275).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3820,7 +3821,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:3027-3030).
+// (2/protocol/server.h:3020-3023).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3840,7 +3841,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:3021-3026).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:3014-3019).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3863,7 +3864,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1074-1079).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1066-1071).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3882,7 +3883,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1081-1099).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1073-1091).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4079,7 +4080,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:416-425).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:413-422).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4102,7 +4103,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:416-420).
+// (qbm/http/src/qbm/http/2/protocol/server.h:413-417).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4119,7 +4120,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1205-1215 else arm).
+// (no stream context to store into; 2/protocol/server.h:1195-1205 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4138,7 +4139,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1112-1124);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1104-1116);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -4228,8 +4229,9 @@ TEST(HTTP2ServerProtocol, PingFloodTriggersEnhanceYourCalmGoaway) {
     do_handshake(protocol, io);
     ASSERT_TRUE(protocol.ok());
 
-    // PING is exempt from HTTP/2 flow control; a flood with no real request progress must not
-    // grow the PONG output without bound. Past MAX_QUEUED_CONTROL_REPLIES the server GOAWAYs.
+    // PING is exempt from HTTP/2 flow control; the flood of a peer that takes nothing -- the fake's
+    // output is never drained -- must not grow the PONG output without bound. Once
+    // MAX_QUEUED_CONTROL_REPLIES are queued the server GOAWAYs.
     const std::vector<uint8_t> ping_payload(8, 0x00);
     for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
         push_frame(io, FrameType::PING, 0, 0, ping_payload);
@@ -4241,10 +4243,11 @@ TEST(HTTP2ServerProtocol, PingFloodTriggersEnhanceYourCalmGoaway) {
 }
 
 // Regression: a DATA frame on a stream the client already closed (END_STREAM) is rejected with
-// RST_STREAM but keeps the connection alive — it is NOT request progress and must NOT forgive the
-// queued control-reply flood budget. Otherwise a peer interleaves such DATA frames with a PING
-// flood to hold the budget at zero and defeats the PING/SETTINGS flood guard (CVE-2019-9512/9515).
-// Guards the placement of the _control_reply_count reset (must be past the DATA rejection paths).
+// RST_STREAM but keeps the connection alive — it must NOT forgive the queued control replies.
+// Otherwise a peer interleaves such DATA frames with a PING flood to hold the count at zero and
+// defeats the PING/SETTINGS flood guard (CVE-2019-9512/9515). No frame the client sends forgives
+// them since the guard counts what the output holds (Huly QB-1270); the resets these DATA draw are
+// written between the PONGs, and move the output without being counted with them.
 TEST(HTTP2ServerProtocol, DataOnClosedStreamDoesNotForgiveControlReplyFloodBudget) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4259,6 +4262,10 @@ TEST(HTTP2ServerProtocol, DataOnClosedStreamDoesNotForgiveControlReplyFloodBudge
 
     // Interleave DATA-on-closed-stream (RST, survives) with a PING flood. Pre-fix each DATA reset the
     // control-reply budget to 0 and the flood never tripped; post-fix the ping flood still GOAWAYs.
+    // The reset each DATA draws is a reply the client solicits too: it is queued, and counted, with the
+    // PONGs -- a thousand replies of both kinds, the handshake's SETTINGS ACK among them, and no more.
+    // The first DATA is not of them: it resets stream 1 itself, a request in flight, which the Rapid
+    // Reset guard counts (a reset the client provoked on a stream it opened).
     const std::vector<uint8_t> data_payload(4, 0x41);
     const std::vector<uint8_t> ping_payload(8, 0x00);
     for (int i = 0; i < 1200 && io.goaway_count == 0; ++i) {
@@ -4269,6 +4276,9 @@ TEST(HTTP2ServerProtocol, DataOnClosedStreamDoesNotForgiveControlReplyFloodBudge
 
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(solicited_reply_ends(io.output).size() + count_frames(io.output, FrameType::RST_STREAM), 1001u)
+        << "a thousand replies still queued -- the handshake's SETTINGS ACK, the PONGs, the resets on the closed stream -- and the one "
+           "reset that closed stream 1";
 }
 
 TEST(HTTP2ServerProtocol, ContinuationFloodTriggersEnhanceYourCalmGoaway) {
@@ -7031,13 +7041,25 @@ closed_stream_one(ServerProtocol &protocol, Http2FakeIO &io) {
     drive(protocol, io);
 }
 
+/// Drive what the client sent, then let its socket take everything the server wrote: a client that READS. The resets it
+/// solicits are then held to their own budget alone -- so many between two streams it opens -- and never to the count of
+/// the replies queued, which they share with the PONGs and the SETTINGS ACKs since the queued model (Huly QB-1270;
+/// PongsSettingsAcksAndSolicitedResetsShareTheQueuedCount): what the witnesses of that budget isolate. Read what the
+/// server wrote from `written_and_queued(io)` afterwards.
+template <typename Protocol, typename FakeIO>
+void
+drive_a_client_that_reads(Protocol &protocol, FakeIO &io) {
+    drive(protocol, io);
+    socket_takes_everything(io);
+}
+
 } // namespace qb1270_test
 
 // RFC 9113 section 5.1: a closed stream may still receive frames sent before the peer saw its end, and the server answers
 // some with RST_STREAM. Each answer is a frame the client solicits, as a PONG or a SETTINGS ACK is -- the reset flood of
 // CVE-2019-9514 -- and it had no bound: 1100 frames on a closed stream, 1100 resets, no GOAWAY. At most
 // MAX_QUEUED_CONTROL_REPLIES are sent now between two streams the client opens -- 1000 resets, then
-// GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270).
+// GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270). The client reads each reset: the budget is not the drain's to forgive.
 TEST(HTTP2ServerProtocol, FramesOnAClosedStreamPastTheControlBudgetCloseTheConnection) {
     for (const auto kind :
          {qb1270_test::closed_frame::data, qb1270_test::closed_frame::headers, qb1270_test::closed_frame::window_update_of_zero,
@@ -7047,33 +7069,37 @@ TEST(HTTP2ServerProtocol, FramesOnAClosedStreamPastTheControlBudgetCloseTheConne
         ServerProtocol protocol(io);
         qb1270_test::closed_stream_one(protocol, io);
         ASSERT_TRUE(protocol.ok());
+        socket_takes_everything(io);
         for (int i = 0; i < qb1270_test::control_budget + 100 && io.goaway_count == 0; ++i) {
             qb1270_test::send_on_closed(io, kind, 1);
-            drive(protocol, io);
+            qb1270_test::drive_a_client_that_reads(protocol, io);
         }
         EXPECT_EQ(io.goaway_count, 1) << "no bound on the resets a closed stream draws";
         EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
-        EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+        EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), static_cast<std::size_t>(qb1270_test::control_budget));
     }
 }
 
 // The budget bounds a flood, not the frames that cross the end of a stream: they are answered and the connection serves
 // on, and a stream the client opens forgives it -- 900 frames on a closed stream, a request served, 900 more: no GOAWAY.
+// The client reads what it is sent, as one that sees the end of its stream does.
 TEST(HTTP2ServerProtocol, FramesOnAClosedStreamWithinTheBudgetAreAnswered) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     qb1270_test::closed_stream_one(protocol, io);
+    socket_takes_everything(io);
     uint32_t sid = 3;
     for (int round = 0; round < 3; ++round, sid += 2) {
         for (int i = 0; i < 900; ++i) {
             qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
         }
-        drive(protocol, io);
+        qb1270_test::drive_a_client_that_reads(protocol, io);
         open_get_stream_end_stream(protocol, io, sid, "/progress");
+        socket_takes_everything(io);
     }
     EXPECT_EQ(io.goaway_count, 0) << "request progress forgives the budget";
     EXPECT_EQ(io.request_count, 3);
-    EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::STREAM_CLOSED);
+    EXPECT_EQ(last_rst_stream_error(written_and_queued(io), 1), ErrorCode::STREAM_CLOSED);
     EXPECT_TRUE(protocol.ok());
 }
 
@@ -7149,7 +7175,8 @@ TEST(HTTP2ServerProtocol, AFrameOnARefusedStreamIsAFrameOnAClosedStream) {
 
 // A refusal is a reset the client solicits too: HEADERS past the concurrency limit, each refused with REFUSED_STREAM, drew
 // a reset each without a bound -- 1100 refused, no GOAWAY. They share the closed-stream budget now (Huly QB-1270): a
-// client that opens streams past the limit without a request ever served is closed with GOAWAY(ENHANCE_YOUR_CALM).
+// client that opens streams past the limit without a request ever served is closed with GOAWAY(ENHANCE_YOUR_CALM),
+// though it reads every refusal.
 TEST(HTTP2ServerProtocol, StreamsRefusedPastTheControlBudgetCloseTheConnection) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -7157,15 +7184,15 @@ TEST(HTTP2ServerProtocol, StreamsRefusedPastTheControlBudgetCloseTheConnection) 
     for (uint32_t sid = 1; sid <= 99; sid += 2) {
         qb1270_test::open_upload(io, sid); // the 50 slots, held
     }
-    drive(protocol, io);
+    qb1270_test::drive_a_client_that_reads(protocol, io);
     uint32_t sid = 101;
     for (int i = 0; i < qb1270_test::control_budget + 100 && io.goaway_count == 0; ++i, sid += 2) {
         qb1270_test::open_upload(io, sid);
-        drive(protocol, io);
+        qb1270_test::drive_a_client_that_reads(protocol, io);
     }
     EXPECT_EQ(io.goaway_count, 1) << "no bound on the refusals";
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
-    EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+    EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), static_cast<std::size_t>(qb1270_test::control_budget));
 }
 
 // A handler that throws inside the DATA that completes an upload resets its stream (INTERNAL_ERROR) and kept it resident:
@@ -7433,52 +7460,55 @@ answer_in_the_dispatch(qb1244_test::AnsweringIO &io, qb1244_test::AnsweringProto
 // upload, a request refused for a limit -- is one the client solicits per new stream id, as a frame on a closed stream
 // solicits one: the published form of the reset flood (CVE-2019-9514). It was in no count: 1100 such streams drew 1100
 // resets and no GOAWAY. They share the closed-stream budget now -- 1000 between two streams the client opens, then
-// GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270).
+// GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270) -- which a client that reads each reset does not escape.
 TEST(HTTP2ServerProtocol, ResetsBeforeDispatchPastTheBudgetCloseTheConnection) {
     for (const auto how : qb1270_test::all_before_dispatch) {
         SCOPED_TRACE(static_cast<int>(how));
         Http2FakeIO    io;
         ServerProtocol protocol(io);
         do_handshake(protocol, io);
+        socket_takes_everything(io);
         uint32_t sid = 1;
         for (int i = 0; i < qb1270_test::control_budget + 100 && io.goaway_count == 0; ++i, sid += 2) {
             qb1270_test::provoke_before_dispatch(io, how, sid);
-            drive(protocol, io);
+            qb1270_test::drive_a_client_that_reads(protocol, io);
         }
         EXPECT_EQ(io.goaway_count, 1) << "no bound on the resets sent before dispatch";
         EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
-        EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+        EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), static_cast<std::size_t>(qb1270_test::control_budget));
         EXPECT_EQ(io.request_count, 0) << "nothing of it reached the application";
-        const auto frames = parse_emitted_frames(io.output);
+        const auto frames = parse_emitted_frames(written_and_queued(io));
         ASSERT_FALSE(frames.empty());
         EXPECT_EQ(frames.back().type, FrameType::GOAWAY) << "a frame left after the GOAWAY: the reset, a WINDOW_UPDATE";
     }
 }
 
 // One budget, not one per kind: 600 frames on a closed stream, then resets before dispatch -- the 1001st reset of either
-// kind closes the connection (Huly QB-1270).
+// kind closes the connection (Huly QB-1270), read or not: the client reads them all here.
 TEST(HTTP2ServerProtocol, ResetsBeforeDispatchAndOnClosedStreamsShareOneBudget) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
     qb1270_test::closed_stream_one(protocol, io);
+    socket_takes_everything(io);
     for (int i = 0; i < 600; ++i) {
         qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
     }
-    drive(protocol, io);
+    qb1270_test::drive_a_client_that_reads(protocol, io);
     ASSERT_EQ(io.goaway_count, 0);
     uint32_t sid = 3;
     for (int i = 0; i < 500 && io.goaway_count == 0; ++i, sid += 2) {
         qb1270_test::provoke_before_dispatch(io, qb1270_test::before_dispatch::missing_path, sid);
-        drive(protocol, io);
+        qb1270_test::drive_a_client_that_reads(protocol, io);
     }
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
-    EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget));
+    EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), static_cast<std::size_t>(qb1270_test::control_budget));
 }
 
 // The budget bounds a flood, not a client whose requests the server sometimes refuses: each stream it opens -- a request
 // dispatched -- forgives it. A reset before dispatch beside every request served, 2000 times, and 900 of them between two
-// requests, three times over: every one answered, the connection kept (Huly QB-1270).
+// requests, three times over: every one answered, the connection kept (Huly QB-1270). The client reads its answers and
+// its resets as they come.
 TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
     for (const auto how : qb1270_test::all_before_dispatch) {
         SCOPED_TRACE(static_cast<int>(how));
@@ -7491,12 +7521,12 @@ TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
                 qb1270_test::provoke_before_dispatch(io, how, sid);
                 push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid + 2,
                            encode_hpack_headers(default_request_headers("/served")));
-                drive(protocol, io);
+                qb1270_test::drive_a_client_that_reads(protocol, io);
             }
             EXPECT_EQ(io.goaway_count, 0) << "a refusal beside each request served closed the connection";
             EXPECT_TRUE(protocol.ok());
             EXPECT_EQ(io.request_count, 2000);
-            EXPECT_EQ(qb1270_test::resets_sent(io.output), 2000u);
+            EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), 2000u);
         }
         {
             qb1244_test::AnsweringIO       io;
@@ -7507,25 +7537,26 @@ TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
                 for (int i = 0; i < 900; ++i, sid += 2) {
                     qb1270_test::provoke_before_dispatch(io, how, sid);
                 }
-                drive(protocol, io);
+                qb1270_test::drive_a_client_that_reads(protocol, io);
                 push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
                            encode_hpack_headers(default_request_headers("/progress")));
-                drive(protocol, io);
+                qb1270_test::drive_a_client_that_reads(protocol, io);
                 sid += 2;
             }
             EXPECT_EQ(io.goaway_count, 0) << "a request served forgives the budget";
             EXPECT_TRUE(protocol.ok());
             EXPECT_EQ(io.request_count, 3);
-            EXPECT_EQ(qb1270_test::resets_sent(io.output), 2700u);
+            EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)), 2700u);
         }
     }
 }
 
-// The PING/SETTINGS budget (CVE-2019-9512, CVE-2019-9515) is forgiven by real progress only. A DATA frame accepted onto
-// an open upload forgave it whatever it carried: an empty one -- or one of padding alone -- after every 999 PINGs or
-// SETTINGS held it at zero, 5000 PONGs or ACKs and no GOAWAY. So did a HEADERS the server then refused as malformed,
-// and one that opened an upload it never dispatched. None of them moves a request forward: the 1001st control frame
-// closes the connection now (Huly QB-1270).
+// The PONGs and SETTINGS ACKs a client solicits (CVE-2019-9512, CVE-2019-9515) are forgiven by nothing it sends. A DATA
+// frame accepted onto an open upload forgave them whatever it carried: an empty one -- or one of padding alone -- after
+// every 999 PINGs or SETTINGS held the count at zero, 5000 PONGs or ACKs and no GOAWAY. So did a HEADERS the server then
+// refused as malformed, and one that opened an upload it never dispatched. The client here reads nothing: the 1001st
+// reply queued closes the connection (Huly QB-1270; first cut as "none of them moves a request forward", and since the
+// queued model for every frame -- APeerThatNeverReadsIsCutOnceAThousandRepliesAreQueued has the octet and the request).
 TEST(HTTP2ServerProtocol, AFrameThatMovesNoRequestForwardDoesNotForgiveThePingAndSettingsBudget) {
     enum class nothing { empty_data, padding_only_data, malformed_headers, upload_headers };
     const std::vector<uint8_t> ping_payload(8, 0x00);
@@ -7570,34 +7601,530 @@ TEST(HTTP2ServerProtocol, AFrameThatMovesNoRequestForwardDoesNotForgiveThePingAn
     }
 }
 
-// Real progress forgives the budget, so a busy client is never cut: 999 PINGs between two octets of an upload's body,
-// or between two requests served, five times over -- every PING answered, no GOAWAY (Huly QB-1270).
-TEST(HTTP2ServerProtocol, RequestBodyOctetsAndRequestsServedForgiveThePingBudget) {
-    const std::vector<uint8_t> ping_payload(8, 0x00);
-    for (const bool requests : {false, true}) {
-        SCOPED_TRACE(requests ? "requests served" : "body octets");
+// ===========================================================================
+// The PING/SETTINGS guard counts the replies QUEUED in the output (Huly QB-1270, the maintainer's decision of
+// 2026-11-11): a PONG or a SETTINGS ACK the client solicited counts from the moment it is written until the socket has
+// taken its last byte, and the 1001st one queued closes the connection. Nothing the client sends forgives a reply --
+// only the output draining does: a peer that reads is never cut, one that never reads is cut at a thousand.
+// ===========================================================================
+
+// The attack: a client that never reads solicits 999 replies, then makes what the guard took for progress between two
+// units of it -- an octet of a request body, a request served -- five times over. Each unit forgave the budget: 4995
+// PONGs or ACKs queued, no GOAWAY, and so on up to qb-io's write cap. A thousand queued close the connection now,
+// whatever the client sends between them, and the 1001st reply is not written.
+TEST(HTTP2ServerProtocol, APeerThatNeverReadsIsCutOnceAThousandRepliesAreQueued) {
+    enum class between { nothing, an_octet_of_a_body, a_request_served };
+    for (const auto what : all_solicited_replies) {
+        for (const auto unit : {between::nothing, between::an_octet_of_a_body, between::a_request_served}) {
+            SCOPED_TRACE(std::string(what == solicited_reply::pong ? "PING" : "SETTINGS") + ", between the rounds: "
+                         + (unit == between::nothing              ? "nothing"
+                            : unit == between::an_octet_of_a_body ? "an octet of a body"
+                                                                  : "a request served"));
+            qb1244_test::AnsweringIO       io;
+            qb1244_test::AnsweringProtocol protocol(io);
+            qb1270_test::answer_in_the_dispatch(io, protocol);
+            qb1270_test::open_upload(io, 1);
+            drive(protocol, io);
+            socket_takes_everything(io); // the handshake left; from here the client reads nothing
+            io.wire.reset();
+            uint32_t sid = 3;
+            for (int round = 0; round < 5 && io.goaway_count == 0; ++round) {
+                solicit_replies(io, what, qb1270_test::control_budget - 1);
+                if (unit == between::an_octet_of_a_body) {
+                    push_frame(io, FrameType::DATA, 0, 1, {'x'});
+                } else if (unit == between::a_request_served) {
+                    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                               encode_hpack_headers(default_request_headers("/served")));
+                    sid += 2;
+                }
+                drive(protocol, io);
+            }
+            EXPECT_EQ(io.goaway_count, 1) << "the replies of a peer that never reads queued without a bound";
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+            EXPECT_FALSE(protocol.ok());
+            EXPECT_EQ(solicited_reply_ends(io.output).size(), static_cast<std::size_t>(qb1270_test::control_budget))
+                << "a thousand replies queued is the bound: the 1001st is not written";
+            const auto frames = parse_emitted_frames(io.output);
+            ASSERT_FALSE(frames.empty());
+            EXPECT_EQ(frames.back().type, FrameType::GOAWAY) << "the GOAWAY is the last frame written";
+        }
+    }
+}
+
+// The legitimate case the old budget cut: a connection kept alive by PINGs alone -- a download whose client pings every
+// few seconds -- opens no stream and sends no body, so nothing ever forgave its replies: closed at the 1001st. Each PONG
+// leaves before the next PING comes: nothing is queued, 5000 are answered and the connection stays open. The same for
+// SETTINGS.
+TEST(HTTP2ServerProtocol, APeerThatReadsMaySolicitRepliesForEverWithoutOpeningAStream) {
+    for (const auto what : all_solicited_replies) {
+        SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        socket_takes_everything(io);
+        io.wire.reset();
+        for (int i = 0; i < 5000 && io.goaway_count == 0; ++i) {
+            solicit_replies(io, what);
+            drive(protocol, io);
+            socket_takes_everything(io); // the peer reads its reply before it asks again
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "a connection that only pings was closed";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(solicited_reply_ends(io.wire).size(), 5000u) << "a reply is missing";
+        EXPECT_EQ(io.wire.size(), 5000u * solicited_reply_size(what)) << "something other than the replies was written";
+    }
+}
+
+// A busy client that reads is never cut either: 999 PINGs in one read, then nothing, an octet of an upload's body or a
+// request served, the output drained before the next round, five times over -- every PING answered, no GOAWAY. What
+// the client sends between the rounds plays no part: with nothing between them the 1001st PING closed the connection
+// (re-derived from the progress model's witness, where the octet and the request were what forgave; Huly QB-1270).
+TEST(HTTP2ServerProtocol, ABusyPeerThatReadsIsNeverCut) {
+    enum class between { nothing, an_octet_of_a_body, a_request_served };
+    for (const auto unit : {between::nothing, between::an_octet_of_a_body, between::a_request_served}) {
+        SCOPED_TRACE(unit == between::nothing ? "nothing" : unit == between::an_octet_of_a_body ? "an octet of a body" : "a request served");
         qb1244_test::AnsweringIO       io;
         qb1244_test::AnsweringProtocol protocol(io);
         qb1270_test::answer_in_the_dispatch(io, protocol);
         qb1270_test::open_upload(io, 1);
         drive(protocol, io);
+        socket_takes_everything(io);
+        io.wire.reset();
         uint32_t sid = 3;
         for (int round = 0; round < 5; ++round) {
-            for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
-                push_frame(io, FrameType::PING, 0, 0, ping_payload);
-            }
-            if (requests) {
+            solicit_replies(io, solicited_reply::pong, qb1270_test::control_budget - 1);
+            if (unit == between::an_octet_of_a_body) {
+                push_frame(io, FrameType::DATA, 0, 1, {'x'});
+            } else if (unit == between::a_request_served) {
                 push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
                            encode_hpack_headers(default_request_headers("/served")));
                 sid += 2;
-            } else {
-                push_frame(io, FrameType::DATA, 0, 1, {'x'});
             }
             drive(protocol, io);
+            socket_takes_everything(io);
         }
-        EXPECT_EQ(io.goaway_count, 0) << "real progress did not forgive the budget";
+        EXPECT_EQ(io.goaway_count, 0) << "a peer that reads was cut";
         EXPECT_TRUE(protocol.ok());
-        EXPECT_EQ(count_frames(io.output, FrameType::PING), static_cast<std::size_t>(5 * (qb1270_test::control_budget - 1)));
-        EXPECT_EQ(io.request_count, requests ? 5 : 0);
+        EXPECT_EQ(count_frames(io.wire, FrameType::PING), static_cast<std::size_t>(5 * (qb1270_test::control_budget - 1)));
+        EXPECT_EQ(io.request_count, unit == between::a_request_served ? 5 : 0);
+    }
+}
+
+// A slow reader is counted for what it has not read, never for what it has: a thousand replies queued, then one leaves
+// and one is solicited, 3000 times -- always a thousand queued, never the 1001st, no GOAWAY, though the client opened no
+// stream and sent no body in 4000 PINGs. Then one more with nothing read: the 1001st, and the connection is closed.
+TEST(HTTP2ServerProtocol, ASlowReaderIsNotCutWhileFewerThanAThousandRepliesAreQueued) {
+    for (const auto what : all_solicited_replies) {
+        SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
+        const std::size_t reply = solicited_reply_size(what);
+        Http2FakeIO       io;
+        ServerProtocol    protocol(io);
+        do_handshake(protocol, io);
+        socket_takes_everything(io);
+        io.wire.reset();
+        solicit_replies(io, what, qb1270_test::control_budget);
+        drive(protocol, io);
+        ASSERT_EQ(io.goaway_count, 0) << "a thousand replies queued are within the bound";
+        ASSERT_EQ(io.output.size(), 1000u * reply);
+        for (int i = 0; i < 3000 && io.goaway_count == 0; ++i) {
+            socket_takes(io, reply); // one reply leaves: 999 queued
+            solicit_replies(io, what);
+            drive(protocol, io); // a thousand again
+        }
+        EXPECT_EQ(io.goaway_count, 0) << "a slow reader was cut with fewer than a thousand replies queued";
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.output.size(), 1000u * reply);
+        EXPECT_EQ(io.wire.size(), 3000u * reply);
+        solicit_replies(io, what); // nothing left since: this one would be the 1001st queued
+        drive(protocol, io);
+        EXPECT_EQ(io.goaway_count, 1) << "the 1001st queued reply did not close the connection";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(solicited_reply_ends(written_and_queued(io)).size(), 4000u) << "the 1001st queued reply was written";
+    }
+}
+
+namespace qb1270_queue_test {
+
+/// The offsets at which the replies queued end, oldest first: what a row of the partial-write table reads.
+using ends_t = const std::vector<std::size_t> &;
+
+/// A thousand replies queued behind and around two responses -- a request served, 400 replies, a request served, 600
+/// replies -- on a connection whose io has already counted @p already_written bytes; then the socket takes the first
+/// bytes of the output, as many as @p take says of the ends of the replies queued. What is asserted: the server queues
+/// as many further replies as have wholly left -- their last byte taken -- and closes the connection at the next.
+void
+expect_replies_forgiven_as_their_last_byte_leaves(solicited_reply what, std::size_t already_written,
+                                                  const std::function<std::size_t(ends_t)> &take) {
+    qb1244_test::AnsweringIO io;
+    io.written = already_written;
+    qb1244_test::AnsweringProtocol protocol(io);
+    qb1270_test::answer_in_the_dispatch(io, protocol);
+    socket_takes_everything(io);
+    io.wire.reset();
+    const auto serve = [&](uint32_t sid) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                   encode_hpack_headers(default_request_headers("/served")));
+    };
+    serve(1);
+    solicit_replies(io, what, 400);
+    serve(3);
+    solicit_replies(io, what, 600);
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok()) << "a thousand replies queued are within the bound";
+    ASSERT_EQ(io.request_count, 2);
+    const auto ends = solicited_reply_ends(io.output);
+    ASSERT_EQ(ends.size(), 1000u);
+    ASSERT_GT(ends.front(), solicited_reply_size(what)) << "the first response is queued before the first reply";
+    ASSERT_GT(ends[400] - ends[399], solicited_reply_size(what)) << "the second response is queued between two replies";
+    ASSERT_EQ(ends.back(), io.output.size());
+
+    const std::size_t taken = take(ends);
+    socket_takes(io, taken);
+    const int left = static_cast<int>(std::count_if(ends.begin(), ends.end(), [taken](std::size_t end) { return end <= taken; }));
+    EXPECT_EQ(replies_admitted_before_the_cut(protocol, io, what, 1100), left)
+        << "the socket took " << taken << " bytes of " << ends.back() << ": " << left << " replies have wholly left";
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+} // namespace qb1270_queue_test
+
+// The partial write. The socket takes what it can -- the middle of a frame as readily as its end -- and every frame the
+// server writes moves the output, not the replies alone: a reply is forgiven when its LAST byte has left, no sooner
+// (the bytes queued before it, or all of it but one octet, forgive nothing) and no later, and one write forgives the
+// replies it carried away, not the count. Read at each edge of the first reply, of the second, around the response
+// queued between the 400th and the 401st, and at the end of the output; and again on an io whose count of bytes written
+// wraps in the middle of the queue, as a 32-bit one does every 4 GiB.
+TEST(HTTP2ServerProtocol, AReplySplitAcrossAPartialWriteIsForgivenWhenItsLastByteHasLeft) {
+    using qb1270_queue_test::ends_t;
+    const std::vector<std::pair<const char *, std::function<std::size_t(ends_t)>>> takes = {
+        {"nothing", [](ends_t) -> std::size_t { return 0; }},
+        {"one octet", [](ends_t) -> std::size_t { return 1; }},
+        {"all that is queued before the first reply but one octet", [](ends_t e) { return e[0] - (e[1] - e[0]) - 1; }},
+        {"all that is queued before the first reply", [](ends_t e) { return e[0] - (e[1] - e[0]); }},
+        {"the first octet of the first reply", [](ends_t e) { return e[0] - (e[1] - e[0]) + 1; }},
+        {"the first reply but its last octet", [](ends_t e) { return e[0] - 1; }},
+        {"the first reply", [](ends_t e) { return e[0]; }},
+        {"the first reply and an octet of the second", [](ends_t e) { return e[0] + 1; }},
+        {"the second reply but its last octet", [](ends_t e) { return e[1] - 1; }},
+        {"the second reply", [](ends_t e) { return e[1]; }},
+        {"the 400th reply", [](ends_t e) { return e[399]; }},
+        {"the response queued behind the 400th reply", [](ends_t e) { return e[400] - (e[1] - e[0]); }},
+        {"the 401st reply but its last octet", [](ends_t e) { return e[400] - 1; }},
+        {"the 401st reply", [](ends_t e) { return e[400]; }},
+        {"everything but the last octet", [](ends_t e) { return e[999] - 1; }},
+        {"everything", [](ends_t e) { return e[999]; }},
+    };
+    for (const auto what : all_solicited_replies) {
+        for (const std::size_t already_written : {std::size_t{0}, std::size_t{123456}, static_cast<std::size_t>(-1) - 9000u}) {
+            for (const auto &[name, take] : takes) {
+                SCOPED_TRACE(std::string(what == solicited_reply::pong ? "PING" : "SETTINGS") + ", the io had written "
+                             + std::to_string(already_written) + " bytes, the socket takes " + name);
+                qb1270_queue_test::expect_replies_forgiven_as_their_last_byte_leaves(what, already_written, take);
+            }
+        }
+    }
+}
+
+// An io handler that does not count what its socket took -- the protocol is a template, and a handler written outside
+// qb-io need not offer `bytes_written()` -- still shows what it queues (`out()`): its replies are forgiven together,
+// when its output is seen empty, and counted until then. A thousand queued and half of them gone, the output not
+// empty: the 1001st closes the connection; the output emptied between rounds of 999: never closed.
+TEST(HTTP2ServerProtocol, AnIoThatDoesNotCountWhatItsSocketTookIsForgivenWhenItsOutputIsEmpty) {
+    using PeerProtocol = qb::protocol::http2::ServerHttp2Protocol<Http2PeerFakeIO>;
+    for (const auto what : all_solicited_replies) {
+        SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
+        {
+            Http2PeerFakeIO io;
+            PeerProtocol    protocol(io);
+            do_handshake(protocol, io);
+            io.output.reset();
+            solicit_replies(io, what, qb1270_test::control_budget);
+            drive(protocol, io);
+            ASSERT_TRUE(protocol.ok()) << "a thousand replies queued are within the bound";
+            io.output.free_front(500 * solicited_reply_size(what)); // half of them left, unseen: the output is not empty
+            solicit_replies(io, what);
+            drive(protocol, io);
+            EXPECT_FALSE(protocol.ok()) << "the 1001st reply of an output never seen empty did not close the connection";
+            EXPECT_NE(find_frame_offset(io.output, FrameType::GOAWAY), SIZE_MAX);
+        }
+        {
+            Http2PeerFakeIO io;
+            PeerProtocol    protocol(io);
+            do_handshake(protocol, io);
+            for (int round = 0; round < 5 && protocol.ok(); ++round) {
+                io.output.reset(); // the socket took everything
+                solicit_replies(io, what, qb1270_test::control_budget - 1);
+                drive(protocol, io);
+            }
+            EXPECT_TRUE(protocol.ok()) << "an output seen empty did not forgive the replies that left it";
+            EXPECT_EQ(solicited_reply_ends(io.output).size(), static_cast<std::size_t>(qb1270_test::control_budget - 1));
+        }
+    }
+}
+
+// Any interleaving. Replies solicited a few or a few hundred at a time, a request served now and then, and a socket
+// that takes whatever it takes -- nothing, a handful of bytes, half a frame, everything -- two thousand steps of it from
+// a fixed seed, the queue kept under the bound: its head moves, it wraps and it grows at every phase of both. The test
+// keeps its own account, from the bytes: a reply is queued until the socket has taken its last byte. At the end the
+// server must queue exactly as many more replies as that account leaves under the bound, then close the connection.
+TEST(HTTP2ServerProtocol, TheCountFollowsAnyInterleavingOfRepliesSolicitedAndBytesTaken) {
+    for (const auto what : all_solicited_replies) {
+        for (const std::uint32_t seed : {1u, 20261111u, 0x9E3779B9u}) {
+            SCOPED_TRACE(std::string(what == solicited_reply::pong ? "PING" : "SETTINGS") + ", seed " + std::to_string(seed));
+            qb1244_test::AnsweringIO       io;
+            qb1244_test::AnsweringProtocol protocol(io);
+            qb1270_test::answer_in_the_dispatch(io, protocol);
+            socket_takes_everything(io);
+            io.wire.reset();
+            std::uint32_t state = seed;
+            const auto    next  = [&state](std::uint32_t below) {
+                state = state * 1664525u + 1013904223u;
+                return (state >> 8) % below;
+            };
+            std::deque<std::size_t> queued;     // where each reply still queued ends, counted from the first byte written
+            std::size_t             parsed = 0; // the bytes written whose frames the account has read
+            std::size_t             total  = 0; // the replies solicited
+            uint32_t                sid    = 1;
+            for (int step = 0; step < 2000; ++step) {
+                const std::size_t room = static_cast<std::size_t>(qb1270_test::control_budget - 1) - queued.size();
+                const std::size_t ask  = std::min<std::size_t>(room, next(4) == 0 ? next(300) : next(6));
+                solicit_replies(io, what, static_cast<int>(ask));
+                total += ask;
+                if (next(16) == 0) {
+                    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                               encode_hpack_headers(default_request_headers("/served")));
+                    sid += 2;
+                }
+                drive(protocol, io);
+                ASSERT_TRUE(protocol.ok()) << "closed at step " << step << " with " << queued.size() + ask << " replies queued";
+                for (std::size_t at = parsed - io.wire.size(); at < io.output.size();) { // the frames this step wrote
+                    const auto frame = peek_frame_header(io.output, at);
+                    at += qb::protocol::http2::FRAME_HEADER_SIZE + frame.get_payload_length();
+                    if ((frame.get_type() == FrameType::PING || frame.get_type() == FrameType::SETTINGS)
+                        && (frame.flags & qb::protocol::http2::FLAG_ACK) != 0) {
+                        queued.push_back(io.wire.size() + at);
+                    }
+                    parsed = io.wire.size() + at;
+                }
+                const std::uint32_t how = next(8);
+                socket_takes(io, how == 0   ? io.output.size()
+                                 : how == 1 ? 0
+                                            : std::min<std::size_t>(io.output.size(), next(how < 5 ? 40 : 4000)));
+                while (!queued.empty() && queued.front() <= io.wire.size()) {
+                    queued.pop_front();
+                }
+            }
+            const auto ends = solicited_reply_ends(written_and_queued(io));
+            ASSERT_EQ(ends.size(), total) << "a reply solicited was not written";
+            ASSERT_EQ(
+                static_cast<std::size_t>(std::count_if(ends.begin(), ends.end(), [&io](std::size_t end) { return end > io.wire.size(); })),
+                queued.size())
+                << "the test's account of the replies queued disagrees with the bytes";
+            EXPECT_EQ(replies_admitted_before_the_cut(protocol, io, what, 1100), qb1270_test::control_budget - static_cast<int>(queued.size()))
+                << queued.size() << " replies were queued after " << total << " solicited and " << io.wire.size() << " bytes taken";
+            EXPECT_EQ(io.goaway_count, 1);
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        }
+    }
+}
+
+// A protocol reset starts a new connection: none of the replies the last one left queued is counted on it, whatever
+// the io's output holds when the first reply is solicited -- here 32 KiB the io wrote of its own, more than the last
+// connection's replies took, so that their positions fall inside the new output. A thousand queued on the last
+// connection, a reset, and the new connection queues its own thousand before the 1001st closes it.
+TEST(HTTP2ServerProtocol, AProtocolResetForgetsTheRepliesTheLastConnectionLeftQueued) {
+    for (const auto what : all_solicited_replies) {
+        SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        solicit_replies(io, what, qb1270_test::control_budget - 1); // with the handshake's ACK, a thousand
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        ASSERT_EQ(solicited_reply_ends(io.output).size(), static_cast<std::size_t>(qb1270_test::control_budget));
+
+        protocol.reset();
+        io.input.reset();
+        io.output.reset();
+        std::memset(io.output.allocate_back(32 * 1024), 0, 32 * 1024); // what the io itself wrote first, still queued
+        do_handshake(protocol, io);
+        EXPECT_EQ(replies_admitted_before_the_cut(protocol, io, what, 1100), qb1270_test::control_budget - 1)
+            << "the replies of the connection before were counted on the new one";
+        EXPECT_EQ(io.goaway_count, 1);
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    }
+}
+
+// The resets a client solicits on streams it never opened -- a frame on a closed stream, a stream refused, a request
+// reset or refused before its dispatch -- are replies it draws for nothing, as a PONG or a SETTINGS ACK is: they count
+// with them while the output holds them. 333 PONGs, 333 SETTINGS ACKs and 333 resets queued by a client that reads
+// nothing, then one more reply of any kind: a thousand queued, within the bound; the next one, of that kind, closes the
+// connection and is not written. Each kind was counted apart and forgiven apart -- the PONGs and ACKs between two
+// units of progress, the resets between two streams opened -- so a thousand of them queued closed nothing (Huly
+// QB-1270, the review of the queued model).
+TEST(HTTP2ServerProtocol, PongsSettingsAcksAndSolicitedResetsShareTheQueuedCount) {
+    struct kind {
+        const char                                    *name;
+        std::function<void(Http2FakeIO &, uint32_t &)> solicit; // one more reply of this kind; the next free stream id
+    };
+    std::vector<kind> kinds = {
+        {"a PING", [](Http2FakeIO &io, uint32_t &) { solicit_replies(io, solicited_reply::pong); }},
+        {"a SETTINGS", [](Http2FakeIO &io, uint32_t &) { solicit_replies(io, solicited_reply::settings_ack); }},
+        {"a frame on a closed stream",
+         [](Http2FakeIO &io, uint32_t &) { qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1); }},
+    };
+    for (const auto how : qb1270_test::all_before_dispatch) {
+        kinds.push_back({"a reset before dispatch", [how](Http2FakeIO &io, uint32_t &sid) {
+                             qb1270_test::provoke_before_dispatch(io, how, sid);
+                             sid += 2;
+                         }});
+    }
+    int nth = 0;
+    for (const auto &[name, one_more] : kinds) {
+        SCOPED_TRACE(std::string(name) + " (kind " + std::to_string(nth++) + ")");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        qb1270_test::closed_stream_one(protocol, io);
+        socket_takes_everything(io); // the handshake left; from here the client reads nothing
+        io.wire.reset();
+        for (int i = 0; i < 333; ++i) {
+            solicit_replies(io, solicited_reply::pong);
+            solicit_replies(io, solicited_reply::settings_ack);
+            qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
+        }
+        drive(protocol, io);
+        ASSERT_TRUE(protocol.ok());
+        ASSERT_EQ(solicited_reply_ends(io.output).size() + qb1270_test::resets_sent(io.output), 999u);
+        uint32_t sid = 3;
+        one_more(io, sid);
+        drive(protocol, io);
+        EXPECT_TRUE(protocol.ok()) << "a thousand replies queued are within the bound";
+        EXPECT_EQ(solicited_reply_ends(io.output).size() + qb1270_test::resets_sent(io.output), 1000u);
+        const std::size_t queued = io.output.size();
+        one_more(io, sid);
+        drive(protocol, io);
+        EXPECT_EQ(io.goaway_count, 1) << "the 1001st reply queued, of another kind than the others, closed nothing";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(solicited_reply_ends(io.output).size() + qb1270_test::resets_sent(io.output), 1000u) << "the 1001st reply was written";
+        const auto frames = parse_emitted_frames(io.output);
+        ASSERT_FALSE(frames.empty());
+        EXPECT_EQ(frames.back().type, FrameType::GOAWAY);
+        EXPECT_EQ(frames.back().payload_offset - qb::protocol::http2::FRAME_HEADER_SIZE, queued) << "something was written before the GOAWAY";
+    }
+}
+
+// A reset the client solicits is queued until the socket has taken its LAST byte, as a PONG is. Each kind of reset -- a
+// frame on a closed stream, a request reset before its dispatch, a request refused for a limit, whose answer and reset
+// are one reply -- is written first in an empty output; the socket then takes it but for its last byte, or whole, and
+// the client pings until the connection is closed. While that byte has not left, the reset is one of the thousand: 999
+// PONGs are admitted behind it. Once it has left, a thousand are. A position taken before the reset is written -- where
+// it starts -- forgave it as soon as the output before it had left (Huly QB-1270).
+TEST(HTTP2ServerProtocol, ASolicitedResetIsForgivenWhenItsLastByteHasLeft) {
+    struct kind {
+        std::string                                  name;
+        std::function<void(Http2FakeIO &, uint32_t)> solicit; // one reset of this kind; the next free stream id
+    };
+    std::vector<kind> kinds;
+    int               nth = 0;
+    for (const auto frame :
+         {qb1270_test::closed_frame::data, qb1270_test::closed_frame::headers, qb1270_test::closed_frame::window_update_of_zero,
+          qb1270_test::closed_frame::priority_of_four_octets}) {
+        kinds.push_back({"a frame on a closed stream (kind " + std::to_string(nth++) + ")", [frame](Http2FakeIO &io, uint32_t) {
+                             qb1270_test::send_on_closed(io, frame, 1);
+                         }});
+    }
+    nth = 0;
+    for (const auto how : qb1270_test::all_before_dispatch) {
+        kinds.push_back({"a reset before dispatch (kind " + std::to_string(nth++) + ")", [how](Http2FakeIO &io, uint32_t sid) {
+                             qb1270_test::provoke_before_dispatch(io, how, sid);
+                         }});
+    }
+    for (const auto &[name, solicit] : kinds) {
+        for (const bool last_byte_left : {false, true}) {
+            SCOPED_TRACE(name + (last_byte_left ? ", taken whole" : ", taken but for its last byte"));
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            qb1270_test::closed_stream_one(protocol, io);
+            socket_takes_everything(io); // the handshake left: the reset is the first thing the output holds
+            io.wire.reset();
+            solicit(io, 3);
+            drive(protocol, io);
+            ASSERT_TRUE(protocol.ok());
+            std::size_t resets = 0, reset_end = 0;
+            for (const auto &f : parse_emitted_frames(io.output)) {
+                if (f.type == FrameType::RST_STREAM) {
+                    ++resets;
+                    reset_end = f.payload_offset + f.payload_length;
+                }
+            }
+            ASSERT_EQ(resets, 1u);
+            socket_takes(io, last_byte_left ? reset_end : reset_end - 1);
+            EXPECT_EQ(replies_admitted_before_the_cut(protocol, io, solicited_reply::pong, 1100),
+                      qb1270_test::control_budget - (last_byte_left ? 0 : 1))
+                << (last_byte_left ? "a reset the socket took whole was still counted" : "a reset whose last byte had not left was forgiven");
+            EXPECT_EQ(io.goaway_count, 1);
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        }
+    }
+}
+
+// The resets a client solicits keep their own budget as well, between two streams it opens, whatever the socket took
+// (Huly QB-1270): a client that READS every reset is still closed at the 1001st with no stream opened between them
+// (FramesOnAClosedStreamPastTheControlBudgetCloseTheConnection and its siblings). What forgives that budget is a stream
+// opened, and that is what a client that reads nothing used: a request SERVED after every 999 resets forgave it each
+// time -- 4995 resets queued, no GOAWAY, and so on up to the write-buffer cap. The resets are counted while they are
+// queued now, and the 1001st closes the connection. What costs the server nothing -- an upload opened and cancelled --
+// forgives the budget of a client that reads too, and is itself counted by the Rapid Reset guard: the 101st
+// cancellation closes the connection, a hundred rounds at most.
+TEST(HTTP2ServerProtocol, TheResetsAClientSolicitsCountWhileQueuedAndBetweenTwoStreamsItOpens) {
+    {
+        SCOPED_TRACE("a client that never reads, a request served after every 999 resets");
+        qb1244_test::AnsweringIO       io;
+        qb1244_test::AnsweringProtocol protocol(io);
+        qb1270_test::answer_in_the_dispatch(io, protocol);
+        qb1270_test::open_upload(io, 1);
+        push_frame(io, FrameType::RST_STREAM, 0, 1, {0x00, 0x00, 0x00, 0x08}); // CANCEL: stream 1 is closed
+        drive(protocol, io);
+        socket_takes_everything(io); // the handshake left; from here the client reads nothing
+        io.wire.reset();
+        uint32_t sid = 3;
+        for (int round = 0; round < 5 && io.goaway_count == 0; ++round, sid += 2) {
+            for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
+                qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
+            }
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+                       encode_hpack_headers(default_request_headers("/served")));
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 1) << "the resets of a client that never reads queued without a bound";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(io.request_count, 1) << "the request of the first round was served, and forgave nothing";
+        EXPECT_EQ(qb1270_test::resets_sent(io.output), static_cast<std::size_t>(qb1270_test::control_budget))
+            << "a thousand resets queued is the bound: the 1001st is not written";
+    }
+    {
+        SCOPED_TRACE("a client that reads, an upload opened and cancelled after every 999 resets");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        qb1270_test::closed_stream_one(protocol, io); // the first cancellation
+        int      rounds = 0;
+        uint32_t sid    = 3;
+        for (; rounds < 400 && io.goaway_count == 0; ++rounds, sid += 2) {
+            for (int i = 0; i < qb1270_test::control_budget - 1; ++i) {
+                qb1270_test::send_on_closed(io, qb1270_test::closed_frame::data, 1);
+            }
+            qb1270_test::open_upload(io, sid);
+            push_frame(io, FrameType::RST_STREAM, 0, sid, {0x00, 0x00, 0x00, 0x08});
+            drive(protocol, io);
+            if (io.goaway_count == 0) {
+                socket_takes_everything(io);
+            }
+        }
+        EXPECT_EQ(io.goaway_count, 1) << "cancelled uploads forgave the reset budget without a bound";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(rounds, qb1244_test::max_resets) << "the Rapid Reset ceiling: the first cancellation and a hundred more";
+        EXPECT_EQ(qb1270_test::resets_sent(written_and_queued(io)),
+                  static_cast<std::size_t>(qb1244_test::max_resets * (qb1270_test::control_budget - 1)));
     }
 }

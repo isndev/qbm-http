@@ -663,6 +663,10 @@ public:
         LOG_HTTP_INFO_PA(this->id(), "Handshake complete. ALPN selected: " << (alpn_proto.empty() ? "none/http1.1" : alpn_proto));
         if (alpn_proto == "h2") {
             LOG_HTTP_DEBUG_PA(this->id(), "Switching to HTTP/2 protocol.");
+            // The protocol counts the replies its peer solicited that are still queued in this session's output -- PONGs,
+            // SETTINGS ACKs, resets -- on what its socket took, `bytes_written()`: without it they would be forgiven only
+            // once the output is empty (Huly QB-1270).
+            static_assert(qb::protocol::http2::counts_bytes_written<session>, "the HTTP/2 session counts the bytes its socket took");
             _http2_protocol = this->template switch_protocol<Http2Protocol>(*this);
             // The server drains: the connection serves nothing. Its final GOAWAY names stream 0, so the client
             // knows none of its streams was processed (Huly QB-91).

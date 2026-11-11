@@ -394,7 +394,7 @@ notification or a reference to the retired stream.
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,282-432,472-497,662 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,282-432,472-497,666 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {

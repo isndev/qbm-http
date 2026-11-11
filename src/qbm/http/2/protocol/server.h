@@ -118,7 +118,6 @@ private:
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
     std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client resets, sent or provoked; streams opened (Rapid Reset)
-    std::uint32_t _control_reply_count      = 0;                     ///< PONG+SETTINGS-ACK replies since real progress (flood guard)
     std::uint32_t _continuation_frame_count = 0;                     ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
@@ -264,7 +263,6 @@ public:
         _last_client_initiated_stream_id = 0;
         _next_server_initiated_stream_id = 2;
         _rst_stream_count = _client_streams_opened = 0;
-        _control_reply_count                       = 0;
         _continuation_frame_count                  = 0;
         _connection_active                         = true;
         _graceful_shutdown_initiated               = false;
@@ -287,8 +285,7 @@ public:
         _push_response_leaving = 0;
         _peer_goaway_received  = false;
 
-        _streams_opened_at_control_reply = 0;     // the PING/SETTINGS budget forgiven from the first stream opened (Huly QB-1270)
-        _streams_wait_for_socket         = false; // the streams that waited for the socket's room are gone (Huly QB-86)
+        _streams_wait_for_socket = false; // the streams that waited for the socket's room are gone (Huly QB-86)
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -471,13 +468,9 @@ public:
             this->conditionally_send_connection_window_update();
             return;
         }
-        // Octets of a request body accepted are real progress: they forgive the PING/SETTINGS budget (CVE-2019-9512/9515),
-        // past every rejection above. A frame that carries none -- empty, or padding alone -- moves no request forward
-        // and forgave it, an empty DATA after every 999 PINGs holding the guard at zero (Huly QB-1270); the end of the
-        // stream it may carry is progress once the request is dispatched (control_reply_over_budget()).
-        if (!data_event.payload.data_payload.empty()) {
-            _control_reply_count = 0;
-        }
+        // Nothing here forgives the PONGs and SETTINGS ACKs the client solicited: they are counted while the output holds
+        // them, whatever the client sends (queue_control_reply()). A DATA accepted forgave them -- an empty one first, then
+        // one carrying an octet of the body after every 999 PINGs, which held the guard at zero (Huly QB-1270).
         body_pipe.put(reinterpret_cast<const char *>(data_event.payload.data_payload.data()), data_event.payload.data_payload.size());
 
         if (header.flags & FLAG_END_STREAM) {
@@ -621,9 +614,9 @@ public:
         }
 
         // The HEADERS is now accepted onto a valid, active stream (a new request or a trailers block): a fresh
-        // CONTINUATION budget for this header block starts HERE, past every rejection check above. It no longer
-        // forgives the PING/SETTINGS budget: a block refused as malformed, or one that opens an upload never
-        // dispatched, moves no request forward -- the request it begins does, once dispatched (Huly QB-1270).
+        // CONTINUATION budget for this header block starts HERE, past every rejection check above. It forgives nothing
+        // of the PONGs and SETTINGS ACKs the client solicited, which are counted while the output holds them
+        // (queue_control_reply(); Huly QB-1270).
         _continuation_frame_count = 0;
 
         bool is_current_block_trailers = stream.headers_received_main;
@@ -860,19 +853,18 @@ public:
             }
         }
 
-        // Bound SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from
-        // flow control, so a flood of empty SETTINGS frames grows the output pipe without limit.
-        // Same counter/reset discipline as the PING guard.
-        if (this->control_reply_over_budget()) {
-            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (flood)");
-            return;
-        }
-        // Send SETTINGS ACK using centralized frame sending
+        // Send the SETTINGS ACK -- unless a thousand ACKs and PONGs the client solicited are still queued. Bound
+        // SETTINGS-ACK amplification (CVE-2019-9515): like PONGs, ACKs are exempt from flow control, so a flood of empty
+        // SETTINGS frames from a client that does not read grows the output pipe without limit. One count with the
+        // PONGs, of the replies the output still holds (queue_control_reply()).
         Http2FrameData<SettingsFrame> ack_frame;
         ack_frame.header.type  = static_cast<uint8_t>(FrameType::SETTINGS);
         ack_frame.header.flags = FLAG_ACK;
         ack_frame.header.set_stream_id(0);
-        this->_io << ack_frame;
+        if (!this->queue_control_reply(ack_frame)) [[unlikely]] {
+            this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive SETTINGS control frames (flood)");
+            return;
+        }
         LOG_HTTP_DEBUG_PA(0, "Server: Processed SETTINGS frame from client. Sending ACK.");
         // A SETTINGS_MAX_CONCURRENT_STREAMS raised makes room for a promised response that waits (Huly QB-1202).
         if (!_waiting_push_responses.empty()) [[unlikely]] {
@@ -1168,13 +1160,9 @@ public:
             // This is a PING from client, send PONG (PING with ACK).
             // Bound PONG amplification (CVE-2019-9512): control frames are exempt from HTTP/2
             // flow control, so a peer flooding PINGs while stalling its own reads makes the
-            // output pipe grow without limit. The budget is forgiven whenever the peer makes real
-            // request progress (control_reply_over_budget()); if control replies pile up past the
-            // cap without any, treat it as a flood and close.
-            if (this->control_reply_over_budget()) {
-                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (flood)");
-                return;
-            }
+            // output pipe grow without limit. The PONGs are counted while the output holds them,
+            // with the SETTINGS ACKs, and forgiven as the socket takes them (queue_control_reply());
+            // when a thousand are queued this one is not written: a flood, and the connection closes.
             Http2FrameData<PingFrame> pong_frame;
             pong_frame.header.type  = static_cast<uint8_t>(FrameType::PING);
             pong_frame.header.flags = FLAG_ACK;
@@ -1182,7 +1170,9 @@ public:
             // pong_frame.header.set_payload_length(HTTP2_PING_PAYLOAD_SIZE); // Length is implicit from PingFrame
             pong_frame.payload.opaque_data = ping_event.payload.opaque_data; // Echo opaque data
 
-            this->_io << pong_frame;
+            if (!this->queue_control_reply(pong_frame)) [[unlikely]] {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive PING control frames (flood)");
+            }
         }
     }
 
@@ -1922,7 +1912,10 @@ private:
      *        empty body and END_STREAM, then RST_STREAM(NO_ERROR), which asks the client to stop sending
      *        what is left of the request without an error -- a complete response sent before the request
      *        is (RFC 9113 §8.1). The request is never routed; the connection and its other streams go on.
-     *        A response that cannot be sent falls back to the stream error it replaces.
+     *        A response that cannot be sent falls back to the stream error it replaces. The answer and its reset
+     *        are one reply the client solicits on a stream it never opened: held to the closed-stream budget and,
+     *        while queued, to the count of the replies it solicited (admit_solicited_reset(); Huly QB-1270) -- past
+     *        either the connection is closed and nothing is answered.
      * @param stream_id The refused stream.
      * @param status    The answer.
      * @param reason    For the log.
@@ -1947,10 +1940,10 @@ private:
         if (!sent) {
             if (_server_streams.find(stream_id) != _server_streams.end())
                 this->on_stream_error(stream_id, ErrorCode::ENHANCE_YOUR_CALM, reason);
-            return;
-        }
-        if (_server_streams.find(stream_id) != _server_streams.end())
+        } else if (_server_streams.find(stream_id) != _server_streams.end()) {
             this->send_rst_stream(stream_id, ErrorCode::NO_ERROR, reason);
+        }
+        this->control_reply_written(); // the answer and its reset, counted while queued as admit_solicited_reset() admitted them
     }
 
     /**
@@ -3384,14 +3377,15 @@ private:
      *        dispatch -- a malformed request or trailer section, DATA over the window, a body against its content-length,
      *        trailers without END_STREAM, a stream error on an upload -- frees no application work, and the client gets one
      *        per new stream id: the published form of the reset flood (CVE-2019-9514). It counts against the closed-stream
-     *        budget (admit_solicited_reset()); past it the connection is closed and the reset is not sent (Huly QB-1270). A
+     *        budget and, while it is queued, with the replies the client solicited (admit_solicited_reset(), which holds
+     *        both bounds); past either the connection is closed and the reset is not sent (Huly QB-1270). A
      *        stream the server reset itself is not counted again (a handler that threw: closed). A client RST_STREAM on an
      *        id whose reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling
      *        only.
      */
     void
     send_provoked_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
-        bool past_ceiling = false;
+        bool past_ceiling = false, solicited = false;
         if (const auto it = _server_streams.find(stream_id); it != _server_streams.end() && _connection_active) {
             const Http2ServerStream &stream = it->second;
             if (!stream.rst_stream_sent && !stream.rst_stream_received) {
@@ -3400,10 +3394,15 @@ private:
                                    && _rst_stream_count * 2u > _client_streams_opened;
                 } else if (!this->admit_solicited_reset("Excessive stream resets before dispatch (HTTP/2 reset flood)")) {
                     return;
+                } else {
+                    solicited = true;
                 }
             }
         }
         this->send_rst_stream(stream_id, error_code, context_msg);
+        if (solicited) {
+            this->control_reply_written(); // counted while it is queued, as admit_solicited_reset() admitted it
+        }
         if (past_ceiling) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets provoked (HTTP/2 MadeYouReset)");
         }
@@ -3475,21 +3474,29 @@ private:
      *        never forgiven by a frame it can send for nothing, such as an empty DATA (admit_solicited_reset(), the budget
      *        a stream refused and a request reset before its dispatch share): past them the connection is closed with
      *        GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of CVE-2019-9514;
-     *        Huly QB-1270).
+     *        Huly QB-1270). The reset is also one of the replies the client solicited that are counted while the output
+     *        holds them, with the PONGs and the SETTINGS ACKs: a thousand queued close the connection the same way,
+     *        whatever streams the client opens (admit_solicited_reset() holds both bounds).
      */
     void
     send_closed_stream_rst(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
         if (this->admit_solicited_reset("Excessive frames on closed streams (HTTP/2 reset flood)")) {
             this->send_rst_stream(stream_id, error_code, context_msg);
+            this->control_reply_written(); // counted while it is queued, as admit_solicited_reset() admitted it
         }
     }
 
     /**
      * @brief Count one RST_STREAM the client solicits on a stream it never opened -- a frame on a closed stream, a stream
-     *        refused, a request reset or refused before its dispatch -- against the closed-stream budget: at most
-     *        MAX_QUEUED_CONTROL_REPLIES between two streams the client opens (_client_streams_opened, what the Rapid Reset
-     *        guard weighs: a request dispatched, or one it cancels), which no frame it sends for nothing forgives. Past it
-     *        the connection is closed with GOAWAY(ENHANCE_YOUR_CALM), @p flood its debug data (Huly QB-1270).
+     *        refused, a request reset or refused before its dispatch -- against two bounds of MAX_QUEUED_CONTROL_REPLIES.
+     *        The closed-stream budget: that many between two streams the client opens (_client_streams_opened, what the
+     *        Rapid Reset guard weighs: a request dispatched, or one it cancels), which no frame it sends for nothing
+     *        forgives -- and which holds for a client that reads every reset. And the replies queued: such a reset is
+     *        one the client draws for nothing, as a PONG or a SETTINGS ACK is, so it counts with them while the output
+     *        holds it (control_replies_at_bound()); the caller records it once written (control_reply_written()). A
+     *        client that read nothing and had a request served after every 999 resets was forgiven each time: its
+     *        resets queued without a bound. Past either the connection is closed with GOAWAY(ENHANCE_YOUR_CALM),
+     *        @p flood its debug data (Huly QB-1270).
      * @return Whether the reset may be sent.
      */
     [[nodiscard]] bool
@@ -3498,28 +3505,11 @@ private:
             _streams_opened_at_closed_reply = _client_streams_opened;
             _closed_stream_reply_count      = 0;
         }
-        if (++_closed_stream_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES) {
+        if (++_closed_stream_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES || this->control_replies_at_bound()) {
             this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, flood);
             return false;
         }
         return true;
-    }
-
-    /**
-     * @brief Count one PONG or SETTINGS ACK the client solicits against the PING/SETTINGS budget (CVE-2019-9512/9515): at
-     *        most MAX_QUEUED_CONTROL_REPLIES between two units of real request progress -- a stream the client opens (a
-     *        request dispatched, or one it cancels: _client_streams_opened, read here) or octets of a request body accepted
-     *        (on(DataFrame) forgives them there). A frame that moves no request forward forgave it: an empty DATA, a DATA of
-     *        padding alone, a HEADERS refused as malformed or opening an upload never dispatched (Huly QB-1270).
-     * @return Whether the reply is past the budget: the caller closes the connection with GOAWAY(ENHANCE_YOUR_CALM).
-     */
-    [[nodiscard]] bool
-    control_reply_over_budget() noexcept {
-        if (_client_streams_opened != _streams_opened_at_control_reply) { // a stream opened since: the budget is forgiven
-            _streams_opened_at_control_reply = _client_streams_opened;
-            _control_reply_count             = 0;
-        }
-        return ++_control_reply_count > ::qb::http2::protocol_limits::MAX_QUEUED_CONTROL_REPLIES;
     }
 
     /**
@@ -3565,8 +3555,6 @@ private:
     uint32_t _highest_client_stream_id = 0;
     /// The resets admit_solicited_reset() let go since the client last opened a stream (_client_streams_opened, as it was).
     std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
-    /// _client_streams_opened when control_reply_over_budget() last forgave the PING/SETTINGS budget (Huly QB-1270).
-    std::uint32_t _streams_opened_at_control_reply = 0;
 
 }; // class ServerHttp2Protocol
 
