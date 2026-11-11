@@ -122,7 +122,7 @@ struct request_limits {
 
 #include <qb/io/async.h>
 #include <qb/system/allocator/pipe.h>
-#include <qb/utility/branch_hints.h> // QB_MSVC_FORCEINLINE (the Host check's helpers, Huly QB-1186)
+#include <qb/utility/branch_hints.h> // QB_MSVC_FORCEINLINE (the Host check's helpers, Huly QB-1186), QB_NOINLINE (QB-1248)
 #include "../../headers.h"           // detail::is_forbidden_trailer_field (trailer sections, Huly QB-1067)
 #include "../../message_base.h"      // detail::store_received_trailer (trailers(), Huly QB-1073)
 #include "../../origin.h"            // origin::request_target_uri (Huly QB-1177), is_request_authority (QB-1186)
@@ -632,15 +632,15 @@ private:
             if (parser->content_length > self->_limits.max_body_size) {
                 return refuse_with_status(parser, "HTTP Content-Length exceeds configured body size limit", HTTP_STATUS_PAYLOAD_TOO_LARGE);
             }
-            // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()`
-            // is MOVE-ASSIGNED from `_chunked` in on_message_complete, which deallocates whatever
-            // was reserved here, so reserving on it was both dangerous and pure waste.
+            // Reserve on `_chunked` — the buffer that actually receives the body. `msg.body().raw()` is MOVE-ASSIGNED from `_chunked` in
+            // on_message_complete, which deallocates whatever was reserved here, so reserving on it was both dangerous and pure waste.
             //
             // And cap the hint: see MAX_BODY_RESERVE_HINT. `content_length` is peer-supplied and is
             // known before any body byte arrives, so an unbounded reserve turns a ~40-byte request
             // into a 100 MB allocation held for the connection's lifetime.
             const auto hint = std::min<std::size_t>(static_cast<std::size_t>(parser->content_length), protocol_limits::MAX_BODY_RESERVE_HINT);
-            self->body_buffer(hint).reserve(hint); // the initial buffer when the hint fits it: body_buffer() (Huly QB-1248)
+            if (hint != 0) // a declared 0 (a GET, a bodyless status) makes no call; body_buffer(): the initial buffer (Huly QB-1248)
+                self->body_buffer(hint).reserve(hint);
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
         msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
@@ -707,10 +707,8 @@ private:
     /**
      * @brief HTTP parser settings with callback functions
      *
-     * This static configuration defines all the callbacks used by the
-     * llhttp parser. Most callbacks are set to default no-op functions,
-     * while the essential ones are set to the specific handlers defined
-     * in this class.
+     * This static configuration defines all the callbacks used by the llhttp parser. Most callbacks are set to default
+     * no-op functions, while the essential ones are set to the specific handlers defined in this class.
      */
     static const http_settings_s inline settings{
         &Parser::default_http_cb,      // on message begin
@@ -783,18 +781,23 @@ private:
     std::size_t               _body_bytes_seen   = 0;     ///< Total parsed body bytes for the current message
     std::size_t               _url_bytes_seen    = 0;     ///< Total URL bytes seen across fragmented on_url callbacks
     /// The next message's limits: set_request_limits(), normalized (0 = the largest size: one comparison each); kept by reset().
-    qb::http::request_limits   _limits         = qb::http::request_limits{}.normalized();
-    int                        _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
-    std::size_t                _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
-    bool                       _host_malformed = false; ///< One of them names no authority (note_host_field())
-    qb::allocator::pipe<char> &body_buffer(std::size_t expected); ///< `_chunked`, the initial buffer when a first write fits (QB-1248)
+    qb::http::request_limits _limits         = qb::http::request_limits{}.normalized();
+    int                      _refusal_status = 0;     ///< The status a refusal of the current message answers (refusal_status())
+    std::size_t              _host_fields    = 0;     ///< Host field lines of the current request's header section (check_host_field())
+    bool                     _host_malformed = false; ///< One of them names no authority (note_host_field())
+    QB_MSVC_FORCEINLINE      qb::allocator::pipe<char> &
+    body_buffer(std::size_t expected) { // `_chunked`; restored when null and a first write of `expected` fits: the test in line (QB-1248)
+        if (_chunked.capacity() == 0) [[unlikely]]
+            restore_body_buffer(expected);
+        return _chunked;
+    }
+    QB_NOINLINE QB_COLD void restore_body_buffer(std::size_t expected); ///< body_buffer()'s cold half: the pipe's initial buffer (QB-1248)
 
 public:
     /**
      * @brief Constructor
      *
-     * Initializes the parser and immediately calls reset() to prepare
-     * it for parsing a new message.
+     * Initializes the parser and immediately calls reset() to prepare it for parsing a new message.
      */
     Parser() noexcept
         : http__internal_s() {
@@ -807,14 +810,11 @@ public:
      * @param size Size of the buffer
      * @return HTTP parser error code or HPE_OK on success
      *
-     * Parses HTTP message data according to HTTP/1.1 specification.
-     * This method can handle both full messages and partial messages.
-     * For partial messages, it can be called multiple times with
-     * subsequent chunks of data until a complete message is parsed.
-     *
-     * When a parsing error occurs, the error_pos field is set to point
-     * to the position in the buffer where the error occurred, which
-     * can be useful for debugging.
+     * Parses HTTP message data according to HTTP/1.1 specification. This method can handle both full messages and
+     * partial messages. For partial messages, it can be called multiple times with subsequent chunks of data until a
+     * complete message is parsed.
+     * When a parsing error occurs, the error_pos field is set to point to the position in the buffer where the error
+     * occurred, which can be useful for debugging.
      */
     http_errno_t
     parse(const char *buffer, std::size_t const size) {
@@ -1260,24 +1260,28 @@ public:
 
 namespace qb::http {
 /**
- * @brief The body's buffer, given the pipe's initial buffer when it is null and the @p expected bytes -- a declared
- *        length's reserve, or a chunk -- fit it.
+ * @brief body_buffer()'s cold half: `_chunked`, null, given the pipe's initial buffer when the @p expected bytes -- a
+ *        declared length's reserve, or a body write -- fit it.
  * @details The buffer is moved into each message (on_message_complete()), so from the second body read through it --
- *          every chunked body of the protocol, every body of a Parser driven directly -- it was null, and the body's
+ *          every chunked body of the protocol, every body of a Parser driven directly -- it is null, and the body's
  *          first write took the pipe's slow path: 8 KiB for a body of a few octets, twice what the first message's took
  *          (Huly QB-1248). A first write past the initial size grows from a null pipe as it would from that buffer, so
- *          it is left null; a message that declares no length allocates nothing (a HEAD response that declares one
- *          gets the initial buffer, unwritten: 8 KiB before). qb's pipe now does the same: this keeps the parser apart.
+ *          it is left null; a message that declares no length allocates nothing (a HEAD response that declares one of
+ *          at most the initial size gets the initial buffer, unwritten: 8 KiB before). qb's pipe now does the same:
+ *          this keeps the parser apart.
+ *
+ *          body_buffer() keeps the test of the buffer in line and calls this only for a null one (Huly QB-1248: defined
+ *          out of line, the test was a call on every message under g++). A write of 0 bytes gets nothing, and a declared
+ *          length of 0 makes no call at all. The reserve of a declared length is written only by a Parser driven
+ *          directly past its header section (resume(), then parse() over the body): the protocol, server and client,
+ *          copies such a body from its input buffer and never writes `_chunked`.
  */
 template <typename MessageType>
-qb::allocator::pipe<char> &
-Parser<MessageType>::body_buffer(std::size_t expected) {
-    if (_chunked.capacity() == 0 && expected != 0) {
-        static const std::size_t initial = qb::allocator::pipe<char>{}.capacity(); // the pipe's own initial size, read once
-        if (expected <= initial) {
-            _chunked = qb::allocator::pipe<char>{};
-        }
+void
+Parser<MessageType>::restore_body_buffer(std::size_t expected) {
+    static const std::size_t initial = qb::allocator::pipe<char>{}.capacity(); // the pipe's own initial size, read once
+    if (expected != 0 && expected <= initial) {
+        _chunked = qb::allocator::pipe<char>{};
     }
-    return _chunked;
 }
 } // namespace qb::http

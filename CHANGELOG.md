@@ -271,7 +271,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   now, declared or chunked, in one allocation, as before. A chunked body whose first chunk fits 4096 and that grows
   past it reallocates once more on the way (4096, then 8192, copying what it holds, at most 4 KiB), as from a
   default-constructed buffer. The same 4096 comes from qb's own fix of the slow path (qb CHANGELOG, Huly QB-1248);
-  this one keeps the parser from depending on the pipe's growth policy.
+  this one keeps the parser from depending on the pipe's growth policy. `Parser::body_buffer()` tests the buffer in
+  line and calls `restore_body_buffer()`, out of line on the unlikely branch, only for a null one, and a declared
+  length of 0 makes no call (defined out of line, the test was a call on every message under g++: Huly QB-1248). The
+  reserve of a declared length is kept: a `Parser` driven directly past the headers writes the body into it, while
+  the protocol, server and client, copies such a body from its input buffer and never writes it.
 
 - **The WebSocket frame decoder allocates nothing per frame (Huly QB-1247).** `onMessage()` built a local
   `ws::Message` for every frame, whose pipe allocated 4 KiB at construction and freed it at the end of the frame --

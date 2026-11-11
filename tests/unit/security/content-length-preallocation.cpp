@@ -194,8 +194,8 @@ TEST(ContentLengthPreallocation, EveryBodyOfAKeptConnectionStartsFromTheInitialB
     const std::string head    = "POST /upload HTTP/1.1\r\nHost: example.test\r\n";
     const std::string chunked = head + "Transfer-Encoding: chunked\r\n\r\n";
     const std::string large(initial + 904, 'z');
-    // Warm: the first null buffer body_buffer() sees reads the pipe's initial size once (a one-time allocation), and it
-    // must not land in a counted scope below, whichever case runs first.
+    // Warm: the first null buffer restore_body_buffer() sees reads the pipe's initial size once (a one-time allocation)
+    // that must not land in a counted scope below, whichever case runs first.
     (void) read_two_messages(chunked, one_chunk("warm"));
 
     const auto declared = read_two_messages(head + "Content-Length: 5\r\n\r\n", "hello");
@@ -212,6 +212,11 @@ TEST(ContentLengthPreallocation, EveryBodyOfAKeptConnectionStartsFromTheInitialB
         EXPECT_EQ(small.second_count, 1u) << "the second takes the initial buffer, once";
         EXPECT_EQ(past.first_count, 1u) << "one growth";
         EXPECT_EQ(past.second_count, 1u) << "one growth from null, not the initial buffer and then a second";
+        // A declared length is reserved at the end of the header section: a Parser driven directly over the body writes
+        // into that reserve, and the body's bytes allocate nothing (the protocol copies such a body from its input).
+        EXPECT_EQ(declared_past.first_count, 0u) << "a declared body past the initial buffer is written into its reserve";
+        EXPECT_EQ(declared_past.second_count, 0u) << "on a kept connection too";
+        EXPECT_EQ(declared.second_count, 0u) << "a declared body that fits the initial buffer is written into it";
     }
 }
 
