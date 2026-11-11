@@ -390,11 +390,6 @@ public:
             return;
         }
         if (!data_payload.empty()) {
-            // Octets of the response accepted are real progress: they forgive the flood budget. A DATA that carries none
-            // -- empty, or padding alone -- moves nothing forward and forgave it, an empty DATA after every 999 PINGs
-            // holding the guard at zero (Huly QB-1270); the end of the stream it may carry completes the response, which
-            // forgives it there (process_complete_response_if_ready).
-            _control_reply_count = 0;
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
             const auto body_size = stream.assembled_response.body().size();
             if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
@@ -406,6 +401,12 @@ public:
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
                 return;
             }
+            // Octets of the response accepted -- past the rejections above, as the server does -- are real progress:
+            // they forgive the flood budget. A DATA that carries none (empty, or padding alone) moves nothing forward
+            // and forgave it, an empty DATA after every 999 PINGs holding the guard at zero, and so did one the stream
+            // was then reset for (Huly QB-1270); the end of the stream it may carry completes the response, which
+            // forgives it there (process_complete_response_if_ready).
+            _control_reply_count = 0;
         }
 
         if (data_event.header.flags & FLAG_END_STREAM) {
