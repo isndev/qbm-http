@@ -2865,3 +2865,101 @@ TEST(Http1ClientTest, ARequestWhoseLengthIsRefusedIsAnswered400ThenClosed) {
     }
     EXPECT_EQ(server.request_count(), 0) << "a request whose length is refused, or the one it carried, was served";
 }
+
+// On the wire (Huly QB-1248): a malformed request -- a method that is no token -- is answered 400 with
+// `Connection: close`, then the connection closes; nothing it carried is served. It closed with no answer.
+TEST(Http1ClientTest, AMalformedRequestIsAnswered400ThenClosed) {
+    LoopbackHttp1Server server;
+    raw_socket          peer(server.port);
+    peer.send_all("G@T /ping HTTP/1.1\r\nHost: a\r\n\r\nGET /ping HTTP/1.1\r\nHost: a\r\n\r\n");
+    const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+    EXPECT_EQ(answer.rfind("HTTP/1.1 400 ", 0), 0u) << answer;
+    EXPECT_NE(lowercase(answer).find("connection: close"), std::string::npos) << answer;
+    EXPECT_TRUE(peer.closes_within(std::chrono::seconds(3)));
+    EXPECT_EQ(server.request_count(), 0) << "the request after a malformed one was served";
+}
+
+// What follows a request the server answers, malformed or behind `Connection: close` (Huly QB-1248). After a request that
+// carries "close" the server answers it and closes: nothing pipelined behind it is answered (RFC 9112 §9.6), a malformed
+// request included, whose 400 would be a response the client had no right to -- llhttp's own refusal of data after
+// `Connection: close` (HPE_CLOSED_CONNECTION) never comes, its parser stopping at each message's end and starting the next
+// afresh. Behind a request still in flight, a malformed one is answered 400 after that request's response, which goes
+// first: it closed the connection with no answer, before that response, which the client lost.
+namespace http1_close_pipeline_test {
+class Server;
+class Session : public qb::http::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http::use<Server>::server<Session> {
+public:
+    std::atomic<int> served{0};
+    Server() {
+        router().get("/now", [this](auto ctx) {
+            ++served;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().get("/later", [this](auto ctx) { // answered 50 ms later: what follows it is read first
+            ++served;
+            qb::io::async::callback(
+                [ctx]() {
+                    ctx->response().status() = qb::http::status::OK;
+                    ctx->complete();
+                },
+                std::chrono::milliseconds(50));
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {}
+
+// The status of every response the peer reads before the connection ends, in order.
+std::string
+statuses(raw_socket &peer) {
+    const auto  all = peer.read_until("\r\n\r\n\r\n\r\n", std::chrono::seconds(3)); // never sent: everything until the close
+    std::string out;
+    for (auto at = all.find("HTTP/1.1 "); at != std::string::npos; at = all.find("HTTP/1.1 ", at + 1))
+        out += (out.empty() ? "" : " ") + all.substr(at + 9, 3);
+    return out;
+}
+} // namespace http1_close_pipeline_test
+
+TEST(Http1ClientTest, NothingPipelinedBehindAConnectionCloseRequestIsAnswered) {
+    using namespace http1_close_pipeline_test;
+    Server              *server = nullptr;
+    ServerThread<Server> thread([&server](Server &s) {
+        server = &s;
+        if (s.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        s.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    const std::string long_target = "GET /" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH + 1, 'x') + " HTTP/1.1\r\nHost: a\r\n\r\n";
+    for (const char *path : {"/now", "/later"}) {
+        for (const std::string &behind : {std::string("GET /now HTTP/1.1\r\nHost: a\r\n\r\n"), std::string("garbage\r\n\r\n"), long_target}) {
+            const int  before = server->served.load();
+            raw_socket peer(thread.port());
+            peer.send_all(std::string("GET ") + path + " HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n" + behind);
+            EXPECT_EQ(statuses(peer), "200") << path << ", then " << behind.substr(0, 20);
+            EXPECT_EQ(server->served.load() - before, 1)
+                << path << ", then " << behind.substr(0, 20) << ": a request after the close was served";
+        }
+    }
+}
+
+TEST(Http1ClientTest, AResponseInFlightGoesOutBeforeTheRefusalOfTheMalformedRequestBehindIt) {
+    using namespace http1_close_pipeline_test;
+    ServerThread<Server> thread([](Server &s) {
+        if (s.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        s.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    raw_socket peer(thread.port());
+    peer.send_all("GET /later HTTP/1.1\r\nHost: a\r\n\r\ngarbage\r\n\r\n");
+    EXPECT_EQ(statuses(peer), "200 400") << "the response in flight was lost, or the malformed request not answered after it";
+}

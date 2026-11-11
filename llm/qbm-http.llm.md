@@ -579,7 +579,8 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
 - An h1 request whose framing is refused is answered `400`, then closed (RFC 9112 §6.3; QB-1248): a `Content-Length`
   llhttp refuses (past 2^64-1, not a number, twice, beside `Transfer-Encoding`), `chunked` named twice or not last, a
   chunk size llhttp refuses (not hexadecimal, past 2^64-1), a framing field in the trailer section; `501` for a coding before a final `chunked`
-  (§6.1). Until 3.4 the connection closed with no answer; any other malformed request still does.
+  (§6.1); any other request llhttp refuses as malformed, `400` too (§2.2). Until 3.4 the connection closed with no answer.
+  A `Content-Length` given twice is refused even when the values agree (deliberate: llhttp, Node.js and nginx do).
 - To stop an HTTP/1.1 server, `drain(deadline, on_drained)`: the listener closes, idle sessions close, busy ones answer
   what they received -- the last answer `Connection: close` -- and `on_drained` reports `drained` or `deadline` once,
   on the server's loop (Huly QB-167). An in-place WebSocket upgrade still owned by that server receives Close

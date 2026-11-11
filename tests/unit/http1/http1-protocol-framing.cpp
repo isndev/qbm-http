@@ -1106,8 +1106,8 @@ TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody
 
 // A request target that names no resource is answered 400 (Huly QB-1177): one the reader refuses (`/a^b`, `*` for
 // GET) and one llhttp refuses itself (`?x`, HPE_INVALID_URL). A request malformed elsewhere -- its version, a field
-// line, its method -- is still not answered, and the protocol ends; one whose framing is refused is (QB-1248, below).
-TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingElseIs) {
+// line, its method -- is answered 400 as well since QB-1248 (piece 11, below), the protocol kept for the answer.
+TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AsIsAnyMalformedRequest) {
     for (const char *target : {"/a^b", "*", "?x"}) {
         RefusingServerFakeIO                             io;
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
@@ -1123,16 +1123,16 @@ TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingE
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
         feed(io, malformed);
         (void) step(proto, io);
-        EXPECT_TRUE(io.refusals.empty()) << malformed;
-        EXPECT_FALSE(proto.ok()) << malformed;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << malformed << ": a malformed request is answered (QB-1248)";
+        EXPECT_TRUE(proto.ok()) << malformed;
     }
 }
 
 // For each byte, `GET /a<byte>b` is dispatched, with the path as it was sent, exactly when the byte may stand in a
 // request path -- RFC 3986's path bytes and `[`, `]`, `|`, which a browser sends unencoded (Huly QB-1187) -- or begins
-// the query. Any other byte is refused with 400, by the target reader or by llhttp, except two: a space, which ends
-// the target and leaves `b` where the version belongs, and LF, which ends the line -- the request is malformed and
-// never read.
+// the query. Any other byte is refused with 400, by the target reader or by llhttp; so are two that end what they
+// interrupt -- a space, which ends the target and leaves `b` where the version belongs, and LF, which ends the line --
+// whose request is malformed, and was never answered until QB-1248 (piece 11).
 TEST(Http1ProtocolFraming, ARequestPathIsDispatchedExactlyWhenItsBytesMayStandInOne) {
     constexpr std::string_view path_bytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@%/[]|";
     for (int c = 0; c < 256; ++c) {
@@ -1148,9 +1148,9 @@ TEST(Http1ProtocolFraming, ARequestPathIsDispatchedExactlyWhenItsBytesMayStandIn
             ASSERT_TRUE(io.last_request.has_value()) << "byte " << c;
             EXPECT_EQ(io.last_request->uri().path(), c == '?' ? std::string{"/a"} : path) << "byte " << c;
             EXPECT_TRUE(io.refusals.empty()) << "byte " << c;
-        } else if (ends_line) {
-            EXPECT_TRUE(io.refusals.empty()) << "byte " << c;
-            EXPECT_FALSE(proto.ok()) << "byte " << c;
+        } else if (ends_line) { // malformed: answered 400 as well (QB-1248)
+            EXPECT_EQ(io.refusals, std::vector<int>{400}) << "byte " << c;
+            EXPECT_TRUE(proto.ok()) << "byte " << c;
         } else {
             EXPECT_EQ(io.refusals, std::vector<int>{400}) << "byte " << c;
         }
@@ -1955,5 +1955,75 @@ TEST(Http1ProtocolFraming, AResponseWhoseFramingIsRefusedFailsTheClientProtocol)
         EXPECT_EQ(step(proto, io), 0u) << wire;
         EXPECT_FALSE(proto.ok()) << wire;
         EXPECT_EQ(io.response_count, 0) << wire;
+    }
+}
+
+// Every malformed request is answered 400, then the connection closed (RFC 9112 §2.2, §3; Huly QB-1248): a request
+// llhttp refuses -- its method, its version, a field line, a line not ended by CRLF, a chunk not ended by one, bytes that
+// are no HTTP -- with no status of its own (refusal_status()) is answered as a framing it refuses is. Each closed the
+// connection with no answer. A pause is no refusal, an io that cannot answer still closes, and a refusal with its own
+// status keeps it.
+namespace http1_malformed_request_test {
+std::string
+shown(std::string const &bytes) {
+    std::string out;
+    for (const unsigned char c : bytes)
+        out += c == '\r'              ? std::string("\\r")
+               : c == '\n'            ? std::string("\\n")
+               : c < 0x20 || c > 0x7e ? std::string("?")
+                                      : std::string(1, char(c));
+    return out;
+}
+} // namespace http1_malformed_request_test
+
+TEST(Http1ProtocolFraming, EveryMalformedRequestIsAnswered400) {
+    using http1_malformed_request_test::shown;
+    const std::string chunked = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    for (std::string const &wire : std::vector<std::string>{
+             "G@T / HTTP/1.1\r\nHost: h\r\n\r\n",           // a method that is no token
+             "GET / HTTP/9.9\r\nHost: h\r\n\r\n",           // a version llhttp refuses
+             "GET / HTTQ/1.1\r\nHost: h\r\n\r\n",           // a protocol name that is no HTTP
+             "GET / HTTP/1.1\r\nX y: 1\r\nHost: h\r\n\r\n", // a field name that is no token
+             "GET / HTTP/1.1\r\nHost : h\r\n\r\n",          // whitespace before the colon (RFC 9112 §5.1)
+             "GET / HTTP/1.1\rHost: h\r\n\r\n",             // a CR with no LF
+             "GET / HTTP/1.1\r\nHost: h\r\nX: a\x01"
+             "b\r\n\r\n",                                                     // a control byte in a field value
+             chunked + "5\r\nhelloX",                                         // chunk data not ended by CRLF
+             chunked + "5\rhello\r\n",                                        // a chunk-size line not ended by CRLF
+             std::string("\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03", 11), // a TLS ClientHello on a plain port
+         }) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, wire + "GET /next HTTP/1.1\r\nHost: h\r\n\r\n");
+        EXPECT_EQ(step(proto, io), 0u) << shown(wire);
+        EXPECT_EQ(io.request_count, 0) << shown(wire) << ": a malformed request, or the one after it, was dispatched";
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << shown(wire) << ": closed with no answer";
+        EXPECT_TRUE(proto.ok()) << shown(wire) << ": the io answers before the connection ends";
+    }
+    // The controls: an io that cannot answer still closes; a refusal with its own status keeps it.
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "G@T / HTTP/1.1\r\nHost: h\r\n\r\n");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_FALSE(proto.ok()) << "an io that cannot answer kept the connection";
+    RefusingServerFakeIO                             limited;
+    qb::protocol::http::server<RefusingServerFakeIO> refusing(limited);
+    limited.limits.max_url_length = 4;
+    feed(limited, "GET /abcdefgh HTTP/1.1\r\nHost: h\r\n\r\n");
+    EXPECT_EQ(step(refusing, limited), 0u);
+    EXPECT_EQ(limited.refusals, std::vector<int>{414}) << "a refusal's own status was replaced";
+}
+
+// A Content-Length given twice is refused even when the values agree (`1` and `1`, `1, 1`), a deliberate deviation from
+// the "unless" of RFC 9112 §6.3, which lets a recipient take the single value: llhttp, Node.js and nginx refuse it too, so
+// no two parsers in a chain can disagree on the length (Huly QB-1248, answered 400 since piece 10).
+TEST(Http1ProtocolFraming, AContentLengthGivenTwiceIsRefusedEvenWhenTheValuesAgree) {
+    for (const char *fields : {"Content-Length: 1\r\nContent-Length: 1\r\n", "Content-Length: 1, 1\r\n", "Content-Length: 1,1\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, std::string("POST /up HTTP/1.1\r\nHost: h\r\n") + fields + "\r\na");
+        EXPECT_EQ(step(proto, io), 0u) << fields;
+        EXPECT_EQ(io.request_count, 0) << fields;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << fields;
     }
 }

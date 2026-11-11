@@ -908,8 +908,8 @@ public:
      * Set when the parse failed on a limit the peer can be told about (set_request_limits()): 414,
      * 431 or 413; on a target origin::request_target_uri() refuses: 400 (on_url_complete()); on a Host field
      * that names no authority: 400 (check_host_field()); on a major version other than 1: 505; on a framing: 400, 501 for a coding
-     * before a final chunked (on_headers_complete(), store_trailer_field()). 0 for any other failure, which fail_message() answers
-     * only for a target or a framing llhttp refuses (400) -- any other malformed message is not answered. reset() clears it.
+     * before a final chunked (on_headers_complete(), store_trailer_field()). 0 for any other failure: the protocol's fail_message()
+     * answers a request llhttp refuses as malformed with 400 (Huly QB-1248). reset() clears it.
      */
     [[nodiscard]] int
     refusal_status() const noexcept {
@@ -1010,17 +1010,17 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
     /// its framing -- the refused body is not read -- so every byte that follows is dropped until the connection ends.
     bool _refused = false;
 
-    /// The message failed. A request refused for a limit, its target, its version, Host or framing (refusal_status()), or whose
-    /// target or framing llhttp refuses -- Content-Length, Transfer-Encoding, a chunk size: 400 (RFC 9112 §3, §6.3, §7.1; QB-1177,
-    /// QB-1248) -- goes to the io (`http1_refuse_request`), which answers it and ends the connection; any other failure closes it.
+    /// The message failed. A request the parser refuses is answered its refusal_status() -- a limit, its target, Host, its
+    /// version, its framing -- and one llhttp refuses as malformed 400 (RFC 9112 §2.2, §3, §6.3; QB-1177, QB-1248): it goes to
+    /// the io (`http1_refuse_request`), which answers it and ends the connection. An io that cannot answer closes it.
     std::size_t
     fail_message() noexcept {
         if constexpr (requires(IO_Handler &io) { io.http1_refuse_request(qb::http::Status{}); }) {
-            int        status = _http_obj.refusal_status();
+            int        status = _http_obj.refusal_status(); // the refusal's own: a limit, the target, Host, the version, a framing
             const auto failed = http_get_errno(static_cast<http_t *>(&_http_obj));
-            if (!status
-                && (failed == HPE_INVALID_URL || failed == HPE_INVALID_CONTENT_LENGTH || failed == HPE_UNEXPECTED_CONTENT_LENGTH
-                    || failed == HPE_INVALID_TRANSFER_ENCODING || failed == HPE_INVALID_CHUNK_SIZE))
+            // Any other refusal llhttp makes of a request is of a malformed one: 400 (RFC 9112 §2.2; Huly QB-1248). A pause is no
+            // refusal -- the header section's, an upgrade's -- and never reaches here: it would not be answered.
+            if (!status && failed != HPE_OK && failed != HPE_PAUSED && failed != HPE_PAUSED_UPGRADE && failed != HPE_PAUSED_H2_UPGRADE)
                 status = HTTP_STATUS_BAD_REQUEST;
             if (status != 0) {
                 _refused      = true;

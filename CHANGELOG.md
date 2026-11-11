@@ -577,13 +577,36 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `400 Bad Request` with `Connection: close` and closes; nothing the request carried is served. A coding before a
   final `chunked` -- `gzip, chunked`, which the server does not implement -- is answered `501 Not Implemented` (§6.1).
   The parser records the status for its own refusals (`refusal_status()`); llhttp's refusals are mapped by its error
-  code. Any other malformed request -- its method, its version string, a field line, a chunk-size line or chunk data
-  not ended by CRLF -- still closes the connection with no answer, and a response whose framing is refused still fails
-  the client's request, unanswered. Witnesses: `qbm-http-test-unit-http1-protocol-framing` (fourteen framings refused
-  with 400, one with 501, the request after each never dispatched; the controls: each framing well-formed is
+  code. A response whose framing is refused still fails the client's request, unanswered; every other malformed
+  request is answered too (the entry below). Witnesses: `qbm-http-test-unit-http1-protocol-framing` (fourteen framings
+  refused with 400, one with 501, the request after each never dispatched; the controls: each framing well-formed is
   dispatched, a response's refusal fails the client's protocol, a malformed field line is still not answered) and
   `qbm-http-test-system-http1-client` (a `Content-Length` of 2^64, `abc` and given twice answered 400 with
   `Connection: close` on the wire, then the close).
+
+- **Every malformed request is answered `400`, then the connection closed (Huly QB-1248).** A request llhttp refused
+  as malformed with no status of its own -- a method that is no token, a version llhttp refuses (`HTTP/9.9`,
+  `HTTQ/1.1`), a field name that is no token or whitespace before its colon, a CR with no LF, a control byte in a
+  field value, a chunk or a chunk-size line not ended by CRLF, bytes that are no HTTP (a TLS ClientHello on a plain
+  port) -- closed the connection with no answer, where RFC 9112 §2.2 says the server SHOULD answer `400` and close.
+  The protocol now answers every refusal llhttp makes of a request `400`, as it answered a target and, since the entry
+  above, a framing it refuses: one rule, not a list of codes. The exceptions are named: a pause is no refusal (the
+  header section's, an upgrade's) and never reaches the refusal; a refusal with a status of its own keeps it (a limit,
+  a target, `Host`, the version, a framing, an exception in a callback); an io that cannot answer -- the client's --
+  closes, and a response still fails the request. A `Content-Length` given twice is refused even when the values agree
+  (`1` and `1`, `1, 1`), kept deliberately against the "unless" of §6.3, which lets a recipient take the single value:
+  llhttp, Node.js and nginx refuse it too, so no two parsers in a chain can disagree on the length (answered `400`
+  since the entry above). Witnesses: `qbm-http-test-unit-http1-protocol-framing` (ten malformed requests answered
+  `400`, the request after each never dispatched; the controls: an io that cannot answer closes, a limit keeps its
+  `414`; a duplicated `Content-Length` refused three ways) and `qbm-http-test-system-http1-client` (a method that is
+  no token answered `400` with `Connection: close` on the wire, then the close). The answer waits behind the requests
+  still in flight: a malformed request pipelined behind a request not yet answered closed the connection before that
+  request's response, which the client lost; the response now goes first, then the `400`. Nothing pipelined behind a
+  request that carries `Connection: close` is answered (RFC 9112 §9.6), a malformed request included: the session
+  closes after that request's response and reads nothing more, and llhttp's refusal of data after `Connection: close`
+  never comes, its parser stopping at each message's end and starting the next afresh. Witnesses (same binary): the
+  response in flight answered before the `400`; behind a "close" request answered at once or 50 ms later, a request, no
+  request and a target past the limit, each unanswered.
 
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
