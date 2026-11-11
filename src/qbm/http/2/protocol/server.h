@@ -86,9 +86,9 @@ concept counts_appended_output = requires(IO const &io) {
 };
 
 namespace detail {
-/// Whether the io exposes its write-buffer cap (`max_write_buffer_size()`): a test harness does, the real session's
-/// is its transport's, a private base, so the protocol then reads qb-io's default (Huly QB-86). A trait, not a
-/// requires-expression on the class's parameter: an access failure there is a hard error once instantiated.
+/// Whether the io exposes its write-buffer cap (`max_write_buffer_size()`): the tcp session does, its transport's
+/// (Huly QB-86), and so does a test harness; an io without one -- a benchmark's -- is read as qb-io's default. A trait,
+/// not a requires-expression on the class's parameter: an access failure there is a hard error once instantiated.
 template <typename IO, typename = void>
 struct io_has_write_cap : std::false_type {};
 template <typename IO>
@@ -287,7 +287,8 @@ public:
         _push_response_leaving = 0;
         _peer_goaway_received  = false;
 
-        _streams_opened_at_control_reply = 0; // the PING/SETTINGS budget forgiven from the first stream opened (Huly QB-1270)
+        _streams_opened_at_control_reply = 0;     // the PING/SETTINGS budget forgiven from the first stream opened (Huly QB-1270)
+        _streams_wait_for_socket         = false; // the streams that waited for the socket's room are gone (Huly QB-86)
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -1499,13 +1500,15 @@ public:
      *        SETTINGS_MAX_HEADER_LIST_SIZE (Huly QB-1240), aborts the stream (RST_STREAM INTERNAL_ERROR): the message
      *        cannot be completed as the producer asked.
      * @param final_response The response as it stands at the end, for its trailers; `nullptr` sends the head's.
-     * @return `false` when the stream has no streamed response to end (not streaming, ended already, closed).
+     * @return `false` when the stream has no streamed response to end (not streaming, ended already, closed), or the
+     *         connection is closing.
      */
     bool
     end_streamed_response(uint32_t stream_id, qb::http::Response const *final_response) {
         auto it = _server_streams.find(stream_id);
-        if (it == _server_streams.end() || !it->second.streaming || it->second.stream_ended || it->second.is_closed()) {
-            return false;
+        if (it == _server_streams.end() || !it->second.streaming || it->second.stream_ended || it->second.is_closed() || !this->ok()
+            || !_connection_active) {
+            return false; // a connection that is closing takes no end either: nothing may leave after its GOAWAY (Huly QB-86)
         }
         Http2ServerStream        &stream = it->second;
         qb::http::Response const &source = final_response ? *final_response : stream.response_to_send;

@@ -23,3 +23,4 @@
 llm/qbm-http.llm.api.md	symbol:qb_load_modules	qb's own CMake function, defined in qb/cmake/qbFunctions.cmake (and re-exported by qb/cmake/qbConfig.cmake). Named here because loading qbm-http is what it is for.
 llm/qbm-http.llm.md	symbol:qb_load_modules	as above — qb/cmake/qbFunctions.cmake.
 llm/qbm-http.llm.md	symbol:target_link_libraries	a CMake built-in command, declared by no C++ project. It appears in a build-integration snippet.
+llm/qbm-http.llm.api.md	symbol:set_max_write_buffer_size	qb's, the setter qb::io::async::tcp::client re-exposes from its transport since Huly QB-86 (qb/src/qb/io/async/tcp/client.h, the using-declaration beside max_write_buffer_size). Named here because a session that lowers its cap changes what stream_write_cap() reports.

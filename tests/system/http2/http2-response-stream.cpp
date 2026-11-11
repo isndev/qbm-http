@@ -89,6 +89,9 @@ struct Seen {
     std::atomic<bool>        closed_seen{false}; ///< a producer's write answered `closed`
     std::atomic<std::size_t> written_at_close{0};
     std::atomic<bool>        wait_verdict_seen{false};
+    std::atomic<int>         socket_tail_ended{0}; ///< /socket-tail producers that wrote and ended (Huly QB-86)
+    std::atomic<std::size_t> socket_tail_cap{0};   ///< the cap a /socket-tail session read back after setting it
+    std::atomic<std::size_t> socket_tail_high{0};  ///< the high mark of a /socket-tail stream: clamped under that cap
 
     void
     reset() {
@@ -103,9 +106,16 @@ struct Seen {
         closed_seen       = false;
         written_at_close  = 0;
         wait_verdict_seen = false;
+        socket_tail_ended = 0;
+        socket_tail_cap   = 0;
+        socket_tail_high  = 0;
     }
 };
 inline Seen g;
+
+/// The write-buffer cap a /socket-tail session lowers itself to, and the pieces its producer writes (Huly QB-86).
+inline constexpr std::size_t kSocketTailCap   = std::size_t{32} * 1024;
+inline constexpr std::size_t kSocketTailPiece = std::size_t{8} * 1024;
 
 struct Responded {
     int                                   status    = 0;
@@ -350,6 +360,23 @@ public:
             g_held.push_back(std::move(ctx));
         });
 
+        // Three pieces and the end at once, under a write-buffer cap the session lowers (Huly QB-86): the window of 0
+        // the client advertised holds them, and end() makes the session forget its producer.
+        router().get("/socket-tail", [](std::shared_ptr<Ctx> ctx) {
+            ctx->session()->set_max_write_buffer_size(kSocketTailCap);
+            g.socket_tail_cap        = ctx->session()->max_write_buffer_size();
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            g.socket_tail_high       = stream->high_watermark();
+            const std::string piece(kSocketTailPiece, 's');
+            for (int i = 0; i < 3; ++i) {
+                if (stream->write(piece) != Stream::write_result::taken)
+                    g.wait_verdict_seen = true;
+            }
+            stream->end();
+            ++g.socket_tail_ended;
+        });
+
         router().get("/plain", [](std::shared_ptr<Ctx> ctx) { ctx->text("still served"); });
         // A producer slower than its own idle deadline (a piece, then one more and the end 700 ms later, under 250 ms):
         // nothing of ITS waits between the pieces, whatever its siblings put through the connection (Huly QB-1212).
@@ -440,6 +467,37 @@ protected:
         return true;
     }
 };
+
+// Two producers that wrote three pieces each and ended, the pieces held by a window of 0, under a write-buffer cap the
+// session lowered to 32 KiB (Huly QB-86): what each wrote was admitted against that cap with its own pieces alone, so
+// the two together pass it. One write of two WINDOW_UPDATEs lets them both go in one read pass. The protocol reads the
+// session's real cap -- it read qb-io's default, 200 MiB, as the session could not expose its transport's -- and stops
+// each flush at the socket's room under it: past the cap publish() disconnects. Both streams had ended, so the session
+// forgot them before the flush that stopped: its write pass resumes the streams held back for the socket BEFORE it
+// consults its map of live producers, which is empty here -- after it, the tails would wait for ever.
+TEST_F(Http2StreamWireTest, StreamsHeldBackForTheSocketUnderALoweredCapLeaveWholeAfterTheirProducersEnded) {
+    static_assert(qb::protocol::http2::detail::io_has_write_cap<WireSession>::value,
+                  "the tcp session exposes its transport's write-buffer cap, and the protocol reads it (Huly QB-86)");
+    Http2RawClient c;
+    ASSERT_TRUE(c.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+    const auto a = c.request("/socket-tail");
+    const auto b = c.request("/socket-tail");
+    ASSERT_NE(a, 0u);
+    ASSERT_NE(b, 0u);
+    ASSERT_TRUE(wait_for([] { return g.socket_tail_ended.load() == 2; })) << "both producers wrote and ended";
+    EXPECT_FALSE(g.wait_verdict_seen) << "each piece was admitted under the lowered cap";
+    EXPECT_EQ(g.socket_tail_cap.load(), kSocketTailCap) << "the session read back the cap it set";
+    EXPECT_EQ(g.socket_tail_high.load(), kSocketTailCap / 2) << "the stream's high mark is clamped under the session's real cap";
+    ASSERT_TRUE(c.window_updates({{a, 1u << 20}, {b, 1u << 20}})); // one write: one read pass opens both
+    ASSERT_TRUE(c.read_until([&] { return c.stream(a).end_stream && c.stream(b).end_stream; }, 5s))
+        << "a tail held back for the socket never left: eof=" << c.eof << " a=" << c.stream(a).data_bytes << " b=" << c.stream(b).data_bytes;
+    EXPECT_FALSE(c.eof) << "the connection was cut: a flush passed the lowered cap";
+    for (const auto id : {a, b}) {
+        EXPECT_EQ(c.stream(id).data_bytes, 3u * kSocketTailPiece);
+        EXPECT_FALSE(c.stream(id).reset);
+    }
+    c.close();
+}
 
 TEST_F(Http2StreamWireTest, DataFramesArriveBeforeTheStreamEnds) {
     Http2RawClient c;

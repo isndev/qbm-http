@@ -189,8 +189,9 @@ access_of(std::string const &target) {
     return it->second;
 }
 
-/// The hard output cap the session of this suite reports to its streams: qb-io's by default, smaller for the cases
-/// that exercise the admission arithmetic -- always at most qb-io's, so publish() never disconnects for it.
+/// The write-buffer cap the session of this suite sets on its transport when it is accepted: qb-io's by default,
+/// smaller for the cases that exercise the admission arithmetic. publish() enforces it, and the session's
+/// stream_write_cap() reads it (Huly QB-86): it reported qb-io's constant, which a session could not change.
 inline std::atomic<std::size_t> g_cap{QB_MAX_WRITE_BUFFER_SIZE};
 
 class StreamServer;
@@ -198,12 +199,8 @@ class StreamServer;
 class StreamSession : public qb::http::use<StreamSession>::session<StreamServer> {
 public:
     explicit StreamSession(StreamServer &server_ref)
-        : session(server_ref) {}
-
-    /// Hides the session's own cap (qb-io's) for the cases that need a small one.
-    [[nodiscard]] static std::size_t
-    stream_write_cap() noexcept {
-        return g_cap.load();
+        : session(server_ref) {
+        this->set_max_write_buffer_size(g_cap.load());
     }
 };
 

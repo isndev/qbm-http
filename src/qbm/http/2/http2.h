@@ -514,13 +514,15 @@ public:
         return protocol ? protocol->streamed_body_waiting(static_cast<uint32_t>(stream.stream_id()), drained_total()) : this->out().size();
     }
 
-    /// The hard cap of the output: qb-io's write-buffer cap, which `publish()` enforces by disconnecting. A stream's own
-    /// buffer is bounded by the producer's `drain()`: it waits at `stream_high_watermark()`. The cap is checked against
-    /// this stream's pieces at `write()`; what every stream held back for a window flushes under it too, the protocol
-    /// bounding each flush by the socket's room (`resume_streamed_responses()` on the next write pass).
-    [[nodiscard]] static constexpr std::size_t
-    stream_write_cap() noexcept {
-        return QB_MAX_WRITE_BUFFER_SIZE;
+    /// The hard cap of the output: the session's write-buffer cap (`max_write_buffer_size()`, its transport's:
+    /// `QB_MAX_WRITE_BUFFER_SIZE` unless `set_max_write_buffer_size()` changed it; Huly QB-86), which `publish()` enforces
+    /// by disconnecting. A stream's own buffer is bounded by the producer's `drain()`: it waits at
+    /// `stream_high_watermark()`. The cap is checked against this stream's pieces at `write()`; what every stream held back
+    /// for a window flushes under it too, the protocol bounding each flush by the socket's room under the same cap
+    /// (`resume_streamed_responses()` on the next write pass).
+    [[nodiscard]] std::size_t
+    stream_write_cap() const noexcept {
+        return this->max_write_buffer_size();
     }
 
     /// The bytes a producer may leave queued before it should wait (1 MiB by default), per stream.

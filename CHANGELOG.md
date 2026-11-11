@@ -86,10 +86,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (the head collection inlined back into its callers, 16 bytes of per-stream state). Mutants: 36 planted one at a time
   in the flush, the windows and the room, the END_STREAM and trailer paths, the HTTP/3 data reader and its
   acknowledgements, the hooks' context ownership and the SSE formatter and head -- 34 caught by the suites above after
-  a green control; one survives for want of a knob (the session's write pass resuming the streams the socket held
-  back before it consults its map needs qb-io's write cap, a private base of the session, lowered in a test), one is
-  equivalent (the HTTP/3 session cancels its live stream before the context's cancel, which `_stream_gone` already
-  keeps from resetting a stream the peer ended).
+  a green control; one survived for want of a knob (the session's write pass resuming the streams the socket held
+  back before it consults its map needs qb-io's write cap lowered in a test, which the session exposes since: under
+  Fixed), one is equivalent (the HTTP/3 session cancels its live stream before the context's cancel, which
+  `_stream_gone` already keeps from resetting a stream the peer ended).
 
 - **A streamed static download its client stops taking is ended at an idle deadline, 60 s by default, and under a
   minimum rate when one is set (Huly QB-1212).** Since QB-101 a download over `stream_threshold` held its file and its
@@ -703,6 +703,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
   streamed response prove both: a byte past the bound at the end resets the stream and encodes nothing while a section
   at the bound exactly leaves whole, and a bound the client lowers while the body waits for credit refuses the section
   after the DATA, no HEADERS encoded.
+
+- **The HTTP/2 and HTTP/1.1 sessions read their real write-buffer cap, and a streamed HTTP/2 response takes no end
+  once its connection is closing (Huly QB-86).** The HTTP/2 protocol bounded a streamed flush by the socket's room
+  under qb-io's default cap, and the two sessions' `stream_write_cap()` reported that constant to their response
+  streams: a tcp session could neither read its transport's cap nor set another. qb exposes both now on the session
+  (`max_write_buffer_size()`, `set_max_write_buffer_size()`), and the protocol and `stream_write_cap()` -- a const
+  member now, no longer `static constexpr` -- read the session's cap: a session that lowers it gets flushes that stop
+  under it and streams begun after it whose watermarks and admission follow it, where `publish()` would have cut the
+  peer (a stream reads the cap when it begins; HTTP/3 keeps qb-io's constant). Over a
+  real TLS connection, two streams whose producers wrote 24 KiB each and ended, under a cap lowered to 32 KiB, leave
+  whole on one read of two `WINDOW_UPDATE`s; read as qb-io's default the cap would have let both flushes pass it. The
+  session's write pass resumes the streams held back for the socket before it consults its producers, which ended
+  streams have left -- an order a mutant of the second lot survived on, for want of a way to lower the cap in a
+  test, and which this case now holds. `end_streamed_response()` had no guard on a connection that failed: after a `GOAWAY` a producer's `end()`
+  still sent its END_STREAM (or its trailer section); it is refused now, as `write()` was. `reset()` forgets that
+  streams waited for the socket's room.
 
 - **An HTTP/2 session no longer reads its protocol after a hook cleared it (Huly QB-86, a residual found by QB-1212's
   sanitizer run).** The second lot of QB-86 made the session's write pass and end of stream resume the streams held

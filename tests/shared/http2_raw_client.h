@@ -154,6 +154,18 @@ public:
         return write_all(out);
     }
 
+    /// Several WINDOW_UPDATEs in ONE write, so that the server reads them in one pass (Huly QB-86): each pair is a
+    /// stream id and its increment.
+    bool
+    window_updates(std::vector<std::pair<std::uint32_t, std::uint32_t>> const &updates) {
+        std::vector<uint8_t> out;
+        for (auto const &[stream_id, increment] : updates)
+            append_frame(out, WINDOW_UPDATE, 0, stream_id,
+                         {static_cast<uint8_t>(increment >> 24), static_cast<uint8_t>(increment >> 16), static_cast<uint8_t>(increment >> 8),
+                          static_cast<uint8_t>(increment)});
+        return write_all(out);
+    }
+
     bool
     rst_stream(std::uint32_t stream_id, std::uint32_t code) {
         std::vector<uint8_t> out;
