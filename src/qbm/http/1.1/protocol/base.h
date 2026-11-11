@@ -563,7 +563,7 @@ private:
      * This callback:
      * 1. Sets the HTTP version, and refuses a request whose major version is not 1: 505
      * 2. Checks a request's Host field (check_host_field()); reads a response's declared length as none for 1xx, 204, 304
-     *    and a HEAD's (`_body_forbidden`); refuses a declared length past the body limit: 413
+     *    and a HEAD's (`_body_forbidden`, marked F_SKIPBODY for keep-alive); refuses a declared length past the body limit: 413
      * 3. For a Parser driven directly, reserves memory for the declared body (the h1 protocol copies it: none); sets upgrade
      * 4. Marks headers as completed and pauses the parser
      *
@@ -615,15 +615,15 @@ private:
                 return refused;
             }
             // llhttp uses ULLONG_MAX as "unknown length". For HTTP requests,
-            // absence of both Content-Length and Transfer-Encoding means an
-            // empty body by default (RFC 9112 framing). Normalize this here
-            // so downstream framing code never treats header-only requests as
-            // waiting for an impossible body length.
+            // absence of both Content-Length and Transfer-Encoding means an empty body by default (RFC 9112 framing). Normalize
+            // this here so downstream framing code never treats header-only requests as waiting for an impossible body length.
             if (parser->content_length == ULLONG_MAX && !msg.has_header("Transfer-Encoding")) {
                 parser->content_length = 0;
             }
         } else if constexpr (MessageType::type == HTTP_RESPONSE) {
             const auto status = parser->status_code;
+            if (self->_body_forbidden) // a HEAD's response ends at its header section: llhttp's own mark, read by keep-alive (QB-1248)
+                parser->flags |= F_SKIPBODY;
             if ((status >= 100 && status < 200) || status == 204 || status == 304 || self->_body_forbidden) { // or answers a HEAD (QB-1248)
                 parser->content_length = 0;
             }

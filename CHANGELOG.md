@@ -464,6 +464,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
   byte; the two refusals as they were) and `qbm-http-test-system-http1-client` (the persistent client and the one-shot
   session, over the server's own answer to HEAD).
 
+- **A response to HEAD that declares no length keeps its connection (Huly QB-1248).** It ends at its header section
+  (RFC 9112 §6.3), and llhttp marks a response to HEAD (`F_SKIPBODY`) only when `on_headers_complete` returns 1; the
+  HTTP/1.1 parser pauses there instead. Unmarked, a response to HEAD with neither `Content-Length` nor
+  `Transfer-Encoding` had its `keep_alive` computed as for a body delimited by the connection's close: false, and the
+  persistent client retired a connection it could keep (qb's own server never answers HEAD in that shape with a status
+  that carries a body: an empty body gets `content-length: 0`; a foreign server may). The parser now marks the
+  response when the protocol says it answers a HEAD (`_body_forbidden`), before `keep_alive` is computed; the protocol
+  framed such a response at its header section already, and the mark changes nothing else of the parser's state, which
+  is reset before the next response. The one-shot session's response reports `keep_alive` true too; that session
+  disconnects after every response anyway. A response to another method with no length, a response to HEAD that says
+  `Connection: close` or an HTTP/1.0 one that does not ask to be kept, and a `Parser` driven directly keep the
+  keep-alive they had. Witnesses: `qbm-http-test-unit-http1-protocol-framing` (the response kept, the responses after
+  it framed, by their length and by the close; HTTP/1.0 with `Connection: keep-alive`; the controls) and
+  `qbm-http-test-system-http1-client` (the persistent client against a scripted peer: one connection for the HEAD and
+  the GET after it, two before).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

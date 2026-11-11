@@ -1568,3 +1568,77 @@ TEST(Http1ProtocolFraming, AResponseToAnotherMethodDeclaringPastTheBodyLimitIsSt
     EXPECT_FALSE(parser.headers_completed());
     EXPECT_EQ(parser.refusal_status(), 413);
 }
+
+// ===========================================================================
+// A response to HEAD that declares no length keeps its connection (Huly QB-1248). It ends at its header section
+// (RFC 9112 §6.3), and llhttp marks a response to HEAD (F_SKIPBODY) only when on_headers_complete returns 1; this
+// parser pauses there instead. Unmarked, a response with neither Content-Length nor Transfer-Encoding had its
+// keep_alive computed as for a body delimited by the connection's close: false, and the persistent client retired a
+// connection it could keep. The parser now marks it when the protocol says the response answers a HEAD. Every other
+// response keeps the keep-alive it had.
+// ===========================================================================
+
+namespace http1_head_keep_alive_test {
+[[nodiscard]] bool
+keep_alive_of(std::string_view wire, bool answers_head) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    io.body_forbidden = answers_head;
+    feed(io, wire);
+    if (step(proto, io) == 0u)
+        proto.flush_eof(); // a body delimited by the connection's close, delivered at its end
+    EXPECT_TRUE(proto.ok()) << wire;
+    EXPECT_EQ(io.response_count, 1) << wire;
+    return io.last_response.has_value() && io.last_response->keep_alive;
+}
+} // namespace http1_head_keep_alive_test
+
+TEST(Http1ProtocolFraming, AHeadResponseWithNoLengthKeepsItsConnectionAndTheNextResponseIsFramed) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    io.body_forbidden = true;
+    feed(io, "HTTP/1.1 200 OK\r\nX-Head: no-length\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"
+             "HTTP/1.1 200 OK\r\n\r\nrest");
+
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.response_count, 1);
+    EXPECT_TRUE(io.last_response->keep_alive) << "keep-alive was computed as for a body delimited by the close";
+    EXPECT_EQ(io.last_response->header("X-Head"), "no-length");
+    EXPECT_TRUE(io.last_response->body().empty());
+
+    io.body_forbidden = false; // the next request is a GET
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_EQ(io.response_count, 2);
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "pong");
+    EXPECT_TRUE(io.last_response->keep_alive);
+
+    // And a response with no length to the GET after it: still delimited by the close.
+    ASSERT_EQ(step(proto, io), 0u);
+    proto.flush_eof();
+    ASSERT_EQ(io.response_count, 3) << "the response after the HEAD's was not read to the close";
+    EXPECT_EQ(io.last_response->body().as<std::string>(), "rest");
+    EXPECT_FALSE(io.last_response->keep_alive);
+    EXPECT_TRUE(proto.ok());
+
+    // HTTP/1.0 keeps a connection only when the response asks for it: one that does, to HEAD, with no length, keeps it.
+    EXPECT_TRUE(http1_head_keep_alive_test::keep_alive_of("HTTP/1.0 200 OK\r\nConnection: keep-alive\r\n\r\n", true));
+}
+
+// Controls, as they were: a response to another method with no length is delimited by the close; a response to HEAD
+// that says Connection: close, or an HTTP/1.0 one that does not ask to be kept, closes; one with a Content-Length
+// keeps its connection; and a Parser driven directly, which nobody tells about the request, reads no length as a body
+// to the close.
+TEST(Http1ProtocolFraming, EveryOtherResponseKeepsTheKeepAliveItHad) {
+    using http1_head_keep_alive_test::keep_alive_of;
+    EXPECT_FALSE(keep_alive_of("HTTP/1.1 200 OK\r\n\r\nclose-delimited", false));
+    EXPECT_FALSE(keep_alive_of("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", true));
+    EXPECT_FALSE(keep_alive_of("HTTP/1.0 200 OK\r\n\r\n", true));
+    EXPECT_TRUE(keep_alive_of("HTTP/1.1 200 OK\r\nContent-Length: 42\r\n\r\n", true));
+    EXPECT_TRUE(keep_alive_of("HTTP/1.1 200 OK\r\nContent-Length: 42\r\n\r\n0123456789012345678901234567890123456789ab", false));
+
+    qb::http::Parser<Response> parser;
+    const std::string          wire = "HTTP/1.1 200 OK\r\n\r\n";
+    ASSERT_EQ(parser.parse(wire.data(), wire.size()), HPE_PAUSED);
+    EXPECT_FALSE(parser.get_parsed_message().keep_alive);
+    EXPECT_EQ(http_message_needs_eof(&parser), 1);
+}

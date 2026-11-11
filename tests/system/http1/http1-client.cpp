@@ -2499,3 +2499,106 @@ TEST(Http1ClientTest, OneShotHeadDeclaringPastTheBodyLimitIsDelivered) {
     EXPECT_EQ(outcome->response.header("X-Head"), "past-limit");
     EXPECT_TRUE(outcome->response.body().empty());
 }
+
+// A response to HEAD that declares no length ends at its header section (RFC 9112 §6.3): the persistent client keeps its
+// connection (Huly QB-1248). It computed keep-alive as for a body delimited by the close and retired the connection.
+// qb's own server never answers in that shape (an empty body gets `content-length: 0`), so a scripted peer does.
+namespace http1_head_no_length_test {
+/// A scripted HTTP/1.1 peer: it answers each request it reads, whatever the connection, with the next response of its
+/// script, and counts the connections it accepted. No call blocks (the listener and each connection are non-blocking,
+/// polled), and it gives up at a deadline: a client that never comes ends the thread.
+class ScriptedPeer {
+public:
+    explicit ScriptedPeer(std::vector<std::string> script)
+        : _script(std::move(script)) {
+        if (_listener.listen_v4(0, "127.0.0.1") != 0 || _listener.set_nonblocking(true) != 0) {
+            throw std::runtime_error("scripted peer: listen failed");
+        }
+        port    = _listener.local_endpoint().port();
+        _thread = std::thread([this] { run(); });
+    }
+
+    ~ScriptedPeer() {
+        _stop = true;
+        _thread.join();
+    }
+
+    ScriptedPeer(ScriptedPeer const &)            = delete;
+    ScriptedPeer &operator=(ScriptedPeer const &) = delete;
+
+    [[nodiscard]] std::string
+    url(std::string const &path) const {
+        return "http://127.0.0.1:" + std::to_string(port) + path;
+    }
+
+    std::uint16_t    port = 0;
+    std::atomic<int> connections{0};
+
+private:
+    void
+    run() {
+        const auto                       deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        std::size_t                      next     = 0;
+        std::vector<qb::io::tcp::socket> peers; // every connection accepted, served side by side: a client may
+        std::vector<std::string>         input; // leave one open (retired, not closed) and open the next
+        while (!_stop && next < _script.size() && std::chrono::steady_clock::now() < deadline) {
+            bool idle = true;
+            if (qb::io::tcp::socket accepted = _listener.accept(); accepted.is_open()) {
+                static_cast<void>(accepted.set_nonblocking(true));
+                peers.push_back(std::move(accepted));
+                input.emplace_back();
+                ++connections;
+                idle = false;
+            }
+            for (std::size_t i = 0; i < peers.size() && next < _script.size(); ++i) {
+                if (!peers[i].is_open()) {
+                    continue;
+                }
+                char      buffer[1024];
+                const int n = peers[i].read(buffer, sizeof(buffer));
+                if (n == 0) {
+                    peers[i].close(); // the client closed this connection
+                    continue;
+                }
+                if (n < 0) {
+                    continue; // nothing to read yet
+                }
+                idle = false;
+                input[i].append(buffer, static_cast<std::size_t>(n));
+                for (auto end = input[i].find("\r\n\r\n"); end != std::string::npos && next < _script.size(); end = input[i].find("\r\n\r\n")) {
+                    input[i].erase(0, end + 4); // a request without a body: the client sends HEAD and GET
+                    const auto &response = _script[next++];
+                    static_cast<void>(peers[i].write(response.data(), response.size()));
+                }
+            }
+            if (idle) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    }
+
+    qb::io::tcp::listener    _listener;
+    std::vector<std::string> _script;
+    std::atomic<bool>        _stop{false};
+    std::thread              _thread;
+};
+} // namespace http1_head_no_length_test
+
+TEST(Http1ClientTest, AHeadResponseWithNoLengthKeepsItsConnection) {
+    http1_head_no_length_test::ScriptedPeer peer(
+        {"HTTP/1.1 200 OK\r\nX-Head: no-length\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"});
+    auto client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto head = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/head-no-length")));
+    auto ping = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(head.status(), qb::http::status::OK);
+    EXPECT_EQ(head.header("X-Head"), "no-length");
+    EXPECT_FALSE(head.has_header("Content-Length"));
+    EXPECT_TRUE(head.body().empty());
+    EXPECT_EQ(ping.status(), qb::http::status::OK);
+    EXPECT_EQ(ping.body().template as<std::string>(), "pong");
+    EXPECT_EQ(peer.connections.load(), 1) << "the response to HEAD retired its connection";
+    drain_client_callbacks();
+}
