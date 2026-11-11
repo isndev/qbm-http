@@ -2650,3 +2650,144 @@ TEST(Http1ClientTest, AnUnassignedInformationalResponseNamingChunkedIsInterim) {
     EXPECT_EQ(peer.connections.load(), 1) << "the interim response dropped its connection";
     drain_client_callbacks();
 }
+
+// A 101 ends HTTP/1.1 on its connection (RFC 9110 §15.2.2), and a server must not switch to a protocol the request did
+// not offer in its Upgrade field (§7.8). The persistent client delivered any 101 as the answer and kept its connection:
+// the bytes the peer sent after it -- another protocol -- were read as the response of the request queued behind it
+// (Huly QB-1248). The scripted peer switches to `foo`, then writes bytes that look like a response.
+namespace http1_switched_protocols_test {
+const std::string switched = "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: foo\r\n\r\n"
+                             "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nsmuggled";
+const std::string pong     = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong";
+
+qb::http::Request
+asking_to_switch(std::string const &target, std::string const &offered = "foo") {
+    auto req = request(qb::http::method::GET, target);
+    req.set_header("Connection", "upgrade");
+    req.set_header("Upgrade", offered);
+    return req;
+}
+} // namespace http1_switched_protocols_test
+
+TEST(Http1ClientTest, AnUnaskedSwitchFailsTheRequestAndNothingAfterItAnswersTheNext) {
+    using namespace http1_switched_protocols_test;
+    http1_head_no_length_test::ScriptedPeer peer({switched, pong});
+    auto                                    client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    std::vector<qb::http::Request> queued; // the second request waits behind the first, as it would under load
+    queued.push_back(request(qb::http::method::GET, "/switch"));
+    queued.push_back(request(qb::http::method::GET, "/ping"));
+    auto replies = qb::http::run_sync(client->push_requests(std::move(queued)));
+
+    ASSERT_EQ(replies.size(), 2u);
+    EXPECT_EQ(replies[0].status(), qb::http::status::BAD_GATEWAY) << "a 101 the request never asked for was its answer";
+    EXPECT_EQ(replies[1].status(), qb::http::status::OK);
+    EXPECT_EQ(replies[1].body().template as<std::string>(), "pong") << "the bytes after the 101 answered the next request";
+    EXPECT_EQ(peer.connections.load(), 2) << "the connection that switched protocols served the next request";
+    const auto [total, successful, failed] = client->get_stats();
+    EXPECT_EQ(failed, 1u) << "the unasked switch was counted a success";
+    static_cast<void>(total);
+    static_cast<void>(successful);
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, AnAskedSwitchIsTheAnswerAndRetiresItsConnection) {
+    using namespace http1_switched_protocols_test;
+    http1_head_no_length_test::ScriptedPeer peer({switched, pong});
+    auto                                    client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    std::vector<qb::http::Request> queued;
+    queued.push_back(asking_to_switch("/switch"));
+    queued.push_back(request(qb::http::method::GET, "/ping"));
+    auto replies = qb::http::run_sync(client->push_requests(std::move(queued)));
+
+    ASSERT_EQ(replies.size(), 2u);
+    EXPECT_EQ(replies[0].status(), qb::http::status::SWITCHING_PROTOCOLS) << "the switch the request asked for was not its answer";
+    EXPECT_EQ(replies[0].header("Upgrade"), "foo");
+    EXPECT_EQ(replies[1].status(), qb::http::status::OK);
+    EXPECT_EQ(replies[1].body().template as<std::string>(), "pong") << "the bytes after the 101 answered the next request";
+    EXPECT_EQ(peer.connections.load(), 2) << "the connection that switched protocols served the next request";
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, OneShotUnaskedSwitchFailsAndAnAskedOneIsTheAnswer) {
+    using namespace http1_switched_protocols_test;
+    {
+        http1_head_no_length_test::ScriptedPeer peer({switched});
+        auto reply = qb::http::run_sync(qb::http::GET(qb::http::Request{{peer.url("/switch")}}, std::chrono::seconds(3)));
+        EXPECT_EQ(reply.response.status(), qb::http::status::BAD_GATEWAY) << "a 101 the request never asked for was its answer";
+    }
+    {
+        http1_head_no_length_test::ScriptedPeer peer({switched});
+        auto                                    req = asking_to_switch("/switch");
+        req.uri()                                   = qb::io::uri(peer.url("/switch"));
+        auto reply                                  = qb::http::run_sync(qb::http::GET(std::move(req), std::chrono::seconds(3)));
+        EXPECT_EQ(reply.response.status(), qb::http::status::SWITCHING_PROTOCOLS) << "the switch the request asked for was not its answer";
+    }
+    {
+        http1_head_no_length_test::ScriptedPeer peer({switched});
+        auto                                    req = asking_to_switch("/switch", "websocket");
+        req.uri()                                   = qb::io::uri(peer.url("/switch"));
+        auto reply                                  = qb::http::run_sync(qb::http::GET(std::move(req), std::chrono::seconds(3)));
+        EXPECT_EQ(reply.response.status(), qb::http::status::BAD_GATEWAY) << "a switch to a protocol the request did not offer was its answer";
+    }
+    drain_client_callbacks();
+}
+
+// A switch to a protocol the request did not offer -- `foo` to an offer of `websocket`, or one that names no protocol --
+// fails the request as an unasked one does (§7.8, §15.2.2), and the connection is retired; a 101 with no request in flight
+// retires it too, and the next request goes to a new connection (Huly QB-1248).
+TEST(Http1ClientTest, ASwitchToWhatTheRequestDidNotOfferFailsIt) {
+    using namespace http1_switched_protocols_test;
+    for (auto const &[offered, answer] : std::vector<std::pair<std::string, std::string>>{
+             {"websocket", switched},
+             {"foo", "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\n\r\nsmuggled"},
+             {"*", switched}, // `*` names a protocol of its own: no wildcard
+             {"foo", "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: , \r\n\r\nsmuggled"}, // a field naming none
+             {"foo", "HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: foo\r\nUpgrade: bar\r\n\r\nsmuggled"}
+         }) {
+        http1_head_no_length_test::ScriptedPeer peer({answer, pong});
+        auto                                    client = qb::http1::make_client(peer.url("/"));
+        client->set_request_timeout(std::chrono::seconds(3));
+        std::vector<qb::http::Request> queued;
+        queued.push_back(asking_to_switch("/switch", offered));
+        queued.push_back(request(qb::http::method::GET, "/ping"));
+        auto replies = qb::http::run_sync(client->push_requests(std::move(queued)));
+        ASSERT_EQ(replies.size(), 2u) << offered;
+        EXPECT_EQ(replies[0].status(), qb::http::status::BAD_GATEWAY) << offered << ": a switch the request did not offer was its answer";
+        EXPECT_EQ(replies[1].status(), qb::http::status::OK) << offered;
+        EXPECT_EQ(replies[1].body().template as<std::string>(), "pong") << offered;
+        EXPECT_EQ(peer.connections.load(), 2) << offered << ": the connection that switched protocols served the next request";
+        drain_client_callbacks();
+    }
+}
+
+// An offer is the request's every Upgrade field line, one list (RFC 9110 §5.3): a 101 to the protocol its second line names
+// is its answer (Huly QB-1248).
+TEST(Http1ClientTest, AnOfferSpreadOverFieldLinesIsReadWhole) {
+    using namespace http1_switched_protocols_test;
+    http1_head_no_length_test::ScriptedPeer peer({switched, pong});
+    auto                                    client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+    auto offer = asking_to_switch("/switch", "h2c");
+    offer.add_header("Upgrade", "foo");
+    auto reply = qb::http::run_sync(client->push_request(std::move(offer)));
+    EXPECT_EQ(reply.status(), qb::http::status::SWITCHING_PROTOCOLS) << "the offer's second field line was not read";
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, ASwitchWithNoRequestInFlightRetiresTheConnection) {
+    using namespace http1_switched_protocols_test;
+    http1_head_no_length_test::ScriptedPeer peer({"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" + switched, pong});
+    auto                                    client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+    auto first  = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/a")));
+    auto second = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/b")));
+    EXPECT_EQ(first.body().template as<std::string>(), "ok");
+    EXPECT_EQ(second.status(), qb::http::status::OK);
+    EXPECT_EQ(second.body().template as<std::string>(), "pong");
+    EXPECT_EQ(peer.connections.load(), 2) << "a connection that switched protocols with no request in flight was kept";
+    drain_client_callbacks();
+}

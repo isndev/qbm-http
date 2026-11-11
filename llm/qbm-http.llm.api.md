@@ -545,7 +545,7 @@ Usage: `auto s = qb::http::make_server(); s->router().get("/", h); s->router().c
 - `template<typename Derived> struct use { ... };` — type-builder mapping a Derived type to internal session/io_handler/server (tcp; `ssl::*` mirror for stcp/saccept).
 
 ### One-shot async client — `src/qbm/http/1.1/http.h`
-- Non-upgrade 1xx responses are discarded; the callback/awaiter receives only the final response or terminal error. They do not cancel the timeout. Status 101 keeps the existing upgrade handling. Bodies are sent immediately even with `Expect: 100-continue`.
+- Non-upgrade 1xx responses are discarded; the callback/awaiter receives only the final response or terminal error. They do not cancel the timeout. Status 101 is the answer of a request whose `Upgrade` offered the protocol it names; any other answers 502 (QB-1248). Bodies are sent immediately even with `Expect: 100-continue`.
 - `struct qb::http::async::Reply { Request request; Response response; }` — result pairing.
 - `template<typename Func> using async::HTTP = session<Func, qb::io::transport::tcp>;` and `async::HTTPS = session<Func, qb::io::transport::stcp>` (**HTTPS needs `QB_HAS_SSL`**).
 - Callback form: `template<typename Func> REQUEST(Request, Func&&, qb::duration timeout=qb::duration::zero(), bool verify_peer=true)` (method taken from request); verb helpers `GET/POST/PUT/DEL/HEAD/OPTIONS/PATCH(Request, Func&&, timeout, verify_peer)` force the method. `Func` is invoked with `async::Reply&&`. Sets Host/User-Agent/Accept-Encoding if absent.
@@ -617,7 +617,7 @@ The chain owns each flight during startup, then preserves the existing session d
 Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:622-675,866-888,1189-1201)_
 
 ### Persistent client — `qb::http1::Client` (alias `client`) — `src/qbm/http/1.1/client.h`
-- Non-upgrade 1xx responses do not complete or advance the active request, enter statistics, or disable its timeout. Only final fields reach the callback/awaiter; status 101 retains the existing handling. No wait-for-100 upload handshake.
+- Non-upgrade 1xx responses do not complete or advance the active request, enter statistics, or disable its timeout. Only final fields reach the callback/awaiter. Status 101 ends HTTP/1.1 on its connection, which is retired (the next request goes to a new one with auto-reconnect, the default), a 101 with no request in flight included: the answer of a request whose `Upgrade` offered the protocol it names; any other fails the request with 502 (QB-1248). No wait-for-100 upload handshake.
 `class Client : public std::enable_shared_from_this<Client>` — same-origin keep-alive client; **non-copyable, must live in a `shared_ptr`**.
 - `explicit Client(const std::string& base_uri); explicit Client(const qb::io::uri&);` — throws `std::invalid_argument` on non-http(s) scheme / missing host (http-only when `QB_HAS_SSL` off).
 - `bool connect(ConnectionCallback);` and `[[nodiscard]] async::awaiter<ConnectResult> connect();` — `ConnectionCallback = void(bool connected, const std::string& error)`. During retirement it accepts the next intent but starts it after old callback/protocol dispatch unwinds; `is_connecting()` may be true before connected. Work may queue behind explicit intent with automatic reconnect disabled.

@@ -149,10 +149,10 @@ public:
     void
     on(typename http_protocol::response response) {
         const auto status = response.status().code();
-        if (status >= 100 && status < 200 && status != 101) [[unlikely]] {
-            // RFC 9110 section 15.2: the active request, its deadline and queue await the final response.
-            return;
-        }
+        if (status >= 100 && status < 200 && status != 101) [[unlikely]]
+            return; // RFC 9110 section 15.2: the active request, its deadline and queue await the final response.
+        if (status == 101) [[unlikely]]
+            return _owner.handle_switched_protocols(std::move(response)); // HTTP/1.1 ends at a 101 on its connection (QB-1248)
         auto owner_guard = _owner.weak_from_this().lock();
         this->setTimeout(qb::duration::zero());
 #ifdef QB_HAS_COMPRESSION
@@ -805,6 +805,28 @@ make_client(std::string const &base_uri) {
 std::shared_ptr<Client>
 make_client(qb::io::uri const &uri) {
     return std::make_shared<Client>(uri);
+}
+
+// A 101 ends HTTP/1.1 on its connection (RFC 9110 section 15.2.2): what follows it is another protocol, which this client
+// does not speak. The connection is retired, never handed the next request -- kept, it read the switched protocol's
+// bytes as the next request's response (Huly QB-1248) -- and so is one that switches with no request in flight. A
+// switch to what the request offered in its Upgrade field is its answer, delivered; any other, which a server must not
+// send (section 7.8), fails it with 502, as a response the client cannot use. The queue goes to a new connection,
+// with auto-reconnect (the default); without it, the queue fails as after any connection retired.
+void
+Client::handle_switched_protocols(qb::http::Response response) {
+    auto self_guard = weak_from_this().lock();
+    if (!_active_request) {
+        retire_connection();
+        return;
+    }
+    if (!qb::http::detail::switch_was_offered(_active_request->request, response)) {
+        retire_connection(); // published before user code can submit the next request, as handle_response() does
+        fail_active_request("HTTP/1.1 server switched to a protocol the request did not offer", qb::http::status::BAD_GATEWAY);
+        return;
+    }
+    response.keep_alive = false;
+    handle_response(std::move(response));
 }
 
 } // namespace qb::http1

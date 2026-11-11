@@ -526,6 +526,25 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-system-http1-client` (the persistent client against a scripted peer waits past a `104` naming
   `chunked` for the final response, on one connection; two before).
 
+- **A `101 Switching Protocols` ends HTTP/1.1 on its connection, and one to a protocol the request did not offer
+  fails it (Huly QB-1248).** After a `101` the connection speaks the protocol the server switched to (RFC 9110
+  §15.2.2), and llhttp ends the message at its header section for that reason. The persistent client delivered every
+  `101` as the answer and kept its connection: the bytes the server sent after it were read as the response of the
+  next request, which a queued request received without the server having read it (a scripted peer's `101` followed
+  by `HTTP/1.1 200 OK ... smuggled`: the second request got `smuggled`). A server must not switch to a protocol the
+  request did not offer in its `Upgrade` field (§7.8), and both clients took any `101` for the answer. The persistent
+  client now retires the connection at any `101`, one that arrives with no request in flight included, the queue going
+  to a new connection (with auto-reconnect, the default; without it the queue fails as after any retired connection):
+  a `101` whose `Upgrade` names only protocols the request offered (every field line of either read as one list, `*` a
+  name like any) is that request's answer, as before; any other -- to a request that offered none, to another
+  protocol, or naming none -- fails the request with `502 Bad Gateway`,
+  counted a failure. The one-shot session answers 502 to the latter as well; it disconnects after every answer
+  already. curl 8.7.1, measured against the same peer, takes an unasked `101` for the final response, reads what
+  follows as its body until the connection closes, and never reuses the connection. Witnesses:
+  `qbm-http-test-system-http1-client` (the persistent client with the request behind it queued: an unasked switch, an
+  offered one, one to another protocol and one naming none, two connections each; a `101` with no request in flight;
+  the one-shot session, unasked, offered and to another protocol).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

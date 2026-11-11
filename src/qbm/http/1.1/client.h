@@ -308,6 +308,7 @@ private:
     void handle_connection_success();
     void handle_connection_failure(std::string const &error);
     void handle_response(qb::http::Response response);
+    void handle_switched_protocols(qb::http::Response response); // a 101: the connection retired, one not offered failed
     void handle_timeout();
     void handle_disconnected(int reason);
     void fail_active_request(std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);

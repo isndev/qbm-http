@@ -660,5 +660,50 @@ join(const std::vector<T> &strings, std::string_view delimiter) {
  * @return A `std::string` with the component percent-encoded.
  */
 [[nodiscard]] std::string uri_encode_component(std::string_view component);
+
 } // namespace utility
+
+namespace detail {
+/**
+ * @brief Whether a `101 Switching Protocols`, @p response, switches to what @p request offered: the response's Upgrade field
+ *        names at least one protocol, and each is a protocol the request's Upgrade field names, case-insensitively (RFC 9110
+ *        §7.8, §15.2.2). Every field line of either is read, as one list (§5.3); `*` is a protocol name like any, no wildcard.
+ *        A 101 that names none, or one the request did not offer, switches unasked (Huly QB-1248).
+ */
+template <typename Request, typename Response>
+[[nodiscard]] bool
+switch_was_offered(Request const &request, Response const &response) {
+    const auto offered  = request.headers().find("Upgrade");
+    const auto switched = response.headers().find("Upgrade");
+    if (offered == request.headers().end() || switched == response.headers().end())
+        return false;
+    const auto is_offered = [&](std::string_view protocol) {
+        for (auto const &line : offered->second)
+            for (std::string_view rest = line;;) {
+                const auto comma = rest.find(',');
+                if (utility::iequals(utility::trim_http_whitespace(rest.substr(0, comma)), protocol))
+                    return true;
+                if (comma == std::string_view::npos)
+                    break;
+                rest.remove_prefix(comma + 1);
+            }
+        return false;
+    };
+    bool named = false;
+    for (auto const &line : switched->second)
+        for (std::string_view rest = line;;) {
+            const auto comma = rest.find(',');
+            const auto item  = utility::trim_http_whitespace(rest.substr(0, comma));
+            if (!item.empty()) {
+                if (!is_offered(item))
+                    return false;
+                named = true;
+            }
+            if (comma == std::string_view::npos)
+                break;
+            rest.remove_prefix(comma + 1);
+        }
+    return named;
+}
+} // namespace detail
 } // namespace qb::http

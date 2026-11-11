@@ -504,7 +504,9 @@ A destroyed suspended WebSocket receive/next-frame/close awaiter makes its slot 
 HTTP/1.1 and HTTP/2 clients discard informational responses (`100`, `103`, other 1xx)
 while waiting for the final response. They do not complete the callback/awaiter, advance
 the HTTP/1.1 request queue, or cancel the request timeout. Informational fields are absent
-from the final result. HTTP/1.1 status `101` retains its upgrade handling; HTTP/2 rejects
+from the final result. HTTP/1.1 status `101` is final and ends HTTP on its connection: it answers a
+request whose `Upgrade` offered the protocol it names, and the persistent client retires the
+connection; a `101` to a protocol the request did not offer fails it with 502 (QB-1248). HTTP/2 rejects
 `101`, informational END_STREAM and DATA before final headers with a stream error.
 Bodies are sent immediately, including when the request carries `Expect: 100-continue`;
 there is no wait-for-100 upload handshake or informational callback API.

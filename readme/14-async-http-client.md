@@ -26,7 +26,13 @@ request does not start because a 1xx arrived.
 
 HTTP/2 also accepts repeated and CONTINUATION-split informational header blocks. A 1xx
 that sets END_STREAM, status 101, or DATA before final headers is a stream protocol
-error. HTTP/1.1 status 101 keeps its existing upgrade handling. This follows
+error. On HTTP/1.1 a `101 Switching Protocols` is final, and the connection speaks HTTP no
+more after it (RFC 9110 section 15.2.2): it answers a request whose `Upgrade` field offered
+the protocol it names, and the persistent client then retires the connection, sending the
+next request on a new one (with auto-reconnect, the default). A 101 to a protocol the request
+did not offer -- or to a request that offered none -- which a server must not send (section
+7.8), fails that request with `502 Bad Gateway`; one with no request in flight retires the
+connection too. This follows
 [RFC 9110 section 15.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.2) and
 [RFC 9113 section 8.1](https://www.rfc-editor.org/rfc/rfc9113.html#section-8.1).
 

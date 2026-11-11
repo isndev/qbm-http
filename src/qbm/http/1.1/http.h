@@ -1441,10 +1441,10 @@ public:
     void
     on(typename http_protocol::response response) {
         const auto status = response.status().code();
-        if (status >= 100 && status < 200 && status != 101) [[unlikely]] {
-            // Keep this session and its deadline alive until the final response (RFC 9110 section 15.2).
-            return;
-        }
+        if (status >= 100 && status < 200 && status != 101) [[unlikely]]
+            return; // Keep this session and its deadline alive until the final response (RFC 9110 section 15.2).
+        if (status == 101 && !qb::http::detail::switch_was_offered(_request, response)) [[unlikely]]
+            response = Response{qb::http::status::BAD_GATEWAY}; // a switch the request did not offer (RFC 9110 §7.8, QB-1248)
         LOG_HTTP_INFO("HTTP/1.1 client received response. Status: " << response.status().code());
 
 #ifdef QB_HAS_COMPRESSION
