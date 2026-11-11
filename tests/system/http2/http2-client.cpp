@@ -69,6 +69,7 @@
 #include <qb/io/tcp/listener.h>
 #include <qb/io/tcp/ssl/listener.h>
 
+#include "../../shared/http2_planned_peer.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
@@ -3708,3 +3709,117 @@ TEST(Http2Extraction, ASessionDeclaringItsOwnOnCancelsItsStreamsContextsAndStops
 }
 
 } // namespace http2_extraction_test
+
+// ===========================================================================
+// What a server sends on a stream the client reset, over real TLS sockets, and what the client says when it closes a
+// connection itself (Huly QB-1270, the maintainer's « Oui, tout dans QB-1270 » of 2026-11-11). A legitimate server
+// whose response passes what the client accepts on one stream has the next frames of that stream in flight when the
+// client resets it: they closed the connection, and every other request on it failed. And a request failed by the
+// client's own GOAWAY read « Server sent GOAWAY: GOAWAY sent by client: ... ».
+// ===========================================================================
+namespace http2_client_crossing_test {
+
+using qb::http::test::Http2PlannedPeer;
+
+class Http2ClientCrossingTest : public ::testing::Test {
+protected:
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        qb::io::async::init();
+    }
+
+    [[nodiscard]] static std::shared_ptr<qb::http2::Client>
+    connected_client(uint16_t port) {
+        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
+        client->disable_auto_reconnect();
+        bool connected = false;
+        client->connect([&](bool ok, const std::string &) { connected = ok; });
+        EXPECT_TRUE(ServerThread::pump_until([&] { return connected; }));
+        return client;
+    }
+
+    [[nodiscard]] static qb::http::Request
+    get(const char *path) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri(path);
+        return request;
+    }
+};
+
+// A server whose body passes its content-length on stream 1 while the client's other request waits on
+// stream 3. The client resets stream 1 at the DATA that passes it; the server had already written the next DATA of that
+// stream and its trailers, then the response to stream 3. The DATA closed the connection with GOAWAY(PROTOCOL_ERROR),
+// « DATA for unknown client stream », and the request on stream 3 failed with it. It is discarded now (RFC 9113 §5.1):
+// the request on stream 3 is answered on the same connection, its header named by an index the discarded trailers put
+// in the HPACK table; the client sent one reset, of stream 1, and its only GOAWAY is the NO_ERROR of the test's
+// disconnect(). The body past MAX_BODY_SIZE, 100 MiB on the wire, is http2-client-huge-body.cpp's.
+TEST_F(Http2ClientCrossingTest, ADataCrossingTheClientsResetLeavesTheOtherRequestOfTheConnectionServed) {
+    Http2PlannedPeer peer(Http2PlannedPeer::Plan::body_past_its_content_length);
+    ASSERT_NE(peer.port(), 0);
+    auto client = connected_client(peer.port());
+    ASSERT_TRUE(client->is_connected()) << "the client did not connect";
+    std::optional<qb::http::Response> large, other;
+    ASSERT_TRUE(client->push_request(get("/large"), [&](qb::http::Response r) { large = std::move(r); }));
+    ASSERT_TRUE(client->push_request(get("/other"), [&](qb::http::Response r) { other = std::move(r); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return (large.has_value() && other.has_value()) || peer.eof(); }, 30s));
+    ASSERT_TRUE(large.has_value()) << "the response past its content-length was not refused";
+    EXPECT_NE(large->status(), qb::http::status::OK);
+    EXPECT_NE(large->body().as<std::string>().find("exceeds content-length"), std::string::npos) << large->body().as<std::string>();
+    ASSERT_TRUE(other.has_value()) << "the connection ended before the other request was answered";
+    EXPECT_EQ(other->status(), qb::http::status::OK) << other->body().as<std::string>();
+    EXPECT_EQ(other->body().as<std::string>(), "three");
+    EXPECT_EQ(other->header("x-crossed"), "one");
+    EXPECT_TRUE(client->is_connected());
+
+    client->disconnect(); // GOAWAY(NO_ERROR) behind everything the client wrote: the peer reads it all
+    ASSERT_TRUE(ServerThread::pump_until([&] { return peer.eof(); }, 30s));
+    const auto resets = peer.resets();
+    ASSERT_EQ(resets.size(), 1u) << "what crossed the reset was answered";
+    EXPECT_EQ(resets.front().first, 1u);
+    EXPECT_EQ(resets.front().second, 0x1u) << "PROTOCOL_ERROR";
+    ASSERT_TRUE(peer.goaway());
+    const auto [code, debug] = peer.first_goaway();
+    EXPECT_EQ(code, 0u) << "the client closed the connection: " << debug;
+}
+
+// A connection the client closes itself -- a HEADERS on an idle stream, a DATA on stream 0, a PING of 7 octets, each a
+// connection error (RFC 9113 §5.1.1, §6.1, §6.7) -- fails the request in flight with the client's reason, once:
+// « GOAWAY sent by client: <reason> », and the server reads that GOAWAY. It read « Server sent GOAWAY: GOAWAY sent by
+// client: <reason> » (the HEADERS); a DATA on stream 0 closed nothing, the request waiting for its timeout; and the PING
+// ended the connection without a GOAWAY, the request failing with « Connection lost ».
+TEST_F(Http2ClientCrossingTest, ARequestTheClientsOwnGoawayFailsNamesTheClientsReasonOnce) {
+    struct kind {
+        Http2PlannedPeer::Plan plan;
+        const char            *reason;
+        uint32_t               code;
+    };
+    // Each kind on a connection of its own, and judged on its own: a fatal assertion ends that kind, not the test.
+    const auto closes = [&](const kind &each) {
+        SCOPED_TRACE(each.reason);
+        Http2PlannedPeer peer(each.plan);
+        ASSERT_NE(peer.port(), 0);
+        auto client = connected_client(peer.port());
+        ASSERT_TRUE(client->is_connected()) << "the client did not connect";
+        std::optional<qb::http::Response> response;
+        ASSERT_TRUE(client->push_request(get("/pending"), [&](qb::http::Response r) { response = std::move(r); }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); }, 10s)) << "the client did not close the connection";
+        EXPECT_EQ(response->status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_EQ(response->body().as<std::string>(), std::string("GOAWAY sent by client: ") + each.reason);
+        ASSERT_TRUE(ServerThread::pump_until([&] { return peer.goaway() || peer.eof(); }, 10s));
+        ASSERT_TRUE(peer.goaway()) << "the connection ended without a GOAWAY";
+        const auto [code, debug] = peer.first_goaway();
+        EXPECT_EQ(code, each.code);
+        EXPECT_EQ(debug, each.reason);
+        client->disconnect();
+    };
+    closes(kind{Http2PlannedPeer::Plan::headers_on_an_idle_stream, "HEADERS frame received on idle client stream", 0x1u});
+    closes(kind{Http2PlannedPeer::Plan::data_on_stream_zero, "DATA frame received on stream 0", 0x1u});
+    closes(kind{Http2PlannedPeer::Plan::ping_of_seven_octets, "PING frame payload incorrect size.", 0x6u});
+}
+
+} // namespace http2_client_crossing_test

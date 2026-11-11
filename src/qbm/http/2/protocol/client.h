@@ -24,8 +24,12 @@
  */
 #pragma once
 
+#include <algorithm>
+#include <bit>
 #include <charconv>
+#include <cstdint>
 #include <optional>
+#include <vector>
 #include "../../origin.h" // origin::authority: the :authority every protocol writes (Huly QB-1064)
 #include "./base.h"
 
@@ -49,6 +53,49 @@ parse_status_code(std::string_view status) noexcept {
     }
     return code;
 }
+
+/// The streams the client reset while it held them, the most recent MAX_RESET_STREAMS_REMEMBERED resets
+/// (ClientHttp2Protocol::send_rst_stream(), Huly QB-1270): a frame the server sent on one before it read the reset is
+/// discarded, not answered (RFC 9113 §5.1) -- one the server had ended is not remembered: nothing of it is in flight.
+/// Two views of the same ids: in the order they were reset, a ring, so that the oldest is forgotten first; and sorted,
+/// for the lookup of a frame on a stream the client holds nothing for -- the only place it is read. A reset is forgotten
+/// by the resets after it, never by its stream's age: a long download reset after a thousand requests has come and gone
+/// is remembered as one reset a moment ago. Empty, nothing is allocated.
+class reset_stream_memory {
+public:
+    [[nodiscard]] bool
+    contains(std::uint32_t stream_id) const noexcept {
+        return std::binary_search(_sorted.begin(), _sorted.end(), stream_id);
+    }
+    void
+    remember(std::uint32_t stream_id) {
+        if (_by_age.size() < capacity) {
+            _by_age.push_back(stream_id);
+        } else { // the oldest reset is forgotten: its slot takes this one
+            std::uint32_t &oldest = _by_age[_oldest];
+            _sorted.erase(std::lower_bound(_sorted.begin(), _sorted.end(), oldest));
+            oldest  = stream_id;
+            _oldest = (_oldest + 1) % capacity;
+        }
+        _sorted.insert(std::upper_bound(_sorted.begin(), _sorted.end(), stream_id), stream_id);
+    }
+    void
+    clear() noexcept {
+        _by_age.clear();
+        _sorted.clear();
+        _oldest = 0;
+    }
+    [[nodiscard]] std::size_t
+    size() const noexcept {
+        return _sorted.size();
+    }
+
+private:
+    static constexpr std::size_t capacity = ::qb::http2::protocol_limits::MAX_RESET_STREAMS_REMEMBERED;
+    std::vector<std::uint32_t>   _by_age; ///< In the order they were reset; once full, a ring whose oldest is at _oldest
+    std::vector<std::uint32_t>   _sorted; ///< The same ids, ascending
+    std::size_t                  _oldest = 0;
+};
 } // namespace detail
 
 /**
@@ -164,6 +211,13 @@ private:
     std::uint32_t _last_promised_stream_id  = 0;
     std::uint32_t _continuation_frame_count = 0;
 
+    /// The streams this client reset while it held them, the most recent resets (send_rst_stream()): what the server sent
+    /// on one before it read the reset is discarded, not answered (RFC 9113 §5.1; Huly QB-1270).
+    detail::reset_stream_memory _reset_streams;
+    /// The HEADERS frames on streams that have closed, on this connection: the first is logged, then one line at each
+    /// power of two of this count (log_headers_on_closed_stream(); Huly QB-1270).
+    std::uint64_t _headers_on_closed_streams = 0;
+
     bool _initial_settings_ack_received_placeholder = false; // Placeholder for actual ACK tracking.
 
     /// What ends a request that announces trailer fields it does not set: true (the protocol's
@@ -233,6 +287,8 @@ public:
         _initial_settings_sent       = false;
         _last_promised_stream_id     = 0;
         _continuation_frame_count    = 0;
+        _reset_streams.clear();
+        _headers_on_closed_streams = 0;
 
         // Reset our settings and derived values
         this->initialize_our_settings_map();
@@ -342,7 +398,9 @@ public:
         auto *stream_ptr = get_stream_by_id(stream_id);
 
         if (!stream_ptr) {
-            handle_data_for_unknown_stream(stream_id, data_event.header.get_payload_length()); // Corrected
+            // The frame's whole payload, padding included, as flow control counts it (RFC 9113 §6.1) and as below
+            handle_data_for_unknown_stream(stream_id,
+                                           static_cast<uint32_t>(data_event.payload.data_payload.size() + data_event.payload.padding_size));
             return;
         }
         Http2ClientStream &stream = *stream_ptr;
@@ -385,20 +443,20 @@ public:
         if (!stream.headers_received_main) [[unlikely]] {
             // Informational HEADERS do not begin the final response's content (RFC 9113 section 8.1).
             // Even rejected DATA consumes connection-level flow-control credit.
-            conditionally_send_connection_window_update();
-            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "DATA before final response headers");
+            refuse_data(stream, data_event.header.flags, ErrorCode::PROTOCOL_ERROR, "DATA before final response headers");
             return;
         }
         if (!data_payload.empty()) {
             stream.assembled_response.body().raw().write(reinterpret_cast<const char *>(data_payload.data()), data_payload.size());
             const auto body_size = stream.assembled_response.body().size();
+            // A body the stream is reset for: refuse_data() -- its octets count, and the WINDOW_UPDATE they make due
+            // leaves with the reset. send_rst_stream() already closes/erases the stream context.
             if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-                // send_rst_stream() already closes/erases the stream context.
-                send_rst_stream(stream_id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
+                refuse_data(stream, data_event.header.flags, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
                 return;
             }
             if (stream.expected_content_length && body_size > *stream.expected_content_length) {
-                send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
+                refuse_data(stream, data_event.header.flags, ErrorCode::PROTOCOL_ERROR, "HTTP/2 response body exceeds content-length");
                 return;
             }
             // Nothing here forgives the PONGs, SETTINGS ACKs and resets the server solicited: they are counted while the
@@ -485,7 +543,14 @@ public:
                 return;
             }
 
-            const auto stream_id = headers_event.header.get_stream_id();
+            const auto stream_id   = headers_event.header.get_stream_id();
+            const bool end_headers = (headers_event.header.flags & FLAG_END_HEADERS) != 0;
+            if (stream_id == 0) [[unlikely]] {
+                // A HEADERS frame names a stream (RFC 9113 §6.2): it was read as one on a closed stream, its block
+                // decoded and dropped, the connection kept (Huly QB-1270).
+                this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "HEADERS frame received on stream 0");
+                return;
+            }
             if (is_idle_stream(stream_id)) {
                 // An unexpected stream identifier (RFC 9113 §5.1.1): an odd id past the last request is not the server's
                 // to use, and an even one is its own only once promised (§8.4.1) -- it was reset, each HEADERS for a
@@ -495,13 +560,20 @@ public:
                                                                            : "HEADERS frame received on idle stream (never promised)");
                 return;
             }
+            if (_reset_streams.contains(stream_id)) {
+                // A stream this client reset: the server sent this block before it read the reset -- trailers, or the
+                // response the reset refused -- and it is discarded, not answered (RFC 9113 §5.1). It is still decoded:
+                // the server's encoder indexed its fields in the connection's one table, and its next blocks reference
+                // them (§4.3). It was reset again, a reply the server drew for nothing (Huly QB-1270).
+                begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
+                return;
+            }
 
             // A closed stream - send RST_STREAM (counted while queued, send_rst_stream()), and still decode the block
             // (HPACK state, QB-534)
-            LOG_HTTP_WARN_PA(headers_event.header.get_stream_id(), "Client: Received HEADERS for unknown/closed stream. Sending RST_STREAM.");
-            this->send_rst_stream(headers_event.header.get_stream_id(), ErrorCode::STREAM_CLOSED, "HEADERS on unknown/closed stream");
-            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment,
-                                         (headers_event.header.flags & FLAG_END_HEADERS) != 0);
+            log_headers_on_closed_stream(stream_id);
+            this->send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS on unknown/closed stream");
+            begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
         Http2ClientStream &stream = *stream_ptr;
@@ -1031,12 +1103,12 @@ public:
         // LOG_DEBUG_PA("ClientHttp2Protocol", "[HTTP/2 Client] Received WINDOW_UPDATE frame on stream " << wu_event.header.get_stream_id()
         //           << " with increment " << wu_event.payload.window_size_increment);
 
-        if (wu_event.payload.window_size_increment == 0) {
+        if (wu_event.payload.window_size_increment == 0) { // a guard: the frame layer refuses it first (on_stream_frame_error)
             LOG_HTTP_ERROR_PA(wu_event.header.get_stream_id(), "Client: WINDOW_UPDATE with 0 increment");
             if (wu_event.header.get_stream_id() == 0) {
                 this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with 0 increment for connection.");
             } else {
-                send_rst_stream(wu_event.header.get_stream_id(), ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with 0 increment for stream.");
+                on_stream_frame_error(ErrorCode::PROTOCOL_ERROR, "WINDOW_UPDATE with 0 increment for stream.", wu_event.header.get_stream_id());
             }
             return;
         }
@@ -1461,7 +1533,44 @@ public:
         this->on(qb::protocol::http2::PrefaceCompleteEvent{});
     }
 
+    /**
+     * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets,
+     *        an empty one included (§6.3): the frame layer hands it here, as it does to the server's hook of this name,
+     *        where it ended the client's connection with neither a reset nor a GOAWAY (Huly QB-1270). A request in flight
+     *        is reset and fails, the connection serving on; a stream that has closed is reset too, a reply the server draws
+     *        for nothing, counted while it is queued (send_rst_stream()); a stream this client reset ignores it, as any
+     *        frame the server sent there before it read the reset (§5.1). On an idle stream, which no RST_STREAM may name
+     *        (§6.4), or on stream 0, it is a connection error, with its GOAWAY (§5.4.1). Public only for the frame layer to
+     *        reach it.
+     */
+    void
+    on_stream_frame_error(ErrorCode error_code, const std::string &message, uint32_t stream_id) noexcept {
+        if (stream_id == 0 || is_idle_stream(stream_id)) {
+            send_goaway_and_close(error_code, message);
+            return;
+        }
+        if (_reset_streams.contains(stream_id)) {
+            return;
+        }
+        send_rst_stream(stream_id, error_code, message);
+    }
+
 private:
+    /**
+     * @brief A HEADERS frame on a stream that has closed, as the client answers it: the first one on the connection is
+     *        logged at WARN, then one line each time their count reaches a power of two, with that count -- 1, 2, 4, 8 and
+     *        so on: a server that sends them cannot flood the log, and the trace still says how many came. One WARN line
+     *        was written for each, without a bound (Huly QB-1270).
+     */
+    void
+    log_headers_on_closed_stream([[maybe_unused]] uint32_t stream_id) noexcept {
+        const std::uint64_t seen = ++_headers_on_closed_streams;
+        if (std::has_single_bit(seen)) {
+            LOG_HTTP_WARN_PA(stream_id, "Client: Received HEADERS for a closed stream, #"
+                                            << seen << " on this connection: sending RST_STREAM"
+                                            << (seen == 1 ? " (the next are logged at each power of two of their count)" : ""));
+        }
+    }
     /**
      * @brief Initialize our max frame size setting
      * @return Max frame size value
@@ -1619,31 +1728,80 @@ private:
     }
 
     /**
-     * @brief Handle DATA frame for unknown stream
+     * @brief A DATA frame on a stream the client holds nothing for.
+     * @details On stream 0 (RFC 9113 §6.1) or an idle stream (§5.1) it is a connection error. On a stream this client
+     *          reset (_reset_streams) it is discarded: the server sent it before it read the reset, and it still counts
+     *          against the connection window, given back by a WINDOW_UPDATE as any DATA is (§5.1, §6.9). It closed the
+     *          connection: a server streaming a body past MAX_BODY_SIZE had the stream reset, and its DATA already in
+     *          flight then ended every other request on the connection (Huly QB-1270). A pushed stream that has closed
+     *          answers it with a reset; a client stream closed otherwise -- its response completed, or the server reset
+     *          it -- makes it a connection error, as it was.
      * @param stream_id Stream ID
-     * @param data_payload_size Data payload size
+     * @param data_payload_size The frame's whole payload, padding included: what flow control counts (§6.1)
      */
     void
     handle_data_for_unknown_stream(uint32_t stream_id, uint32_t data_payload_size) {
+        if (stream_id == 0) [[unlikely]] {
+            // It was read as a DATA on a closed pushed stream: a reset of stream 0 the client never sends, the connection
+            // window spent and the connection kept (Huly QB-1270).
+            send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA frame received on stream 0");
+            return;
+        }
+        if (is_idle_stream(stream_id)) {
+            // Idle, where only HEADERS and PRIORITY are frames at all (RFC 9113 §5.1). An even one never promised was
+            // reset, each DATA for a 13-octet reply (Huly QB-1270).
+            send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, (stream_id & 1u) != 0u ? "DATA for unknown client stream"
+                                                                                    : "DATA frame received on idle stream (never promised)");
+            return;
+        }
+        if (_reset_streams.contains(stream_id)) {
+            discard_data(data_payload_size);
+            return;
+        }
         if (stream_id % 2 == 0) {
-            // Even stream ID - could be server push
+            // Even stream ID - a pushed stream
             auto it = _pending_pushed_streams.find(stream_id);
             if (it != _pending_pushed_streams.end()) {
                 send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "DATA before HEADERS on pushed stream");
                 _pending_pushed_streams.erase(it);
-            } else if (is_idle_stream(stream_id)) {
-                // Never promised: idle, where only HEADERS and PRIORITY are frames at all (RFC 9113 §5.1). It was reset,
-                // each DATA for a 13-octet reply (Huly QB-1270).
-                send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA frame received on idle stream (never promised)");
             } else {
                 send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA for unknown pushed stream");
             }
+            discard_data(data_payload_size);
         } else {
-            // Odd stream ID - client-initiated
+            // Odd stream ID - client-initiated, closed by its response or the server's reset
             send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA for unknown client stream");
         }
+    }
 
-        // Update connection window
+    /**
+     * @brief Reset a stream for the DATA frame just read, whose octets the windows already took: a connection
+     *        WINDOW_UPDATE they make due leaves first, with the reset -- it waited for whatever DATA came next, which the
+     *        reset may leave none of (RFC 9113 §6.9). The frame's END_STREAM, if it has one, is recorded first: the
+     *        server sent nothing behind it, and send_rst_stream() remembers only a stream the server could still send on
+     *        (Huly QB-1270). @p stream is erased past this call.
+     */
+    void
+    refuse_data(Http2ClientStream &stream, uint8_t flags, ErrorCode error_code, const char *reason) noexcept {
+        conditionally_send_connection_window_update();
+        if ((flags & FLAG_END_STREAM) != 0) {
+            stream.end_stream_received = true;
+        }
+        send_rst_stream(stream.id, error_code, reason);
+    }
+
+    /**
+     * @brief A DATA frame the client discards still counts against the connection window, and is given back with the
+     *        connection WINDOW_UPDATE once the octets taken reach the threshold, as for a DATA the client reads (RFC 9113
+     *        §6.9): the window is not lost. A server that sends past it is a connection FLOW_CONTROL_ERROR (§6.9.1). It
+     *        was taken from the window without that check (Huly QB-1270).
+     */
+    void
+    discard_data(uint32_t data_payload_size) noexcept {
+        if (_connection_receive_window < data_payload_size) [[unlikely]] {
+            this->send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "Connection flow control violation by peer.");
+            return;
+        }
         _connection_receive_window -= data_payload_size;
         _connection_processed_bytes_for_window_update += data_payload_size;
         conditionally_send_connection_window_update();
@@ -1866,7 +2024,11 @@ private:
      *          (control_replies_at_bound(), control_reply_written()): with MAX_QUEUED_CONTROL_REPLIES of them queued it
      *          is not written and the connection is closed with GOAWAY(ENHANCE_YOUR_CALM). They had no bound: a server
      *          that read nothing and sent HEADERS on a closed stream queued a reset for each, up to the write-buffer
-     *          cap (Huly QB-1270; CVE-2019-9514 from the client's side).
+     *          cap (Huly QB-1270; CVE-2019-9514 from the client's side). A stream the client held when it reset it,
+     *          and that the server had not ended, is remembered (_reset_streams): what the server sent on it before it
+     *          read the reset is discarded, not answered. Only these resets are remembered, at most one per stream the
+     *          client holds -- a request it opened, a stream promised: a frame on a stream it does not hold adds
+     *          nothing to that memory.
      * @param stream_id Stream ID
      * @param error_code Error code
      * @param debug_message Optional debug message
@@ -1899,7 +2061,14 @@ private:
         // leaves a dangling iterator if that callback erases it. Touch no stream afterwards.
         if (it != _client_streams.end()) {
             const bool notify_error = !it->second.response_dispatched;
+            // A stream the server could still send on -- it has not ended it: what it sent before it read the reset is
+            // discarded (on(DataFrame), on(HeadersFrame)). After its END_STREAM nothing is in flight, and a frame there
+            // stays the error it is (RFC 9113 §5.1).
+            const bool in_flight = !it->second.end_stream_received;
             _client_streams.erase(it);
+            if (in_flight) {
+                _reset_streams.remember(stream_id);
+            }
             if (notify_error) {
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by client: " + debug_message};
                 // Check if IO_Handler has the 'on' method for this event type
@@ -1919,7 +2088,13 @@ private:
     send_goaway_and_close(ErrorCode error_code, const std::string &debug_message) noexcept {
         if (!this->ok())
             return; // Don't send if protocol already not ok
+        write_goaway_and_close(error_code, debug_message);
+    }
 
+    /// send_goaway_and_close() past its guard: also for the frame layer, which ends the connection (not_ok()) before it
+    /// reports why (handle_framer_detected_error()).
+    void
+    write_goaway_and_close(ErrorCode error_code, const std::string &debug_message) noexcept {
         LOG_HTTP_WARN_PA(0, "Client: Sending GOAWAY frame. Error: " << static_cast<int>(error_code) << ", Message: " << debug_message);
 
         // The last-stream-id of a GOAWAY names the highest stream the SENDER's peer initiated that the
@@ -2032,33 +2207,23 @@ private:
     }
 
     /**
-     * @brief Handle framer-detected errors
+     * @brief A frame the frame layer refused: a connection error, which it has already ended (not_ok()) when it calls
+     *        this. The GOAWAY the error owes is sent (RFC 9113 §5.4.1), its code and the frame layer's reason as debug
+     *        data. Every refusal that comes here is a connection error -- a padding past the payload, a frame of the
+     *        wrong size (PING, RST_STREAM, WINDOW_UPDATE, SETTINGS, a HEADERS too short for its priority fields), a
+     *        CONTINUATION missing, a WINDOW_UPDATE of 0 or a PRIORITY that is not 5 octets on stream 0 -- the stream
+     *        errors take on_stream_frame_error(). The protocol was no longer ok() here, and every one of them ended the
+     *        connection without a GOAWAY (Huly QB-1270).
      * @param reason Error code
      * @param message Error message
-     * @param stream_id_context Stream ID context (0 for connection errors)
+     * @param stream_id_context The frame's stream, 0 for stream 0
      */
     void
-    handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t stream_id_context) noexcept {
-        if (!_connection_active && this->ok()) {
-            this->not_ok(reason);
-            return;
+    handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t /*stream_id_context*/) noexcept {
+        if (!_connection_active) {
+            return; // this client has sent its GOAWAY already
         }
-        if (!this->ok())
-            return;
-
-        if (stream_id_context != 0) {
-            auto it = _client_streams.find(stream_id_context);
-            if (it != _client_streams.end()) {
-                send_rst_stream(stream_id_context, reason, "Framer detected error: " + message);
-                if (reason != ErrorCode::FRAME_SIZE_ERROR && reason != ErrorCode::PROTOCOL_ERROR) {
-                    send_goaway_and_close(reason, "Framer detected error (escalated to connection): " + message);
-                }
-            } else {
-                send_goaway_and_close(reason, "Framer detected error (unknown stream context or general): " + message);
-            }
-        } else {
-            send_goaway_and_close(reason, "Framer detected connection error: " + message);
-        }
+        write_goaway_and_close(reason, message);
     }
 
     /**
@@ -2302,6 +2467,11 @@ private:
 
             clear_header_assembly_state();
 
+            // A block refused below ends the stream all the same when the frame carries END_STREAM: recorded first, so
+            // that the reset remembers nothing -- nothing follows it (send_rst_stream(); Huly QB-1270). Set again below.
+            if ((headers_event.header.flags & FLAG_END_STREAM) != 0) {
+                stream.end_stream_received = true;
+            }
             if (!process_response_header_block(stream, decoded_fields, (headers_event.header.flags & FLAG_END_STREAM) != 0,
                                                over_header_list_size)) {
                 return;

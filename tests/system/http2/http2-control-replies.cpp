@@ -27,7 +27,7 @@
  *     resets: never closed;
  *   - the client, a server that sends such HEADERS and reads nothing: the resets were in no count and queued for as
  *     long as the server sent. Once the socket's buffers are full a thousand queue and the client closes the
- *     connection: the request it had in flight fails with the guard's reason.
+ *     connection: the request it had in flight fails with the guard's reason, named once as the client's.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -617,8 +617,9 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatNeverReadsIsCutOnceAThousan
     EXPECT_FALSE(peer.done()) << "a server that never read drew " << peer.replies() << " resets of " << peer.solicited()
                               << " solicited and the client is still connected: they queued in the client's output";
     ASSERT_TRUE(in_flight.has_value()) << "the connection was not closed: the request in flight is still waiting";
-    EXPECT_NE(in_flight->find("Excessive stream resets solicited"), std::string::npos)
-        << "the connection was closed for another reason: " << *in_flight;
+    // The client's own reason, named once: it read « Server sent GOAWAY: GOAWAY sent by client: ... » (Huly QB-1270).
+    EXPECT_EQ(*in_flight, "GOAWAY sent by client: Excessive stream resets solicited (server flood)")
+        << "the connection was closed for another reason, or the reason is not the client's alone";
     EXPECT_FALSE(client->is_connected());
     peer.stop_writing(); // the client is gone: the server reads what it had been sent
     EXPECT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.eof(); }, 30s)) << "the server did not see the connection end";
