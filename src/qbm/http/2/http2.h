@@ -855,14 +855,15 @@ public:
     }
 
     /**
-     * @brief Handle GOAWAY from client
+     * @brief Handle a GOAWAY: the client's, or the one this session's protocol sent with an error (`event.sent`)
      * @param event GOAWAY details
      */
     void
     on(const qb::protocol::http2::Http2GoAwayEvent &event) {
-        LOG_HTTP_WARN_PA(this->id(), "Received GOAWAY from client. Last Stream ID: " << event.last_stream_id
-                                                                                     << ", Code: " << static_cast<int>(event.error_code)
-                                                                                     << ", Debug: " << event.debug_data);
+        // The server's own GOAWAY was logged as received from the client (Huly QB-1270).
+        LOG_HTTP_WARN_PA(this->id(), (event.sent ? "Sent GOAWAY to client. Last Stream ID: " : "Received GOAWAY from client. Last Stream ID: ")
+                                         << event.last_stream_id << ", Code: " << static_cast<int>(event.error_code)
+                                         << ", Debug: " << event.debug_data);
         // Server may decide to stop accepting new requests on this connection.
         if (event.error_code != qb::protocol::http2::ErrorCode::NO_ERROR) {
             this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);

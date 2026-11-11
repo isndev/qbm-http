@@ -26,6 +26,7 @@
 
 #include <algorithm> // For std::min
 #include <array>
+#include <chrono>   // std::chrono::steady_clock: the bucket of the frames that make no progress (Huly QB-1270)
 #include <concepts> // std::same_as: counts_bytes_written (Huly QB-1270)
 #include <cstddef>  // std::size_t
 #include <cstdint>  // For uintN_t types
@@ -126,6 +127,25 @@ constexpr std::uint32_t MAX_RESET_STREAMS_REMEMBERED = 1000;
  *  so a peer could stream them forever (CONTINUATION-flood variant of CVE-2024-27316). A full
  *  1 MB block in 16 KB frames needs ~64; 512 is generous headroom while still bounding the flood. */
 constexpr std::uint32_t MAX_CONTINUATION_FRAMES = 512;
+
+/** @brief The frames that make no progress and draw no reply, each a dispatch for its receiver, so that a peer could
+ *  send them for ever (the empty-frame flood, CVE-2019-9518, and its kin; Huly QB-1270: they were counted nowhere). These
+ *  take a token from a bucket of NO_PROGRESS_FRAME_BURST that regains NO_PROGRESS_FRAME_RATE a second, on the client and
+ *  on the server, and with none left the connection ends with GOAWAY(ENHANCE_YOUR_CALM)
+ *  (Http2Protocol::refuse_no_progress_frame()): a DATA without END_STREAM whose data is empty (its padding aside); a
+ *  HEADERS without END_STREAM whose header block fragment is empty (its padding and priority fields aside); a
+ *  CONTINUATION without END_HEADERS and with an empty fragment; a PRIORITY, a signal this endpoint ignores (RFC 9113
+ *  §5.3.2); a frame of a type it does not know (§4.1); a SETTINGS ACK or a PING ACK that answers no SETTINGS or PING this
+ *  endpoint sent; on the client, every HEADERS on a stream it reset -- discarded -- and a stream error the frame layer
+ *  finds there, which it ignores. The bucket is nghttp2's "glitch" rate limiter (nghttp2_option_set_glitch_rate_limit():
+ *  added in nghttp2 1.67.0 at 1000 tokens and 33 a second, these values since 1.69.0), which takes a token for an empty
+ *  DATA, a PRIORITY, an unknown frame and an ignored header block alike; qb departs from it twice: it takes a token for an
+ *  empty HEADERS or CONTINUATION, which nghttp2 bounds otherwise, and for an ACK that answers nothing, which nghttp2
+ *  makes a connection error at once (a SETTINGS ACK). A WINDOW_UPDATE or a RST_STREAM on a stream that has closed, which
+ *  RFC 9113 §5.1 lets cross the end of a stream, takes none, as in nghttp2. */
+constexpr std::uint32_t NO_PROGRESS_FRAME_BURST = 10000;
+/** @brief The tokens the bucket of the frames that make no progress regains each second (NO_PROGRESS_FRAME_BURST). */
+constexpr std::uint32_t NO_PROGRESS_FRAME_RATE = 330;
 } // namespace qb::http2::protocol_limits
 
 namespace qb::protocol::http2 {
@@ -703,6 +723,14 @@ protected:
     /// The replies the peer solicited that the output still holds: PONGs, SETTINGS ACKs, on the server the resets of
     /// streams the client never opened, on the client those of anything but a request in flight (Huly QB-1270).
     detail::control_reply_queue _queued_control_replies;
+    /// The bucket of the frames that make no progress (protocol_limits::NO_PROGRESS_FRAME_BURST,
+    /// refuse_no_progress_frame(); Huly QB-1270): the tokens left, the second of the steady clock it was last filled at
+    /// (0: never), and the SETTINGS and the PINGs this endpoint sent that the peer has not acknowledged yet
+    /// (settings_sent(), ping_sent()): an ACK past them answers nothing.
+    std::uint32_t _no_progress_tokens      = ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST;
+    std::int64_t  _no_progress_second      = 0;
+    std::uint32_t _settings_unacknowledged = 0;
+    std::uint32_t _pings_unacknowledged    = 0;
 
 public:
     /**
@@ -861,24 +889,34 @@ public:
                         }
                     }
 
-                    // Validate SETTINGS frames on stream 0
-                    if (_current_frame_header.get_type() == FrameType::SETTINGS && _current_frame_header.get_stream_id() != 0) {
-                        this->not_ok(ErrorCode::PROTOCOL_ERROR);
+                    // The three checks made on a frame's header alone, before it is dispatched: SETTINGS, PING and GOAWAY
+                    // name the connection, never a stream (RFC 9113 §6.5, §6.7, §6.8), and a frame longer than the
+                    // SETTINGS_MAX_FRAME_SIZE this endpoint advertised is refused before its payload is read (§4.2). Each is
+                    // a connection error, ended with a GOAWAY of its code (§5.4.1) by the side's handle_framer_detected_error(),
+                    // as every other error the frame layer reports. They called not_ok() alone: the client and the server
+                    // closed the connection without a GOAWAY (Huly QB-1270).
+                    if (_current_frame_header.get_type() == FrameType::SETTINGS && _current_frame_header.get_stream_id() != 0) [[unlikely]] {
+                        (void) report_frame_error(ErrorCode::PROTOCOL_ERROR, "SETTINGS frame on non-zero stream_id",
+                                                  _current_frame_header.get_stream_id());
                         return;
                     }
 
-                    // Validate PING/GOAWAY frames on stream 0
                     if ((_current_frame_header.get_type() == FrameType::PING || _current_frame_header.get_type() == FrameType::GOAWAY)
-                        && _current_frame_header.get_stream_id() != 0) {
-                        this->not_ok(ErrorCode::PROTOCOL_ERROR);
+                        && _current_frame_header.get_stream_id() != 0) [[unlikely]] {
+                        (void) report_frame_error(ErrorCode::PROTOCOL_ERROR,
+                                                  _current_frame_header.get_type() == FrameType::PING ? "PING frame on non-zero stream_id"
+                                                                                                      : "GOAWAY frame on non-zero stream_id",
+                                                  _current_frame_header.get_stream_id());
                         return;
                     }
 
-                    // Check frame size against our limit
-                    if (_expected_payload_bytes > get_our_max_frame_size()) {
+                    if (_expected_payload_bytes > get_our_max_frame_size()) [[unlikely]] {
                         LOG_HTTP_ERROR_PA(_current_frame_header.get_stream_id(),
                                           "Frame size " << _expected_payload_bytes << " exceeds limit " << get_our_max_frame_size());
-                        this->not_ok(ErrorCode::FRAME_SIZE_ERROR);
+                        (void) report_frame_error(ErrorCode::FRAME_SIZE_ERROR,
+                                                  "Frame size " + std::to_string(_expected_payload_bytes) + " exceeds SETTINGS_MAX_FRAME_SIZE "
+                                                      + std::to_string(get_our_max_frame_size()),
+                                                  _current_frame_header.get_stream_id());
                         return;
                     }
 
@@ -942,6 +980,10 @@ public:
         _continuation_required  = false;
         _continuation_stream_id = 0;
         _queued_control_replies.clear(); // a new connection's output holds none of the last one's replies (Huly QB-1270)
+        _no_progress_tokens      = ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST;
+        _no_progress_second      = 0;
+        _settings_unacknowledged = 0;
+        _pings_unacknowledged    = 0;
     }
 
 protected:
@@ -1142,6 +1184,46 @@ protected:
     }
 
     /**
+     * @brief Takes the token of one frame that makes no progress and draws no reply, and refuses the frame once none is
+     *        left (protocol_limits::NO_PROGRESS_FRAME_BURST names the frames; the empty-frame flood, CVE-2019-9518; Huly
+     *        QB-1270). The bucket holds NO_PROGRESS_FRAME_BURST tokens and regains NO_PROGRESS_FRAME_RATE for each second
+     *        of the steady clock since it was last filled, as nghttp2's glitch limiter does; with none left the frame is a
+     *        connection error, GOAWAY(ENHANCE_YOUR_CALM), reported as the frame layer reports any (report_frame_error()).
+     *        Such frames went through, each a dispatch with no reply, and nothing counted them.
+     * @return true when the frame is refused (the connection is ended), false when it may be dispatched
+     */
+    [[nodiscard]] bool
+    refuse_no_progress_frame() noexcept {
+        const std::int64_t second =
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (second != _no_progress_second) {
+            const std::uint64_t elapsed = second > _no_progress_second ? static_cast<std::uint64_t>(second - _no_progress_second) : 1u;
+            const std::uint64_t tokens  = _no_progress_tokens + elapsed * ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_RATE;
+            _no_progress_tokens =
+                static_cast<std::uint32_t>(std::min<std::uint64_t>(::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST, tokens));
+            _no_progress_second = second;
+        }
+        if (_no_progress_tokens != 0) {
+            --_no_progress_tokens;
+            return false;
+        }
+        return !report_frame_error(ErrorCode::ENHANCE_YOUR_CALM, "Excessive frames making no progress (flood)",
+                                   _current_frame_header.get_stream_id());
+    }
+
+    /// The side wrote a SETTINGS (not an ACK) to the peer: its ACK answers it (protocol_limits::NO_PROGRESS_FRAME_BURST).
+    void
+    settings_sent() noexcept {
+        ++_settings_unacknowledged;
+    }
+
+    /// The side wrote a PING (not an ACK) to the peer: its ACK answers it (protocol_limits::NO_PROGRESS_FRAME_BURST).
+    void
+    ping_sent() noexcept {
+        ++_pings_unacknowledged;
+    }
+
+    /**
      * @brief Helper to report framing error and set not_ok state
      * @param error_code The error code
      * @param message Error message
@@ -1272,10 +1354,11 @@ protected:
     }
 
     /**
-     * @brief Handle error detected by framer
+     * @brief Handle error detected by framer: a connection error, which both sides end with a GOAWAY of its code (the
+     *        stream errors take the side's on_stream_frame_error(); Huly QB-1270)
      * @param reason Error code
      * @param message Error message
-     * @param stream_id_context Stream ID context (0 for connection errors)
+     * @param stream_id_context The frame's stream, 0 for stream 0: context only, never a stream to reset
      */
     void
     handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t stream_id_context) noexcept {
@@ -1382,6 +1465,12 @@ private:
         switch (_current_frame_header.get_type()) {
             case FrameType::SETTINGS:
                 if (_current_frame_header.flags & FLAG_ACK) {
+                    // An ACK that answers no SETTINGS this endpoint sent makes no progress (Huly QB-1270).
+                    if (_settings_unacknowledged != 0) {
+                        --_settings_unacknowledged;
+                    } else if (refuse_no_progress_frame()) {
+                        break;
+                    }
                     Http2FrameData<SettingsFrame> settings_ack_frame;
                     settings_ack_frame.header = _current_frame_header;
                     static_cast<SideProtocol *>(this)->on(std::move(settings_ack_frame));
@@ -1400,6 +1489,20 @@ private:
                 break;
 
             case FrameType::HEADERS: {
+                // A PADDED or PRIORITY HEADERS of no octet has no room for its Pad Length or its priority fields: too
+                // small for its mandatory data, and a frame carrying a field block, so a connection error (RFC 9113 §4.2).
+                // It was dispatched as an empty block (Huly QB-1270).
+                if (_current_frame_header.flags & (FLAG_PADDED | FLAG_PRIORITY)) [[unlikely]] {
+                    (void) report_frame_error(ErrorCode::FRAME_SIZE_ERROR,
+                                              (_current_frame_header.flags & FLAG_PADDED)
+                                                  ? "Padded HEADERS frame too short for Pad Length."
+                                                  : "HEADERS with PRIORITY flag frame payload too short.",
+                                              _current_frame_header.get_stream_id());
+                    break;
+                }
+                if (!(_current_frame_header.flags & FLAG_END_STREAM) && refuse_no_progress_frame()) {
+                    break;
+                }
                 Http2FrameData<HeadersFrame> hf;
                 hf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(hf));
@@ -1407,6 +1510,16 @@ private:
             } break;
 
             case FrameType::DATA: {
+                // A PADDED DATA of no octet has no room for its Pad Length (§4.2): it was dispatched as an empty DATA (Huly
+                // QB-1270).
+                if (_current_frame_header.flags & FLAG_PADDED) [[unlikely]] {
+                    (void) report_frame_error(ErrorCode::FRAME_SIZE_ERROR, "Padded DATA frame too short for Pad Length.",
+                                              _current_frame_header.get_stream_id());
+                    break;
+                }
+                if (!(_current_frame_header.flags & FLAG_END_STREAM) && refuse_no_progress_frame()) {
+                    break;
+                }
                 Http2FrameData<DataFrame> df;
                 df.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(df));
@@ -1447,6 +1560,9 @@ private:
                 break;
 
             case FrameType::CONTINUATION: {
+                if (!(_current_frame_header.flags & FLAG_END_HEADERS) && refuse_no_progress_frame()) {
+                    break;
+                }
                 Http2FrameData<ContinuationFrame> cf;
                 cf.header = _current_frame_header;
                 static_cast<SideProtocol *>(this)->on(std::move(cf));
@@ -1459,6 +1575,8 @@ private:
                 // No error needs to be signaled here for truly unknown frame types.
                 // QB_LOG_TRACE_PA(this->getName(), "Ignored unknown frame type " << static_cast<int>(_current_frame_header.get_type()) << "
                 // with zero payload.");
+                // Each takes a token of the bucket of the frames that make no progress, as in nghttp2 (Huly QB-1270).
+                (void) refuse_no_progress_frame();
                 break;
         }
     }
@@ -1498,8 +1616,9 @@ private:
             case FrameType::CONTINUATION:
                 return handle_continuation_frame_payload(payload_data, payload_size);
             default:
-                // Unknown frame type - ignore per RFC 9113
-                return true;
+                // Unknown frame type - ignore per RFC 9113 (§4.1), one token of the bucket of the frames that make no
+                // progress taken, as in nghttp2 (Huly QB-1270)
+                return !refuse_no_progress_frame();
         }
     }
 
@@ -1522,6 +1641,11 @@ private:
             // The Pad Length octet (1) + the pad_length padding bytes are stripped from
             // data_payload but still count against flow control (RFC 9113 §6.1).
             data_f.payload.padding_size = static_cast<std::size_t>(1) + pad_length;
+            // Padding alone is an empty DATA: a token of the bucket of the frames that make no progress unless it ends the stream (Huly
+            // QB-1270).
+            if (data_f.payload.data_payload.empty() && !(_current_frame_header.flags & FLAG_END_STREAM) && refuse_no_progress_frame()) {
+                return false;
+            }
         } else {
             data_f.payload.data_payload.assign(payload_data, payload_data + payload_size);
         }
@@ -1569,6 +1693,11 @@ private:
         }
 
         std::size_t header_block_size = p_len - pad_length;
+        // Padding and priority fields alone are an empty HEADERS: a token of the bucket of the frames that make no progress unless it ends the
+        // stream (Huly QB-1270).
+        if (header_block_size == 0 && !(_current_frame_header.flags & FLAG_END_STREAM) && refuse_no_progress_frame()) {
+            return false;
+        }
         headers_f.payload.header_block_fragment.assign(p_data, p_data + header_block_size);
         static_cast<SideProtocol *>(this)->on(std::move(headers_f));
         track_header_block_after_dispatch();
@@ -1593,6 +1722,11 @@ private:
             return false;
         }
 
+        // A signal this endpoint ignores (RFC 9113 §5.3.2): one token of the bucket of the frames that make no progress,
+        // as in nghttp2 (Huly QB-1270).
+        if (refuse_no_progress_frame()) {
+            return false;
+        }
         Http2FrameData<PriorityFrame> priority_f;
         priority_f.header                                     = _current_frame_header;
         uint32_t stream_dep_raw                               = extract_uint32_be(payload_data);
@@ -1694,6 +1828,14 @@ private:
             return false;
         }
 
+        // An ACK that answers no PING this endpoint sent makes no progress (Huly QB-1270).
+        if (_current_frame_header.flags & FLAG_ACK) {
+            if (_pings_unacknowledged != 0) {
+                --_pings_unacknowledged;
+            } else if (refuse_no_progress_frame()) {
+                return false;
+            }
+        }
         Http2FrameData<PingFrame> ping_f;
         ping_f.header = _current_frame_header;
         std::copy(payload_data, payload_data + payload_size, ping_f.payload.opaque_data.begin());

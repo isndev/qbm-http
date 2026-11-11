@@ -343,6 +343,7 @@ public:
         ping.header.set_stream_id(0);
         ping.payload.opaque_data = SHUTDOWN_PING_DATA;
         this->_io << ping;
+        this->ping_sent(); // its ACK is the round trip the drain waits for (Huly QB-1270)
         LOG_HTTP_INFO("ServerHttp2Protocol: graceful shutdown notice sent (GOAWAY 2^31-1 + PING)");
         return true;
     }
@@ -2627,6 +2628,7 @@ private:
         }
 
         this->_io << settings_frame_data;
+        this->settings_sent(); // its ACK is the one the client owes (Huly QB-1270)
         _initial_settings_sent = true;
         LOG_HTTP_DEBUG("Server: Initial SETTINGS frame sent successfully");
     }
@@ -2685,9 +2687,10 @@ private:
         _graceful_shutdown_initiated = true;
         _connection_active           = false; // Connection is being shut down
 
-        // Notify IO_Handler about sending GOAWAY
+        // Notify IO_Handler about sending GOAWAY: `sent`, and the debug data as written. The reason followed a « GOAWAY sent by
+        // server: » prefix, and the session logged this GOAWAY as one received from the client (Huly QB-1270).
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
-            Http2GoAwayEvent goaway_event_to_dispatch{error_code, _last_client_initiated_stream_id, "GOAWAY sent by server: " + debug_message};
+            Http2GoAwayEvent goaway_event_to_dispatch{error_code, _last_client_initiated_stream_id, debug_message, true};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
 
@@ -3172,23 +3175,22 @@ private:
     }
 
     /**
-     * @brief Handle errors detected by the framer
-     *
-     * Called by base class when frame parsing errors occur.
-     *
+     * @brief A frame the frame layer refused: a connection error, which it has already ended (not_ok()) when it calls
+     *        this, whatever stream the frame names. The GOAWAY the error owes is sent (RFC 9113 §5.4.1), its code and the
+     *        frame layer's reason as debug data. Every refusal that comes here is a connection error -- a padding past the
+     *        payload (§6.1, §6.2), a frame of the wrong size (RST_STREAM §6.4, WINDOW_UPDATE §6.9, PING, GOAWAY, SETTINGS, a
+     *        HEADERS too short for its priority fields, §4.2), a CONTINUATION missing (§6.10), a SETTINGS, PING or GOAWAY
+     *        on a stream, a frame past SETTINGS_MAX_FRAME_SIZE, a WINDOW_UPDATE of 0 or a PRIORITY that is not 5 octets on
+     *        stream 0 -- or one §5.4.1 lets an endpoint treat as such (a padded DATA too short for its Pad Length): the
+     *        stream errors the frame layer finds take on_stream_frame_error(). One on a stream other than 0 was answered
+     *        with a RST_STREAM of that stream and the connection closed without a GOAWAY (Huly QB-1270).
      * @param reason Error code
      * @param message Error description
-     * @param stream_id_context Stream ID if error is stream-specific, 0 for connection errors
+     * @param stream_id_context The frame's stream, 0 for stream 0
      */
     void
-    handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t stream_id_context) noexcept {
-        if (stream_id_context != 0) {
-            // Error is specific to a stream - send RST_STREAM
-            this->send_rst_stream(stream_id_context, reason, message);
-        } else {
-            // Error affects the entire connection
-            this->on_connection_error(reason, message);
-        }
+    handle_framer_detected_error(ErrorCode reason, const std::string &message, uint32_t /*stream_id_context*/) noexcept {
+        this->on_connection_error(reason, message);
     }
 
     /**

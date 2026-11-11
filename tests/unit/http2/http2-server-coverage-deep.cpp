@@ -25,8 +25,8 @@
  *     (the is_valid_header_field send-path arm; the value is set via Response::set_header,
  *     which stores verbatim, so it reaches the validator before any HPACK encode).
  *   - GOAWAY received: the dispatched Http2GoAwayEvent carries the peer's
- *     last_stream_id and debug_data (the canonical harness sink drops both; a
- *     local rich sink captures them), and a second GOAWAY arriving while already
+ *     last_stream_id and debug_data (the canonical harness sink keeps no
+ *     last_stream_id; a local rich sink captures both), and a second GOAWAY arriving while already
  *     shutting down returns early without re-dispatching.
  *
  * Pure logic: socket-less, deterministic, parallel-safe, no engine / TLS / clock.
@@ -111,7 +111,7 @@ request_with(const std::vector<qb::protocol::hpack::HeaderField> &extra) {
 }
 
 // A server-facing rich sink that captures the FULL GOAWAY event (the canonical
-// Http2FakeIO drops last_stream_id and debug_data). Otherwise mirrors the
+// Http2FakeIO keeps no last_stream_id). Otherwise mirrors the
 // server IO contract.
 struct RichServerIO {
     using base_io_t = RichServerIO;
@@ -462,7 +462,7 @@ TEST(HTTP2ServerCoverageDeep, SendResponseWithControlByteInHeaderValueIsStreamEr
 
 // ===========================================================================
 // GOAWAY received: the dispatched event carries the peer's last_stream_id and
-// debug_data verbatim (fields the canonical harness sink drops). A local rich
+// debug_data verbatim (the canonical harness sink keeps no last_stream_id). A local rich
 // sink captures them.
 // ===========================================================================
 

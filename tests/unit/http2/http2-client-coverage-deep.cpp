@@ -25,8 +25,8 @@
  *     active-stream budget is reached, the next send_request is rejected.
  *   - a graceful GOAWAY (NO_ERROR) that names a still-open stream keeps the client
  *     ok() with shutdown pending, and the dispatched Http2GoAwayEvent carries the
- *     peer's last_stream_id and debug_data (the canonical sink drops both; a local
- *     rich sink captures them).
+ *     peer's last_stream_id and debug_data (the canonical sink keeps the debug
+ *     data but not the last_stream_id; a local rich sink captures both).
  *
  * Pure logic: socket-less, deterministic, parallel-safe, no engine / TLS / clock.
  * The harness lives in tests/shared/http2_fake_io.h. Contains no main().
@@ -81,7 +81,7 @@ make_server_settings(std::initializer_list<std::pair<Http2SettingIdentifier, uin
 }
 
 // A client-facing rich sink that captures the FULL GOAWAY event (the canonical
-// Http2ClientFakeIO drops last_stream_id and debug_data). Mirrors the client IO
+// Http2ClientFakeIO keeps no last_stream_id). Mirrors the client IO
 // contract otherwise.
 struct RichClientIO {
     using base_io_t = RichClientIO;

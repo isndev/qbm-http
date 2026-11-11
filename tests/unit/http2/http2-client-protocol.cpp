@@ -21,6 +21,7 @@
  * @ingroup Http
  */
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -1760,9 +1761,11 @@ TEST(HTTP2ClientProtocol, DataOnAnIdleEvenStreamIsAConnectionError) {
 // DATA for an UNKNOWN (already-completed-then-erased) initiated id is a
 // connection error. After GET -> 200 -> END_STREAM the stream is ERASED, so the
 // trailing DATA frame is not found by id and falls into
-// handle_data_for_unknown_stream(), which raises GOAWAY(PROTOCOL_ERROR) — this
-// is the unknown-id path, NOT the per-stream STREAM_CLOSED RST path (that only
-// fires while a closed-but-still-resident stream context exists).
+// handle_data_for_unknown_stream(), which raises GOAWAY(STREAM_CLOSED), the code
+// RFC 9113 §5.1 names for a frame on a closed stream — this is the unknown-id
+// path, NOT the per-stream STREAM_CLOSED RST path (that only fires while a
+// still-resident stream context exists). It was GOAWAY(PROTOCOL_ERROR) (Huly
+// QB-1270).
 // ===========================================================================
 TEST(HTTP2ClientProtocol, DataOnUnknownStreamIsConnectionError) {
     Http2ClientFakeIO                          io;
@@ -1782,7 +1785,7 @@ TEST(HTTP2ClientProtocol, DataOnUnknownStreamIsConnectionError) {
 
     EXPECT_FALSE(protocol.ok());
     ASSERT_TRUE(protocol.get_last_error_code().has_value());
-    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(*protocol.get_last_error_code(), h2::ErrorCode::STREAM_CLOSED);
     EXPECT_EQ(io.goaway_count, 1);
 }
 
@@ -5509,10 +5512,10 @@ TEST(HTTP2ClientProtocol, TheClientRemembersTheThousandStreamsItResetLastAndNoth
         EXPECT_TRUE(protocol.ok()) << "a DATA on a stream among the last thousand reset closed the connection";
     }
     EXPECT_EQ(io.goaway_count, 0);
-    data(protocol, io, 5, 10); // the second reset, forgotten
+    data(protocol, io, 5, 10); // the second reset, forgotten: a frame on a closed stream (RFC 9113 §5.1)
     EXPECT_FALSE(protocol.ok()) << "the memory of the streams reset holds more than the last thousand";
     EXPECT_EQ(io.goaway_count, 1);
-    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::PROTOCOL_ERROR);
+    EXPECT_EQ(io.last_goaway_error, h2::ErrorCode::STREAM_CLOSED);
 }
 
 // A HEADERS the server sent on a stream before it read the client's reset -- the trailers behind the response the
@@ -5573,7 +5576,8 @@ TEST(HTTP2ClientProtocol, AHeadersOnAStreamTheClientResetIsDiscardedAndItsBlockS
 // whether the client resets it at a later frame or at the very frame that ends it -- a body short of its content-length
 // at its END_STREAM, a DATA that passes its content-length and ends the stream, a DATA that ends the stream after an
 // informational response alone, a HEADERS that ends the stream with a field the client refuses. A DATA on it stays the connection error a frame
-// after END_STREAM is, and a HEADERS on it the reset of a closed stream, counted.
+// after END_STREAM is -- of type STREAM_CLOSED (RFC 9113 §5.1; it was PROTOCOL_ERROR, Huly QB-1270, part 6) --, and a
+// HEADERS on it the reset of a closed stream, counted.
 TEST(HTTP2ClientProtocol, AStreamTheServerEndedIsNotRememberedWhenTheClientResetsIt) {
     using namespace qb1270_crossing_test;
     enum class ended_by {
@@ -5609,7 +5613,7 @@ TEST(HTTP2ClientProtocol, AStreamTheServerEndedIsNotRememberedWhenTheClientReset
                 data(c.protocol, c.io, 1, 4);
                 EXPECT_FALSE(c.protocol.ok()) << "a DATA after the server's END_STREAM was discarded";
                 EXPECT_EQ(c.io.goaway_count, 1);
-                EXPECT_EQ(c.io.last_goaway_error, h2::ErrorCode::PROTOCOL_ERROR);
+                EXPECT_EQ(c.io.last_goaway_error, h2::ErrorCode::STREAM_CLOSED);
             } else {
                 headers(c.protocol, c.io, 1, h2::FLAG_END_STREAM, {{"x-late", "1"}});
                 EXPECT_TRUE(c.protocol.ok());
@@ -5837,3 +5841,437 @@ TEST(HTTP2ClientProtocol, AServerSendingHeadersOnClosedStreamsCannotFloodTheLog)
     }
 }
 #endif // QB_WITH_LOGGING
+
+// ===========================================================================
+// The GOAWAY a connection error owes on the client too, the client's own GOAWAY told by a field rather than a text, and
+// what a frame after the server's END_STREAM is (Huly QB-1270, part 6: the maintainer's « Yes, as recommended » of
+// 2026-11-11).
+// ===========================================================================
+namespace qb1270_goaway_test {
+
+namespace fake        = qb::http::test;
+using client_protocol = h2::ClientHttp2Protocol<Http2ClientFakeIO>;
+using qb1270_crossing_test::connection_window_given_back;
+using qb1270_crossing_test::data;
+using qb1270_crossing_test::headers;
+using qb1270_crossing_test::last_goaway_code;
+using qb1270_crossing_test::resets_written;
+using qb1270_crossing_test::two_requests;
+
+/// The debug data of the GOAWAY the client's output ends on, if it ends on one.
+[[nodiscard]] std::optional<std::string>
+last_goaway_debug(const Http2ClientFakeIO &io) {
+    const auto bytes  = fake::written_and_queued(io);
+    const auto frames = fake::parse_emitted_frames(bytes);
+    if (frames.empty() || frames.back().type != h2::FrameType::GOAWAY || frames.back().payload_length < 8) {
+        return std::nullopt;
+    }
+    const auto p = fake::emitted_payload(bytes, frames.back());
+    return std::string(p.begin() + 8, p.end());
+}
+
+/// A client whose preface the socket has taken, with two uploads in flight -- stream 1 (app id 1) and stream 3 (app id
+/// 2), each a POST that announces a trailer section and so does not end its stream: once the server ends a stream with
+/// its response, the stream stays half-closed (remote) (RFC 9113 §5.1).
+struct two_uploads {
+    Http2ClientFakeIO io;
+    client_protocol   protocol{io};
+
+    two_uploads() {
+        fake::socket_takes_everything(io);
+        io.wire.reset();
+        for (uint64_t app_id : {1u, 2u}) {
+            qb::http::Request req;
+            req.method() = qb::http::method::POST;
+            req.uri()    = qb::io::uri("https://example.test/upload");
+            req.body()   = "payload";
+            req.set_header("trailer", "x-checksum");
+            EXPECT_TRUE(protocol.send_request(std::move(req), app_id));
+        }
+    }
+};
+
+} // namespace qb1270_goaway_test
+
+// Three checks the frame layer makes on a frame's header alone, before it dispatches the frame: SETTINGS, PING and
+// GOAWAY name the connection, never a stream (RFC 9113 §6.5, §6.7, §6.8), and a frame longer than the
+// SETTINGS_MAX_FRAME_SIZE the client advertised is refused before its payload is read (§4.2). Each is a connection
+// error: the client sends the GOAWAY it owes (§5.4.1), its code and the reason as debug data, and resets nothing. They
+// called not_ok() alone, and the connection closed without a GOAWAY.
+TEST(HTTP2ClientProtocol, ACheckOnAFramesHeaderAloneEndsTheConnectionWithItsGoaway) {
+    using namespace qb1270_goaway_test;
+    struct refused_frame {
+        const char          *name;
+        h2::FrameType        type;
+        uint8_t              flags;
+        uint32_t             sid;
+        std::vector<uint8_t> payload;
+        h2::ErrorCode        error;
+        std::string          debug;
+    };
+    const auto oversized = static_cast<std::size_t>(h2::DEFAULT_SETTINGS_MAX_FRAME_SIZE) + 1u;
+    const auto too_long =
+        "Frame size " + std::to_string(oversized) + " exceeds SETTINGS_MAX_FRAME_SIZE " + std::to_string(h2::DEFAULT_SETTINGS_MAX_FRAME_SIZE);
+    const std::vector<refused_frame> refused = {
+        {"an empty SETTINGS on stream 1",
+         h2::FrameType::SETTINGS,
+         0,
+         1,
+         {},
+         h2::ErrorCode::PROTOCOL_ERROR,
+         "SETTINGS frame on non-zero stream_id"},
+        {"a SETTINGS ACK on stream 3",
+         h2::FrameType::SETTINGS,
+         h2::FLAG_ACK,
+         3,
+         {},
+         h2::ErrorCode::PROTOCOL_ERROR,
+         "SETTINGS frame on non-zero stream_id"},
+        {"a PING on stream 1",
+         h2::FrameType::PING,
+         0,
+         1,
+         {1, 2, 3, 4, 5, 6, 7, 8},
+         h2::ErrorCode::PROTOCOL_ERROR,
+         "PING frame on non-zero stream_id"},
+        {"a GOAWAY on stream 1",
+         h2::FrameType::GOAWAY,
+         0,
+         1,
+         {0, 0, 0, 0, 0, 0, 0, 0},
+         h2::ErrorCode::PROTOCOL_ERROR,
+         "GOAWAY frame on non-zero stream_id"},
+        {"a DATA past SETTINGS_MAX_FRAME_SIZE on a request in flight", h2::FrameType::DATA, 0, 1, std::vector<uint8_t>(oversized, 'd'),
+         h2::ErrorCode::FRAME_SIZE_ERROR, too_long},
+        {"a HEADERS past SETTINGS_MAX_FRAME_SIZE", h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 3, std::vector<uint8_t>(oversized, 'h'),
+         h2::ErrorCode::FRAME_SIZE_ERROR, too_long},
+        {"a PING past SETTINGS_MAX_FRAME_SIZE on stream 0", h2::FrameType::PING, 0, 0, std::vector<uint8_t>(oversized, 'p'),
+         h2::ErrorCode::FRAME_SIZE_ERROR, too_long},
+    };
+    for (const auto &frame : refused) {
+        SCOPED_TRACE(frame.name);
+        two_requests c;
+        push_frame(c.io, frame.type, frame.flags, frame.sid, frame.payload);
+        drive(c.protocol, c.io);
+        EXPECT_FALSE(c.protocol.ok());
+        ASSERT_TRUE(c.protocol.get_last_error_code().has_value());
+        EXPECT_EQ(*c.protocol.get_last_error_code(), frame.error);
+        EXPECT_EQ(c.io.goaway_count, 1) << "the connection ended without a GOAWAY";
+        EXPECT_EQ(last_goaway_code(c.io), static_cast<uint32_t>(frame.error)) << "no GOAWAY ends the output";
+        EXPECT_EQ(last_goaway_debug(c.io), frame.debug);
+        EXPECT_TRUE(resets_written(c.io).empty()) << "a connection error reset a stream";
+    }
+}
+
+// The client dispatches its own GOAWAY to its io handler as it dispatches the server's: `sent` tells the two apart and
+// `debug_data` is the frame's debug data as written. The client's read « GOAWAY sent by client: <reason> », a prefix
+// the handler told it by -- and which a server's debug data could carry.
+TEST(HTTP2ClientProtocol, TheClientDispatchesItsOwnGoawayAsSentWithItsDebugDataAsWritten) {
+    using namespace qb1270_goaway_test;
+    {
+        SCOPED_TRACE("the client's own GOAWAY: a HEADERS on stream 0");
+        two_requests c;
+        headers(c.protocol, c.io, 0, h2::FLAG_END_STREAM, {{":status", "200"}});
+        ASSERT_EQ(c.io.goaway_count, 1);
+        EXPECT_EQ(c.io.last_goaway_sent, std::optional<bool>{true}) << "the client's own GOAWAY is not told as sent";
+        EXPECT_EQ(c.io.last_goaway_debug, "HEADERS frame received on stream 0");
+        EXPECT_EQ(last_goaway_debug(c.io), std::optional<std::string>{c.io.last_goaway_debug}) << "the event's debug data is not the frame's";
+    }
+    {
+        SCOPED_TRACE("the server's GOAWAY, whatever its debug data says");
+        two_requests         c;
+        const std::string    debug = "GOAWAY sent by client: a server's own words";
+        std::vector<uint8_t> payload{0, 0, 0, 0, 0, 0, 0, static_cast<uint8_t>(h2::ErrorCode::PROTOCOL_ERROR)};
+        payload.insert(payload.end(), debug.begin(), debug.end());
+        push_frame(c.io, h2::FrameType::GOAWAY, 0, 0, payload);
+        drive(c.protocol, c.io);
+        ASSERT_EQ(c.io.goaway_count, 1);
+        EXPECT_EQ(c.io.last_goaway_sent, std::optional<bool>{false}) << "the server's GOAWAY is told as the client's";
+        EXPECT_EQ(c.io.last_goaway_debug, debug);
+    }
+}
+
+// A frame after the server's END_STREAM, as RFC 9113 §5.1 names it. On a stream that has closed -- its response
+// completed and the request ended, or the server reset it -- a DATA is a connection error of type STREAM_CLOSED: the
+// client answered GOAWAY(PROTOCOL_ERROR). A HEADERS there is still the counted RST_STREAM(STREAM_CLOSED) of part 4, and
+// a WINDOW_UPDATE, a PRIORITY or a RST_STREAM is ignored (§5.1: they may cross the end of the stream).
+TEST(HTTP2ClientProtocol, ADataOnAStreamTheServerEndedIsAConnectionErrorOfTypeStreamClosed) {
+    using namespace qb1270_goaway_test;
+    for (const bool reset_by_the_server : {false, true}) {
+        SCOPED_TRACE(reset_by_the_server ? "closed by the server's RST_STREAM" : "closed by a completed response");
+        const auto close_stream_one = [reset_by_the_server](two_requests &c) {
+            if (reset_by_the_server) {
+                push_frame(c.io, h2::FrameType::RST_STREAM, 0, 1, {0, 0, 0, static_cast<uint8_t>(h2::ErrorCode::CANCEL)});
+                drive(c.protocol, c.io);
+                EXPECT_EQ(c.io.stream_error_count, 1);
+            } else {
+                headers(c.protocol, c.io, 1, h2::FLAG_END_STREAM, {{":status", "204"}});
+                EXPECT_EQ(c.io.response_count, 1);
+            }
+            EXPECT_TRUE(c.protocol.ok());
+        };
+        {
+            SCOPED_TRACE("a DATA");
+            two_requests c;
+            close_stream_one(c);
+            data(c.protocol, c.io, 1, 4);
+            EXPECT_FALSE(c.protocol.ok());
+            EXPECT_EQ(c.io.goaway_count, 1);
+            EXPECT_EQ(c.io.last_goaway_error, h2::ErrorCode::STREAM_CLOSED);
+            EXPECT_EQ(last_goaway_code(c.io), static_cast<uint32_t>(h2::ErrorCode::STREAM_CLOSED));
+            EXPECT_EQ(last_goaway_debug(c.io), std::optional<std::string>{"DATA for closed client stream"});
+            EXPECT_TRUE(resets_written(c.io).empty());
+        }
+        {
+            SCOPED_TRACE("a HEADERS");
+            two_requests c;
+            close_stream_one(c);
+            headers(c.protocol, c.io, 1, h2::FLAG_END_STREAM, {{"x-late", "1"}});
+            EXPECT_TRUE(c.protocol.ok());
+            const auto resets = resets_written(c.io);
+            ASSERT_EQ(resets.size(), 1u);
+            EXPECT_EQ(resets.front(), (std::pair<uint32_t, uint32_t>{1u, static_cast<uint32_t>(h2::ErrorCode::STREAM_CLOSED)}));
+        }
+        for (const auto &[name, type, payload] : std::vector<std::tuple<const char *, h2::FrameType, std::vector<uint8_t>>>{
+                 {"a WINDOW_UPDATE", h2::FrameType::WINDOW_UPDATE, {0, 0, 0x10, 0}},
+                 {"a PRIORITY", h2::FrameType::PRIORITY, {0, 0, 0, 0, 16}},
+                 {"a RST_STREAM", h2::FrameType::RST_STREAM, {0, 0, 0, static_cast<uint8_t>(h2::ErrorCode::CANCEL)}},
+             }) {
+            SCOPED_TRACE(name);
+            two_requests c;
+            close_stream_one(c);
+            push_frame(c.io, type, 0, 1, payload);
+            drive(c.protocol, c.io);
+            EXPECT_TRUE(c.protocol.ok()) << "a frame §5.1 allows on a closed stream ended the connection";
+            EXPECT_EQ(c.io.goaway_count, 0);
+            EXPECT_TRUE(resets_written(c.io).empty());
+        }
+    }
+}
+
+// On a stream the server ended while the client still sends -- an upload whose trailer section is not sent yet:
+// half-closed (remote) -- a DATA or a HEADERS is a stream error of type STREAM_CLOSED (RFC 9113 §5.1), the stream reset
+// and the connection serving on; a WINDOW_UPDATE, a PRIORITY and a RST_STREAM are allowed. Three things were wrong
+// there: the HEADERS was reset PROTOCOL_ERROR, and after a trailer section it was not refused at all -- decoded as a
+// second trailer section of a response already delivered, and dropped; and the DATA was reset without its octets being
+// counted in the connection window, which the server had counted (§6.9): every such DATA shrank the server's view of the
+// window for good.
+TEST(HTTP2ClientProtocol, AFrameOnAStreamTheServerEndedWhileTheClientSendsIsAStreamClosedError) {
+    using namespace qb1270_goaway_test;
+    const auto end_both = [](two_uploads &u) {
+        for (uint32_t sid : {1u, 3u}) {
+            headers(u.protocol, u.io, sid, h2::FLAG_END_STREAM, {{":status", "200"}});
+        }
+        ASSERT_EQ(u.io.response_count, 2);
+        ASSERT_TRUE(u.protocol.ok());
+    };
+    {
+        SCOPED_TRACE("a DATA on each, 16384 octets");
+        two_uploads u;
+        end_both(u);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        for (uint32_t sid : {1u, 3u}) {
+            data(u.protocol, u.io, sid, 16384);
+        }
+        EXPECT_TRUE(u.protocol.ok());
+        EXPECT_EQ(u.io.goaway_count, 0);
+        const auto resets = resets_written(u.io);
+        ASSERT_EQ(resets.size(), 2u);
+        for (const auto &[sid, code] : resets) {
+            EXPECT_EQ(code, static_cast<uint32_t>(h2::ErrorCode::STREAM_CLOSED)) << "stream " << sid;
+        }
+        EXPECT_EQ(connection_window_given_back(u.io), 2u * 16384u) << "the octets refused were lost to the connection window";
+    }
+    {
+        SCOPED_TRACE("a HEADERS");
+        two_uploads u;
+        end_both(u);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        headers(u.protocol, u.io, 1, h2::FLAG_END_STREAM, {{"x-late", "1"}});
+        EXPECT_TRUE(u.protocol.ok());
+        const auto resets = resets_written(u.io);
+        ASSERT_EQ(resets.size(), 1u);
+        EXPECT_EQ(resets.front(), (std::pair<uint32_t, uint32_t>{1u, static_cast<uint32_t>(h2::ErrorCode::STREAM_CLOSED)}));
+    }
+    {
+        SCOPED_TRACE("a HEADERS after the trailer section that ended the stream");
+        two_uploads u;
+        headers(u.protocol, u.io, 1, 0, {{":status", "200"}, {"trailer", "x-t"}});
+        headers(u.protocol, u.io, 1, h2::FLAG_END_STREAM, {{"x-t", "1"}});
+        ASSERT_EQ(u.io.response_count, 1);
+        ASSERT_TRUE(u.protocol.ok());
+        headers(u.protocol, u.io, 1, h2::FLAG_END_STREAM, {{"x-late", "1"}});
+        EXPECT_TRUE(u.protocol.ok());
+        const auto resets = resets_written(u.io);
+        ASSERT_EQ(resets.size(), 1u) << "a HEADERS after the trailer section was taken for another one";
+        EXPECT_EQ(resets.front(), (std::pair<uint32_t, uint32_t>{1u, static_cast<uint32_t>(h2::ErrorCode::STREAM_CLOSED)}));
+    }
+    for (const auto &[name, type, payload] : std::vector<std::tuple<const char *, h2::FrameType, std::vector<uint8_t>>>{
+             {"a WINDOW_UPDATE", h2::FrameType::WINDOW_UPDATE, {0, 0, 0x10, 0}},
+             {"a PRIORITY", h2::FrameType::PRIORITY, {0, 0, 0, 0, 16}},
+             {"a RST_STREAM", h2::FrameType::RST_STREAM, {0, 0, 0, static_cast<uint8_t>(h2::ErrorCode::CANCEL)}},
+         }) {
+        SCOPED_TRACE(name);
+        two_uploads u;
+        end_both(u);
+        ASSERT_FALSE(::testing::Test::HasFatalFailure());
+        push_frame(u.io, type, 0, 1, payload);
+        drive(u.protocol, u.io);
+        EXPECT_TRUE(u.protocol.ok()) << "a frame §5.1 allows in half-closed (remote) ended the connection";
+        EXPECT_EQ(u.io.goaway_count, 0);
+        EXPECT_TRUE(resets_written(u.io).empty()) << "a frame §5.1 allows in half-closed (remote) was answered with a reset";
+    }
+}
+
+// A frame of no octet whose PADDED or PRIORITY flag calls for some has no room for its Pad Length or its priority fields:
+// too small for its mandatory data, a connection error for a frame carrying a field block (RFC 9113 §4.2), and the
+// client sends its GOAWAY. It was dispatched as an empty frame, the connection kept.
+TEST(HTTP2ClientProtocol, AFrameOfNoOctetWhoseFlagsCallForSomeIsAFrameSizeError) {
+    using namespace qb1270_goaway_test;
+    struct refused_frame {
+        const char   *name;
+        h2::FrameType type;
+        uint8_t       flags;
+        uint32_t      sid;
+        const char   *debug;
+    };
+    for (const auto &frame : std::vector<refused_frame>{
+             {"a PADDED DATA on a request in flight", h2::FrameType::DATA, h2::FLAG_PADDED, 1, "Padded DATA frame too short for Pad Length."},
+             {"a PADDED HEADERS", h2::FrameType::HEADERS, h2::FLAG_PADDED | h2::FLAG_END_HEADERS, 1,
+              "Padded HEADERS frame too short for Pad Length."},
+             {"a PRIORITY HEADERS", h2::FrameType::HEADERS, h2::FLAG_PRIORITY | h2::FLAG_END_HEADERS, 1,
+              "HEADERS with PRIORITY flag frame payload too short."},
+         }) {
+        SCOPED_TRACE(frame.name);
+        two_requests c;
+        push_frame(c.io, frame.type, frame.flags, frame.sid, {});
+        drive(c.protocol, c.io);
+        EXPECT_FALSE(c.protocol.ok());
+        EXPECT_EQ(c.io.goaway_count, 1) << "a frame too small for its flags was taken as an empty frame";
+        EXPECT_EQ(last_goaway_code(c.io), static_cast<uint32_t>(h2::ErrorCode::FRAME_SIZE_ERROR));
+        EXPECT_EQ(last_goaway_debug(c.io), std::optional<std::string>{frame.debug});
+        EXPECT_TRUE(resets_written(c.io).empty());
+    }
+}
+
+// ===========================================================================
+// The frames that make no progress and draw no reply, on the client: the empty-frame flood, CVE-2019-9518, and its kin
+// (Huly QB-1270, part 6, item 7: the maintainer's mandate of 2026-11-11). Each cost the client a dispatch, drew no reply
+// and was counted nowhere -- a HEADERS on a stream the client reset is discarded (part 5), so a server could send those
+// for ever too, END_STREAM or not. Each takes a token from the bucket the server keeps as well (NO_PROGRESS_FRAME_BURST,
+// NO_PROGRESS_FRAME_RATE a second); with none left the connection ends with GOAWAY(ENHANCE_YOUR_CALM).
+// ===========================================================================
+namespace qb1270_empty_frame_test {
+
+using qb1270_crossing_test::two_requests;
+// The bound the docs name, qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST and NO_PROGRESS_FRAME_RATE: written as numbers, so
+// that the witnesses compile -- and fail -- against the code before them.
+constexpr std::size_t burst = 10000;
+constexpr std::size_t rate  = 330;
+
+/// The frames of a flood, pushed one by one until the client ends the connection or @p cap of them: how many were sent
+/// when it did (0: it never did), and the seconds the flood took.
+template <typename Send>
+[[nodiscard]] std::pair<std::size_t, double>
+flood_until_cut(two_requests &c, Send &&send, std::size_t cap) {
+    const auto start = std::chrono::steady_clock::now();
+    for (std::size_t sent = 1; sent <= cap; ++sent) {
+        send();
+        drive(c.protocol, c.io);
+        if (c.io.goaway_count != 0) {
+            return {sent, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()};
+        }
+    }
+    return {0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()};
+}
+
+} // namespace qb1270_empty_frame_test
+
+// Frames that make no progress, one after the other. On a response in flight: empty DATA frames without END_STREAM, DATA
+// frames of padding alone, PRIORITY frames, frames of an unknown type, SETTINGS ACKs, PING ACKs (the client sends no
+// PING). On a stream the client reset, whose frames it discards or ignores: HEADERS of any block, END_STREAM or not --
+// which ends nothing there --, empty DATA frames that carry END_STREAM, and the stream errors of the frame layer (a
+// WINDOW_UPDATE of 0, a PRIORITY of 4 octets). The client took them for ever. It ends the connection once the bucket is
+// spent, and not before -- one frame later for the SETTINGS ACKs, whose first acknowledges the client's own SETTINGS.
+TEST(HTTP2ClientProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnhanceYourCalm) {
+    using namespace qb1270_empty_frame_test;
+    using qb1270_goaway_test::headers;
+    using qb1270_goaway_test::last_goaway_code;
+    using qb1270_goaway_test::last_goaway_debug;
+    struct kind {
+        const char          *name;
+        bool                 on_a_reset_stream;
+        h2::FrameType        type;
+        uint8_t              flags;
+        uint32_t             sid;
+        std::vector<uint8_t> payload;
+        std::size_t          at_least;
+    };
+    for (const auto &each : std::vector<kind>{
+             {"empty DATA frames", false, h2::FrameType::DATA, 0, 1, {}, burst + 1},
+             {"DATA frames of padding alone", false, h2::FrameType::DATA, h2::FLAG_PADDED, 1, {2, 0, 0}, burst + 1},
+             {"PRIORITY frames", false, h2::FrameType::PRIORITY, 0, 1, {0, 0, 0, 0, 16}, burst + 1},
+             {"empty frames of an unknown type", false, static_cast<h2::FrameType>(0x20), 0, 0, {}, burst + 1},
+             {"frames of an unknown type with a payload", false, static_cast<h2::FrameType>(0x20), 0, 1, {1, 2, 3}, burst + 1},
+             {"SETTINGS ACKs", false, h2::FrameType::SETTINGS, h2::FLAG_ACK, 0, {}, burst + 2},
+             {"PING ACKs", false, h2::FrameType::PING, h2::FLAG_ACK, 0, {1, 2, 3, 4, 5, 6, 7, 8}, burst + 1},
+             {"HEADERS of an empty block", true, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, {}, burst + 1},
+             {"empty HEADERS that carry END_STREAM",
+              true,
+              h2::FrameType::HEADERS,
+              h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM,
+              1,
+              {},
+              burst + 1},
+             {"empty DATA frames that carry END_STREAM", true, h2::FrameType::DATA, h2::FLAG_END_STREAM, 1, {}, burst + 1},
+             {"HEADERS of a block", true, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS, 1, {0x88}, burst + 1},
+             {"HEADERS of a block that carry END_STREAM",
+              true,
+              h2::FrameType::HEADERS,
+              h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM,
+              1,
+              {0x88},
+              burst + 1},
+             {"WINDOW_UPDATE frames of 0", true, h2::FrameType::WINDOW_UPDATE, 0, 1, {0, 0, 0, 0}, burst + 1},
+             {"PRIORITY frames of 4 octets", true, h2::FrameType::PRIORITY, 0, 1, {0, 0, 0, 1}, burst + 1},
+         }) {
+        SCOPED_TRACE(std::string(each.name) + (each.on_a_reset_stream ? ", on a stream the client reset" : ", on a response in flight"));
+        two_requests c;
+        if (each.on_a_reset_stream) {
+            headers(c.protocol, c.io, 1, 0, {{"x-no-status", "1"}}); // the client resets stream 1
+            ASSERT_EQ(c.io.stream_error_count, 1);
+        } else {
+            headers(c.protocol, c.io, 1, 0, {{":status", "200"}}); // a response in flight
+        }
+        ASSERT_TRUE(c.protocol.ok());
+        const auto [cut, seconds] = flood_until_cut(c, [&] { push_frame(c.io, each.type, each.flags, each.sid, each.payload); }, 3 * burst);
+        ASSERT_NE(cut, 0u) << "a flood of frames making no progress was never cut";
+        EXPECT_GE(cut, each.at_least) << "a frame within the burst was refused";
+        EXPECT_LE(cut, burst + 1 + rate * (static_cast<std::size_t>(seconds) + 2));
+        EXPECT_EQ(c.io.last_goaway_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(last_goaway_code(c.io), static_cast<uint32_t>(h2::ErrorCode::ENHANCE_YOUR_CALM));
+        EXPECT_EQ(last_goaway_debug(c.io), std::optional<std::string>{"Excessive frames making no progress (flood)"});
+    }
+}
+
+// A legitimate server is never cut: a response streamed in 200 chunks, three empty DATA frames after each, then an
+// empty DATA that ends the stream, is delivered whole and the connection serves on.
+TEST(HTTP2ClientProtocol, EmptyDataFramesOfALegitimateServerAreNeverCut) {
+    using namespace qb1270_empty_frame_test;
+    using qb1270_goaway_test::headers;
+    two_requests c;
+    headers(c.protocol, c.io, 1, 0, {{":status", "200"}});
+    for (int chunk = 0; chunk < 200; ++chunk) {
+        push_frame(c.io, h2::FrameType::DATA, 0, 1, {'a', 'b', 'c'});
+        for (int empty = 0; empty < 3; ++empty) {
+            push_frame(c.io, h2::FrameType::DATA, 0, 1, {});
+        }
+    }
+    push_frame(c.io, h2::FrameType::DATA, h2::FLAG_END_STREAM, 1, {});
+    drive(c.protocol, c.io);
+    EXPECT_TRUE(c.protocol.ok());
+    EXPECT_EQ(c.io.goaway_count, 0);
+    ASSERT_EQ(c.io.response_count, 1);
+    ASSERT_TRUE(c.io.last_body.has_value());
+    EXPECT_EQ(c.io.last_body->size(), 600u);
+}

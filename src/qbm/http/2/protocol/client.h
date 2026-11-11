@@ -349,6 +349,7 @@ public:
             // No need to call calculate_length, it's implicit in Http2FrameData serialization
 
             this->_io << settings_frame_data; // Send SETTINGS frame with our settings
+            this->settings_sent();            // its ACK is the one the server owes (Huly QB-1270)
             _initial_settings_sent = true;
             LOG_HTTP_DEBUG_PA(0, "Client: Initial SETTINGS frame sent successfully");
             // HPACK encoder max table size is already set based on _our_settings in constructor/reset
@@ -400,7 +401,8 @@ public:
         if (!stream_ptr) {
             // The frame's whole payload, padding included, as flow control counts it (RFC 9113 §6.1) and as below
             handle_data_for_unknown_stream(stream_id,
-                                           static_cast<uint32_t>(data_event.payload.data_payload.size() + data_event.payload.padding_size));
+                                           static_cast<uint32_t>(data_event.payload.data_payload.size() + data_event.payload.padding_size),
+                                           data_event.payload.data_payload.empty() && (data_event.header.flags & FLAG_END_STREAM) != 0);
             return;
         }
         Http2ClientStream &stream = *stream_ptr;
@@ -411,10 +413,14 @@ public:
         }
 
         if (stream.state != Http2StreamConcreteState::OPEN && stream.state != Http2StreamConcreteState::HALF_CLOSED_LOCAL) {
-            // send_rst_stream() already closes (and erases) the stream context; a follow-up
-            // try_close_stream_context_by_id(stream.id, ...) would read the freed `stream`
-            // reference (heap-use-after-free) and double-close. Do not re-close here.
+            // A stream the server ended (half-closed (remote)) and still sends on: a stream error of type STREAM_CLOSED (RFC
+            // 9113 §5.1, §6.1). Its octets still count against the connection window and are given back as any DATA's
+            // (§6.9: a flow-controlled frame counts "even if the frame is in error"); they were left out of it, and the
+            // server's view of the window shrank by them for good (Huly QB-1270). send_rst_stream() already closes (and
+            // erases) the stream context; a follow-up try_close_stream_context_by_id(stream.id, ...) would read the freed
+            // `stream` reference (heap-use-after-free) and double-close. Do not re-close here.
             send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA in invalid state");
+            discard_data(static_cast<uint32_t>(data_event.payload.data_payload.size() + data_event.payload.padding_size));
             return;
         }
 
@@ -564,7 +570,14 @@ public:
                 // A stream this client reset: the server sent this block before it read the reset -- trailers, or the
                 // response the reset refused -- and it is discarded, not answered (RFC 9113 §5.1). It is still decoded:
                 // the server's encoder indexed its fields in the connection's one table, and its next blocks reference
-                // them (§4.3). It was reset again, a reply the server drew for nothing (Huly QB-1270).
+                // them (§4.3). It was reset again, a reply the server drew for nothing (Huly QB-1270). It makes no progress,
+                // and nothing ends the memory of the stream: each such HEADERS takes a token of the bucket of the frames
+                // that make no progress -- but an empty one without END_STREAM, which the frame layer charged -- as nghttp2
+                // charges every header block it ignores (Huly QB-1270).
+                if (!(headers_event.payload.header_block_fragment.empty() && (headers_event.header.flags & FLAG_END_STREAM) == 0)
+                    && this->refuse_no_progress_frame()) {
+                    return;
+                }
                 begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
@@ -1539,7 +1552,8 @@ public:
      *        where it ended the client's connection with neither a reset nor a GOAWAY (Huly QB-1270). A request in flight
      *        is reset and fails, the connection serving on; a stream that has closed is reset too, a reply the server draws
      *        for nothing, counted while it is queued (send_rst_stream()); a stream this client reset ignores it, as any
-     *        frame the server sent there before it read the reset (§5.1). On an idle stream, which no RST_STREAM may name
+     *        frame the server sent there before it read the reset (§5.1), a frame that makes no progress and takes a token
+     *        of their bucket (protocol_limits::NO_PROGRESS_FRAME_BURST). On an idle stream, which no RST_STREAM may name
      *        (§6.4), or on stream 0, it is a connection error, with its GOAWAY (§5.4.1). Public only for the frame layer to
      *        reach it.
      */
@@ -1550,6 +1564,7 @@ public:
             return;
         }
         if (_reset_streams.contains(stream_id)) {
+            (void) this->refuse_no_progress_frame(); // ignored, as any frame there: no progress (Huly QB-1270)
             return;
         }
         send_rst_stream(stream_id, error_code, message);
@@ -1735,12 +1750,14 @@ private:
      *          connection: a server streaming a body past MAX_BODY_SIZE had the stream reset, and its DATA already in
      *          flight then ended every other request on the connection (Huly QB-1270). A pushed stream that has closed
      *          answers it with a reset; a client stream closed otherwise -- its response completed, or the server reset
-     *          it -- makes it a connection error, as it was.
+     *          it -- makes it a connection error of type STREAM_CLOSED (§5.1, closed; it was PROTOCOL_ERROR).
      * @param stream_id Stream ID
      * @param data_payload_size The frame's whole payload, padding included: what flow control counts (§6.1)
+     * @param empty_end_stream The frame carries END_STREAM and no octet of data: on a stream this client reset it ends
+     *        nothing, a frame that makes no progress (protocol_limits::NO_PROGRESS_FRAME_BURST)
      */
     void
-    handle_data_for_unknown_stream(uint32_t stream_id, uint32_t data_payload_size) {
+    handle_data_for_unknown_stream(uint32_t stream_id, uint32_t data_payload_size, bool empty_end_stream) {
         if (stream_id == 0) [[unlikely]] {
             // It was read as a DATA on a closed pushed stream: a reset of stream 0 the client never sends, the connection
             // window spent and the connection kept (Huly QB-1270).
@@ -1755,6 +1772,11 @@ private:
             return;
         }
         if (_reset_streams.contains(stream_id)) {
+            // Its END_STREAM ends nothing here: an empty one takes a token of the bucket of the frames that make no progress,
+            // as an empty DATA without END_STREAM did in the frame layer -- a server could send them for ever (Huly QB-1270).
+            if (empty_end_stream && this->refuse_no_progress_frame()) {
+                return;
+            }
             discard_data(data_payload_size);
             return;
         }
@@ -1769,8 +1791,10 @@ private:
             }
             discard_data(data_payload_size);
         } else {
-            // Odd stream ID - client-initiated, closed by its response or the server's reset
-            send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "DATA for unknown client stream");
+            // Odd stream ID - client-initiated, closed by its response or the server's reset: the server sent it after its
+            // END_STREAM or its RST_STREAM, a connection error of type STREAM_CLOSED (RFC 9113 §5.1, closed). It was
+            // PROTOCOL_ERROR (Huly QB-1270).
+            send_goaway_and_close(ErrorCode::STREAM_CLOSED, "DATA for closed client stream");
         }
     }
 
@@ -2118,9 +2142,10 @@ private:
         _connection_active           = false; // Connection is being shut down
         _graceful_shutdown_initiated = true;  // Mark that we've started shutdown
 
-        // Notify IO_Handler about sending GOAWAY
+        // Notify IO_Handler about sending GOAWAY: `sent`, and the debug data as written. The reason followed a « GOAWAY sent by
+        // client: » prefix, by which the handler told this GOAWAY from a server's (Huly QB-1270).
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
-            Http2GoAwayEvent goaway_event_to_dispatch{error_code, last_stream_id_to_report, "GOAWAY sent by client: " + debug_message};
+            Http2GoAwayEvent goaway_event_to_dispatch{error_code, last_stream_id_to_report, debug_message, true};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
 
@@ -2211,9 +2236,10 @@ private:
      *        this. The GOAWAY the error owes is sent (RFC 9113 §5.4.1), its code and the frame layer's reason as debug
      *        data. Every refusal that comes here is a connection error -- a padding past the payload, a frame of the
      *        wrong size (PING, RST_STREAM, WINDOW_UPDATE, SETTINGS, a HEADERS too short for its priority fields), a
-     *        CONTINUATION missing, a WINDOW_UPDATE of 0 or a PRIORITY that is not 5 octets on stream 0 -- the stream
-     *        errors take on_stream_frame_error(). The protocol was no longer ok() here, and every one of them ended the
-     *        connection without a GOAWAY (Huly QB-1270).
+     *        CONTINUATION missing, a SETTINGS, PING or GOAWAY on a stream, a frame past SETTINGS_MAX_FRAME_SIZE, a
+     *        WINDOW_UPDATE of 0 or a PRIORITY that is not 5 octets on stream 0 -- the stream errors take
+     *        on_stream_frame_error(). The protocol was no longer ok() here, and every one of them ended the connection
+     *        without a GOAWAY (Huly QB-1270); the checks on a frame's header alone did not come here at all.
      * @param reason Error code
      * @param message Error message
      * @param stream_id_context The frame's stream, 0 for stream 0
@@ -2405,9 +2431,13 @@ private:
     void
     process_incoming_headers(Http2ClientStream &stream, const Http2FrameData<HeadersFrame> &headers_event) {
         const bool end_headers = (headers_event.header.flags & FLAG_END_HEADERS) != 0;
-        if (stream.end_stream_received && !stream.trailers_expected) {
+        if (stream.end_stream_received) {
+            // Half-closed (remote): the server ended the stream, and a HEADERS after its END_STREAM is a stream error of
+            // type STREAM_CLOSED (RFC 9113 §5.1), as the server answers the client's. It was PROTOCOL_ERROR, and none at
+            // all after a trailer section, which leaves trailers_expected set: the block was decoded as a second trailer
+            // section of a response already delivered, and dropped (Huly QB-1270).
             const uint32_t stream_id = stream.id; // send_rst_stream() erases the stream
-            send_rst_stream(stream_id, ErrorCode::PROTOCOL_ERROR, "HEADERS after END_STREAM without trailers");
+            send_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS after END_STREAM");
             begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
         }
