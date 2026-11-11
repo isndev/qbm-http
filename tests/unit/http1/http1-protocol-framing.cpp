@@ -1105,8 +1105,8 @@ TEST(Http1ProtocolFraming, AContentLengthOverTheCapIsRefusedWith413BeforeTheBody
 }
 
 // A request target that names no resource is answered 400 (Huly QB-1177): one the reader refuses (`/a^b`, `*` for
-// GET) and one llhttp refuses itself (`?x`, HPE_INVALID_URL). Only those: a request malformed elsewhere -- its version,
-// its framing -- is still not answered, and the protocol ends.
+// GET) and one llhttp refuses itself (`?x`, HPE_INVALID_URL). A request malformed elsewhere -- its version, a field
+// line, its method -- is still not answered, and the protocol ends; one whose framing is refused is (QB-1248, below).
 TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingElseIs) {
     for (const char *target : {"/a^b", "*", "?x"}) {
         RefusingServerFakeIO                             io;
@@ -1118,8 +1118,7 @@ TEST(Http1ProtocolFraming, ATargetThatNamesNoResourceIsRefusedWith400AndNothingE
         EXPECT_TRUE(proto.ok()) << target << ": the io answers before the connection ends";
     }
     for (const char *malformed :
-         {"GET /x HTTP/9.9\r\nHost: h\r\n\r\n", "POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
-          "G@T /x HTTP/1.1\r\nHost: h\r\n\r\n"}) {
+         {"GET /x HTTP/9.9\r\nHost: h\r\n\r\n", "POST /x HTTP/1.1\r\nHost: h\r\nX y: 1\r\n\r\n", "G@T /x HTTP/1.1\r\nHost: h\r\n\r\n"}) {
         RefusingServerFakeIO                             io;
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
         feed(io, malformed);
@@ -1897,4 +1896,64 @@ TEST(Http1ProtocolFraming, AChunkedBodyPastTheChunkLimitIsWrittenInFramesAServer
     qb::allocator::pipe<char> one;
     one << exact;
     EXPECT_EQ(std::count(one.begin(), one.end(), '\n'), 2) << "a chunk of 64 KiB was split";
+}
+
+// A request whose framing llhttp or the parser refuses is answered, then the connection closed (RFC 9112 §6.3, §7.1;
+// Huly QB-1248): 400 for a Content-Length that is no length -- past 2^64-1 (llhttp's overflow), not a number, given twice,
+// beside Transfer-Encoding -- for a Transfer-Encoding whose final coding is not `chunked` or that names it twice, for a
+// chunk size llhttp refuses (not hex, past 2^64-1) and for a field the trailer section must not carry; 501 for a coding
+// before a final `chunked`, which the server does not implement (§6.1). The connection closed with no answer.
+TEST(Http1ProtocolFraming, ARequestWhoseFramingIsRefusedIsAnswered) {
+    const std::string                              chunked = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const std::vector<std::pair<std::string, int>> table   = {
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 18446744073709551616\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 99999999999999999999\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: abc\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: -1\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n0\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, chunked\r\n\r\n0\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n", 400},
+        {chunked + "zz\r\n", 400},
+        {chunked + "10000000000000000\r\n", 400},
+        {chunked + "1\r\na\r\n0\r\nContent-Length: 1\r\n\r\n", 400}, // llhttp refuses it
+        {chunked + "1\r\na\r\n0\r\nHost: elsewhere\r\n\r\n", 400},   // the parser does (store_trailer_field())
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", 501},
+    };
+    for (auto const &[wire, status] : table) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, wire + "GET /next HTTP/1.1\r\nHost: h\r\n\r\n");
+        EXPECT_EQ(step(proto, io), 0u) << wire;
+        EXPECT_EQ(io.request_count, 0) << wire << ": a request whose framing is refused, or the one after it, was dispatched";
+        EXPECT_EQ(io.refusals, std::vector<int>{status}) << wire;
+        EXPECT_TRUE(proto.ok()) << wire << ": the io answers before the connection ends";
+        EXPECT_EQ(io.input.size(), 0u) << wire << ": what followed the refused request is dropped";
+    }
+    // The control: a well-formed request with each framing is dispatched, and nothing is refused.
+    for (std::string const &wire :
+         {std::string("POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\na"), chunked + "1\r\na\r\n0\r\n\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, wire);
+        EXPECT_GT(step(proto, io), 0u) << wire;
+        EXPECT_EQ(io.request_count, 1) << wire;
+        EXPECT_TRUE(io.refusals.empty()) << wire;
+    }
+}
+
+// A response is not answered: its framing refused, the client's protocol fails, as it did (Huly QB-1248).
+TEST(Http1ProtocolFraming, AResponseWhoseFramingIsRefusedFailsTheClientProtocol) {
+    for (const char *wire :
+         {"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551616\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n",
+          "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"}) {
+        ClientFakeIO                             io;
+        qb::protocol::http::client<ClientFakeIO> proto(io);
+        feed(io, wire);
+        EXPECT_EQ(step(proto, io), 0u) << wire;
+        EXPECT_FALSE(proto.ok()) << wire;
+        EXPECT_EQ(io.response_count, 0) << wire;
+    }
 }

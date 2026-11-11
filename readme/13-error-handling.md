@@ -203,7 +203,7 @@ Several behaviors produce error responses without any error chain:
 
 Everything above assumes a parsed request and a `Context`. When the bytes on the wire are not a valid HTTP message, there is no context to fail — the protocol layer rejects the connection itself.
 
-For HTTP/1.1, the parser enforces compile-time security limits and structural rules. Any violation makes a parser callback return `HPE_USER` (via `fail_with_reason`), which surfaces in `getMessageSize()` as a call to `this->not_ok()` (`qbm/http/src/qbm/http/1.1/protocol/base.h`). `not_ok()` is the qb-io `AProtocol` signal that the byte stream is unrecoverable; the connection is closed. Enforced limits include:
+For HTTP/1.1, the parser enforces security limits and structural rules. A violation makes a parser callback fail the message (`fail_with_reason`, or `refuse_with_status` with the status that answers it): the parse returns `HPE_USER`, or llhttp's own `HPE_CB_*` code for a callback it checks itself. A request the server can answer -- a limit, a target, `Host`, its version, its framing -- is handed to the session, which answers it with `Connection: close` and closes the connection (see [HTTP parsing](./15-http-parsing.md)); anything else surfaces in `getMessageSize()` as a call to `this->not_ok()` (`qbm/http/src/qbm/http/1.1/protocol/base.h`), the qb-io `AProtocol` signal that the byte stream is unrecoverable, and the connection is closed. Enforced limits include:
 
 | Limit | Value |
 |-------|-------|
@@ -214,7 +214,7 @@ For HTTP/1.1, the parser enforces compile-time security limits and structural ru
 | chunk size | 16 MB |
 | total body | 100 MB |
 
-Structural rejections in the same path include `Transfer-Encoding` together with `Content-Length` (request smuggling guard) and any unsupported transfer coding other than `chunked`. None of these produce a 4xx response body by default at the HTTP/1.1 layer — a framing failure is a closed connection, not a status code, because the parser cannot trust enough of the message to reply.
+Structural rejections in the same path include `Transfer-Encoding` together with `Content-Length` (request smuggling guard), any unsupported transfer coding other than `chunked`, and the framings llhttp refuses at a field or a chunk size (a `Content-Length` that is no length, `chunked` named twice or not last, a chunk size it refuses). A request among them is answered `400 Bad Request` -- `501 Not Implemented` for a coding before a final `chunked` -- with `Connection: close`, then the connection closes (RFC 9112 §6.3; until 3.4 each closed it with no answer, Huly QB-1248); the server reads nothing after it, since it cannot trust the framing. A response among them fails the client's request. Any other malformed message -- its method, its version string, a field line, a chunk-size line or chunk data not ended by CRLF -- still closes the connection with no answer.
 
 The other protocols follow the same `not_ok()` discipline at their own framers:
 

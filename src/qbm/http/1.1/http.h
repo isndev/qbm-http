@@ -669,8 +669,8 @@ public:
     }
 
     /**
-     * @brief Protocol hook: a request was refused -- 414 for its target, 431 for its fields, 413 for its body or a chunk,
-     *        400 for a target that names no resource or a bad Host field, 505 for a version not 1.x (refusal_status(), or llhttp's own).
+     * @brief Protocol hook: a request was refused -- 414 for its target, 431 for its fields, 413 for its body or a chunk, 400 for a
+     *        target that names no resource, a bad Host or a framing refused (501: a coding before chunked), 505 for a version not 1.x.
      * @param status The status that answers it.
      *
      * The answer -- the status, an empty body, `Connection: close` -- goes out once every request

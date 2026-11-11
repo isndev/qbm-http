@@ -567,6 +567,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
   dispatches at its default limit and at 1 MiB, a chunk of 64 KiB one frame) and `qbm-http-test-system-http1-client` (a qb client's
   chunked upload and a qb server's chunked response of 16 MiB + 5, both ways at the default limits).
 
+- **A request whose framing is refused is answered `400`, then the connection closed (Huly QB-1248).** A
+  `Content-Length` llhttp refuses -- past 2^64-1 (its overflow), not a number, given twice, beside `Transfer-Encoding`
+  -- a `Transfer-Encoding` that names `chunked` twice or not last, a chunk size llhttp refuses (not hexadecimal, or
+  past 2^64-1), a field the trailer section must not carry: the HTTP/1.1 server closed the connection with no answer
+  for each, where RFC 9112 §6.3 says the server answers `400` and then closes (and §6.1 for a request carrying both
+  fields). Only a target that names no resource, a version other than 1 and a `Host` that names no authority were
+  answered. The protocol now hands the request to the session as it does those (`http1_refuse_request`), which answers
+  `400 Bad Request` with `Connection: close` and closes; nothing the request carried is served. A coding before a
+  final `chunked` -- `gzip, chunked`, which the server does not implement -- is answered `501 Not Implemented` (§6.1).
+  The parser records the status for its own refusals (`refusal_status()`); llhttp's refusals are mapped by its error
+  code. Any other malformed request -- its method, its version string, a field line, a chunk-size line or chunk data
+  not ended by CRLF -- still closes the connection with no answer, and a response whose framing is refused still fails
+  the client's request, unanswered. Witnesses: `qbm-http-test-unit-http1-protocol-framing` (fourteen framings refused
+  with 400, one with 501, the request after each never dispatched; the controls: each framing well-formed is
+  dispatched, a response's refusal fails the client's protocol, a malformed field line is still not answered) and
+  `qbm-http-test-system-http1-client` (a `Content-Length` of 2^64, `abc` and given twice answered 400 with
+  `Connection: close` on the wire, then the close).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

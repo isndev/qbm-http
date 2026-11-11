@@ -2849,3 +2849,19 @@ TEST(Http1ClientTest, AChunkedBodyPastTheChunkLimitGoesFromQbToQbBothWays) {
     EXPECT_EQ(big.body().size(), kSize);
     drain_client_callbacks();
 }
+
+// On the wire (Huly QB-1248): a Content-Length llhttp refuses -- past 2^64-1, not a number, given twice -- is answered
+// 400 with `Connection: close`, and the connection closes (RFC 9112 §6.3); nothing the request carried is served. The
+// server closed the connection with no answer.
+TEST(Http1ClientTest, ARequestWhoseLengthIsRefusedIsAnswered400ThenClosed) {
+    LoopbackHttp1Server server;
+    for (const std::string length : {"18446744073709551616", "abc", "1\r\nContent-Length: 2"}) {
+        raw_socket peer(server.port);
+        peer.send_all("POST /ping HTTP/1.1\r\nHost: a\r\nContent-Length: " + length + "\r\n\r\nGET /ping HTTP/1.1\r\nHost: a\r\n\r\n");
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.rfind("HTTP/1.1 400 ", 0), 0u) << length << ": " << answer;
+        EXPECT_NE(lowercase(answer).find("connection: close"), std::string::npos) << length << ": " << answer;
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(3))) << length;
+    }
+    EXPECT_EQ(server.request_count(), 0) << "a request whose length is refused, or the one it carried, was served";
+}
