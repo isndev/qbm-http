@@ -480,6 +480,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-system-http1-client` (the persistent client against a scripted peer: one connection for the HEAD and
   the GET after it, two before).
 
+- **A response to HEAD, a `204` or a `304` is accepted whatever transfer coding it names (Huly QB-1248).** The
+  HTTP/1.1 parser accepted `chunked` alone and refused every other coding (`gzip, chunked`, `gzip`) at the end of the
+  header section, on every message. A response to HEAD and a `304` may carry the coding the origin would have applied
+  (RFC 9112 §6.1), and a response to HEAD, a `204` and a `304` end at their header section whatever their fields say
+  (§6.3): nothing follows to decode, yet the client lost the response and its connection. The parser now skips the
+  coding check for a response to HEAD the protocol names (`_body_forbidden`, a `1xx` answering a HEAD included), a
+  `204` (which breaks §6.1 naming a coding, but §6.3 frames it all the same) and a `304`; the new test of the response
+  runs only when the coding is not `chunked` alone, so no other message pays for it. The protocol frames a response to
+  HEAD at its header section, and resumes the parser on a `204` or a `304` that names a coding, which llhttp ends
+  there by its status. A `Parser` driven directly accepts a `204` or a `304` that names a coding too: its status says
+  no body follows. A response with a body is held to `chunked`, which is all qb decodes; so is any other `1xx`, as
+  before (llhttp ends only `100` to `103` at their header section by their status). `Transfer-Encoding` beside
+  `Content-Length` is refused on every message, as before (by llhttp, at its field line). Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing` (a response to HEAD, a `1xx` answering one, a `204` and a `304` naming
+  `gzip`, `gzip, chunked` or `br`, each followed by a response it must not eat; a `304` that ends the buffer; a
+  `Parser` driven directly; the controls, each refused case fed alone) and `qbm-http-test-system-http1-client` (the
+  persistent client against a scripted peer: one connection for a HEAD, a `304` and a GET; three before).
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it

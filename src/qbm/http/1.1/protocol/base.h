@@ -603,11 +603,11 @@ private:
             if (msg.has_header("Content-Length")) {
                 return fail_with_reason(parser, "HTTP Transfer-Encoding with Content-Length is forbidden");
             }
-            if (!is_supported_transfer_encoding(msg)) {
+            // Nothing follows a HEAD's response, a 204 or a 304 to decode, whatever coding it names (RFC 9112 §6.1, §6.3; QB-1248)
+            if (!is_supported_transfer_encoding(msg) && !(self->_body_forbidden || parser->status_code == 204 || parser->status_code == 304)) {
                 return fail_with_reason(parser, "Unsupported HTTP Transfer-Encoding");
             }
-            // A chunked body may end with a trailer section: its fields are stored as their values end
-            // (trailer_settings, Huly QB-1067). Installed here, so no other message pays for it.
+            // Only a chunked body has a trailer section (trailer_settings, Huly QB-1067): installed under a coding alone, harmless on no body.
             parser->settings = const_cast<http_settings_s *>(&trailer_settings);
         }
         if constexpr (MessageType::type == HTTP_REQUEST) {
@@ -796,7 +796,7 @@ private:
 protected:
     /// Reserve a declared body at the end of its header section; the h1 protocol (it copies it) turns this off; kept by reset() (QB-1248).
     bool _reserve_declared_body = true;
-    bool _body_forbidden        = false; ///< A HEAD's response: its declared length read as none; set per response, kept by reset() (QB-1248)
+    bool _body_forbidden        = false; ///< A HEAD's response: no body whatever it names; set per response, kept by reset() (QB-1248)
 
 public:
     /// Constructor: initializes the parser and immediately calls reset() to prepare it for parsing a new message.

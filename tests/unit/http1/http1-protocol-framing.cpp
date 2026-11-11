@@ -1642,3 +1642,123 @@ TEST(Http1ProtocolFraming, EveryOtherResponseKeepsTheKeepAliveItHad) {
     EXPECT_FALSE(parser.get_parsed_message().keep_alive);
     EXPECT_EQ(http_message_needs_eof(&parser), 1);
 }
+
+// ===========================================================================
+// A response with no body may name any transfer coding (Huly QB-1248). A response to HEAD and a 304 may carry the
+// Transfer-Encoding the origin would have applied (RFC 9112 §6.1), and every response to HEAD, 204 and 304 ends at its
+// header section whatever its fields say (§6.3): nothing follows to decode. The parser refused every coding but
+// `chunked` alone, and the client lost the response and its connection. A HEAD's response, a 204 (which breaks §6.1
+// naming one, but §6.3 frames it all the same) and a 304 now pass; a 1xx answering a HEAD passes with them, framed at
+// its header section on the HEAD path. Any other 1xx is held to `chunked` as before (llhttp ends only 100 to 103 at the
+// header section by their status), and so is a response with a body, which qb cannot decode.
+// ===========================================================================
+
+namespace http1_bodyless_coding_test {
+/// The client protocol over `first` then a 4-byte response: what each delivered, and whether the protocol stayed valid.
+struct Outcome {
+    int                               responses = 0;
+    bool                              ok        = false;
+    std::optional<qb::http::Response> first;
+    std::optional<qb::http::Response> next;
+};
+
+[[nodiscard]] Outcome
+deliver(std::string_view first, bool answers_head) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    io.body_forbidden = answers_head;
+    feed(io, first);
+    feed(io, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong");
+    Outcome out;
+    if (step(proto, io) > 0u) {
+        out.first         = io.last_response;
+        io.body_forbidden = false; // the next request is a GET
+        if (step(proto, io) > 0u)
+            out.next = io.last_response;
+    }
+    out.responses = io.response_count;
+    out.ok        = proto.ok() && io.input.size() == 0u;
+    return out;
+}
+
+/// `wire` alone: the protocol failed it, delivering nothing (a body read to the close would leave it valid).
+[[nodiscard]] bool
+refused_alone(std::string_view wire, bool answers_head) {
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    io.body_forbidden = answers_head;
+    feed(io, wire);
+    return step(proto, io) == 0u && !proto.ok() && io.response_count == 0;
+}
+} // namespace http1_bodyless_coding_test
+
+TEST(Http1ProtocolFraming, AResponseToHeadA204OrA304MayNameAnyCodingAndTheNextResponseIsFramed) {
+    using http1_bodyless_coding_test::deliver;
+    const std::vector<std::pair<std::string, bool>> bodyless = {
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", true}, // to HEAD
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", true},
+        {"HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: gzip\r\n\r\n", true}, // a 1xx answering a HEAD
+        {"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", false},
+        {"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: br\r\n\r\n", false},
+        {"HTTP/1.1 204 No Content\r\nTransfer-Encoding: gzip\r\n\r\n", false},
+    };
+    for (auto const &[wire, answers_head] : bodyless) {
+        const auto out = deliver(wire, answers_head);
+        ASSERT_TRUE(out.first.has_value()) << "refused: " << wire;
+        EXPECT_TRUE(out.first->has_header("Transfer-Encoding")) << wire;
+        EXPECT_TRUE(out.first->body().empty()) << wire;
+        EXPECT_TRUE(out.first->keep_alive) << wire;
+        ASSERT_TRUE(out.next.has_value()) << "the response after it was not framed: " << wire;
+        EXPECT_EQ(out.next->body().as<std::string>(), "pong") << wire;
+        EXPECT_EQ(out.responses, 2) << wire;
+        EXPECT_TRUE(out.ok) << wire;
+    }
+
+    // A 304 that ends the buffer: the parser, resumed on no byte, completes it at its header section.
+    ClientFakeIO                             io;
+    qb::protocol::http::client<ClientFakeIO> proto(io);
+    const std::string                        wire = "HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: gzip\r\n\r\n";
+    feed(io, wire);
+    EXPECT_EQ(step(proto, io), wire.size());
+    EXPECT_EQ(io.response_count, 1);
+    EXPECT_TRUE(proto.ok());
+
+    // A Parser driven directly knows no request, but a 204 or a 304 says by its status that no body follows.
+    qb::http::Parser<Response> not_modified;
+    EXPECT_EQ(not_modified.parse(wire.data(), wire.size()), HPE_PAUSED);
+    EXPECT_TRUE(not_modified.headers_completed());
+}
+
+// Controls, as they were: a response with a body names `chunked` alone, so does a 1xx not answering a HEAD, Transfer-Encoding
+// beside Content-Length is refused on any response (by llhttp, at its field line, before on_headers_complete), and
+// `chunked` alone frames as before. Each refused case is fed alone: refused is the protocol failed, no response
+// delivered, not a body waiting for the close. A Parser driven directly knows no request: a 200 naming a coding is
+// refused there.
+TEST(Http1ProtocolFraming, EveryOtherCodingIsRefusedAsItWas) {
+    using http1_bodyless_coding_test::deliver;
+    using http1_bodyless_coding_test::refused_alone;
+    const std::vector<std::pair<std::string, bool>> refused = {
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", false},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n", false},
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 5\r\n\r\n", true},
+        {"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n", false},
+        {"HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: gzip\r\n\r\n", false},
+    };
+    for (auto const &[wire, answers_head] : refused) {
+        EXPECT_TRUE(refused_alone(wire, answers_head)) << "accepted, or left waiting: " << wire;
+    }
+
+    const auto head_chunked = deliver("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", true);
+    ASSERT_TRUE(head_chunked.first.has_value());
+    EXPECT_TRUE(head_chunked.first->body().empty());
+    EXPECT_EQ(head_chunked.responses, 2);
+    const auto chunked = deliver("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n", false);
+    ASSERT_TRUE(chunked.first.has_value());
+    EXPECT_EQ(chunked.first->body().as<std::string>(), "ok");
+    EXPECT_EQ(chunked.responses, 2);
+
+    qb::http::Parser<Response> with_body;
+    const std::string          coded = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    EXPECT_NE(with_body.parse(coded.data(), coded.size()), HPE_PAUSED);
+    EXPECT_FALSE(with_body.headers_completed());
+}

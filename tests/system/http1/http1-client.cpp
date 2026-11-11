@@ -2602,3 +2602,30 @@ TEST(Http1ClientTest, AHeadResponseWithNoLengthKeepsItsConnection) {
     EXPECT_EQ(peer.connections.load(), 1) << "the response to HEAD retired its connection";
     drain_client_callbacks();
 }
+
+// A response with no body may name any transfer coding (RFC 9112 §6.1, §6.3; Huly QB-1248): the persistent client
+// delivers a HEAD's response and a 304 that name `gzip, chunked` and keeps its connection. It refused both, and opened a
+// connection for each request after them. qb's own server sends no such coding, so the scripted peer does.
+TEST(Http1ClientTest, AResponseToHeadOrA304MayNameAnyCodingAndKeepsItsConnection) {
+    http1_head_no_length_test::ScriptedPeer peer(
+        {"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nX-Head: coded\r\n\r\n",
+         "HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"});
+    auto client = qb::http1::make_client(peer.url("/"));
+    client->set_request_timeout(std::chrono::seconds(3));
+
+    auto head                 = qb::http::run_sync(client->push_request(request(qb::http::method::HEAD, "/coded")));
+    auto not_modified_request = request(qb::http::method::GET, "/coded");
+    not_modified_request.set_header("If-None-Match", "\"v1\"");
+    auto not_modified = qb::http::run_sync(client->push_request(std::move(not_modified_request)));
+    auto ping         = qb::http::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+
+    EXPECT_EQ(head.status(), qb::http::status::OK) << "the response to HEAD was refused";
+    EXPECT_EQ(head.header("X-Head"), "coded");
+    EXPECT_TRUE(head.body().empty());
+    EXPECT_EQ(not_modified.status(), qb::http::status::NOT_MODIFIED) << "the 304 was refused";
+    EXPECT_TRUE(not_modified.body().empty());
+    EXPECT_EQ(ping.status(), qb::http::status::OK);
+    EXPECT_EQ(ping.body().template as<std::string>(), "pong");
+    EXPECT_EQ(peer.connections.load(), 1) << "a bodyless response that names a coding dropped its connection";
+    drain_client_callbacks();
+}
