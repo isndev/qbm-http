@@ -42,7 +42,7 @@ namespace qb::allocator {
 template <>
 pipe<char> &
 pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
-    constexpr std::size_t frame   = std::size_t{64} * 1024;
+    constexpr std::size_t frame   = qb::http::chunk_frame_size; // ResponseStream::chunk_overhead() budgets the same frames
     constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
     for (std::size_t at = 0; at < c.size(); at += frame) {
         const std::size_t size = std::min(frame, c.size() - at);

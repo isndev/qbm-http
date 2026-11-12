@@ -283,6 +283,16 @@ inflate_piece(qb::compression::decompress_provider &inflater, std::string const 
 }
 #endif // QB_HAS_COMPRESSION
 
+// What the chunk serializer writes for a chunk of `size` bytes beyond them, counted on its output (Huly QB-1248): the
+// framing ResponseStream::chunk_overhead() must budget to the byte.
+[[nodiscard]] inline std::size_t
+serialized_chunk_overhead(std::size_t size) {
+    static const std::string  bytes(std::size_t{2} << 20, 'f');
+    qb::allocator::pipe<char> out;
+    out << qb::http::Chunk{bytes.data(), size};
+    return out.size() - size;
+}
+
 inline void
 record_verdict(int index, Stream::write_result r) {
     g_seen.verdicts[index] = static_cast<int>(r) + 1;
@@ -557,6 +567,24 @@ public:
             producer->stream = std::move(stream);
             producer->piece  = std::string(std::size_t{400} * 1024, 'y');
             producer->run();
+        });
+
+        // A chunk past chunk_frame_size leaves as frames, each with its own framing, and the admission budgets them (Huly
+        // QB-1248): with half the cap as the high mark, the largest piece whose frames fit the room is taken, one byte more is
+        // too_large. The piece is sized on the serializer's own output, not on chunk_overhead().
+        router().get("/budget", [](std::shared_ptr<Ctx> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            record(ctx, stream);
+            stream->set_watermarks(g_cap.load() / 2, g_cap.load() / 4);
+            const std::size_t room  = g_cap.load() - stream->high_watermark() - serialized_chunk_overhead(0);
+            std::size_t       piece = room;
+            while (piece + serialized_chunk_overhead(piece) > room)
+                --piece;
+            g_seen.bytes = piece;
+            record_verdict(0, stream->write(std::string(piece + 1, 'p')));
+            record_verdict(1, stream->write(std::string(piece, 'p')));
+            stream->end();
         });
 
         // A session's high watermark reaches the streams it begins (clamped like any other).
@@ -1840,6 +1868,30 @@ TEST_F(ResponseStreamTest, ALaterHookThatCodesOrRangesTheAnswerDropsTheStreamCod
     }
 }
 #endif // QB_HAS_COMPRESSION
+
+// The admission's framing is the serializer's, to the byte (Huly QB-1248): since chunks past chunk_frame_size leave as frames,
+// each with its own size line and CRLFs, chunk_overhead() counted one: a write it admitted could pass the cap.
+TEST(ResponseStreamFraming, ChunkOverheadIsTheSerializersFramingToTheByte) {
+    for (const std::size_t size :
+         {std::size_t{0}, std::size_t{1}, std::size_t{15}, std::size_t{16}, std::size_t{4095}, std::size_t{65535},
+          qb::http::chunk_frame_size - 1, qb::http::chunk_frame_size, qb::http::chunk_frame_size + 1, 2 * qb::http::chunk_frame_size,
+          2 * qb::http::chunk_frame_size + 1, std::size_t{200000}, (std::size_t{1} << 20) + 3})
+        EXPECT_EQ(Stream::chunk_overhead(size), serialized_chunk_overhead(size)) << size;
+}
+
+TEST_F(ResponseStreamTest, AChunkedPiecePastAFrameIsBudgetedToTheByte) {
+    g_cap = std::size_t{1} << 20; // 1 MiB: a high mark of 512 KiB, a room of 512 KiB less the last-chunk
+    RawClient c;
+    ASSERT_TRUE(c.connect(port));
+    ASSERT_TRUE(c.send(get("/budget")));
+    ASSERT_TRUE(c.read_until([&] { return parse_response(c.buffer).complete; }, 20s)) << c.buffer.substr(0, 256);
+    EXPECT_EQ(g_seen.verdicts[0].load(), verdict(Stream::write_result::too_large))
+        << "a piece one byte past the room, its frames counted, was admitted";
+    EXPECT_EQ(g_seen.verdicts[1].load(), verdict(Stream::write_result::taken)) << "the largest piece that fits was refused";
+    const auto r = parse_response(c.buffer);
+    EXPECT_EQ(r.status, 200);
+    EXPECT_EQ(r.body.size(), g_seen.bytes.load());
+}
 
 TEST_F(ResponseStreamTest, TheCodingsTailKeepsItsRoomUnderTheCapSoAFullStreamStillEnds) {
     g_cap = 65541; // 64 framed pieces of 1024 bytes plus the last-chunk's 5: the tail's room is the only slack

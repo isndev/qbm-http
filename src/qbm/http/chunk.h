@@ -17,17 +17,17 @@
 #include <qb/system/allocator/pipe.h> // qb::allocator::pipe<char> — specialised below
 
 namespace qb::http {
+/// The largest frame qb writes a chunk in (Huly QB-1248): a chunk past it leaves as frames of this size, each with its own size
+/// line and CRLF pair -- written by the chunk serializer (body.cpp), budgeted by `ResponseStream::chunk_overhead()`.
+inline constexpr std::size_t chunk_frame_size = std::size_t{64} * 1024;
+
 /**
  * @brief Represents a single chunk in HTTP chunked transfer encoding.
  *
- * This class provides a lightweight, non-owning view of a segment of data that
- * constitutes a chunk in an HTTP message body transmitted with chunked encoding.
- * It stores a pointer to the data and its size, but does not manage the lifetime
- * of the underlying data buffer. This makes it efficient for streaming scenarios
- * where chunks are processed sequentially.
- *
- * Chunked transfer encoding allows a sender to begin transmitting a dynamically
- * generated message body before knowing its total size.
+ * This class provides a lightweight, non-owning view of a segment of data that constitutes a chunk in an HTTP message body
+ * transmitted with chunked encoding. It stores a pointer to the data and its size, but does not manage the lifetime of the
+ * underlying data buffer. This makes it efficient for streaming scenarios where chunks are processed sequentially. Chunked
+ * transfer encoding allows a sender to begin transmitting a dynamically generated message body before knowing its total size.
  */
 class Chunk {
     const char *_data; ///< Pointer to the beginning of the chunk data. This class does not own the data.

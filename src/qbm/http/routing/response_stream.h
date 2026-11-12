@@ -665,14 +665,14 @@ public:
         _low_watermark  = low < _high_watermark ? low : _high_watermark / 2;
     }
 
-    /// The framing bytes a chunk of `size` payload bytes adds: its hexadecimal size, CRLF, then CRLF after the bytes
-    /// (the last-chunk, of size 0, is `chunk_overhead(0)` bytes).
+    /// The framing bytes a chunk of `size` payload bytes adds as qb writes it, per frame of at most `chunk_frame_size` (Huly QB-1248): its
+    /// hexadecimal size, CRLF, then CRLF after its bytes -- 9 bytes a full frame; the last-chunk, of size 0, is chunk_overhead(0) bytes.
     [[nodiscard]] static constexpr std::size_t
     chunk_overhead(std::size_t size) noexcept {
-        std::size_t digits = 1;
-        while (size >>= 4)
+        std::size_t full = size > chunk_frame_size ? (size - 1) / chunk_frame_size : 0, last = size - full * chunk_frame_size, digits = 1;
+        while (last >>= 4)
             ++digits;
-        return digits + 4;
+        return (full ? full * chunk_overhead(chunk_frame_size) : 0) + digits + 4; // the frames before the last, then the last
     }
 
     // --- the session's side ----------------------------------------------------------------------------------
