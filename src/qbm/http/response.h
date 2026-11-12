@@ -61,7 +61,22 @@ public:
         // here was an out-of-line call per message built -- every parse (Huly QB-1073).
     }
 
-    Response(Status s, qb::icase_unordered_map<std::vector<std::string>> h = {}, Body b = {})
+    /**
+     * @brief A response of status @p s, with headers @p h and body @p b when they are given.
+     * @details Three forms, not one with two defaulted arguments: a response with no body is built without one,
+     *          where an empty `Body` -- and, with no headers, an empty map -- was made for the call and moved in
+     *          (`internal::MessageBase`'s headers-only constructor says what that cost; Huly QB-1270). Implicit from a
+     *          status, as before.
+     */
+    Response(Status s) noexcept
+        : internal::MessageBase()
+        , _status(s) {}
+
+    Response(Status s, qb::icase_unordered_map<std::vector<std::string>> h)
+        : internal::MessageBase(std::move(h))
+        , _status(s) {}
+
+    Response(Status s, qb::icase_unordered_map<std::vector<std::string>> h, Body b)
         : internal::MessageBase(std::move(h), std::move(b))
         , _status(s) {}
 
