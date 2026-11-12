@@ -819,23 +819,23 @@ public:
     http_errno_t
     parse(const char *buffer, std::size_t const size) {
         const auto result = http_execute(static_cast<http_t *>(this), buffer, size);
-        if (_failure_reason) [[unlikely]] // llhttp writes its own over it after a callback it checks itself (Huly QB-1279)
-            http_set_error_reason(static_cast<http_t *>(this), _failure_reason);
-        return result;
+        // llhttp writes its own reason over a refusal's after a callback it checks itself (Huly QB-1279): restored out of line
+        return _failure_reason ? restore_failure_reason(result) : result;
     }
 
+private:
+    /// parse()'s cold half, out of line: the reason a refusal gave, written back over llhttp's -- @p result passes through, so
+    /// the parse every message takes keeps nothing live across the restore (Huly QB-1248, F2; defined at the file's tail).
+    QB_NOINLINE http_errno_t restore_failure_reason(http_errno_t result) noexcept;
+
+public:
     /**
-     * @brief Reset the parser state
+     * @brief Reset the parser state for a new message
      *
-     * Clears all parser state and prepares it for parsing a new message: llhttp's (http_init(), its error and
-     * reason with it), the message object, the headers_completed flag, any accumulated body data, the refusal
-     * status and the reason a refusal gave.
-     *
-     * `http_t::data` is left as http_init() sets it: the callbacks find this object through
-     * the state llhttp executes, never through a stored self-pointer (Huly QB-510).
-     *
-     * This method should be called before reusing the parser for a new
-     * message or after an error occurs to restore the parser to a clean state.
+     * llhttp's (http_init(), its error and reason with it), the message, the headers_completed flag, the body data, the refusal
+     * status and the reason a refusal gave. Call it before reusing the parser or after an error. `http_t::data` is left as
+     * http_init() sets it: the callbacks find this object through the state llhttp executes, never through a stored self-pointer
+     * (Huly QB-510).
      */
     void
     reset() noexcept {
@@ -1283,5 +1283,14 @@ Parser<MessageType>::restore_body_buffer(std::size_t expected) {
     if (expected != 0 && expected <= initial) {
         _chunked = qb::allocator::pipe<char>{};
     }
+}
+
+/// parse()'s cold half (Huly QB-1279; out of line since the pilot's read, QB-1248 F2): llhttp wrote its own reason over the one
+/// a refusal gave, after a callback it checks itself; the refusal's is written back, and @p result returned as it came.
+template <typename MessageType>
+http_errno_t
+Parser<MessageType>::restore_failure_reason(http_errno_t result) noexcept {
+    http_set_error_reason(static_cast<http_t *>(this), _failure_reason);
+    return result;
 }
 } // namespace qb::http
