@@ -996,6 +996,15 @@ Client::on(const qb::protocol::http2::Http2GoAwayEvent &event) {
         return;
     }
 
+    // A connection this client ends for a flood -- its own GOAWAY(ENHANCE_YOUR_CALM): the queued-reply count, the frames
+    // that make no progress -- is closed at once: qb-io would otherwise hand the descriptor to the loop, which reads the
+    // server it has just refused to read for linger(), up to its byte budget. A linger of zero is qb-io's "close at once";
+    // it is read by the dispose() this close leads to, after on(event::disconnected), so on(event::dispose) puts the
+    // client's own setting back (Huly QB-1270).
+    if (event.sent && event.error_code == qb::protocol::http2::ErrorCode::ENHANCE_YOUR_CALM && !_linger_before_flood) {
+        _linger_before_flood = this->linger();
+        this->set_linger(qb::duration::zero());
+    }
     close_connection(error_msg); // the `disconnected` it raises decides on the reconnection
 }
 
@@ -1118,11 +1127,19 @@ Client::on(qb::io::async::event::dispose const &) {
     // (a second failure pass over the work the disconnected callbacks had just re-queued, a state
     // reset that clobbered a reconnection already started) is that handler's, once.
     LOG_HTTP_DEBUG_PA(_client_id, "Client disposal event");
-    // The transport is not touched here: dispose() has already ended it (Huly QB-1060) -- closed
-    // when the server ended the connection, its sending side shut down when this client did, so the
-    // server reads everything queued, the GOAWAY last, then EOF (Huly QB-1021, QB-1059). Closing it
-    // here as well reset a server whose bytes this client had left unread, and refused what the
-    // server still sent: its next send failed.
+    // The transport is not touched here: dispose() has already ended it (Huly QB-1060, QB-1270) -- closed
+    // when the server ended the connection; when this client did, its descriptor given to the loop, which
+    // shuts the sending side down -- the server reads everything queued, the GOAWAY last, then EOF (Huly
+    // QB-1021, QB-1059) -- reads and drops what the server still sends, and closes after it, within
+    // linger(). Closing it here reset a server whose bytes this client had left unread; keeping it
+    // half-closed, as 3.3 did, left a server that kept writing blocked until the next connect().
+    if (_linger_before_flood) {
+        // The connection ended for a flood was closed at once: the client's own linger is back -- unless the application
+        // set a non-zero one since (from the callback of a request that close failed); a zero reads as this close's own.
+        if (this->linger() == qb::duration::zero())
+            this->set_linger(*_linger_before_flood);
+        _linger_before_flood.reset();
+    }
 }
 
 // Factory functions

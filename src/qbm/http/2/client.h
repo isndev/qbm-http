@@ -237,6 +237,11 @@ private:
     std::chrono::steady_clock::time_point _reconnect_started_at{};
     qb::duration                          _reconnect_delay{};
 
+    // linger() as it was before this client ended a connection for a flood (its own GOAWAY(ENHANCE_YOUR_CALM)): that
+    // one connection is closed at once -- a linger of zero -- and the setting, which is the client's for every
+    // connection it makes, is put back when the close is done, in on(event::dispose) (Huly QB-1270).
+    std::optional<qb::duration> _linger_before_flood;
+
     // Callbacks
     std::vector<ConnectionCallback> _connection_callbacks;
 
@@ -312,9 +317,9 @@ public:
      * @brief Disconnect from server
      * @details The outstanding requests fail at once (`503`, "Connection closed"). A live connection
      *          is announced to the server first, as RFC 9113 §6.8 asks: GOAWAY(NO_ERROR) leaves after
-     *          what the connection still had to send, then the sending side is shut down (qb-io ends
-     *          the transport, Huly QB-1060) -- at the latest after GOAWAY_FLUSH_LIMIT, when the
-     *          server no longer reads.
+     *          what the connection still had to send, then qb-io ends the transport -- its loop shuts
+     *          the sending side down and closes the descriptor after the server (Huly QB-1060,
+     *          QB-1270) -- at the latest after GOAWAY_FLUSH_LIMIT, when the server no longer reads.
      */
     void disconnect();
 

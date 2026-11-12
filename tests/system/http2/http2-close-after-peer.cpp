@@ -1,7 +1,7 @@
 /**
  * @file qbm/http/tests/system/http2/http2-close-after-peer.cpp
  * @brief How an HTTP/2 connection ends when this side ends it, over real TLS sockets: its descriptor goes to the loop of
- *        its thread, which closes it after the peer (Huly QB-1270).
+ *        its thread, which closes it after the peer -- and a flood is closed at once (Huly QB-1270).
  *
  * A connection an io object ended itself leaves the object for the loop of its thread, which shuts the sending side
  * down, reads and drops what the peer still sends, and closes the descriptor on the peer's EOF, a socket error,
@@ -18,7 +18,10 @@
  *     session is released at once, its descriptor on the loop while the client keeps its end open and closed when it
  *     closes; a client that never reads is refused within the byte budget, not held for `linger()`;
  *   - not every session takes that path: one that ends with output still queued -- a slow reader behind a large
- *     response -- is closed with the session, and the streams of a connection are cancelled when its GOAWAY is sent.
+ *     response -- is closed with the session, and the streams of a connection are cancelled when its GOAWAY is sent;
+ *   - a flood is closed at once, on both sides: the server's GOAWAY(ENHANCE_YOUR_CALM) and the client's own leave no
+ *     socket on the loop -- the loop would read on, up to the byte budget, a peer it has just refused to read -- the
+ *     flooder's next writes fail, and the client's `linger()` is the same after such a close as before it.
  *
  * Each case runs on connections of its own and leaves nothing behind: no socket on a loop, every thread joined.
  *
@@ -57,9 +60,9 @@ using qb::http::test::ServerThread;
 
 namespace http2_close_after_peer_test {
 
-constexpr std::uint8_t  kData = 0x0, kHeaders = 0x1, kSettings = 0x4, kPing = 0x6, kGoaway = 0x7;
+constexpr std::uint8_t  kData = 0x0, kHeaders = 0x1, kPriority = 0x2, kSettings = 0x4, kPing = 0x6, kGoaway = 0x7;
 constexpr std::uint8_t  kAck = 0x1, kEndStream = 0x1, kEndHeaders = 0x4;
-constexpr std::uint32_t kNoError = 0x0, kProtocolError = 0x1;
+constexpr std::uint32_t kNoError = 0x0, kProtocolError = 0x1, kEnhanceYourCalm = 0xb;
 
 /// The most a peer that writes into a connection this side ended may have handed its socket before its writes fail: the
 /// byte budget, and what the two socket buffers hold besides (10 MiB with Linux's default limits).
@@ -859,4 +862,181 @@ TEST_F(Http2ServerCloseAfterPeerTest, TheStreamsOfAConnectionAreCancelledWhenIts
     RecordProperty("cancelled_after_ms", std::to_string(ms(cancelled_at - sent_at)));
     client.close();
     EXPECT_TRUE(loop_closes_nothing()) << "the server's loop still closes the socket of a client that closed";
+}
+
+// A flood -- 10400 PRIORITY frames in one write, frames that make no progress: the bucket holds 10000 tokens and
+// regains 330 a second -- is answered with GOAWAY(ENHANCE_YOUR_CALM), and the session closes its socket at once: the
+// loop does not read on, for its bound, a peer the server has just refused to read. The client reads the GOAWAY, and
+// its next writes fail before the byte budget; the server's loop has no socket at any moment. Without the flood's
+// linger of zero the descriptor went to the loop, which read the client up to the budget.
+TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverReachesTheLoop) {
+    qb::io::tcp::ssl::socket sock{qb::io::ssl::Context::client().alpn({"h2"})};
+    sock.set_insecure();
+    ASSERT_EQ(sock.connect_v4("127.0.0.1", port), 0);
+    ASSERT_EQ(sock.get_alpn_selected_protocol(), "h2");
+    ASSERT_EQ(sock.set_nonblocking(true), 0);
+    const auto write_all = [&](std::vector<std::uint8_t> const &bytes) {
+        std::size_t off      = 0;
+        const auto  deadline = std::chrono::steady_clock::now() + 10s;
+        while (off < bytes.size() && std::chrono::steady_clock::now() < deadline) {
+            const int n = sock.write(bytes.data() + off, bytes.size() - off);
+            if (n < 0)
+                return false;
+            if (n == 0)
+                std::this_thread::sleep_for(1ms);
+            off += static_cast<std::size_t>(std::max(n, 0));
+        }
+        return off == bytes.size();
+    };
+    std::vector<std::uint8_t>    in;
+    std::size_t                  parsed = 0;
+    std::optional<std::uint32_t> goaway;
+    bool                         settings   = false; // the server's SETTINGS
+    const auto                   read_until = [&](auto &&done) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        char       buffer[16384];
+        while (!done() && std::chrono::steady_clock::now() < deadline) {
+            const int n = sock.read(buffer, sizeof(buffer));
+            if (n < 0)
+                break;
+            if (n == 0) {
+                std::this_thread::sleep_for(1ms);
+                continue;
+            }
+            in.insert(in.end(), buffer, buffer + n);
+            parsed = parse_frames(in, parsed,
+                                  [&](std::uint8_t type, std::uint8_t flags, std::uint32_t, std::uint8_t const *payload, std::size_t length) {
+                                      if (type == kSettings && (flags & kAck) == 0)
+                                          settings = true;
+                                      else if (type == kGoaway && length >= 8 && !goaway)
+                                          goaway = be32(payload + 4);
+                                  });
+        }
+        return done();
+    };
+
+    std::vector<std::uint8_t> preface(HTTP2_CONNECTION_PREFACE.begin(), HTTP2_CONNECTION_PREFACE.end());
+    append_frame(preface, kSettings, 0, 0, {});
+    ASSERT_TRUE(write_all(preface));
+    ASSERT_TRUE(read_until([&] { return settings; })) << "the server never sent its SETTINGS";
+    std::vector<std::uint8_t> flood;
+    for (int i = 0; i < 10400; ++i)
+        append_frame(flood, kPriority, 0, 3, {0, 0, 0, 0, 16}); // stream 3, idle: a signal the server ignores
+    ASSERT_TRUE(write_all(flood));
+    // The client reads up to the GOAWAY and no further: a TLS layer that has read the end of the connection fails every
+    // write itself, and the writes below must meet the socket.
+    ASSERT_TRUE(read_until([&] { return goaway.has_value(); })) << "the server did not answer the flood with a GOAWAY";
+    EXPECT_EQ(*goaway, kEnhanceYourCalm);
+
+    std::vector<std::uint8_t> more;
+    for (int i = 0; i < 1000; ++i)
+        append_frame(more, kPriority, 0, 3, {0, 0, 0, 0, 16});
+    std::size_t taken   = 0;
+    bool        refused = false;
+    const auto  t0      = std::chrono::steady_clock::now();
+    while (!refused && taken < 2 * kAcceptedBound && std::chrono::steady_clock::now() - t0 < 10s) {
+        const int n = sock.write(more.data(), more.size());
+        if (n < 0)
+            refused = true;
+        else if (n == 0)
+            std::this_thread::sleep_for(1ms);
+        else
+            taken += static_cast<std::size_t>(n);
+    }
+    EXPECT_TRUE(refused) << "the flooder's writes were never refused: " << taken << " octets taken";
+    EXPECT_LT(taken, qb::io::async::detail::closing_socket_byte_budget())
+        << "the server's loop read the flooder: its socket took " << taken << " octets after the GOAWAY";
+    RecordProperty("octets_taken_after_the_goaway", std::to_string(taken));
+    sock.disconnect();
+    ASSERT_TRUE(wait_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
+    EXPECT_EQ(probe.closing_at_release.load(), 0) << "the flooder's descriptor went to the server's loop";
+    EXPECT_EQ(probe.closing_max.load(), 0) << "the server's loop closed the flooder's socket after it";
+}
+
+// The client's own flood close, against a raw TLS server: a 200, then empty DATA frames until the client ends the
+// connection with GOAWAY(ENHANCE_YOUR_CALM). The client closes the socket at once -- its loop has no socket at any
+// moment, and the server's next writes fail before the byte budget -- and its linger() is the same after the close as
+// before the flood: the default, and a value the test set. The contrast first: a connection error that is no flood (a
+// HEADERS on an idle stream, GOAWAY(PROTOCOL_ERROR)) against a server that stays open and silent leaves one socket on
+// the loop, until the server closes. Without the flood's linger of zero the flood went the same way, and the loop read
+// the flooder up to the budget.
+TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedAtOnceAndKeepsItsLinger) {
+    {
+        SCOPED_TRACE("a connection error that is no flood");
+        ClosingPeer peer(ClosingPeer::provoke::idle_stream_headers);
+        ASSERT_NE(peer.port(), 0);
+        auto client = connected_client(peer.port());
+        ASSERT_TRUE(client->is_connected());
+        const qb::duration                linger = client->linger();
+        std::optional<qb::http::Response> response;
+        ASSERT_TRUE(client->push_request(get("/pending"), [&](qb::http::Response r) { response = std::move(r); }));
+        ASSERT_TRUE(pump_until([&] { return response.has_value(); }, 10s)) << "the client did not end the connection";
+        EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: HEADERS frame received on idle client stream");
+        EXPECT_TRUE(pump_until([&] { return !client->transport().is_open(); }, 3s))
+            << "the client kept the descriptor of the connection it ended";
+        EXPECT_EQ(qb::io::async::detail::closing_sockets(), 1u) << "the descriptor of the connection the client ended is not on its loop";
+        EXPECT_EQ(client->linger().count(), linger.count());
+        peer.release(); // the server closes: the loop reads its EOF and closes the socket
+        EXPECT_TRUE(pump_until([] { return qb::io::async::detail::closing_sockets() == 0; }, 5s))
+            << "the server closed and the client's loop kept its socket";
+    }
+    // Each linger on a connection of its own, and judged on its own: a fatal assertion ends that one, not the test.
+    const auto floods = [&](std::optional<qb::duration> set) {
+        SCOPED_TRACE(set ? "a flood, the client's linger set to 750 ms" : "a flood, the client's default linger");
+        ClosingPeer peer(ClosingPeer::provoke::empty_data_flood);
+        ASSERT_NE(peer.port(), 0);
+        auto client = connected_client(peer.port());
+        ASSERT_TRUE(client->is_connected());
+        if (set)
+            client->set_linger(*set);
+        const qb::duration before      = client->linger();
+        std::size_t        closing_max = 0;
+        const auto         sampled     = [&] {
+            closing_max = std::max(closing_max, qb::io::async::detail::closing_sockets());
+            return true;
+        };
+        std::optional<qb::http::Response> response;
+        ASSERT_TRUE(client->push_request(get("/flood"), [&](qb::http::Response r) { response = std::move(r); }));
+        ASSERT_TRUE(pump_until([&] { return sampled() && response.has_value(); }, 20s)) << "the client did not end the flood";
+        EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: Excessive frames making no progress (flood)");
+        EXPECT_TRUE(pump_until([&] { return sampled() && !client->transport().is_open(); }, 3s))
+            << "the client kept the descriptor of the connection it ended";
+        EXPECT_EQ(client->linger().count(), before.count()) << "the client's linger() was not put back after the flood's close";
+        ASSERT_TRUE(pump_until([&] { return sampled() && peer.provoked(); }, 10s)) << "the server did not read the client's GOAWAY";
+        EXPECT_EQ(peer.goaway_code(), kEnhanceYourCalm);
+
+        peer.write_until_refused();
+        ASSERT_TRUE(pump_until([&] { return sampled() && peer.writing_done(); }, ClosingPeer::write_window + 20s));
+        EXPECT_TRUE(peer.write_failed()) << "the flooder's writes never failed: its socket took " << peer.written() << " octets";
+        EXPECT_LT(peer.written(), qb::io::async::detail::closing_socket_byte_budget())
+            << "the client's loop read the flooder: its socket took " << peer.written() << " octets after the close";
+        EXPECT_EQ(closing_max, 0u) << "the descriptor of a connection the client ended for a flood went to its loop";
+        RecordProperty(set ? "flood_octets_taken_linger_750ms" : "flood_octets_taken_default_linger", std::to_string(peer.written()));
+        client.reset();
+        EXPECT_EQ(qb::io::async::detail::closing_sockets(), 0u) << "the client's loop still closes a socket";
+    };
+    floods(std::nullopt);
+    floods(qb::duration{750ms});
+}
+
+// A linger() the application sets while the flood's close is under way -- from the callback of a request that close
+// fails, which runs after the client zeroed its linger and before on(event::dispose) -- is the application's: the
+// client does not put its earlier value back over it.
+TEST_F(Http2ClientCloseAfterPeerTest, ALingerTheApplicationSetsDuringAFloodsCloseIsKept) {
+    ClosingPeer peer(ClosingPeer::provoke::empty_data_flood);
+    ASSERT_NE(peer.port(), 0);
+    auto client = connected_client(peer.port());
+    ASSERT_TRUE(client->is_connected());
+    std::optional<qb::http::Response> response;
+    ASSERT_TRUE(client->push_request(get("/flood"), [&](qb::http::Response r) {
+        response = std::move(r);
+        client->set_linger(1500ms);
+    }));
+    ASSERT_TRUE(pump_until([&] { return response.has_value(); }, 20s)) << "the client did not end the flood";
+    EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: Excessive frames making no progress (flood)");
+    EXPECT_TRUE(pump_until([&] { return !client->transport().is_open(); }, 3s)) << "the client kept the descriptor of the connection it ended";
+    EXPECT_EQ(client->linger().count(), qb::duration{1500ms}.count()) << "the client put its earlier linger() back over the application's";
+    peer.release(); // the server closes: whatever the loop holds of this connection ends on its EOF
+    client.reset();
+    EXPECT_TRUE(pump_until([] { return qb::io::async::detail::closing_sockets() == 0; }, 5s)) << "the client's loop still closes a socket";
 }

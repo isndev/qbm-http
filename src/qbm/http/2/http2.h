@@ -873,6 +873,15 @@ public:
         _client_goaway_logged = _client_goaway_logged || (!event.sent && event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR);
         // Server may decide to stop accepting new requests on this connection.
         if (event.error_code != qb::protocol::http2::ErrorCode::NO_ERROR) {
+            // A connection this server ended for a flood (every flood rule of the protocol, the no-progress bucket
+            // included, sends ENHANCE_YOUR_CALM) is closed with the session: a linger of zero is qb-io's "close at
+            // once", and the loop does not read on, for the bound, the peer it has just refused to read. Any other
+            // error GOAWAY leaves with a disconnect(), as before: the session is released at the next dispatch, and
+            // once the frame is written qb-io closes the descriptor after the peer, so that a client still sending
+            // reads the GOAWAY instead of a reset. A GOAWAY still queued behind output the client has not taken is
+            // dropped with the session: the bound on resources wins over delivery there (Huly QB-1270).
+            if (event.sent && event.error_code == qb::protocol::http2::ErrorCode::ENHANCE_YOUR_CALM)
+                this->set_linger(qb::duration::zero());
             this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);
         }
     }
