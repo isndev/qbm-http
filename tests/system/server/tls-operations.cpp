@@ -350,11 +350,13 @@ TEST(HttpTlsOperations, Http2KeepAliveContinuesAcrossRotation) {
         const auto origin = "https://localhost:" + std::to_string(server->transport().local_endpoint().port());
         auto       client = qb::http2::make_client(origin);
         client->set_verify_peer(false);
+        // Declared here, not inside the lambda below: MSVC 19.52 reads a class local to a lambda's body as a dependent
+        // type, and then wants `template` before `as<std::string>()` on a member of it (C4864, an error under /WX).
+        struct Result {
+            bool               done = false;
+            qb::http::Response response;
+        };
         auto request = [&]() {
-            struct Result {
-                bool               done = false;
-                qb::http::Response response;
-            };
             auto result = std::make_shared<Result>();
             EXPECT_TRUE(client->push_request(qb::http::Request{{origin + "/ping"}}, [result](qb::http::Response r) {
                 result->response = std::move(r);
