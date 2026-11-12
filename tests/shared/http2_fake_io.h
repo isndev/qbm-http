@@ -143,6 +143,14 @@ struct Http2FakeIO {
         return written;
     }
 
+    /// The clock the bucket of the frames that make no progress reads (h2::keeps_no_progress_clock): stopped at 0 unless
+    /// a test steps it, so that the bucket holds the burst and regains nothing until one does (Huly QB-1270).
+    std::int64_t clock_seconds = 0;
+    [[nodiscard]] std::int64_t
+    no_progress_clock_seconds() const noexcept {
+        return clock_seconds;
+    }
+
     template <typename Frame>
     Http2FakeIO &
     operator<<(const Frame &frame) {
@@ -224,6 +232,14 @@ struct Http2ClientFakeIO {
     [[nodiscard]] std::size_t
     bytes_written() const noexcept {
         return written;
+    }
+
+    /// The clock the bucket of the frames that make no progress reads, stopped at 0 unless a test steps it, as on
+    /// @ref Http2FakeIO (Huly QB-1270).
+    std::int64_t clock_seconds = 0;
+    [[nodiscard]] std::int64_t
+    no_progress_clock_seconds() const noexcept {
+        return clock_seconds;
     }
 
     template <typename Frame>
@@ -637,6 +653,23 @@ count_frames(const qb::allocator::pipe<char> &output, h2::FrameType type) {
         }
     }
     return n;
+}
+
+/// Whether @p output holds a GOAWAY whose error code is not NO_ERROR -- one that ends the connection -- and the frames
+/// written after the first such GOAWAY, which nothing may follow (RFC 9113 §5.4.1; Huly QB-1270).
+[[nodiscard]] inline std::pair<bool, std::vector<EmittedFrame>>
+frames_after_the_closing_goaway(const qb::allocator::pipe<char> &output) {
+    bool                      closed = false;
+    std::vector<EmittedFrame> after;
+    for (const auto &f : parse_emitted_frames(output)) {
+        if (closed) {
+            after.push_back(f);
+        } else if (f.type == h2::FrameType::GOAWAY && f.payload_length >= 8) {
+            const auto *p = reinterpret_cast<const uint8_t *>(output.cbegin() + f.payload_offset);
+            closed        = ((uint32_t{p[4]} << 24) | (uint32_t{p[5]} << 16) | (uint32_t{p[6]} << 8) | p[7]) != 0;
+        }
+    }
+    return {closed, after};
 }
 
 // ===========================================================================

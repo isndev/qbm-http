@@ -53,7 +53,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -3857,13 +3860,15 @@ TEST_F(Http2ClientCrossingTest, ADataAfterTheResponseEndedIsAConnectionErrorOfTy
 }
 
 // The empty-frame flood (CVE-2019-9518): a server that answers with a 200, then sends empty DATA frames without
-// END_STREAM -- each a dispatch for the client, no reply, counted nowhere -- 10000 at once, then one at a time behind a
+// END_STREAM -- each a dispatch for the client, no reply, counted nowhere -- 10000 at once, then 1000 at a time behind a
 // PING whose PONG it waits for. The client took them for ever. It ends the connection with GOAWAY(ENHANCE_YOUR_CALM)
-// once its bucket of NO_PROGRESS_FRAME_BURST is spent, and the request fails with that reason. A server that sends a few
-// empty DATA frames between its chunks is never cut.
+// once its bucket of NO_PROGRESS_FRAME_BURST is spent, and the request fails with that reason. The rounds were of one
+// frame, which outran the 330 tokens the bucket regains a second only while a round trip took under 3 ms: a slow host
+// was never cut, and the test waited out its 10 s (Huly QB-1270). A server that sends a few empty DATA frames between
+// its chunks is never cut.
 TEST_F(Http2ClientCrossingTest, AFloodOfEmptyDataFramesEndsTheConnectionAndAFewNeverDo) {
     {
-        SCOPED_TRACE("20000 empty DATA frames");
+        SCOPED_TRACE("a flood of empty DATA frames");
         Http2PlannedPeer peer(Http2PlannedPeer::Plan::empty_data_flood);
         ASSERT_NE(peer.port(), 0);
         auto client = connected_client(peer.port());
@@ -3896,5 +3901,61 @@ TEST_F(Http2ClientCrossingTest, AFloodOfEmptyDataFramesEndsTheConnectionAndAFewN
         client->disconnect();
     }
 }
+
+#ifdef QB_WITH_LOGGING
+/// What the process logged while @p body ran: a log of its own, closed and drained by the next qb::io::log::init()
+/// before that returns (the capture of qbm-redis's consumer-unknown-push.cpp), then the process's own file again
+/// (LogInitializer's "./qb", 512 MB).
+[[nodiscard]] std::string
+log_of(const std::function<void()> &body) {
+    const auto      dir = std::filesystem::temp_directory_path() / ("qbm-http-h2-client-log-" + std::to_string(std::random_device{}()));
+    std::error_code ec;
+    EXPECT_TRUE(std::filesystem::create_directory(dir, ec)) << ec.message();
+    const auto base = dir / "capture";
+    qb::io::log::init(base.string(), 64);
+    EXPECT_TRUE(nanolog::log_file_opened());
+    EXPECT_TRUE(nanolog::is_logged(qb::io::log::Level::WARN));
+    body();
+    qb::io::log::init("./qb", 512);
+    std::string content;
+    {
+        std::ifstream      in(base.string() + ".1.log", std::ios::binary);
+        std::ostringstream bytes;
+        bytes << in.rdbuf();
+        content = bytes.str();
+    }
+    std::filesystem::remove_all(dir, ec);
+    return content;
+}
+
+[[nodiscard]] std::size_t
+occurrences(const std::string &text, std::string_view needle) {
+    std::size_t n = 0;
+    for (std::size_t at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
+        ++n;
+    }
+    return n;
+}
+
+// A server that lowers its GOAWAY's last-stream-id 100 times, each GOAWAY dispatched: qb::http2::Client logs « Server
+// sent GOAWAY » once, for the first, and its protocol at each power of two of their count -- #1, #2, #4 and so on to #64,
+// 7 lines. Each was logged twice, 202 lines; the request, below every last-stream-id, is answered.
+TEST_F(Http2ClientCrossingTest, AServersGoawaysAreLoggedOnceByTheClient) {
+    std::optional<qb::http::Response> response;
+    const std::string                 log = log_of([&] {
+        Http2PlannedPeer peer(Http2PlannedPeer::Plan::goaways_lowered);
+        ASSERT_NE(peer.port(), 0);
+        auto client = connected_client(peer.port());
+        ASSERT_TRUE(client->is_connected()) << "the client did not connect";
+        ASSERT_TRUE(client->push_request(get("/lowered"), [&](qb::http::Response r) { response = std::move(r); }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); }, 10s));
+        client->disconnect();
+    });
+    ASSERT_TRUE(response.has_value());
+    EXPECT_EQ(response->status(), qb::http::status::OK) << response->body().as<std::string>();
+    EXPECT_EQ(occurrences(log, "Server sent GOAWAY"), 1u) << "the client logged each NO_ERROR GOAWAY of the server";
+    EXPECT_EQ(occurrences(log, "Client: Received GOAWAY frame"), 7u) << "the protocol logged a GOAWAY past the powers of two";
+}
+#endif // QB_WITH_LOGGING
 
 } // namespace http2_client_crossing_test

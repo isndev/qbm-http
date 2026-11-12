@@ -73,11 +73,15 @@ public:
         /// Stream 1 answered and ended (a 200, END_STREAM), then a DATA on it, while stream 3 waits.
         data_after_the_response_completed,
         /// Stream 1: a 200, then 10000 empty DATA frames without END_STREAM and a PING in one write (the empty-frame flood,
-        /// CVE-2019-9518); once the PONG is back, one empty DATA and a PING at a time, until the client's GOAWAY.
+        /// CVE-2019-9518); once the PONG is back, 1000 empty DATA frames and a PING in one write, and again at each PONG,
+        /// until the client's GOAWAY.
         empty_data_flood,
         /// Stream 1: a 200, then 200 chunks of "abc", three empty DATA frames after each, then an empty DATA that ends the
         /// stream: a legitimate stream of chunks.
         empty_data_between_chunks,
+        /// A GOAWAY(NO_ERROR) naming 2^31-1, then 100 more, each lowering the last-stream-id by one -- all above the request
+        /// on stream 1 -- and a PING in one write; once the PONG is back, the 200 of stream 1 with END_STREAM.
+        goaways_lowered,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -316,21 +320,30 @@ private:
         static_cast<void>(send(burst));
     }
 
-    /// Stream 1: a 200, then 10000 empty DATA frames and a PING in one write; once the PONG is back, one empty DATA and a
-    /// PING at a time until the client's GOAWAY. Each frame the client refuses shares its write with the PING behind it,
-    /// so the client leaves nothing of it unread in the kernel, whatever it does with its socket once it has closed.
+    /// Stream 1: a 200, then 10000 empty DATA frames and a PING in one write; once the PONG is back, 1000 empty DATA frames
+    /// and a PING in one write, and again at each PONG, until the client's GOAWAY. Each round spends 1000 tokens of the
+    /// client's bucket, which regains 330 a second: the client is cut within a few rounds however slow they are, short of
+    /// three seconds each. Rounds of one frame needed more than 330 of them a second once a second had passed during the
+    /// burst -- a round trip under 3 ms, which a sanitizer or a loaded host does not keep (Huly QB-1270). A round is one
+    /// write of 9 KB, one TLS record the client reads whole: when it cuts the flood, nothing it has not read is left in the
+    /// kernel, whatever it does with its socket once it has closed.
     void
     play_empty_data_flood() {
         static constexpr std::array<uint8_t, 8> opaque{'q', 'b', '-', '1', '2', '7', '0', 0};
         const std::vector<uint8_t>              ping(opaque.begin(), opaque.end());
-        std::vector<uint8_t>                    burst;
-        append_frame(burst, 0x1, 0x4, 1, {0x88}); // HEADERS, END_HEADERS, stream 1: `:status: 200`
-        for (int i = 0; i < 10000; ++i) {
-            append_frame(burst, 0x0, 0, 1, {});
-        }
-        append_frame(burst, 0x6, 0, 0, ping);
+        const auto                              round = [&](int empty_frames) {
+            std::vector<uint8_t> frames;
+            if (empty_frames == 10000) {
+                append_frame(frames, 0x1, 0x4, 1, {0x88}); // HEADERS, END_HEADERS, stream 1: `:status: 200`
+            }
+            for (int i = 0; i < empty_frames; ++i) {
+                append_frame(frames, 0x0, 0, 1, {});
+            }
+            append_frame(frames, 0x6, 0, 0, ping);
+            return frames;
+        };
         std::size_t pongs = _pongs;
-        if (!send(burst)) {
+        if (!send(round(10000))) {
             return;
         }
         while (!_goaway) {
@@ -340,13 +353,37 @@ private:
                 }
             }
             pongs = _pongs;
-            std::vector<uint8_t> one;
-            append_frame(one, 0x0, 0, 1, {});
-            append_frame(one, 0x6, 0, 0, ping);
-            if (!_goaway && !send(one)) {
+            if (!_goaway && !send(round(1000))) {
                 return;
             }
         }
+    }
+
+    /// A GOAWAY naming 2^31-1, 100 more each one lower, and a PING in one write; once the PONG is back, the 200 of stream 1
+    /// with END_STREAM.
+    void
+    play_goaways_lowered() {
+        static constexpr std::array<uint8_t, 8> opaque{'q', 'b', '-', '1', '2', '7', '0', 1};
+        std::vector<uint8_t>                    frames;
+        for (uint32_t lowered = 0; lowered <= 100; ++lowered) {
+            const uint32_t last = 0x7FFFFFFFu - lowered;
+            append_frame(frames, 0x7, 0, 0,
+                         {static_cast<uint8_t>(last >> 24), static_cast<uint8_t>(last >> 16), static_cast<uint8_t>(last >> 8),
+                          static_cast<uint8_t>(last), 0, 0, 0, 0});
+        }
+        append_frame(frames, 0x6, 0, 0, std::vector<uint8_t>(opaque.begin(), opaque.end()));
+        const std::size_t pongs = _pongs;
+        if (!send(frames)) {
+            return;
+        }
+        while (_pongs == pongs && !_goaway) {
+            if (!read_some()) {
+                return;
+            }
+        }
+        std::vector<uint8_t> answer;
+        append_frame(answer, 0x1, 0x5, 1, {0x88}); // HEADERS, END_STREAM | END_HEADERS, stream 1: `:status: 200`
+        static_cast<void>(send(answer));
     }
 
     void
@@ -397,6 +434,8 @@ private:
                     append_frame(frame, 0x0, 0, 1, {'l', 'a', 't', 'e'}); // a DATA after it
                 } else if (_plan == Plan::empty_data_flood) {
                     play_empty_data_flood();
+                } else if (_plan == Plan::goaways_lowered) {
+                    play_goaways_lowered();
                 } else {
                     append_frame(frame, 0x1, 0x4, 1, {0x88});
                     for (int chunk = 0; chunk < 200; ++chunk) {
