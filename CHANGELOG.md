@@ -653,6 +653,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   100 MiB failing with the limit named by both clients; a limit raised past 100 MiB, and 0, delivering a body the default
   refuses.
 
+- **A streamed chunked response's admission counts every frame its piece leaves as (Huly QB-1248).** Since the chunk
+  serializer writes a piece past 64 KiB as frames of 64 KiB, each with its own size line and CRLF pair, `ResponseStream`
+  budgeted the framing of one chunk for a piece that leaves as several: under a write cap, a piece it admitted could
+  pass it (the pilot's second read of `bd11b0ad`; measured: under a 1 MiB cap, a piece one byte past the room admitted,
+  and both pieces written). `chunk_overhead()` counts the frames from the constant the serializer writes them with,
+  `qb::http::chunk_frame_size`, so the two cannot drift. Witnesses (`qbm-http-test-system-response-stream`): the
+  overhead equal to the serializer's framing to the byte across frame boundaries; under a 1 MiB cap, the largest piece
+  whose frames fit taken and one byte more `too_large`.
+
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,

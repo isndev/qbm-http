@@ -286,7 +286,7 @@ body.add_chunk(qb::http::Chunk{b.data(), b.size()});
 body.add_final_chunk();   // 0\r\n\r\n terminator
 ```
 
-Serialization (the `pipe<char>::put<Chunk>` specialization) writes each segment as `<hex-size>\r\n<data>\r\n`, and the empty chunk as `0\r\n\r\n`; a segment past 64 KiB is written as frames of 64 KiB, which a qb server takes at any chunk limit of at least that (Huly QB-1248):
+Serialization (the `pipe<char>::put<Chunk>` specialization) writes each segment as `<hex-size>\r\n<data>\r\n`, and the empty chunk as `0\r\n\r\n`; a segment past 64 KiB is written as frames of 64 KiB (`qb::http::chunk_frame_size`, the constant a streamed response's admission budgets the same frames with), which a qb server takes at any chunk limit of at least that (Huly QB-1248):
 
 <!-- src: qbm/http/src/qbm/http/body.cpp:42-63 -->
 ```text
