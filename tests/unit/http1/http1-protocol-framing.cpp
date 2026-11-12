@@ -2097,3 +2097,39 @@ TEST(Http1ProtocolFraming, TheInactivityTimeoutRestartsAtARequestsFirstByteAndAt
     EXPECT_EQ(io.progress, 9);
     EXPECT_TRUE(proto.ok());
 }
+
+// `Transfer-Encoding: chunked,` -- an empty list element after the final coding -- is refused 400, a deliberate deviation
+// (Huly QB-1248, F4): RFC 9110 §5.6.1.2 lets a recipient ignore an empty list element, but Transfer-Encoding is the field
+// request smuggling plays on, and a value two parsers in a chain could read differently is refused, as a Content-Length given
+// twice is. The refusal is llhttp's -- it marks a body chunked only when `chunked` ends the field -- with no status of the
+// parser's own (qb's scan reads `chunked` last and passes it); the general rule answers it 400. `,chunked`, the control, ends in
+// `chunked` and is read as chunked.
+TEST(Http1ProtocolFraming, ATransferEncodingEndingInAnEmptyElementIsRefused400) {
+    const std::string body = "\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    for (const char *coding : {"chunked,", "chunked, ", "chunked ,"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, std::string("POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: ") + coding + body);
+        EXPECT_EQ(step(proto, io), 0u) << coding;
+        EXPECT_EQ(io.request_count, 0) << coding;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << coding;
+
+        qb::http::Parser<qb::http::Request> parser; // where the 400 comes from: llhttp's refusal, no status of the parser's
+        const std::string                   wire = std::string("POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: ") + coding + body;
+        auto                                err  = parser.parse(wire.data(), wire.size());
+        if (err == HPE_PAUSED && parser.headers_completed()) {
+            const auto at = static_cast<std::size_t>(parser.error_pos - wire.data());
+            parser.resume();
+            err = parser.parse(wire.data() + at, wire.size() - at);
+        }
+        EXPECT_EQ(err, HPE_INVALID_TRANSFER_ENCODING) << coding << ": " << http_errno_name(err);
+        EXPECT_EQ(parser.refusal_status(), 0) << coding;
+    }
+    ServerFakeIO                             io; // the control: a leading empty element leaves `chunked` last
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: ,chunked" + body);
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 1);
+    ASSERT_TRUE(io.last_request.has_value());
+    EXPECT_EQ(io.last_request->body().as<std::string>(), "hello");
+}

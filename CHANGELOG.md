@@ -665,6 +665,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   overhead equal to the serializer's framing to the byte across frame boundaries; under a 1 MiB cap, the largest piece
   whose frames fit taken and one byte more `too_large`.
 
+- **A `Transfer-Encoding` that ends in an empty list element is refused `400`, by decision (Huly QB-1248).** RFC 9110
+  §5.6.1.2 lets a recipient ignore an empty list element, so `Transfer-Encoding: chunked,` could be read as chunked;
+  it is refused instead, as a `Content-Length` given twice is: Transfer-Encoding is the field request smuggling plays
+  on, and a value two parsers in a chain could read differently is a value to refuse. The refusal is llhttp's, which
+  marks a body chunked only when `chunked` ends the field (`HPE_INVALID_TRANSFER_ENCODING`, with no status of the
+  parser's own -- qb's own scan reads `chunked` last), answered `400` by the rule of the entry "Every malformed request
+  is answered `400`"; `,chunked` ends in `chunked` and is read as chunked. Documented in readme/15 beside the
+  duplicated `Content-Length`. Witness: `qbm-http-test-unit-http1-protocol-framing` (`chunked,`, `chunked, ` and
+  `chunked ,` each answered `400`, nothing dispatched, the parser's error llhttp's with no status of its own; `,chunked`
+  read as chunked).
+
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,
