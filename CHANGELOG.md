@@ -257,6 +257,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ~60 ns a response on g++. The cells sit in `dev/bench/instrument-cases.txt`, not in the gate; three mutants per owner (the read
   not consumed, one request short, the read disarmed after the preflights) are refused.
 
+- **`qb::http1::Client::set_max_body_size(std::size_t)` and `max_body_size()` (Huly QB-1248).** The persistent HTTP/1.1
+  client takes the largest response body it accepts: `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB) by default, 0
+  for none, read as each response begins. A body that declares its length past it fails before a byte of it is read, a
+  chunked or close-delimited one once the bytes it delivered pass it, with a 502 whose error names the limit. It had no
+  setting: the constant was every response's bound. The one-shot verbs stay on the default, the persistent client is
+  the way past it; the HTTP/3 client's `set_max_body_size` takes 0 for none too, now written. Witnesses in the entry
+  "The HTTP/1.1 clients read a body of exactly their limit" below.
+
 ### Changed
 
 - **Every chunked body of a kept HTTP/1.1 connection starts from the pipe's initial buffer, and the protocol reserves
@@ -628,7 +636,19 @@ All notable changes to the qbm-http module are documented here. The format is ba
   connection a timeout after its last response) and `qbm-http-test-system-http2-client` (the same body over the ALPN
   http/1.1 fallback is served).
 
-- **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
+- **The HTTP/1.1 clients read a body of exactly their limit, and name the limit when a body passes it (Huly
+  QB-1248).** Neither the persistent client nor the one-shot verbs read a response whose body is exactly the 100 MiB
+  limit: qb-io's generic message cap (`QB_MAX_MESSAGE_SIZE`, 100 MiB), which their connections kept, cut the response --
+  body and header section -- before the parser's limit was reached, a 502 "Connection closed" (measured: 100 MiB - 64
+  KiB delivered, exactly 100 MiB refused). Both connections lift it, as the server session did (Huly QB-168): the
+  parser's body limit is the bound, and qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) the ceiling of a
+  response held whole in the input buffer. A body past the limit failed with the same 502 "Connection closed"; the
+  persistent client's error, and the one-shot verbs' 502 body, now name the limit, as the HTTP/2 client's names its
+  own. Witnesses (`qbm-http-test-system-http1-client`): a body of exactly 100 MiB delivered by both clients (a 502 on
+  the base); past a limit of 1024, a declared, chunked and close-delimited body each failing with an error naming it,
+  1024 itself delivered; the default unchanged, one byte past 100 MiB failing with the limit named by both clients; a
+  limit raised past 100 MiB, and 0, delivering a body the default refuses.
+ llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,
   `` `on_header_value_complete` callback error `` (a trailer field), `` `on_chunk_header` callback error ``. Ten of the

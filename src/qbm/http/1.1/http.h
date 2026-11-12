@@ -1375,6 +1375,7 @@ public:
         LOG_HTTP_DEBUG("HTTP/1.1 client session created for " << _request.method() << " " << _request.uri().source());
         _http_protocol = this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
+        this->set_max_message_size(std::numeric_limits<std::size_t>::max()); // the parser bounds a response (Huly QB-1248)
     }
 
     ~session() = default;
@@ -1385,9 +1386,8 @@ public:
     }
 
     /**
-     * @brief Connect to a remote server
-     * @param remote URI to connect to
-     * @param timeout Connection timeout
+     * @brief Connect to the request's server
+     * @param timeout Connection timeout (zero: none); @p verify_peer whether TLS verifies the server's certificate
      */
     void
     connect(qb::duration timeout = qb::duration::zero(), bool verify_peer = true) {
@@ -1480,7 +1480,7 @@ public:
      *
      * Every disposal passes here before on(dispose). A peer close (reason 0) first completes a
      * close-delimited response the protocol has buffered; flush_eof() never delivers a failed or
-     * oversized message. A session still unanswered then -- whatever the reason -- answers 502.
+     * oversized message. A session still unanswered then -- whatever the reason -- answers 502, naming the body limit (QB-1248).
      */
     void
     on(qb::io::async::event::disconnected const &event) {
@@ -1491,7 +1491,7 @@ public:
         }
         if (!_answered) {
             LOG_HTTP_WARN("HTTP/1.1 client disconnected before a complete response. Reason: " << event.reason);
-            answer(Response{qb::http::status::BAD_GATEWAY});
+            answer(_http_protocol ? _http_protocol->failed_response() : Response{qb::http::status::BAD_GATEWAY});
         } else {
             LOG_HTTP_DEBUG("HTTP/1.1 client disconnected. Reason: " << event.reason);
         }

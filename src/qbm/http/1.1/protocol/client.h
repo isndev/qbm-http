@@ -92,6 +92,32 @@ public:
         this->_io.on(std::move(response_obj));
         this->_http_obj.reset();
     }
+
+    /// The response failed for its body: past the parser's body limit -- declared, chunked, or close-delimited, which once its
+    /// header section is read fails for nothing else (base::getMessageSize()). The clients name the limit then (Huly QB-1248).
+    [[nodiscard]] bool
+    body_over_limit() noexcept {
+        return this->_http_obj.refusal_status() == HTTP_STATUS_PAYLOAD_TOO_LARGE
+               || (!this->ok() && this->_http_obj.headers_completed() && http_message_needs_eof(&this->_http_obj));
+    }
+
+    /// The error that names it: the limit, in bytes.
+    [[nodiscard]] std::string
+    body_over_limit_error() const {
+        return "HTTP/1.1 response body exceeds the client's limit of " + std::to_string(this->_http_obj.max_body_size()) + " bytes";
+    }
+
+    /// The answer a one-shot request gets when its response failed: 502, the error as its text/plain body when the body passed
+    /// the limit.
+    [[nodiscard]] qb::http::Response
+    failed_response() {
+        qb::http::Response response{qb::http::status::BAD_GATEWAY};
+        if (body_over_limit()) {
+            response.body() = body_over_limit_error();
+            response.set_header("content-type", "text/plain");
+        }
+        return response;
+    }
 };
 
 } // namespace qb::protocol::http

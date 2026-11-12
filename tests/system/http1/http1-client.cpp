@@ -3096,3 +3096,195 @@ TEST(Http1ClientTest, AnIdleConnectionStillEndsATimeoutAfterItsLastResponse) {
     EXPECT_GE(took, kTimeout * 8 / 10) << took.count() << " ms";
     EXPECT_LT(took, kTimeout * 14 / 10) << took.count() << " ms";
 }
+
+// The HTTP/1.1 clients' response body limit (Huly QB-1248): `qb::http1::Client::set_max_body_size()`, 0 = none, 100 MiB
+// (`protocol_limits::MAX_BODY_SIZE`) by default and for the one-shot verbs. A response at the limit is delivered and one past
+// it fails with a 502 that names the limit. Until 3.4 the persistent client had no setting, and neither client read a body
+// of exactly 100 MiB: qb-io's generic message cap (QB_MAX_MESSAGE_SIZE, 100 MiB) cut the response, body and header section,
+// before the parser's limit was reached -- a 502 "Connection closed", which every failure past the limit read as too.
+namespace http1_body_limit_test {
+constexpr std::size_t kMiB = std::size_t{1} << 20;
+
+std::string
+hex(std::size_t n) {
+    std::string out;
+    do {
+        out.insert(out.begin(), "0123456789abcdef"[n & 15]);
+        n >>= 4;
+    } while (n);
+    return out;
+}
+
+// Answers the one request it is sent with `head`, then `body` bytes of body -- in chunks of at most 1 MiB when `chunked` --
+// written whole; closes after it when `close` (a close-delimited body ends there).
+class BodyPeer {
+public:
+    BodyPeer(std::string head, std::size_t body, bool chunked, bool close)
+        : _head(std::move(head))
+        , _body(body)
+        , _chunked(chunked)
+        , _close(close) {
+        if (_listener.listen_v4(0, "127.0.0.1") != 0 || _listener.set_nonblocking(true) != 0)
+            throw std::runtime_error("body peer: listen failed");
+        port    = _listener.local_endpoint().port();
+        _thread = std::thread([this] { run(); });
+    }
+    ~BodyPeer() {
+        _stop = true;
+        _thread.join();
+    }
+    BodyPeer(BodyPeer const &)            = delete;
+    BodyPeer &operator=(BodyPeer const &) = delete;
+
+    [[nodiscard]] std::string
+    url() const {
+        return "http://127.0.0.1:" + std::to_string(port) + "/";
+    }
+    std::uint16_t port = 0;
+
+private:
+    void
+    run() {
+        const auto          deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        qb::io::tcp::socket peer;
+        while (!_stop && !peer.is_open() && std::chrono::steady_clock::now() < deadline) {
+            peer = _listener.accept();
+            if (!peer.is_open())
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!peer.is_open() || peer.set_nonblocking(false) != 0)
+            return;
+        std::string request;
+        char        buffer[1024];
+        while (request.find("\r\n\r\n") == std::string::npos) {
+            const int n = peer.read(buffer, sizeof(buffer));
+            if (n <= 0)
+                return;
+            request.append(buffer, static_cast<std::size_t>(n));
+        }
+        const auto put = [&peer](std::string_view bytes) {
+            while (!bytes.empty()) {
+                const int n = peer.write(bytes.data(), bytes.size());
+                if (n <= 0)
+                    return false; // the client stopped reading: a body past its limit
+                bytes.remove_prefix(static_cast<std::size_t>(n));
+            }
+            return true;
+        };
+        const std::string piece(kMiB, 'b');
+        bool              written = put(_head);
+        for (std::size_t left = _body; written && left;) {
+            const auto n = std::min(left, piece.size());
+            if (_chunked) {
+                written = put(hex(n) + "\r\n") && put(std::string_view(piece).substr(0, n)) && put("\r\n");
+            } else
+                written = put(std::string_view(piece).substr(0, n));
+            left -= n;
+        }
+        if (written && _chunked)
+            written = put("0\r\n\r\n");
+        if (_close) {
+            peer.close();
+            return;
+        }
+        while (!_stop && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    qb::io::tcp::listener _listener;
+    std::string           _head;
+    std::size_t           _body;
+    bool                  _chunked;
+    bool                  _close;
+    std::atomic<bool>     _stop{false};
+    std::thread           _thread;
+};
+
+enum class framing { length, chunked, close };
+
+std::unique_ptr<BodyPeer>
+peer(framing how, std::size_t body) {
+    switch (how) {
+        case framing::length:
+            return std::make_unique<BodyPeer>("HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body) + "\r\n\r\n", body, false, false);
+        case framing::chunked:
+            return std::make_unique<BodyPeer>("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", body, true, false);
+        case framing::close:
+        default:
+            return std::make_unique<BodyPeer>("HTTP/1.1 200 OK\r\n\r\n", body, false, true);
+    }
+}
+
+// One GET through a persistent client whose limit is `limit` (none given: the default).
+qb::http::Response
+fetch(BodyPeer const &peer, std::optional<std::size_t> limit) {
+    auto client = qb::http1::make_client(peer.url());
+    client->set_request_timeout(std::chrono::seconds(30));
+    if (limit)
+        client->set_max_body_size(*limit);
+    auto response = qb::http::run_sync(client->push_request(request(qb::http::method::GET, peer.url())));
+    client->disconnect();
+    return response;
+}
+} // namespace http1_body_limit_test
+
+TEST(Http1ClientTest, ABodyOfExactlyTheDefaultLimitIsDelivered) {
+    using namespace http1_body_limit_test;
+    {
+        const auto source   = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE);
+        const auto response = fetch(*source, std::nullopt);
+        EXPECT_EQ(response.status(), qb::http::status::OK) << response.body().as<std::string>().substr(0, 200);
+        EXPECT_EQ(response.body().size(), qb::http::protocol_limits::MAX_BODY_SIZE);
+    }
+    const auto source = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE);
+    auto       reply  = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, source->url()), std::chrono::seconds(30)));
+    EXPECT_EQ(reply.response.status(), qb::http::status::OK) << "the one-shot verb cut a body of exactly its limit";
+    EXPECT_EQ(reply.response.body().size(), qb::http::protocol_limits::MAX_BODY_SIZE);
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, ABodyPastTheClientsLimitFailsWithAnErrorThatNamesIt) {
+    using namespace http1_body_limit_test;
+    for (const auto how : {framing::length, framing::chunked, framing::close}) {
+        const auto source   = peer(how, 2048);
+        const auto response = fetch(*source, 1024);
+        EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY) << static_cast<int>(how);
+        EXPECT_NE(response.body().as<std::string>().find("limit of 1024 bytes"), std::string::npos)
+            << static_cast<int>(how) << ": " << response.body().as<std::string>();
+    }
+    {
+        const auto source   = peer(framing::length, 1024); // the limit itself is accepted
+        const auto response = fetch(*source, 1024);
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        EXPECT_EQ(response.body().size(), 1024u);
+    }
+    { // the default, unchanged: one byte past 100 MiB fails, now naming the limit
+        const auto source   = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+        const auto response = fetch(*source, std::nullopt);
+        EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY);
+        EXPECT_NE(response.body().as<std::string>().find("limit of " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE) + " bytes"),
+                  std::string::npos)
+            << response.body().as<std::string>();
+    }
+    const auto source = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+    auto       reply  = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, source->url()), std::chrono::seconds(30)));
+    EXPECT_EQ(reply.response.status(), qb::http::status::BAD_GATEWAY);
+    EXPECT_NE(reply.response.body().as<std::string>().find("limit of"), std::string::npos)
+        << "the one-shot verb's error: " << reply.response.body().as<std::string>();
+    drain_client_callbacks();
+}
+
+TEST(Http1ClientTest, TheClientsBodyLimitRaisedOrNoneDeliversWhatTheDefaultRefuses) {
+    using namespace http1_body_limit_test;
+    auto client = qb::http1::make_client("http://127.0.0.1:1/");
+    EXPECT_EQ(client->max_body_size(), qb::http::protocol_limits::MAX_BODY_SIZE);
+    client->set_max_body_size(0);
+    EXPECT_EQ(client->max_body_size(), 0u);
+    for (const std::size_t limit : {qb::http::protocol_limits::MAX_BODY_SIZE + kMiB, std::size_t{0}}) {
+        const auto source   = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
+        const auto response = fetch(*source, limit);
+        EXPECT_EQ(response.status(), qb::http::status::OK) << "limit " << limit << ": " << response.body().as<std::string>().substr(0, 200);
+        EXPECT_EQ(response.body().size(), qb::http::protocol_limits::MAX_BODY_SIZE + 1) << "limit " << limit;
+    }
+    drain_client_callbacks();
+}

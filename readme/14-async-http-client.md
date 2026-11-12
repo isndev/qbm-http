@@ -67,7 +67,7 @@ co_await qb::http::GET(std::move(req), 5s);   // 5-second socket timeout
 co_await qb::http::GET(std::move(req));        // qb::duration::zero() -> no timeout
 ```
 
-The persistent clients carry their own defaults: a 30-second connect timeout and a 60-second request timeout, both adjustable via `set_connect_timeout(qb::duration)` and `set_request_timeout(qb::duration)`.
+The persistent clients carry their own defaults: a 30-second connect timeout and a 60-second request timeout, both adjustable via `set_connect_timeout(qb::duration)` and `set_request_timeout(qb::duration)`. The persistent HTTP/1.1 client also takes the largest response body it accepts, `set_max_body_size(std::size_t)` (100 MiB by default, `qb::http::protocol_limits::MAX_BODY_SIZE`; 0 = none; Huly QB-1248): a response past it fails with a 502 whose error names the limit, a body that declares its length before a byte of it is read. The one-shot verbs read under the default, and fail past it the same way; the persistent client is the way past it. A response is held in the connection's input buffer until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever the limit. The HTTP/2 client reads under the 100 MiB constant, with no setting; the HTTP/3 client's `set_max_body_size` takes 0 for none too.
 
 ### `verify_peer` — TLS certificate verification
 
@@ -304,7 +304,7 @@ The three persistent clients share the connect / `push_request` / `push_requests
 | `set_max_concurrent_streams` | — | ✓ (default 100) | ✓ (default 100) |
 | `set_max_pending_requests` | ✓ | ✓ | ✓ (default 10000) |
 | `push_request_with_id` / `cancel_request` | — | — | ✓ |
-| `set_max_body_size` | — | — | ✓ (default 64 MiB) |
+| `set_max_body_size` | ✓ (default 100 MiB, 0 = none) | — (100 MiB) | ✓ (default 64 MiB, 0 = none) |
 | `set_auto_reconnect` | ✓ (default true) | ✓ (default true) | ✓ (default true) |
 | `enable_auto_reconnect(RetryPolicy)` — backoff, cap, `on_retry` | — (immediate) | ✓ | — (immediate) |
 | Connect / request timeout | 30s / 60s | 30s / 60s | 30s / 60s |
@@ -346,6 +346,8 @@ namespace qb::http1 {
         void set_auto_reconnect(bool value) noexcept;           // default true
         void set_max_pending_requests(std::size_t value) noexcept;
         void set_verify_peer(bool value) noexcept;              // default true
+        void set_max_body_size(std::size_t value) noexcept;     // default 100 MiB; 0 = none
+        [[nodiscard]] std::size_t max_body_size() const noexcept;
     };
 }
 ```

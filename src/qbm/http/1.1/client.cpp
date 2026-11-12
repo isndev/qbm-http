@@ -2,11 +2,9 @@
  * @file qbm/http/1.1/client.cpp
  * @brief Implementation of the persistent HTTP/1.1 client.
  *
- * Contains the out-of-line definitions for `qb::http1::Client` (connection
- * lifecycle, request queueing/dispatch, timeout and reconnection handling,
- * batch coordination, and the coroutine awaiter factories) together with the
- * private `connection<Transport>` adapter that bridges the client to qb-io's
- * asynchronous TCP/TLS transports.
+ * Contains the out-of-line definitions for `qb::http1::Client` (connection lifecycle, request queueing/dispatch, timeout and
+ * reconnection handling, batch coordination, and the coroutine awaiter factories) together with the private
+ * `connection<Transport>` adapter that bridges the client to qb-io's asynchronous TCP/TLS transports.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -66,15 +64,15 @@ class Client::connection final
 public:
     using http_protocol = qb::protocol::http::client<connection<Transport>>;
 
-    /// Typed protocol handle, captured from switch_protocol so on(disconnected) can flush a
-    /// close-delimited response body (no Content-Length / Transfer-Encoding) that the parser
-    /// buffered until EOF. Owned by the io base's protocol list; not freed here.
+    /// Typed protocol handle, captured from switch_protocol so on(disconnected) can flush a close-delimited response body (no
+    /// Content-Length / Transfer-Encoding) that the parser buffered until EOF. Owned by the io base's protocol list; not freed here.
     http_protocol *_http_protocol = nullptr;
 
     explicit connection(Client &owner)
         : _owner(owner) {
         _http_protocol = this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
+        this->set_max_message_size(std::numeric_limits<std::size_t>::max()); // the parser bounds a response, by its body limit
     }
 
     ~connection() override {
@@ -85,6 +83,8 @@ public:
     http1_response_body_forbidden() const noexcept {
         return _active_method == qb::http::Method::HEAD;
     }
+    /// Protocol hook: the limits of the next response -- the defaults, the body's this client's (defined below; Huly QB-1248).
+    [[nodiscard]] qb::http::request_limits http_request_limits() const noexcept;
 
     void
     connect(qb::io::uri const &uri, qb::duration timeout, bool verify_peer) override {
@@ -180,16 +180,16 @@ public:
         if (_owner._deferred_connection_reset) {
             return;
         }
-        // A close-delimited response (no Content-Length, no Transfer-Encoding) is framed by the
-        // connection close: deliver its buffered body NOW, before the disconnect tears the active
-        // request down. flush_eof dispatches through on(response) → handle_response, completing
-        // the request, so handle_disconnected below then finds nothing to fail. No-op otherwise.
-        // Only the peer's close (reason 0) ends such a body: a disconnect for another reason -- a
-        // cap qb-io enforced (-3, -2), a protocol error (-1) -- cut it, and the request fails below,
-        // as the one-shot client's does (Huly QB-1066).
+        // A close-delimited response (no Content-Length, no Transfer-Encoding) is framed by the connection close: deliver its
+        // buffered body NOW, before the disconnect tears the active request down. flush_eof dispatches through on(response) ->
+        // handle_response, completing the request, so handle_disconnected below then finds nothing to fail. No-op otherwise.
+        // Only the peer's close (reason 0) ends such a body: a disconnect for another reason -- a cap qb-io enforced (-3, -2), a
+        // protocol error (-1) -- cut it, and the request fails below, as the one-shot client's does (Huly QB-1066).
         if (_http_protocol && event.reason == 0) {
             _http_protocol->flush_eof();
         }
+        if (_http_protocol && _http_protocol->body_over_limit()) // past the client's body limit: the error names it (QB-1248)
+            _owner.fail_active_request(_http_protocol->body_over_limit_error());
         _owner.handle_disconnected(event.reason);
     }
 
@@ -827,6 +827,16 @@ Client::handle_switched_protocols(qb::http::Response response) {
     }
     response.keep_alive = false;
     handle_response(std::move(response));
+}
+
+/// The limits the protocol reads as each response begins (its `http_request_limits()` hook, the server's own name): the
+/// defaults, the body's set_max_body_size() -- 0, none (Huly QB-1248).
+template <typename Transport>
+qb::http::request_limits
+Client::connection<Transport>::http_request_limits() const noexcept {
+    qb::http::request_limits limits;
+    limits.max_body_size = _owner.max_body_size();
+    return limits;
 }
 
 } // namespace qb::http1

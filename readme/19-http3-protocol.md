@@ -241,7 +241,7 @@ All setters are `noexcept` and take effect on subsequent connects/requests:
 | --- | --- | --- |
 | `set_verify_peer(bool)` | `true` | set `false` only for self-signed dev certs |
 | `set_max_concurrent_streams(std::size_t)` | `100` | concurrent in-flight requests |
-| `set_max_body_size(std::size_t)` | 64 MiB | caps response bodies; over-cap resets the stream |
+| `set_max_body_size(std::size_t)` | 64 MiB | caps response bodies (0 = none); over-cap resets the stream |
 | `set_connect_timeout(qb::duration)` | 30 s | |
 | `set_request_timeout(qb::duration)` | 60 s | |
 | `set_auto_reconnect(bool)` | `true` | |

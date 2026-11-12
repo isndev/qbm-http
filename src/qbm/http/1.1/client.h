@@ -263,6 +263,22 @@ public:
     verify_peer() const noexcept {
         return _verify_peer;
     }
+    /**
+     * @brief Set the largest response body this client accepts, in bytes; 0 = none (Huly QB-1248).
+     * @details `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB) by default, read as each response begins: one that declares a
+     *          `Content-Length` past it fails before a byte of its body is read, a chunked or close-delimited one once the bytes
+     *          it delivered pass it, with a 502 whose error names the limit. A response is held in the connection's input buffer
+     *          until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever this is.
+     */
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _max_body_size = value;
+    }
+    /** @return The largest response body this client accepts, in bytes; 0 = none. */
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return _max_body_size;
+    }
 
     /** @return Tuple of {total, successful, failed} request counts since construction. */
     [[nodiscard]] std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>
@@ -315,6 +331,8 @@ private:
     void fail_all_requests(std::string const &error, qb::http::status status = qb::http::status::SERVICE_UNAVAILABLE);
     [[nodiscard]] bool               has_pending_work() const noexcept;
     [[nodiscard]] qb::http::Response create_error_response(qb::http::status status, std::string const &message);
+
+    std::size_t _max_body_size = qb::http::protocol_limits::MAX_BODY_SIZE; ///< set_max_body_size(); 0: none (QB-1248)
 };
 
 /** @brief Lowercase alias for `Client`. */

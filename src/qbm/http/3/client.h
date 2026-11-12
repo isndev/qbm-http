@@ -267,7 +267,7 @@ public:
     set_max_pending_requests(std::size_t value) noexcept {
         _max_pending_requests = value;
     }
-    /// Set the maximum accepted response body size, in bytes.
+    /// Set the maximum accepted response body size, in bytes; 0 = none.
     void
     set_max_body_size(std::size_t value) noexcept {
         _max_body_size = value;
@@ -312,7 +312,7 @@ public:
         return _h3 ? _h3->stream_state_count() : 0;
     }
 
-    /// @return The configured maximum response body size, in bytes.
+    /// @return The configured maximum response body size, in bytes; 0 = none.
     [[nodiscard]] std::size_t
     max_http3_body_size() const noexcept {
         return _max_body_size;
