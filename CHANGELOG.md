@@ -293,9 +293,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   test translation units, none now. The sanitized build is not warning-free for it: libstdc++'s
   own `std_function.h` still reports the same warning inside `<regex>` in five translation units -- qb's `cpu.cpp`,
   `middleware/cors.cpp`, `validation/rule.cpp` and the unit tests of the last two -- which is not qb's code to change.
-  Instructions (callgrind, g++ 14; nothing timed): a client GET is level; a server's browser GET costs about 110 more
-  in 48 000 -- with the constructors' shapes changed, GCC inlines fewer of the header-name comparisons of the function
-  that builds the request, which this entry does not touch.
+  Instructions (callgrind, g++ 14; nothing timed): a client GET is level. A server's browser GET first cost about 110
+  more in 48 000 in a plain Release build: with the constructors' shapes changed, GCC called libstdc++'s
+  `operator==(const std::string &, const char *)` out of line at one more of the seven header-name comparisons of
+  `ServerHttp2Protocol::process_complete_header_block()`. Those comparisons go through `detail::name_is` now -- the
+  literal's length a constant, `[[gnu::always_inline]]` -- so that none is out of line, and the request costs about
+  110 fewer than before the constructors changed in each of three alignment families, with and without
+  `-march=native` (157 fewer without it, where the inliner also takes a string move inline: not this change's doing).
 - **A connection the HTTP/2 server or client ends for a flood is closed at once (Huly QB-1270).** qb-io now closes a
   connection an endpoint ended itself after its peer, reading what the peer still sends for `linger()`, up to 16 MiB
   (qb's CHANGELOG). A connection ended with the endpoint's own `GOAWAY(ENHANCE_YOUR_CALM)` -- every flood rule of the

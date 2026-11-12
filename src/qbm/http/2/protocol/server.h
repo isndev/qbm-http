@@ -27,9 +27,13 @@
 #include <type_traits> // std::void_t, std::declval: the io's write-cap trait (Huly QB-86)
 #include <memory>      // std::unique_ptr: a streamed response's buffer, allocated when it begins (Huly QB-86)
 #include <utility>
-#include <algorithm> // std::min over the windows, the frame size and the socket's room (Huly QB-86)
-#include <cstring>   // std::memcpy: a streamed body's piece into its stream's buffer (Huly QB-86)
-#include <concepts>  // std::convertible_to: counts_appended_output (Huly QB-1212)
+#include <algorithm>   // std::min over the windows, the frame size and the socket's room (Huly QB-86)
+#include <cstddef>     // std::size_t: the length of the literal detail::name_is compares with (Huly QB-1270)
+#include <cstring>     // std::memcpy: a streamed body's piece into its stream's buffer (Huly QB-86); std::memcmp: name_is
+#include <concepts>    // std::convertible_to: counts_appended_output (Huly QB-1212)
+#include <string_view> // detail::name_is
+
+#include <qb/utility/branch_hints.h> // QB_GNU_ALWAYS_INLINE: detail::name_is (Huly QB-1270)
 
 #include "../../origin.h" // origin::authority, the :authority every protocol writes (Huly QB-1064); origin::request_uri
 #include "./base.h"       // For qb::protocol::http2::Http2Protocol and frame types
@@ -93,6 +97,29 @@ template <typename IO, typename = void>
 struct io_has_write_cap : std::false_type {};
 template <typename IO>
 struct io_has_write_cap<IO, std::void_t<decltype(std::declval<IO const &>().max_write_buffer_size())>> : std::true_type {};
+
+/**
+ * @brief Whether a decoded header field's name is exactly `literal`, a string literal.
+ * @param literal A string literal: its `N - 1` characters are compared, so an array that holds a NUL before its end
+ *                does not compare as `name == array` would.
+ * @details The length compared is the literal's, a constant: a size test and a compare of that many octets, inline.
+ *          Written `name == "host"` on a `std::string`, the comparison is libstdc++'s
+ *          `operator==(const std::string &, const char *)`, and whether it is inlined -- its `strlen` folded away --
+ *          is the inliner's choice in a function the size of `process_complete_header_block()`. Measured (callgrind,
+ *          g++ 14, Release, three alignment families with and without `-march=native`): when `Request`'s
+ *          constructors became overloads the unit changed shape and, without `-march=native`, GCC called the
+ *          operator out of line at three of that function's seven comparisons where it was two: +101 to +109
+ *          instructions a browser GET. `[[gnu::always_inline]]` takes the comparisons out of that budget -- none is
+ *          out of line in any family -- and the request costs about 110 instructions fewer than before the
+ *          constructors changed in every family. (Without `-march=native` it reads 157 fewer: the inliner also
+ *          takes a string's move into the header map inline there, a choice this helper does not hold.) MSVC
+ *          inlines the helper on its own, and expands the compare where its `operator==` called `memcmp`.
+ */
+template <std::size_t N>
+[[nodiscard]] QB_GNU_ALWAYS_INLINE bool
+name_is(std::string_view name, const char (&literal)[N]) noexcept {
+    return name.size() == N - 1 && std::memcmp(name.data(), literal, N - 1) == 0;
+}
 } // namespace detail
 
 /// HTTP/2 ":status" response pseudo-header name.
@@ -2149,26 +2176,26 @@ private:
                         return false;
                     }
                     // Process pseudo-headers
-                    if (name == ":method") {
+                    if (detail::name_is(name, ":method")) {
                         if (method_sv) {
                             this->reset_malformed_request(stream.id, "Duplicate :method pseudo-header.");
                             return false;
                         }
                         method_sv       = value;
                         temp_method_str = value; // Store for later conversion
-                    } else if (name == ":scheme") {
+                    } else if (detail::name_is(name, ":scheme")) {
                         if (scheme_sv) {
                             this->reset_malformed_request(stream.id, "Duplicate :scheme pseudo-header.");
                             return false;
                         }
                         scheme_sv = value;
-                    } else if (name == ":path") {
+                    } else if (detail::name_is(name, ":path")) {
                         if (path_sv) {
                             this->reset_malformed_request(stream.id, "Duplicate :path pseudo-header.");
                             return false;
                         }
                         path_sv = value;
-                    } else if (name == ":authority") {
+                    } else if (detail::name_is(name, ":authority")) {
                         if (authority_sv) {
                             this->reset_malformed_request(stream.id, "Duplicate :authority pseudo-header.");
                             return false;
@@ -2185,14 +2212,15 @@ private:
                         this->reset_malformed_request(stream.id, "Invalid header field name or value format (contains forbidden characters).");
                         return false;
                     }
-                    if (HeaderValidator::is_forbidden_header(name) || (name == "te" && !HeaderValidator::is_valid_request_te_value(value))) {
+                    if (HeaderValidator::is_forbidden_header(name)
+                        || (detail::name_is(name, "te") && !HeaderValidator::is_valid_request_te_value(value))) {
                         this->reset_malformed_request(stream.id, "Forbidden connection-specific header in request: " + name);
                         return false;
                     }
                     // A `host` field names the authority too: one field, as RFC 9112 §3.2 has it, naming :authority's
                     // (RFC 9113 §8.3.1) -- HTTP/3's check (Huly QB-1189) -- or, without :authority, the request's
                     // authority: §8.3.1 sets Host aside only when :authority is present (Huly QB-1195).
-                    if (name == "host") [[unlikely]] {
+                    if (detail::name_is(name, "host")) [[unlikely]] {
                         if (host_sv || (authority_sv && !qb::http::utility::iequals(value, *authority_sv))) {
                             this->reset_malformed_request(stream.id, "A second host header field, or one not naming the :authority before it.");
                             return false;
@@ -2201,7 +2229,7 @@ private:
                     }
                     // `content-length` too is judged before the limits, over them or not: a malformed or conflicting
                     // value is a malformed request, and the body it declares is judged below (Huly QB-1197).
-                    if (name == "content-length") {
+                    if (detail::name_is(name, "content-length")) {
                         auto parsed = HeaderValidator::parse_content_length(value);
                         if (!parsed) {
                             this->reset_malformed_request(stream.id, "Invalid content-length header in HTTP/2 request");
