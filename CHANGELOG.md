@@ -1324,6 +1324,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   hung 13 runs in 200, the same lines drained first none. The assertions are the old child's; the guarantee that a
   JSON serialization error propagates instead of terminating keeps its death test in `body-codec`, whose binary
   logs nothing. Test only.
+- **A completion delivered after the thread's loop is destroyed is dropped (Huly QB-1246).** The two coroutine
+  completions of `qbm/http/coro.h` -- the slot of `ws` `receive()` / `close_async()` and of the redirecting client,
+  and the awaiter of `connect()` / `push_request()` -- resumed their coroutine through
+  `coro_scheduler().schedule_resume()`. Called from the destructor of an object with static storage, after the main
+  thread's `listener::current`, that built a scheduler inside the destroyed listener; with qb's new door it would
+  have stopped the process instead. They go through `qb::io::async::resume_via_current()`: queued on the thread's
+  current scheduler while the loop lives -- the rule of qb-io's own wakers; it was the thread's listener's
+  scheduler, which is the same one on a core -- and dropped once it is gone. Requires the qb of the same train.
 
 ### Removed
 

@@ -109,7 +109,7 @@ public:
             return;
         *_result = std::move(value);
         if (_handle)
-            qb::io::async::coro_scheduler().schedule_resume(_handle);
+            qb::io::async::resume_via_current(_handle);
     }
 };
 
@@ -208,7 +208,7 @@ public:
                 }
                 _result = std::move(value);
                 if (_handle) {
-                    qb::io::async::coro_scheduler().schedule_resume(_handle);
+                    qb::io::async::resume_via_current(_handle);
                 }
             });
         }

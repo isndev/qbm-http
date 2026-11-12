@@ -385,7 +385,7 @@ llm/qbm-http.llm.api.md	src/qbm/http/auth/manager.h:36-36	17e417635082	class Man
 llm/qbm-http.llm.api.md	src/qbm/http/auth/options.h:36-36	4433c05e97bb	class Options {
 llm/qbm-http.llm.api.md	src/qbm/http/auth/user.h:33-33	8d7c426a6b33	struct User {
 llm/qbm-http.llm.api.md	src/qbm/http/coro.h:162-162	4f6f1c5c33b5	class http_awaiter {
-llm/qbm-http.llm.api.md	src/qbm/http/coro.h:182-218	70a40f61a616	~http_awaiter() {
+llm/qbm-http.llm.api.md	src/qbm/http/coro.h:182-218	eaafced3fe87	~http_awaiter() {
 llm/qbm-http.llm.api.md	src/qbm/http/coro.h:232-232	f01d83a441e0	using awaiter = http_awaiter<T, std::function<void(std::function<void...
 llm/qbm-http.llm.api.md	src/qbm/http/coro.h:232-259	898def4c2bda	using awaiter = http_awaiter<T, std::function<void(std::function<void...
 llm/qbm-http.llm.api.md	src/qbm/http/coro.h:247-247	884ca4028f87	make_awaiter(Func &&op) {
@@ -537,9 +537,9 @@ llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:773-810	5ea6c41569d4	Client::dispa
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:813-851	30c86e5aefce	Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:854-872	ab2d1495b1a8	Client::dispatch(qb::io::async::quic::event::stream_data_acked const ...
 llm/qbm-http.llm.md	src/qbm/http/3/client.cpp:93-115	13c1e3c6b3c8	if (callback) {
-llm/qbm-http.llm.md	src/qbm/http/coro.h:182-218	70a40f61a616	~http_awaiter() {
+llm/qbm-http.llm.md	src/qbm/http/coro.h:182-218	eaafced3fe87	~http_awaiter() {
 llm/qbm-http.llm.md	src/qbm/http/coro.h:232-259	898def4c2bda	using awaiter = http_awaiter<T, std::function<void(std::function<void...
-llm/qbm-http.llm.md	src/qbm/http/coro.h:93-112	fdf69ed19bdc	explicit
+llm/qbm-http.llm.md	src/qbm/http/coro.h:93-112	38047bddd528	explicit
 llm/qbm-http.llm.md	src/qbm/http/detail/redirect.cpp:123-151	a325b5c1e75a	remove_dot_segments(std::string_view input) {
 llm/qbm-http.llm.md	src/qbm/http/detail/redirect.cpp:161-229	adc45c67f25a	resolve_redirect_location(const qb::io::uri &base, std::string_view l...
 llm/qbm-http.llm.md	src/qbm/http/detail/redirect.cpp:233-270	b2d51d7b6679	prepare_redirect(Request &request, const Response &response, bool all...
