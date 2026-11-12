@@ -194,7 +194,7 @@ Defaults apply when the header is absent or unparseable: `application/octet-stre
 
 A message's trailer section -- the fields that follow its content (RFC 9110 §6.5) -- is a `Headers` of its own, `trailers()`, the same on HTTP/1.1 (a chunked message), HTTP/2 and HTTP/3 (Huly QB-1073).
 
-<!-- src: qbm/http/src/qbm/http/message_base.h:248-289 -->
+<!-- src: qbm/http/src/qbm/http/message_base.h:265-306 -->
 ```cpp
 // Received: a status a server sends after the content.
 if (response.has_trailers()) {

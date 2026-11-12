@@ -67,24 +67,47 @@ public:
     }
 
     /**
-     * @brief Constructs an HTTP request with specified method, URI, headers, and body.
+     * @brief Constructs an HTTP request with specified method and URI, and headers and a body when they are given.
      * @param m The HTTP method for the request.
      * @param u The URI for the request (moved).
-     * @param h A map of headers for the request (moved). Defaults to an empty map.
-     * @param b The body content for the request (moved). Defaults to an empty body.
+     * @param h A map of headers for the request (moved); none in the two-argument form.
+     * @param b The body content for the request (moved); none in the forms without it.
+     * @details Three forms, not one with two defaulted arguments: a request with no body is built without one, where
+     *          an empty `Body` was made for the call and moved in (`internal::MessageBase`'s headers-only constructor
+     *          says what that cost; Huly QB-1270).
      */
-    Request(qb::http::method m, qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h = {}, Body b = {})
+    Request(qb::http::method m, qb::io::uri u)
+        : internal::MessageBase()
+        , _method(m)
+        , _uri(std::move(u)) {}
+
+    Request(qb::http::method m, qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h)
+        : internal::MessageBase(std::move(h))
+        , _method(m)
+        , _uri(std::move(u)) {}
+
+    Request(qb::http::method m, qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h, Body b)
         : internal::MessageBase(std::move(h), std::move(b))
         , _method(m)
         , _uri(std::move(u)) {}
 
     /**
-     * @brief Constructs an HTTP GET request with specified URI, headers, and body.
+     * @brief Constructs an HTTP GET request with specified URI, and headers and a body when they are given.
      * @param u The URI for the request (moved).
-     * @param h A map of headers for the request (moved). Defaults to an empty map.
-     * @param b The body content for the request (moved). Defaults to an empty body.
+     * @param h A map of headers for the request (moved); none in the one-argument form.
+     * @param b The body content for the request (moved); none in the forms without it.
      */
-    explicit Request(qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h = {}, Body b = {})
+    explicit Request(qb::io::uri u)
+        : internal::MessageBase()
+        , _method(Method::GET)
+        , _uri(std::move(u)) {}
+
+    explicit Request(qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h)
+        : internal::MessageBase(std::move(h))
+        , _method(Method::GET)
+        , _uri(std::move(u)) {}
+
+    explicit Request(qb::io::uri u, qb::icase_unordered_map<std::vector<std::string>> h, Body b)
         : internal::MessageBase(std::move(h), std::move(b))
         , _method(Method::GET)
         , _uri(std::move(u)) {}

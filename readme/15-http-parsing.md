@@ -268,7 +268,7 @@ assert(std::string_view(http_get_error_reason(&parser)) == "Unsupported HTTP Tra
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: qbm/http/src/qbm/http/request.h:409; qbm/http/src/qbm/http/response.h:358; qbm/http/src/qbm/http/request.cpp:467-469; qbm/http/src/qbm/http/response.cpp:368-370 -->
+<!-- src: qbm/http/src/qbm/http/request.h:432; qbm/http/src/qbm/http/response.h:373; qbm/http/src/qbm/http/request.cpp:467-469; qbm/http/src/qbm/http/response.cpp:368-370 -->
 
 ```cpp
 template <>
@@ -284,7 +284,7 @@ These write the request line / status line, the headers, and the body to the out
 
 `out << qb::http::MessageHead{msg}` writes the start line and the header section and nothing after them — no body, no last-chunk — with the same validation. The HTTP/1.1 server session serializes every `HEAD` response that way, whatever framing headers it carries, and it is the head to write before a body you stream yourself as `Chunk`s.
 
-<!-- src: qbm/http/src/qbm/http/message_base.h:323-329; qbm/http/src/qbm/http/request.h:419; qbm/http/src/qbm/http/response.h:368 -->
+<!-- src: qbm/http/src/qbm/http/message_base.h:340-346; qbm/http/src/qbm/http/request.h:442; qbm/http/src/qbm/http/response.h:383 -->
 
 ## After the upgrade: WebSocket
 

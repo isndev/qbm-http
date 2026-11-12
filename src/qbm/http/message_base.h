@@ -194,6 +194,23 @@ public:
         , keep_alive(false) {}
 
     /**
+     * @brief Constructs a MessageBase with specified initial headers and no body yet.
+     * @param initial_headers A map of headers to initialize with. Values will be moved.
+     * @details What `Request` and `Response` build on when no body is given. They used to default a `Body` argument
+     *          and move it in: besides the move, an empty `Body` made for the call and moved is the one shape g++ 14
+     *          cannot follow under `-fsanitize=address` -- it reads the move of a body whose pipe does not exist yet
+     *          (Huly QB-1216) as a read of uninitialised storage, and reported `-Wmaybe-uninitialized` in
+     *          `qb/system/allocator/pipe.h` at every such message it inlined (Huly QB-1270).
+     */
+    explicit MessageBase(qb::icase_unordered_map<std::vector<std::string>> initial_headers)
+        : Headers(std::move(initial_headers))
+        , major_version(1)
+        , minor_version(1)
+        , upgrade(false)
+        , stream_id(0)
+        , keep_alive(false) {}
+
+    /**
      * @brief Move constructor.
      * @param other Message to move from.
      * Efficiently transfers ownership of resources (headers and body)

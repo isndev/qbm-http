@@ -282,6 +282,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **`Request` and `Response` build a message with no body without making one: their constructors are overloads, not
+  one form with two defaulted arguments (Huly QB-1270).** `Response{status}`, `Request{method, uri}` and
+  `Request{uri}`, and the forms with headers alone, made an empty header map and an empty `Body` for the call and
+  moved both into the message; `internal::MessageBase` gains a headers-only constructor and the messages are built in
+  place. Every call that compiled still does, and means the same. Why it is here: an empty `Body` made for the call
+  and moved is the one shape g++ 14 cannot follow under `-fsanitize=address` -- the body's pipe does not exist yet
+  (Huly QB-1216), and the compiler reads its move as a read of uninitialised storage -- and every such message it
+  inlined reported `-Wmaybe-uninitialized` in `qb/system/allocator/pipe.h`: 132 lines in thirteen of the module's
+  test translation units, none now. The sanitized build is not warning-free for it: libstdc++'s
+  own `std_function.h` still reports the same warning inside `<regex>` in five translation units -- qb's `cpu.cpp`,
+  `middleware/cors.cpp`, `validation/rule.cpp` and the unit tests of the last two -- which is not qb's code to change.
+  Instructions (callgrind, g++ 14; nothing timed): a client GET is level; a server's browser GET costs about 110 more
+  in 48 000 -- with the constructors' shapes changed, GCC inlines fewer of the header-name comparisons of the function
+  that builds the request, which this entry does not touch.
 - **The `debug_data` of a GOAWAY an HTTP/2 protocol sends itself is the frame's debug data alone (Huly QB-1270).** The
   client and server protocols dispatch `Http2GoAwayEvent` for their own `GOAWAY` with an error; its `debug_data` was
   the reason behind « GOAWAY sent by client: » or « GOAWAY sent by server: », and is the reason alone now, as on the
@@ -715,6 +729,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
   a callee-saved register across the call in every message's parse -- +8 to +10 instructions a message on x86-64 (the
   pilot's read of `bd11b0ad`), now the test of the reason and its branch.
 
+- **The HTTP/2 server's error GOAWAY reaches a client that was still sending, and a server that keeps writing into a
+  connection `qb::http2::Client` ended is no longer left blocked (Huly QB-1270, after QB-1060; qb-io's close of a
+  connection an endpoint ends).** Two faces of one qb-io defect, fixed in qb (its CHANGELOG has the mechanism). The
+  server session disconnects on the GOAWAY it sends with an error and its socket was closed with the client's bytes
+  unread, a reset: on Windows a client that was still sending read no GOAWAY at all. The session is still released at
+  once and its streams cancelled then; when the frame was written whole its descriptor goes to the loop, which closes
+  it after the client. A GOAWAY still queued behind output the client has not taken -- a large response to a slow
+  reader -- is dropped with the session, as before: the bound on resources wins over delivery there. And
+  `qb::http2::Client`, after `disconnect()` or a GOAWAY of its own, kept its half-closed socket until its next
+  connection or its destruction: a server that went on writing blocked once the socket buffers were full (4.2 MB on
+  Linux, 180 KB on Windows) and no write ever failed. The client now holds no descriptor after its close and the
+  server's writes fail within qb-io's bound. Proven over real TLS sockets by
+  `qbm-http-test-system-http2-close-after-peer`:
+  `TheErrorGoawayReachesAClientThatWasStillSending` is red on the base on Windows,
+  `AServerThatWritesWithoutReadingIntoAConnectionTheClientEndedSeesItsWritesFail` and
+  `AnErrorGoawayLeavesThroughTheLoopUntilTheClientCloses` on both systems.
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it
