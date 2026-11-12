@@ -342,7 +342,7 @@ public:
         ping.header.flags = 0;
         ping.header.set_stream_id(0);
         ping.payload.opaque_data = SHUTDOWN_PING_DATA;
-        this->_io << ping;
+        (void) this->write_frame(ping);
         this->ping_sent(); // its ACK is the round trip the drain waits for (Huly QB-1270)
         LOG_HTTP_INFO("ServerHttp2Protocol: graceful shutdown notice sent (GOAWAY 2^31-1 + PING)");
         return true;
@@ -967,9 +967,13 @@ public:
             return; // Already processing a GOAWAY or shutting down
 
         const std::string debug_data_str(goaway_event.payload.additional_debug_data.begin(), goaway_event.payload.additional_debug_data.end());
-        LOG_HTTP_WARN_PA(0, "Server: Received GOAWAY frame from client. Last Stream ID: " << goaway_event.payload.last_stream_id << ", Error: "
-                                                                                          << static_cast<int>(goaway_event.payload.error_code)
-                                                                                          << ", Debug: " << debug_data_str);
+        // At WARN for an error, or at each power of two of their count on the connection: one a client lowers for ever is
+        // dispatched each time, and logged each time it was (Huly QB-1270).
+        if (this->goaway_logged_at_warn(goaway_event.payload.error_code)) {
+            LOG_HTTP_WARN_PA(0, "Server: Received GOAWAY frame #"
+                                    << this->_goaways_received << " from client. Last Stream ID: " << goaway_event.payload.last_stream_id
+                                    << ", Error: " << static_cast<int>(goaway_event.payload.error_code) << ", Debug: " << debug_data_str);
+        }
 
         // RFC 9113 §6.8: the last-stream-id of a GOAWAY a CLIENT sends is the highest
         // SERVER-initiated stream -- a push -- it processed or might process. It says nothing
@@ -988,6 +992,12 @@ public:
         const ErrorCode error_code = goaway_event.payload.error_code;
         _waiting_push_responses.clear();
         _peer_goaway_received = true; // before any observer runs: send_response() opens no promised stream now
+        // An error ends the connection now, before any observer runs below -- the event, the streams it closes: nothing the
+        // application sends from them is written (Http2Protocol::write_frame()). It ended it after them (Huly QB-1270).
+        if (error_code != ErrorCode::NO_ERROR) {
+            _connection_active = false;
+            this->not_ok(error_code); // Signal specific error
+        }
 
         Http2GoAwayEvent event_to_dispatch{error_code, last_pushed_stream_id, debug_data_str};
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
@@ -1032,9 +1042,7 @@ public:
         }
 
         if (error_code != ErrorCode::NO_ERROR) {
-            _connection_active = false;
-            this->not_ok(error_code); // Signal specific error
-            return;
+            return; // the connection ended above
         }
         if (_connection_active && this->are_all_relevant_streams_closed(last_pushed_stream_id)) {
             // Nothing left to finish: the graceful shutdown is complete at once.
@@ -1836,8 +1844,10 @@ public:
      */
     void
     send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg = "", bool close_context = true) noexcept {
-        if (!_connection_active
-            && error_code != ErrorCode::CANCEL) { // CANCEL can be sent on closed connection by app // Removed .load(std::memory_order_relaxed)
+        if (!this->ok()) {
+            return; // the connection has ended: nothing follows its GOAWAY (write_frame(); Huly QB-1270)
+        }
+        if (!_connection_active && error_code != ErrorCode::CANCEL) { // a graceful shutdown still lets the application cancel
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Tried to send RST_STREAM but connection is not active");
             return;
         }
@@ -1853,7 +1863,7 @@ public:
         header.set_stream_id(stream_id);
 
         rst_frame_data.header = header;
-        this->_io << rst_frame_data;
+        (void) this->write_frame(rst_frame_data);
 
         auto it = _server_streams.find(stream_id);
         if (it != _server_streams.end()) {
@@ -2420,7 +2430,7 @@ private:
             }
 
             data_frame_data.header = header_to_send;
-            this->_io << data_frame_data;
+            (void) this->write_frame(data_frame_data);
 
             if (!this->ok()) {
                 // QB_LOG_ERROR_PA(this->getName(), "Server Stream " << stream.id << ": Send failed for DATA frame during send_response_body.
@@ -2627,7 +2637,7 @@ private:
             settings_frame_data.payload.entries.push_back({setting_pair.first, setting_pair.second});
         }
 
-        this->_io << settings_frame_data;
+        (void) this->write_frame(settings_frame_data);
         this->settings_sent(); // its ACK is the one the client owes (Huly QB-1270)
         _initial_settings_sent = true;
         LOG_HTTP_DEBUG("Server: Initial SETTINGS frame sent successfully");
@@ -2647,7 +2657,7 @@ private:
         goaway.payload.last_stream_id = last_stream_id;
         goaway.payload.error_code     = ErrorCode::NO_ERROR;
         goaway.payload.additional_debug_data.assign(debug_message.begin(), debug_message.end());
-        this->_io << goaway;
+        (void) this->write_frame(goaway);
     }
 
     /**
@@ -2687,15 +2697,17 @@ private:
         _graceful_shutdown_initiated = true;
         _connection_active           = false; // Connection is being shut down
 
+        // The connection is ended before the IO_Handler hears of it: nothing an observer of the event sends is written after
+        // this GOAWAY (write_frame()). It was ended after the observers had run (Huly QB-1270).
+        LOG_HTTP_INFO("ServerHttp2Protocol: GOAWAY sent. Connection will be closed");
+        this->FramerBase::not_ok(error_code); // Request underlying transport to close.
+
         // Notify IO_Handler about sending GOAWAY: `sent`, and the debug data as written. The reason followed a « GOAWAY sent by
         // server: » prefix, and the session logged this GOAWAY as one received from the client (Huly QB-1270).
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             Http2GoAwayEvent goaway_event_to_dispatch{error_code, _last_client_initiated_stream_id, debug_message, true};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
-
-        LOG_HTTP_INFO("ServerHttp2Protocol: GOAWAY sent. Connection will be closed");
-        this->FramerBase::not_ok(error_code); // Request underlying transport to close.
     }
 
     /**
@@ -2716,7 +2728,7 @@ private:
         wu_frame_data.header.set_stream_id(stream_id);
         wu_frame_data.payload.window_size_increment = increment;
 
-        this->_io << wu_frame_data;
+        (void) this->write_frame(wu_frame_data);
     }
 
     /**
@@ -2907,7 +2919,7 @@ private:
                     data_frame_event.header.flags |= FLAG_END_STREAM;
                 }
 
-                this->_io << data_frame_event;
+                (void) this->write_frame(data_frame_event);
 
                 if (!this->ok()) {
                     stream.send_buffer_offset -= current_chunk_size;
@@ -3096,7 +3108,7 @@ private:
             frame.header.flags = last ? FLAG_END_STREAM : 0;
             frame.header.set_stream_id(stream_id);
             frame.payload.data_payload.assign(buffer.begin(), buffer.begin() + chunk);
-            this->_io << frame;
+            (void) this->write_frame(frame);
             if (!this->ok()) {
                 stream.has_pending_data_to_send = true;
                 return;
@@ -3161,7 +3173,7 @@ private:
             frame.header.type  = static_cast<uint8_t>(FrameType::DATA);
             frame.header.flags = FLAG_END_STREAM;
             frame.header.set_stream_id(stream_id);
-            this->_io << frame;
+            (void) this->write_frame(frame);
             if (!this->ok()) {
                 stream.has_pending_data_to_send = true;
                 return;

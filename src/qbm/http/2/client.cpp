@@ -984,7 +984,11 @@ Client::on(const qb::protocol::http2::Http2GoAwayEvent &event) {
     // taken for the server's -- « Server sent GOAWAY: GOAWAY sent by client: ... » -- then told by a prefix of the debug
     // data, which a server's debug data could carry too (Huly QB-1270).
     std::string error_msg = (event.sent ? "GOAWAY sent by client: " : "Server sent GOAWAY: ") + event.debug_data;
-    LOG_HTTP_WARN_PA(_client_id, error_msg);
+    // A server's NO_ERROR GOAWAY once this connection drains -- one it lowers each time -- is logged by the protocol at each
+    // power of two of their count, not here each time (Huly QB-1270).
+    if (event.sent || event.error_code != qb::protocol::http2::ErrorCode::NO_ERROR || !_received_graceful_goaway) {
+        LOG_HTTP_WARN_PA(_client_id, error_msg);
+    }
     if (event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR) {
         _received_graceful_goaway = true;
         fail_active_requests_after_goaway(event.last_stream_id, error_msg);

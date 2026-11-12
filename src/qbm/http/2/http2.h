@@ -151,6 +151,7 @@ private:
     /// knows (http2_speaks_http()).
     qb::io::async::IProtocol const *_handshake_protocol{nullptr};
     bool                            _draining{false}; ///< The server drains (http2_begin_drain(), Huly QB-91)
+    bool _client_goaway_logged{false};                ///< A NO_ERROR GOAWAY of the client was logged (on(Http2GoAwayEvent), Huly QB-1270)
 
     void
     reclaim_completed_stream_contexts() noexcept {
@@ -860,10 +861,16 @@ public:
      */
     void
     on(const qb::protocol::http2::Http2GoAwayEvent &event) {
-        // The server's own GOAWAY was logged as received from the client (Huly QB-1270).
-        LOG_HTTP_WARN_PA(this->id(), (event.sent ? "Sent GOAWAY to client. Last Stream ID: " : "Received GOAWAY from client. Last Stream ID: ")
-                                         << event.last_stream_id << ", Code: " << static_cast<int>(event.error_code)
-                                         << ", Debug: " << event.debug_data);
+        // The server's own GOAWAY was logged as received from the client. A client's NO_ERROR GOAWAY after the first -- one it
+        // lowers each time -- is logged by the protocol at each power of two of their count, not here each time (Huly
+        // QB-1270).
+        const bool graceful_again = !event.sent && event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR && _client_goaway_logged;
+        if (!graceful_again) {
+            LOG_HTTP_WARN_PA(
+                this->id(), (event.sent ? "Sent GOAWAY to client. Last Stream ID: " : "Received GOAWAY from client. Last Stream ID: ")
+                                << event.last_stream_id << ", Code: " << static_cast<int>(event.error_code) << ", Debug: " << event.debug_data);
+        }
+        _client_goaway_logged = _client_goaway_logged || (!event.sent && event.error_code == qb::protocol::http2::ErrorCode::NO_ERROR);
         // Server may decide to stop accepting new requests on this connection.
         if (event.error_code != qb::protocol::http2::ErrorCode::NO_ERROR) {
             this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);

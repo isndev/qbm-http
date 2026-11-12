@@ -26,6 +26,7 @@
 
 #include <algorithm> // For std::min
 #include <array>
+#include <bit>      // std::has_single_bit: a GOAWAY repeated, logged at each power of two of their count (Huly QB-1270)
 #include <chrono>   // std::chrono::steady_clock: the bucket of the frames that make no progress (Huly QB-1270)
 #include <concepts> // std::same_as: counts_bytes_written (Huly QB-1270)
 #include <cstddef>  // std::size_t
@@ -136,12 +137,21 @@ constexpr std::uint32_t MAX_CONTINUATION_FRAMES = 512;
  *  HEADERS without END_STREAM whose header block fragment is empty (its padding and priority fields aside); a
  *  CONTINUATION without END_HEADERS and with an empty fragment; a PRIORITY, a signal this endpoint ignores (RFC 9113
  *  §5.3.2); a frame of a type it does not know (§4.1); a SETTINGS ACK or a PING ACK that answers no SETTINGS or PING this
- *  endpoint sent; on the client, every HEADERS on a stream it reset -- discarded -- and a stream error the frame layer
- *  finds there, which it ignores. The bucket is nghttp2's "glitch" rate limiter (nghttp2_option_set_glitch_rate_limit():
- *  added in nghttp2 1.67.0 at 1000 tokens and 33 a second, these values since 1.69.0), which takes a token for an empty
- *  DATA, a PRIORITY, an unknown frame and an ignored header block alike; qb departs from it twice: it takes a token for an
- *  empty HEADERS or CONTINUATION, which nghttp2 bounds otherwise, and for an ACK that answers nothing, which nghttp2
- *  makes a connection error at once (a SETTINGS ACK). A WINDOW_UPDATE or a RST_STREAM on a stream that has closed, which
+ *  endpoint sent; a GOAWAY after the peer's first (Http2Protocol::admit_goaway()); on the client, every HEADERS on a
+ *  stream it reset -- discarded --, an empty DATA that carries END_STREAM there, which ends nothing, and a stream error
+ *  the frame layer finds there, which it ignores. The bucket is nghttp2's "glitch" rate limiter
+ *  (nghttp2_option_set_glitch_rate_limit(): added in nghttp2 1.67.0 at 1000 tokens and 33 a second, these values since
+ *  1.69.0). Of these frames, nghttp2 at v1.69.0 takes a token for an empty DATA without END_STREAM on a stream it holds
+ *  (a padded one only when nothing follows its Pad Length), a HEADERS of an empty block (a malformed message, its stream
+ *  reset), a PRIORITY, a frame of a type it does not know and a HEADERS whose header block it ignores, once, on the
+ *  HEADERS (lib/nghttp2_session.c: nghttp2_session_mem_recv2(), session_after_header_block_received()); none for a
+ *  PUSH_PROMISE or for the CONTINUATION frames of an ignored block. The rest is qb's own: an empty DATA on a stream
+ *  nghttp2 does not hold, which it ignores before it counts; a DATA of padding alone; an empty CONTINUATION, which it
+ *  bounds otherwise (8 a block); an ACK that answers nothing, which it makes a connection error at once (a SETTINGS ACK)
+ *  or takes for free (a PING ACK); a GOAWAY after the first, which it refuses only when it raises the last-stream-id or
+ *  names the wrong parity; and on a stream the client reset, the empty DATA with END_STREAM and the stream errors -- a
+ *  WINDOW_UPDATE of 0, which nghttp2 ignores for free on a stream it no longer holds, a PRIORITY that is not 5 octets,
+ *  which it makes a connection error on any stream. A WINDOW_UPDATE or a RST_STREAM on a stream that has closed, which
  *  RFC 9113 §5.1 lets cross the end of a stream, takes none, as in nghttp2. */
 constexpr std::uint32_t NO_PROGRESS_FRAME_BURST = 10000;
 /** @brief The tokens the bucket of the frames that make no progress regains each second (NO_PROGRESS_FRAME_BURST). */
@@ -160,6 +170,16 @@ namespace qb::protocol::http2 {
 template <typename IO>
 concept counts_bytes_written = requires(IO const &io) {
     { io.bytes_written() } -> std::same_as<std::size_t>;
+};
+
+/// An IO handler that keeps the clock the bucket of the frames that make no progress reads (`no_progress_clock_seconds()`,
+/// a count of seconds; Http2Protocol::refuse_no_progress_frame(), Huly QB-1270): the qbm-http test suite's fake handlers
+/// keep one, to step the time the bucket sees instead of sleeping through it -- back too, which the bucket counts as one
+/// second, as nghttp2 does. Every other handler, every qb-io session among them, has the bucket read
+/// std::chrono::steady_clock.
+template <typename IO>
+concept keeps_no_progress_clock = requires(IO const &io) {
+    { io.no_progress_clock_seconds() } -> std::same_as<std::int64_t>;
 };
 
 namespace detail {
@@ -731,6 +751,10 @@ protected:
     std::int64_t  _no_progress_second      = 0;
     std::uint32_t _settings_unacknowledged = 0;
     std::uint32_t _pings_unacknowledged    = 0;
+    /// The GOAWAY frames the peer sent (admit_goaway(); Huly QB-1270): how many, and the last-stream-id of the last one
+    /// dispatched, which a later one may lower and never raise (RFC 9113 §6.8).
+    std::uint64_t _goaways_received               = 0;
+    std::uint32_t _goaway_received_last_stream_id = 0;
 
 public:
     /**
@@ -980,10 +1004,12 @@ public:
         _continuation_required  = false;
         _continuation_stream_id = 0;
         _queued_control_replies.clear(); // a new connection's output holds none of the last one's replies (Huly QB-1270)
-        _no_progress_tokens      = ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST;
-        _no_progress_second      = 0;
-        _settings_unacknowledged = 0;
-        _pings_unacknowledged    = 0;
+        _no_progress_tokens             = ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST;
+        _no_progress_second             = 0;
+        _settings_unacknowledged        = 0;
+        _pings_unacknowledged           = 0;
+        _goaways_received               = 0;
+        _goaway_received_last_stream_id = 0;
     }
 
 protected:
@@ -1006,8 +1032,9 @@ protected:
      *          output is written, so the replies solicited within one read queue together. Modelled on nghttp2's
      *          max_outbound_ack (1000 too), which differs twice: it forgives an ACK when the frame leaves its queue to
      *          be serialized, not when the socket has taken it, and it sends ACKs ahead of the data it has queued.
-     * @return Whether the reply was written. `false`: the bound is reached and this reply is NOT written; the caller
-     *         closes the connection with GOAWAY(ENHANCE_YOUR_CALM).
+     * @return `false`: the bound is reached and this reply is NOT written; the caller closes the connection with
+     *         GOAWAY(ENHANCE_YOUR_CALM). `true` otherwise: the reply was written, or the connection has ended and nothing
+     *         is (write_frame()).
      */
     template <typename Reply>
     [[nodiscard]] bool
@@ -1015,9 +1042,37 @@ protected:
         if (control_replies_at_bound()) [[unlikely]] {
             return false;
         }
-        this->_io << reply;
-        control_reply_written();
+        if (write_frame(reply)) {
+            control_reply_written();
+        }
         return true;
+    }
+
+    /**
+     * @brief Write one frame to the peer -- every frame the protocol writes but the GOAWAY that ends the connection goes
+     *        through here -- unless the connection is ended (not ok()): after that GOAWAY nothing may follow, the endpoint
+     *        closes the connection (RFC 9113 §5.4.1). A response the application sent to a request read before it, the
+     *        trailers of an upload, a reset were written after it, and so was what an observer of the endpoint's own
+     *        GOAWAY sent while it was dispatched (Huly QB-1270): the side ends the connection before it dispatches that
+     *        GOAWAY, and nothing here writes once it has.
+     * @return whether the frame was written
+     */
+    template <typename Frame>
+    bool
+    write_frame(const Frame &frame) noexcept {
+        if (!this->ok()) [[unlikely]] {
+            return false;
+        }
+        this->_io << frame;
+        return true;
+    }
+
+    /// Whether the GOAWAY the peer just sent is logged at WARN: one that carries an error, or one whose number on the
+    /// connection is a power of two -- the 1st, 2nd, 4th, 8th and so on, the number in the line: a peer that sends
+    /// them for ever leaves a bounded trace that still says how many came (admit_goaway(); Huly QB-1270).
+    [[nodiscard]] bool
+    goaway_logged_at_warn(ErrorCode error_code) const noexcept {
+        return error_code != ErrorCode::NO_ERROR || std::has_single_bit(_goaways_received);
     }
 
     /// The two halves of queue_control_reply(), for a reply its caller writes itself -- the server's reset of a stream
@@ -1100,7 +1155,7 @@ protected:
         } else {
             headers_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
         }
-        this->_io << headers_frame_data;
+        (void) this->write_frame(headers_frame_data);
         if (!this->ok()) {
             return false;
         }
@@ -1126,7 +1181,7 @@ protected:
         push_promise_frame_data.header.set_stream_id(associated_stream_id);
         push_promise_frame_data.payload.promised_stream_id = promised_stream_id;
         push_promise_frame_data.payload.header_block_fragment.assign(encoded_header_block.begin(), encoded_header_block.begin() + first_size);
-        this->_io << push_promise_frame_data;
+        (void) this->write_frame(push_promise_frame_data);
         if (!this->ok()) {
             return false;
         }
@@ -1152,7 +1207,7 @@ protected:
             continuation_frame_data.header.set_stream_id(stream_id);
             continuation_frame_data.payload.header_block_fragment.assign(fragment_begin,
                                                                          fragment_begin + static_cast<std::ptrdiff_t>(fragment_size));
-            this->_io << continuation_frame_data;
+            (void) this->write_frame(continuation_frame_data);
             if (!this->ok()) {
                 return false;
             }
@@ -1187,18 +1242,28 @@ protected:
      * @brief Takes the token of one frame that makes no progress and draws no reply, and refuses the frame once none is
      *        left (protocol_limits::NO_PROGRESS_FRAME_BURST names the frames; the empty-frame flood, CVE-2019-9518; Huly
      *        QB-1270). The bucket holds NO_PROGRESS_FRAME_BURST tokens and regains NO_PROGRESS_FRAME_RATE for each second
-     *        of the steady clock since it was last filled, as nghttp2's glitch limiter does; with none left the frame is a
-     *        connection error, GOAWAY(ENHANCE_YOUR_CALM), reported as the frame layer reports any (report_frame_error()).
-     *        Such frames went through, each a dispatch with no reply, and nothing counted them.
+     *        of the steady clock since it was last filled -- one second when that clock reads earlier than it did -- as
+     *        nghttp2's glitch limiter does (nghttp2_ratelim_update()); with none left the frame is a connection error,
+     *        GOAWAY(ENHANCE_YOUR_CALM), reported as the frame layer reports any (report_frame_error()). Such frames went
+     *        through, each a dispatch with no reply, and nothing counted them. An IO handler that keeps its own clock
+     *        (keeps_no_progress_clock) is read instead of the steady clock.
      * @return true when the frame is refused (the connection is ended), false when it may be dispatched
      */
     [[nodiscard]] bool
     refuse_no_progress_frame() noexcept {
-        const std::int64_t second =
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::int64_t second = 0;
+        if constexpr (keeps_no_progress_clock<IO_Handler>) {
+            second = this->_io.no_progress_clock_seconds();
+        } else {
+            second = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        }
         if (second != _no_progress_second) {
             const std::uint64_t elapsed = second > _no_progress_second ? static_cast<std::uint64_t>(second - _no_progress_second) : 1u;
-            const std::uint64_t tokens  = _no_progress_tokens + elapsed * ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_RATE;
+            // As many seconds as the burst holds tokens regain it whole, whatever the clock's jump: the product cannot
+            // wrap (nghttp2_ratelim_update() saturates likewise).
+            const std::uint64_t tokens = elapsed >= ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST
+                                             ? ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST
+                                             : _no_progress_tokens + elapsed * ::qb::http2::protocol_limits::NO_PROGRESS_FRAME_RATE;
             _no_progress_tokens =
                 static_cast<std::uint32_t>(std::min<std::uint64_t>(::qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST, tokens));
             _no_progress_second = second;
@@ -1314,7 +1379,7 @@ protected:
         frame_to_send.payload = payload;
 
         if constexpr (qb::has_on_r<IO_Handler, IO_Handler &, Http2FrameData<FramePayloadType>>) {
-            this->_io << frame_to_send;
+            (void) this->write_frame(frame_to_send);
         } else {
             this->not_ok(ErrorCode::INTERNAL_ERROR);
             return false;
@@ -1858,11 +1923,50 @@ private:
         goaway_f.payload.last_stream_id = extract_uint31_be(payload_data); // Masks R bit automatically
         goaway_f.payload.error_code     = static_cast<ErrorCode>(extract_uint32_be(payload_data + 4));
 
+        if (!admit_goaway(goaway_f.payload.last_stream_id, goaway_f.payload.error_code)) {
+            return this->ok(); // a repeat that changes nothing, ignored; or refused, the connection ended
+        }
+
         if (payload_size > 8) {
             goaway_f.payload.additional_debug_data.assign(payload_data + 8, payload_data + payload_size);
         }
 
         static_cast<SideProtocol *>(this)->on(std::move(goaway_f));
+        return true;
+    }
+
+    /**
+     * @brief Whether a GOAWAY the peer sent is dispatched to the side. RFC 9113 §6.8 lets an endpoint send more than one
+     *        "if circumstances change" -- a graceful shutdown's notice, then the last-stream-id it settles on, or an
+     *        error after a NO_ERROR -- and forbids it to raise the last-stream-id. The first is dispatched. Each one after
+     *        it takes a token of the bucket of the frames that make no progress (refuse_no_progress_frame()), so that a
+     *        peer that sends them for ever is cut while one that sends two or three never is; one that raises the
+     *        last-stream-id is a connection error of type PROTOCOL_ERROR, as in nghttp2
+     *        (nghttp2_session_on_goaway_received()); one that changes nothing -- the same last-stream-id, NO_ERROR -- is
+     *        not dispatched again. A GOAWAY is logged at WARN when it carries an error or when its number on the
+     *        connection is a power of two (goaway_logged_at_warn()): here when it is ignored, by the side when it is
+     *        dispatched. Every copy was dispatched, the side's handler and the stock sessions each logging it at WARN,
+     *        and none was counted (Huly QB-1270). nghttp2 also refuses a last-stream-id of the wrong parity, one naming
+     *        the sender's own streams; qb does not: the side takes it as the bound it names.
+     * @return true to dispatch it; false when it is ignored or refused (refused: the connection is ended)
+     */
+    [[nodiscard]] bool
+    admit_goaway(uint32_t last_stream_id, ErrorCode error_code) noexcept {
+        if (_goaways_received++ != 0) {
+            if (last_stream_id > _goaway_received_last_stream_id) [[unlikely]] {
+                return report_frame_error(ErrorCode::PROTOCOL_ERROR, "GOAWAY last-stream-id increased", 0);
+            }
+            if (refuse_no_progress_frame()) {
+                return false;
+            }
+            if (last_stream_id == _goaway_received_last_stream_id && error_code == ErrorCode::NO_ERROR) {
+                if (goaway_logged_at_warn(error_code)) {
+                    LOG_HTTP_WARN_PA(0, "Received GOAWAY #" << _goaways_received << " on this connection, the same as the last: ignored");
+                }
+                return false;
+            }
+        }
+        _goaway_received_last_stream_id = last_stream_id;
         return true;
     }
 

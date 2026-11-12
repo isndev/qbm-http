@@ -60,24 +60,36 @@ parse_status_code(std::string_view status) noexcept {
 /// Two views of the same ids: in the order they were reset, a ring, so that the oldest is forgotten first; and sorted,
 /// for the lookup of a frame on a stream the client holds nothing for -- the only place it is read. A reset is forgotten
 /// by the resets after it, never by its stream's age: a long download reset after a thousand requests has come and gone
-/// is remembered as one reset a moment ago. Empty, nothing is allocated.
+/// is remembered as one reset a moment ago. Each sorted entry keeps, with the id, the receive window the stream had
+/// left when it was reset: the octets of DATA the server may still send on it, since the client gives it no window
+/// again (RFC 9113 §6.9.1; window_left()). 12 octets a reset, 12 KB at the bound; empty, nothing is allocated.
 class reset_stream_memory {
 public:
     [[nodiscard]] bool
     contains(std::uint32_t stream_id) const noexcept {
-        return std::binary_search(_sorted.begin(), _sorted.end(), stream_id);
+        const auto it = find(stream_id);
+        return it != _sorted.end() && it->stream_id == stream_id;
+    }
+    /// The receive window @p stream_id had left when the client reset it, less the DATA discarded on it since; nullptr
+    /// when the client does not remember that stream.
+    [[nodiscard]] std::uint32_t *
+    window_left(std::uint32_t stream_id) noexcept {
+        const auto it = find(stream_id);
+        return it != _sorted.end() && it->stream_id == stream_id ? &_sorted[static_cast<std::size_t>(it - _sorted.cbegin())].window : nullptr;
     }
     void
-    remember(std::uint32_t stream_id) {
+    remember(std::uint32_t stream_id, std::uint32_t window) {
         if (_by_age.size() < capacity) {
             _by_age.push_back(stream_id);
         } else { // the oldest reset is forgotten: its slot takes this one
             std::uint32_t &oldest = _by_age[_oldest];
-            _sorted.erase(std::lower_bound(_sorted.begin(), _sorted.end(), oldest));
+            _sorted.erase(find(oldest));
             oldest  = stream_id;
             _oldest = (_oldest + 1) % capacity;
         }
-        _sorted.insert(std::upper_bound(_sorted.begin(), _sorted.end(), stream_id), stream_id);
+        const auto at =
+            std::upper_bound(_sorted.cbegin(), _sorted.cend(), stream_id, [](std::uint32_t id, const entry &e) { return id < e.stream_id; });
+        _sorted.insert(at, entry{stream_id, window});
     }
     void
     clear() noexcept {
@@ -91,9 +103,17 @@ public:
     }
 
 private:
+    struct entry {
+        std::uint32_t stream_id;
+        std::uint32_t window; ///< The octets of DATA the server may still send on it
+    };
+    [[nodiscard]] std::vector<entry>::const_iterator
+    find(std::uint32_t stream_id) const noexcept {
+        return std::lower_bound(_sorted.cbegin(), _sorted.cend(), stream_id, [](const entry &e, std::uint32_t id) { return e.stream_id < id; });
+    }
     static constexpr std::size_t capacity = ::qb::http2::protocol_limits::MAX_RESET_STREAMS_REMEMBERED;
     std::vector<std::uint32_t>   _by_age; ///< In the order they were reset; once full, a ring whose oldest is at _oldest
-    std::vector<std::uint32_t>   _sorted; ///< The same ids, ascending
+    std::vector<entry>           _sorted; ///< The same ids, ascending, each with its window left
     std::size_t                  _oldest = 0;
 };
 } // namespace detail
@@ -348,8 +368,8 @@ public:
             }
             // No need to call calculate_length, it's implicit in Http2FrameData serialization
 
-            this->_io << settings_frame_data; // Send SETTINGS frame with our settings
-            this->settings_sent();            // its ACK is the one the server owes (Huly QB-1270)
+            (void) this->write_frame(settings_frame_data); // Send SETTINGS frame with our settings
+            this->settings_sent();                         // its ACK is the one the server owes (Huly QB-1270)
             _initial_settings_sent = true;
             LOG_HTTP_DEBUG_PA(0, "Client: Initial SETTINGS frame sent successfully");
             // HPACK encoder max table size is already set based on _our_settings in constructor/reset
@@ -573,7 +593,8 @@ public:
                 // them (§4.3). It was reset again, a reply the server drew for nothing (Huly QB-1270). It makes no progress,
                 // and nothing ends the memory of the stream: each such HEADERS takes a token of the bucket of the frames
                 // that make no progress -- but an empty one without END_STREAM, which the frame layer charged -- as nghttp2
-                // charges every header block it ignores (Huly QB-1270).
+                // charges a HEADERS whose header block it ignores, once, on the HEADERS (protocol_limits::
+                // NO_PROGRESS_FRAME_BURST; Huly QB-1270).
                 if (!(headers_event.payload.header_block_fragment.empty() && (headers_event.header.flags & FLAG_END_STREAM) == 0)
                     && this->refuse_no_progress_frame()) {
                     return;
@@ -1035,13 +1056,22 @@ public:
     void
     on(Http2FrameData<GoAwayFrame> goaway_event) noexcept {
         const std::string debug_data_str(goaway_event.payload.additional_debug_data.begin(), goaway_event.payload.additional_debug_data.end());
-        LOG_HTTP_WARN_PA(0, "Client: Received GOAWAY frame. Last Stream ID: " << goaway_event.payload.last_stream_id << ", Error: "
-                                                                              << static_cast<int>(goaway_event.payload.error_code)
-                                                                              << ", Debug: " << debug_data_str);
+        // At WARN for an error, or at each power of two of their count on the connection: one a server lowers for ever is
+        // dispatched each time, and logged each time it was (Huly QB-1270).
+        if (this->goaway_logged_at_warn(goaway_event.payload.error_code)) {
+            LOG_HTTP_WARN_PA(0, "Client: Received GOAWAY frame #"
+                                    << this->_goaways_received << ". Last Stream ID: " << goaway_event.payload.last_stream_id
+                                    << ", Error: " << static_cast<int>(goaway_event.payload.error_code) << ", Debug: " << debug_data_str);
+        }
 
         this->set_last_peer_initiated_stream_id_processed_in_goaway(goaway_event.payload.last_stream_id);
         _received_goaway   = true;
         _goaway_error_code = goaway_event.payload.error_code;
+        // An error ends the connection now, before any observer runs below -- a response failed, the event: nothing the
+        // application sends from them is written (Http2Protocol::write_frame()). It ended it after them (Huly QB-1270).
+        if (goaway_event.payload.error_code != ErrorCode::NO_ERROR) {
+            this->FramerBase::not_ok(goaway_event.payload.error_code);
+        }
 
         // Mark streams with IDs greater than last_stream_id as effectively closed or failed.
         // Iterate over _client_streams and _pending_pushed_streams.
@@ -1087,12 +1117,9 @@ public:
             this->get_io_handler().on(Http2GoAwayEvent{goaway_event.payload.error_code, goaway_event.payload.last_stream_id, debug_data_str});
         }
 
-        // The FramerBase::not_ok() should be called to signal the qb-io transport to close.
-        // The GOAWAY itself implies the connection will close.
-        // If error code is NO_ERROR, it's a graceful shutdown.
-        if (goaway_event.payload.error_code != ErrorCode::NO_ERROR) {
-            this->FramerBase::not_ok(goaway_event.payload.error_code);
-        } else {
+        // An error GOAWAY ended the connection above (FramerBase::not_ok(), which has the qb-io transport close). A NO_ERROR
+        // one is a graceful shutdown.
+        if (goaway_event.payload.error_code == ErrorCode::NO_ERROR) {
             // For graceful shutdown, we might wait for active streams to complete or set a timer.
             // For now, if graceful, just mark that we received it. The IO layer might have its own logic.
             // If no streams are active that are <= last_stream_id, we can close.
@@ -1422,7 +1449,7 @@ public:
         goaway_frame.header.set_stream_id(0);
         goaway_frame.payload.last_stream_id = _last_promised_stream_id;
         goaway_frame.payload.error_code     = ErrorCode::NO_ERROR;
-        this->_io << goaway_frame;
+        (void) this->write_frame(goaway_frame);
 
         _connection_active           = false;
         _graceful_shutdown_initiated = true;
@@ -1748,7 +1775,10 @@ private:
      *          reset (_reset_streams) it is discarded: the server sent it before it read the reset, and it still counts
      *          against the connection window, given back by a WINDOW_UPDATE as any DATA is (§5.1, §6.9). It closed the
      *          connection: a server streaming a body past MAX_BODY_SIZE had the stream reset, and its DATA already in
-     *          flight then ended every other request on the connection (Huly QB-1270). A pushed stream that has closed
+     *          flight then ended every other request on the connection (Huly QB-1270). It counts against the stream's
+     *          window too, what the stream had left when it was reset, which the client never grows again: past it the
+     *          server sends what it may not (§6.9.1), a connection error of type FLOW_CONTROL_ERROR. Only the connection
+     *          window counted it, given back each time, and DATA on a reset stream had no bound (Huly QB-1270). A pushed stream that has closed
      *          answers it with a reset; a client stream closed otherwise -- its response completed, or the server reset
      *          it -- makes it a connection error of type STREAM_CLOSED (§5.1, closed; it was PROTOCOL_ERROR).
      * @param stream_id Stream ID
@@ -1771,12 +1801,17 @@ private:
                                                                                     : "DATA frame received on idle stream (never promised)");
             return;
         }
-        if (_reset_streams.contains(stream_id)) {
+        if (std::uint32_t *const window_left = _reset_streams.window_left(stream_id)) {
             // Its END_STREAM ends nothing here: an empty one takes a token of the bucket of the frames that make no progress,
             // as an empty DATA without END_STREAM did in the frame layer -- a server could send them for ever (Huly QB-1270).
             if (empty_end_stream && this->refuse_no_progress_frame()) {
                 return;
             }
+            if (*window_left < data_payload_size) [[unlikely]] {
+                send_goaway_and_close(ErrorCode::FLOW_CONTROL_ERROR, "Stream flow control violation by peer.");
+                return;
+            }
+            *window_left -= data_payload_size;
             discard_data(data_payload_size);
             return;
         }
@@ -1997,7 +2032,7 @@ private:
                 data_frame.header.flags |= FLAG_END_STREAM;
             }
 
-            this->_io << data_frame;
+            (void) this->write_frame(data_frame);
             if (!this->ok()) {
                 active_stream.send_buffer_offset -= chunk_size;
                 active_stream.has_pending_data_to_send = true;
@@ -2075,7 +2110,7 @@ private:
         rst_frame.header.set_stream_id(stream_id);
         rst_frame.payload.error_code = error_code;
 
-        this->_io << rst_frame;
+        (void) this->write_frame(rst_frame);
         if (solicited) {
             this->control_reply_written(); // counted while it is queued, as control_replies_at_bound() admitted it
         }
@@ -2089,9 +2124,12 @@ private:
             // discarded (on(DataFrame), on(HeadersFrame)). After its END_STREAM nothing is in flight, and a frame there
             // stays the error it is (RFC 9113 §5.1).
             const bool in_flight = !it->second.end_stream_received;
+            // What the server may still send on it: the window the stream had left, which the client never grows again.
+            const auto window_left =
+                static_cast<std::uint32_t>(std::clamp<std::int64_t>(it->second.local_window_size, 0, MAX_WINDOW_SIZE_LIMIT));
             _client_streams.erase(it);
             if (in_flight) {
-                _reset_streams.remember(stream_id);
+                _reset_streams.remember(stream_id, window_left);
             }
             if (notify_error) {
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by client: " + debug_message};
@@ -2142,14 +2180,16 @@ private:
         _connection_active           = false; // Connection is being shut down
         _graceful_shutdown_initiated = true;  // Mark that we've started shutdown
 
+        // The connection is ended before the IO_Handler hears of it: nothing an observer of the event sends is written after
+        // this GOAWAY (write_frame()). It was ended after the observers had run (Huly QB-1270).
+        this->FramerBase::not_ok(error_code); // Signal base protocol and underlying transport to close
+
         // Notify IO_Handler about sending GOAWAY: `sent`, and the debug data as written. The reason followed a « GOAWAY sent by
         // client: » prefix, by which the handler told this GOAWAY from a server's (Huly QB-1270).
         if constexpr (qb::has_on<IO_Handler, Http2GoAwayEvent>) {
             Http2GoAwayEvent goaway_event_to_dispatch{error_code, last_stream_id_to_report, debug_message, true};
             this->get_io_handler().on(goaway_event_to_dispatch);
         }
-
-        this->FramerBase::not_ok(error_code); // Signal base protocol and underlying transport to close
     }
 
     /**
@@ -2168,7 +2208,7 @@ private:
         wu_frame.header.set_stream_id(stream_id);
         wu_frame.payload.window_size_increment = increment;
 
-        this->_io << wu_frame;
+        (void) this->write_frame(wu_frame);
     }
 
     /**

@@ -298,4 +298,38 @@ TEST_F(Http2ServerGoawayWireTest, TheSessionLogsItsOwnGoawayAsSentAndTheClientsA
     EXPECT_EQ(occurrences(log, "Received GOAWAY from client. Last Stream ID: 0, Code: 1, Debug: the client's reason"), 1u);
     EXPECT_EQ(occurrences(log, "GOAWAY sent by server"), 0u);
 }
+
+// A client's GOAWAY is logged at WARN when it carries an error or when its number on the connection is a power of two.
+// An upload in flight keeps the connection while a client sends a GOAWAY, lowers its last-stream-id 1000 times, then
+// repeats the last one 1000 times -- 2001, fewer than the bucket's burst: the protocol writes 11 lines (#1, #2, #4 and so
+// on to #512 among those it dispatches, #1024 among those it ignores), the session one, for the first. Each of the 2001
+// was logged by both, 4002 lines.
+TEST_F(Http2ServerGoawayWireTest, AClientsGoawaysAreLoggedAtEachPowerOfTwoOfTheirCount) {
+    const std::string log = log_of([] {
+        auto server = start_server();
+        ASSERT_TRUE(server->ready());
+        Http2RawClient client;
+        ASSERT_TRUE(client.connect(server->port()));
+        ASSERT_TRUE(client.read_until([&] { return client.settings_acked; }));
+        qb::protocol::hpack::Encoder encoder; // the client's one, for its one header block
+        std::vector<uint8_t>         block;
+        ASSERT_TRUE(encoder.encode({{":method", "POST"}, {":scheme", "https"}, {":authority", "localhost"}, {":path", "/upload"}}, block));
+        ASSERT_TRUE(client.frame(Http2RawClient::HEADERS, Http2RawClient::END_HEADERS, 1, block)); // an upload, its body to come
+        ASSERT_TRUE(client.goaway(0x7FFFFFFFu, 0));
+        for (std::uint32_t lowered = 1; lowered <= 1000; ++lowered) {
+            ASSERT_TRUE(client.goaway(0x7FFFFFFFu - lowered, 0));
+        }
+        for (int repeated = 0; repeated < 1000; ++repeated) {
+            ASSERT_TRUE(client.goaway(0x7FFFFFFFu - 1000, 0));
+        }
+        ASSERT_TRUE(client.solicit(1));
+        ASSERT_TRUE(client.read_until([&] { return client.pongs == 1 || client.eof; }, 10s));
+        EXPECT_FALSE(client.eof) << "a client that sent 2001 GOAWAYs, fewer than the burst, was cut";
+        client.close();
+        server.reset(); // the server's thread ends before the capture does
+    });
+    EXPECT_EQ(occurrences(log, "Server: Received GOAWAY frame"), 10u) << "a GOAWAY dispatched was logged past the powers of two";
+    EXPECT_EQ(occurrences(log, "the same as the last: ignored"), 1u) << "a GOAWAY ignored was logged past the powers of two";
+    EXPECT_EQ(occurrences(log, "Received GOAWAY from client"), 1u) << "the session logged each NO_ERROR GOAWAY of the client";
+}
 #endif // QB_WITH_LOGGING

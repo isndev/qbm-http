@@ -265,6 +265,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the way past it; the HTTP/3 client's `set_max_body_size` takes 0 for none too, now written. Witnesses in the entry
   "The HTTP/1.1 clients read a body of exactly their limit" below.
 
+- **An HTTP/2 IO handler may keep the clock the bucket of the frames that make no progress reads (Huly QB-1270).**
+  `qb::protocol::http2::keeps_no_progress_clock`: a handler with `std::int64_t no_progress_clock_seconds() const` is
+  read by `Http2Protocol::refuse_no_progress_frame()` instead of `std::chrono::steady_clock`, a clock that reads earlier
+  counting one second. The test suite's fake handlers keep one, so that the bucket's refill is tested by stepping time
+  rather than by sleeping through it; every qb-io session reads the steady clock, as before.
+
 - **`Http2GoAwayEvent::sent` says who sent an HTTP/2 GOAWAY (Huly QB-1270).** The client and server protocols dispatch
   `qb::protocol::http2::Http2GoAwayEvent` for the `GOAWAY` they receive and for the `GOAWAY` with an error they send
   themselves; the new `bool sent` is `true` for the latter, and the constructor's new trailing parameter defaults to
@@ -930,20 +936,44 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **Security: the HTTP/2 client and server bound the frames that make no progress and draw no reply (Huly QB-1270;
   CVE-2019-9518).** The maintainer's mandate of 2026-11-11. An empty `DATA` without `END_STREAM`, a `DATA` of padding
   alone, a `HEADERS` of an empty block without `END_STREAM`, a `CONTINUATION` of an empty fragment without
-  `END_HEADERS`, a `PRIORITY`, a frame of an unknown type and a `SETTINGS` or `PING` ACK that answers nothing the
-  endpoint sent each cost their receiver a dispatch and draw no reply; so do, on the client, every `HEADERS` it
-  discards on a stream it reset, a stream error of the frame layer it ignores there and an empty `DATA` with
-  `END_STREAM` there. Unless another count met them first -- on the server an empty `HEADERS` is a malformed
+  `END_HEADERS`, a `PRIORITY`, a frame of an unknown type, a `SETTINGS` or `PING` ACK that answers nothing the
+  endpoint sent and a `GOAWAY` repeated each cost their receiver a dispatch and draw no reply -- each copy of a `GOAWAY`
+  was dispatched again and logged at `WARN` twice, by the protocol and by the stock session or client; so do, on the
+  client, every `HEADERS` it discards on a stream it reset, a stream error of the frame layer it ignores there and an
+  empty `DATA` with `END_STREAM` there. Unless another count met them first -- on the server an empty `HEADERS` is a malformed
   request, whose reset is counted, and a block takes at most `MAX_CONTINUATION_FRAMES` `CONTINUATION` frames -- a
   peer could send them for as long as it liked. Each now takes a token from a bucket of
   `qb::http2::protocol_limits::NO_PROGRESS_FRAME_BURST` (10000) that regains `NO_PROGRESS_FRAME_RATE` (330) tokens a
   second, on both sides; with none left the connection ends with `GOAWAY(ENHANCE_YOUR_CALM)`, « Excessive frames
-  making no progress (flood) ». It is nghttp2's glitch rate limiter (added in 1.67.0 at 1000 and 33, these values
-  since 1.69.0), which charges an empty `DATA`, a `PRIORITY`, an unknown frame and an ignored header block alike; qb
-  also charges an empty `HEADERS` or `CONTINUATION`, which nghttp2 bounds otherwise, and an ACK that answers
-  nothing, which nghttp2 makes a connection error at once (a `SETTINGS` ACK). A peer that sends fewer than that
-  rate, beyond the burst, is never cut; elsewhere an empty `DATA` or `HEADERS` that ends its stream takes no token,
-  nor does a `WINDOW_UPDATE` or a `RST_STREAM` on a stream that has closed, which RFC 9113 §5.1 lets cross its end.
+  making no progress (flood) ». A `GOAWAY` is dispatched the first time; each after it takes a token, and one that
+  changes nothing -- the same last-stream-id, `NO_ERROR` -- is not dispatched again; a `GOAWAY` is logged at `WARN`
+  when it carries an error or when its number on the connection is a power of two. It is nghttp2's glitch rate limiter
+  (added in 1.67.0 at 1000 and 33, these values since 1.69.0), which of these frames charges at v1.69.0 an empty
+  `DATA` without `END_STREAM` on a stream it holds -- a padded one only when nothing follows its Pad Length --, a
+  `HEADERS` of an empty block, as a malformed message whose stream it resets, a `PRIORITY`, a frame of an unknown type
+  and a `HEADERS` whose header block it ignores, once on the `HEADERS`; the rest is qb's own: an empty `DATA` on a
+  stream it does not hold, which nghttp2 ignores before it counts, a `DATA` of padding alone, an empty `CONTINUATION`,
+  which nghttp2 bounds otherwise, an ACK that answers nothing, which nghttp2 makes a connection error at once (a `SETTINGS` ACK) or takes for free (a `PING`
+  ACK), a `GOAWAY` after the first, which nghttp2 refuses only when it raises its last-stream-id or names the wrong
+  parity (qb checks no parity), and on a stream the client reset the empty `DATA` with `END_STREAM` and the stream
+  errors, which nghttp2 ignores for free (a `WINDOW_UPDATE` of 0) or makes a connection error on any stream (a
+  `PRIORITY` that is not 5 octets). A peer that sends fewer than that rate, beyond the burst, is never cut -- nor is one that sends two or three
+  `GOAWAY`s, a graceful notice and the last-stream-id it settles on; elsewhere an empty `DATA` or `HEADERS` that ends
+  its stream takes no token, nor does a `WINDOW_UPDATE` or a `RST_STREAM` on a stream that has closed, which RFC 9113
+  §5.1 lets cross its end. A `DATA` the client discards on a stream it reset counts against the window that stream had
+  left when it was reset, which the client never grows again: past it the server sends what it may not (§6.9.1), a
+  connection error of type `FLOW_CONTROL_ERROR`. Only the connection window counted it, given back each time, and a
+  server could send `DATA` on a stream the client reset for as long as it liked.
+
+- **Nothing is written after the GOAWAY that ends an HTTP/2 connection, and a GOAWAY that raises its last-stream-id
+  is a connection error (Huly QB-1270).** RFC 9113 §5.4.1 has an endpoint close the connection after the `GOAWAY` of a
+  connection error. A response the application sent to a request read before it, the trailers of an upload and a
+  reset the application asked for were written after it, and so was what an observer of the endpoint's own `GOAWAY`,
+  or of the peer's `GOAWAY` of an error, sent while the event was dispatched: the protocol said `ok()` until its
+  observers had run. Every frame the client and the server write but that `GOAWAY` now goes through one place that
+  refuses it once the connection has ended, and the connection ends before the observers run. A `GOAWAY` whose
+  last-stream-id is higher than the peer's last one is a connection error of type `PROTOCOL_ERROR` (RFC 9113 §6.8:
+  endpoints MUST NOT increase it), as nghttp2 makes it; it was taken as a new `GOAWAY`.
 
 - **Every connection error the HTTP/2 frame layer finds ends the connection with its GOAWAY, on the server whatever
   stream the frame names; a frame after END_STREAM is STREAM_CLOSED on the client; the server no longer logs its own

@@ -3776,7 +3776,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the response's header list, counted uncompressed, exceeds it, the stream
-// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1287-1290).
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1295-1298).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3804,7 +3804,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1271-1276).
+// (2/protocol/server.h:1279-1284).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3824,7 +3824,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:3023-3026).
+// (2/protocol/server.h:3035-3038).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3844,7 +3844,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:3017-3022).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:3029-3034).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3867,7 +3867,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1067-1072).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1075-1080).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3886,7 +3886,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the snapshot-then-flush loop in
-// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1074-1092).
+// on(WindowUpdateFrame) for stream 0 (2/protocol/server.h:1082-1100).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4123,7 +4123,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1196-1206 else arm).
+// (no stream context to store into; 2/protocol/server.h:1204-1214 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4142,7 +4142,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1105-1117);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1113-1125);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -8501,30 +8501,29 @@ constexpr std::size_t burst = 10000;
 constexpr std::size_t rate  = 330;
 
 /// The frames of a flood, sent one by one until the server ends the connection or @p cap of them: how many were sent
-/// when it did (0: it never did), and the seconds the flood took.
+/// when it did (0: it never did).
 template <typename Send>
-[[nodiscard]] std::pair<std::size_t, double>
+[[nodiscard]] std::size_t
 flood_until_cut(Http2FakeIO &io, ServerProtocol &protocol, Send &&send, std::size_t cap) {
-    const auto start = std::chrono::steady_clock::now();
+    const int goaways = io.goaway_count;
     for (std::size_t sent = 1; sent <= cap; ++sent) {
         send();
         drive(protocol, io);
-        if (io.goaway_count != 0) {
-            return {sent, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()};
+        if (io.goaway_count != goaways) {
+            return sent;
         }
     }
-    return {0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count()};
+    return 0;
 }
 
-/// What a flood must meet: cut, at the frame past the tokens the bucket held and those it regained meanwhile -- never
-/// before @p at_least frames, the burst for a full bucket -- with GOAWAY(ENHANCE_YOUR_CALM) and the guard's reason, the
-/// last frame the server writes.
+/// What a flood must meet: cut at exactly the frame past the tokens the bucket held, @p at -- the clock the bucket
+/// reads is the fake io's, stopped unless a test steps it (h2::keeps_no_progress_clock), so it regains nothing
+/// meanwhile -- with GOAWAY(ENHANCE_YOUR_CALM) and the guard's reason, the last frame the server writes. The bound was
+/// a range that a bucket refilling the whole burst each second also met (Huly QB-1270).
 void
-expect_cut(const Http2FakeIO &io, std::pair<std::size_t, double> flood, std::size_t at_least = burst + 1) {
-    const auto [cut, seconds] = flood;
+expect_cut(const Http2FakeIO &io, std::size_t cut, std::size_t at = burst + 1) {
     ASSERT_NE(cut, 0u) << "a flood of empty frames was never cut";
-    EXPECT_GE(cut, at_least) << "a frame within the bucket was refused";
-    EXPECT_LE(cut, burst + 1 + rate * (static_cast<std::size_t>(seconds) + 2)) << "the bucket held more than the burst and what it regained";
+    EXPECT_EQ(cut, at) << "cut before or after the frame past the bucket";
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
     const auto goaway = last_goaway(io.output);
     ASSERT_TRUE(goaway.has_value());
@@ -8536,8 +8535,8 @@ expect_cut(const Http2FakeIO &io, std::pair<std::size_t, double> flood, std::siz
 
 // An upload in flight, then frames that make no progress, one after the other: empty DATA frames without END_STREAM, DATA
 // frames of padding alone (no octet of the body either), PRIORITY frames, frames of an unknown type with or without a
-// payload, SETTINGS ACKs, PING ACKs (the server sent no PING). The server took them for ever. It ends the connection once
-// the bucket is spent, and not before -- one frame later for the SETTINGS ACKs, whose first acknowledges the server's own
+// payload, SETTINGS ACKs, PING ACKs (the server sent no PING). The server took them for ever. It ends the connection at
+// the frame past the bucket's burst -- one frame later for the SETTINGS ACKs, whose first acknowledges the server's own
 // SETTINGS.
 TEST(HTTP2ServerProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnhanceYourCalm) {
     using namespace qb1270_empty_frame_test;
@@ -8547,7 +8546,7 @@ TEST(HTTP2ServerProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnh
         uint8_t              flags;
         uint32_t             sid;
         std::vector<uint8_t> payload;
-        std::size_t          at_least;
+        std::size_t          cut_at; // the frame the server cuts: past the burst
     };
     for (const auto &each : std::vector<kind>{
              {"empty DATA frames", FrameType::DATA, 0, 1, {}, burst + 1},
@@ -8563,7 +8562,7 @@ TEST(HTTP2ServerProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnh
         expect_cut(s.io,
                    flood_until_cut(
                        s.io, s.protocol, [&] { push_frame(s.io, each.type, each.flags, each.sid, each.payload); }, 3 * burst),
-                   each.at_least);
+                   each.cut_at);
     }
 }
 
@@ -8610,21 +8609,292 @@ TEST(HTTP2ServerProtocol, EmptyDataFramesOfALegitimateClientAreNeverCut) {
     }
 }
 
-// The bucket regains NO_PROGRESS_FRAME_RATE tokens a second: a client that has spent the burst may send that many again after
-// a second, and is cut once it sends faster than that.
-TEST(HTTP2ServerProtocol, TheBucketOfFramesMakingNoProgressRegainsItsTokensEachSecond) {
+// The bucket regains NO_PROGRESS_FRAME_RATE tokens a second of the clock it reads, never more than the burst, and a
+// second when that clock reads earlier than it did, as nghttp2_ratelim_update() does: a client that has spent the burst
+// may send that many again a second later and is cut at the next frame. The clock is the fake io's, stepped by the test:
+// the cut falls on one frame, where the test slept 1.1 s and accepted any cut up to the burst again -- a bucket that
+// refilled the whole burst each second passed it (Huly QB-1270).
+TEST(HTTP2ServerProtocol, TheBucketOfFramesMakingNoProgressRegainsItsRateEachSecondAndNoMore) {
     using namespace qb1270_empty_frame_test;
+    struct step {
+        const char  *name;
+        std::size_t  spent;   // the frames sent before the clock moves, none cut
+        std::int64_t seconds; // how far the clock moves
+        std::size_t  regained;
+    };
+    for (const auto &each : std::vector<step>{
+             {"one second", burst, 1, rate},
+             {"two seconds", burst, 2, 2 * rate},
+             {"a clock that reads earlier: one second", burst, -5, rate},
+             {"a long pause: the burst, no more", rate, 1000, rate},
+             // A jump of 2^64 / 330 + 1 seconds: the rate times the seconds wraps a 64-bit count to fewer than 330
+             // tokens; the bucket regains the burst whole (nghttp2_ratelim_update() saturates likewise).
+             {"a jump whose product with the rate wraps: the burst", rate,
+              static_cast<std::int64_t>(std::numeric_limits<std::uint64_t>::max() / rate + 1), rate},
+         }) {
+        SCOPED_TRACE(each.name);
+        an_upload_in_flight s;
+        s.io.clock_seconds = 100; // the first frame fills the bucket at this second, nothing regained before it
+        for (std::size_t i = 0; i < each.spent; ++i) {
+            push_frame(s.io, FrameType::DATA, 0, 1, {});
+        }
+        drive(s.protocol, s.io);
+        ASSERT_EQ(s.io.goaway_count, 0) << "a frame within the burst was refused";
+        s.io.clock_seconds += each.seconds;
+        expect_cut(s.io,
+                   flood_until_cut(
+                       s.io, s.protocol, [&] { push_frame(s.io, FrameType::DATA, 0, 1, {}); }, 3 * burst),
+                   burst - each.spent + each.regained + 1);
+    }
+}
+
+// ===========================================================================
+// A GOAWAY repeated, and nothing written after the GOAWAY that ends a connection (Huly QB-1270, part 6b). RFC 9113 §6.8 lets a client send more
+// than one GOAWAY "if circumstances change" and forbids it to raise the last-stream-id; §5.4.1 has an endpoint close the connection after the
+// GOAWAY of a connection error.
+// ===========================================================================
+namespace qb1270_part6b_test {
+
+using qb1270_empty_frame_test::burst;
+using qb1270_goaway_test::an_upload_in_flight;
+using qb1270_goaway_test::last_goaway;
+
+/// A GOAWAY frame's payload: @p last_stream_id, then @p code.
+[[nodiscard]] std::vector<uint8_t>
+goaway_payload(uint32_t last_stream_id, ErrorCode code) {
+    const auto c = static_cast<uint32_t>(code);
+    return {
+        static_cast<uint8_t>(last_stream_id >> 24),
+        static_cast<uint8_t>(last_stream_id >> 16),
+        static_cast<uint8_t>(last_stream_id >> 8),
+        static_cast<uint8_t>(last_stream_id),
+        static_cast<uint8_t>(c >> 24),
+        static_cast<uint8_t>(c >> 16),
+        static_cast<uint8_t>(c >> 8),
+        static_cast<uint8_t>(c)
+    };
+}
+
+/// An io whose observer of a GOAWAY event -- the one the server sends itself, or the client's -- acts on the protocol
+/// (@ref act), as an application's handler of the event may: it runs while the connection ends.
+struct ActingOnGoawayIO : Http2FakeIO {
+    std::function<void(const qb::protocol::http2::Http2GoAwayEvent &)> act;
+    using Http2FakeIO::on;
+    void
+    on(const qb::protocol::http2::Http2GoAwayEvent &event) {
+        Http2FakeIO::on(event);
+        if (act) {
+            act(event);
+        }
+    }
+};
+using ActingProtocol = qb::protocol::http2::ServerHttp2Protocol<ActingOnGoawayIO>;
+
+/// A complete GET on @p sid, its request dispatched, its response not sent.
+template <typename Protocol, typename IO>
+void
+request_awaiting_its_response(Protocol &protocol, IO &io, uint32_t sid) {
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid,
+               encode_hpack_headers(default_request_headers("/awaiting")));
+    drive(protocol, io);
+}
+
+/// A HEADERS on stream 2, an even stream a client never opens: the server ends the connection (GOAWAY(PROTOCOL_ERROR)),
+/// a protocol error of its own -- not the frame layer's, which ends it before it writes the GOAWAY.
+template <typename Protocol, typename IO>
+void
+headers_on_an_even_stream(Protocol &protocol, IO &io) {
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 2,
+               encode_hpack_headers(default_request_headers("/even")));
+    drive(protocol, io);
+}
+
+[[nodiscard]] qb::http::Response
+late_response() {
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = "too late";
+    return response;
+}
+
+/// Nothing after the GOAWAY that ends the connection in @p output, and that GOAWAY there.
+void
+expect_nothing_after_the_closing_goaway(const qb::allocator::pipe<char> &output) {
+    const auto [closed, after] = frames_after_the_closing_goaway(output);
+    ASSERT_TRUE(closed) << "the server did not end the connection with a GOAWAY";
+    EXPECT_TRUE(after.empty()) << after.size() << " frame(s) written after the GOAWAY, the first of type "
+                               << (after.empty() ? 0 : static_cast<int>(after.front().type));
+}
+
+} // namespace qb1270_part6b_test
+
+// The same GOAWAY(NO_ERROR) again and again while an upload is in flight: each was dispatched -- logged at WARN by the
+// protocol and again by the stock session -- moved nothing, drew no reply and took no token, so a client could send it
+// for ever. The first is dispatched; each after it takes a token of the bucket of the frames that make no progress, and
+// one that changes nothing is not dispatched again: the connection ends at the repeat past the burst, with
+// GOAWAY(ENHANCE_YOUR_CALM).
+TEST(HTTP2ServerProtocol, ARepeatedGoawayIsDispatchedOnceAndCutWhenItNeverEnds) {
+    using namespace qb1270_part6b_test;
     an_upload_in_flight s;
-    for (std::size_t i = 0; i < burst; ++i) {
-        push_frame(s.io, FrameType::DATA, 0, 1, {});
+    const auto          goaway = goaway_payload(0, ErrorCode::NO_ERROR);
+    std::size_t         cut    = 0;
+    for (std::size_t i = 1; i <= 3 * burst && cut == 0; ++i) {
+        push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway);
+        drive(s.protocol, s.io);
+        if (!s.protocol.ok()) {
+            cut = i;
+        }
     }
+    EXPECT_EQ(cut, burst + 2) << "the first GOAWAY, the burst of repeats, then the repeat past it";
+    EXPECT_EQ(s.io.goaway_count, 2) << "the client's GOAWAY dispatched once, then the server's own";
+    EXPECT_EQ(s.io.last_goaway_sent, std::optional<bool>{true});
+    EXPECT_EQ(s.io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    const auto own = last_goaway(s.io.output);
+    ASSERT_TRUE(own.has_value());
+    EXPECT_EQ(own->first, static_cast<uint32_t>(ErrorCode::ENHANCE_YOUR_CALM));
+    EXPECT_EQ(own->second, "Excessive frames making no progress (flood)");
+}
+
+// A client MUST NOT raise the last-stream-id of its GOAWAY (RFC 9113 §6.8): one that does is a connection error of type
+// PROTOCOL_ERROR, as nghttp2 makes it. It was taken as a new GOAWAY.
+TEST(HTTP2ServerProtocol, AGoawayThatRaisesItsLastStreamIdIsAConnectionError) {
+    using namespace qb1270_part6b_test;
+    an_upload_in_flight s;
+    push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0, ErrorCode::NO_ERROR));
     drive(s.protocol, s.io);
-    ASSERT_EQ(s.io.goaway_count, 0) << "a frame within the burst was refused";
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100)); // a second boundary at least: NO_PROGRESS_FRAME_RATE regained
-    for (std::size_t i = 0; i < rate; ++i) {
-        push_frame(s.io, FrameType::DATA, 0, 1, {});
+    ASSERT_TRUE(s.protocol.ok());
+    push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(2, ErrorCode::NO_ERROR));
+    drive(s.protocol, s.io);
+    EXPECT_FALSE(s.protocol.ok());
+    EXPECT_EQ(s.io.goaway_count, 2) << "the client's first GOAWAY, then the server's own";
+    EXPECT_EQ(s.io.last_goaway_sent, std::optional<bool>{true});
+    const auto own = last_goaway(s.io.output);
+    ASSERT_TRUE(own.has_value());
+    EXPECT_EQ(own->first, static_cast<uint32_t>(ErrorCode::PROTOCOL_ERROR));
+    EXPECT_EQ(own->second, "GOAWAY last-stream-id increased");
+}
+
+// What a conforming client sends is never cut and each is dispatched: a graceful notice (2^31-1), the last-stream-id it
+// settles on, then an error that ends the connection -- each changes something.
+TEST(HTTP2ServerProtocol, AGoawayThatLowersItsLastStreamIdOrEndsTheConnectionIsDispatched) {
+    using namespace qb1270_part6b_test;
+    an_upload_in_flight s;
+    push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0x7FFFFFFFu, ErrorCode::NO_ERROR));
+    push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0, ErrorCode::NO_ERROR));
+    drive(s.protocol, s.io);
+    EXPECT_TRUE(s.protocol.ok());
+    EXPECT_EQ(s.io.goaway_count, 2);
+    push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0, ErrorCode::INTERNAL_ERROR));
+    drive(s.protocol, s.io);
+    EXPECT_FALSE(s.protocol.ok());
+    EXPECT_EQ(s.io.goaway_count, 3);
+    EXPECT_EQ(s.io.last_goaway_sent, std::optional<bool>{false}) << "the client's error, not a guard of the server";
+    EXPECT_EQ(s.io.last_goaway_error, ErrorCode::INTERNAL_ERROR);
+}
+
+// A client that lowers its last-stream-id each time changes something with each GOAWAY -- each is dispatched -- and is
+// still cut, every GOAWAY after the first taking a token: only the copies that changed nothing were. And the bound it may
+// not raise is the last one it sent: a GOAWAY above the one dispatched last, if below the first, is a connection error.
+TEST(HTTP2ServerProtocol, AGoawayLoweredEachTimeIsCutAndOneRaisedAboveTheLastIsRefused) {
+    using namespace qb1270_part6b_test;
+    {
+        SCOPED_TRACE("lowered by one each time");
+        an_upload_in_flight s;
+        std::size_t         cut = 0;
+        for (std::size_t i = 1; i <= 3 * burst && cut == 0; ++i) {
+            push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0x7FFFFFFFu - static_cast<uint32_t>(i), ErrorCode::NO_ERROR));
+            drive(s.protocol, s.io);
+            if (!s.protocol.ok()) {
+                cut = i;
+            }
+        }
+        EXPECT_EQ(cut, burst + 2) << "the first GOAWAY, the burst of lowered ones, then the one past it";
+        EXPECT_EQ(static_cast<std::size_t>(s.io.goaway_count), burst + 2) << "each lowered GOAWAY dispatched, then the server's own";
+        const auto own = last_goaway(s.io.output);
+        ASSERT_TRUE(own.has_value());
+        EXPECT_EQ(own->first, static_cast<uint32_t>(ErrorCode::ENHANCE_YOUR_CALM));
     }
-    drive(s.protocol, s.io);
-    EXPECT_EQ(s.io.goaway_count, 0) << "the tokens a second regains were not there";
-    expect_cut(s.io, flood_until_cut(s.io, s.protocol, [&] { push_frame(s.io, FrameType::DATA, 0, 1, {}); }, 3 * burst), 1);
+    {
+        SCOPED_TRACE("raised above the last one dispatched");
+        an_upload_in_flight s;
+        push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0x7FFFFFFFu, ErrorCode::NO_ERROR));
+        push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(0, ErrorCode::NO_ERROR));
+        drive(s.protocol, s.io);
+        ASSERT_TRUE(s.protocol.ok());
+        ASSERT_EQ(s.io.goaway_count, 2);
+        push_frame(s.io, FrameType::GOAWAY, 0, 0, goaway_payload(2, ErrorCode::NO_ERROR));
+        drive(s.protocol, s.io);
+        EXPECT_FALSE(s.protocol.ok());
+        const auto own = last_goaway(s.io.output);
+        ASSERT_TRUE(own.has_value());
+        EXPECT_EQ(own->first, static_cast<uint32_t>(ErrorCode::PROTOCOL_ERROR));
+        EXPECT_EQ(own->second, "GOAWAY last-stream-id increased");
+    }
+}
+
+// Nothing follows the GOAWAY that ends a connection (RFC 9113 §5.4.1). Requests read before it, their responses not
+// sent: the server ends the connection, then the application answers one, resets another, begins a streamed response
+// on a third, starts a graceful shutdown. Each is refused and writes nothing.
+TEST(HTTP2ServerProtocol, NothingFollowsTheGoawayThatEndsTheConnection) {
+    using namespace qb1270_part6b_test;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    request_awaiting_its_response(protocol, io, 1);
+    request_awaiting_its_response(protocol, io, 3);
+    request_awaiting_its_response(protocol, io, 5);
+    ASSERT_EQ(io.request_count, 3);
+    headers_on_an_even_stream(protocol, io);
+    ASSERT_FALSE(protocol.ok());
+    EXPECT_FALSE(protocol.send_response(1, late_response()));
+    const int stream_errors = io.stream_error_count;
+    protocol.send_rst_stream(3, ErrorCode::CANCEL, "the application cancels");
+    EXPECT_EQ(io.stream_error_count, stream_errors) << "a reset never written was reported to the application as sent";
+    EXPECT_FALSE(protocol.begin_streamed_response(5, late_response(), false));
+    EXPECT_FALSE(protocol.begin_graceful_shutdown());
+    expect_nothing_after_the_closing_goaway(io.output);
+}
+
+// The same while the connection ends: the observer of the GOAWAY event answers a request -- of the server's own GOAWAY,
+// and of a client's GOAWAY of an error. Each ran while the protocol still said ok(), and its response was written.
+TEST(HTTP2ServerProtocol, NothingFollowsTheGoawayThatEndsTheConnectionFromItsObserver) {
+    using namespace qb1270_part6b_test;
+    {
+        SCOPED_TRACE("the server's own GOAWAY");
+        ActingOnGoawayIO io;
+        ActingProtocol   protocol(io);
+        do_handshake(protocol, io);
+        request_awaiting_its_response(protocol, io, 1);
+        ASSERT_EQ(io.request_count, 1);
+        bool answered = false;
+        io.act        = [&](const qb::protocol::http2::Http2GoAwayEvent &event) {
+            if (event.sent) {
+                answered = protocol.send_response(1, late_response());
+            }
+        };
+        headers_on_an_even_stream(protocol, io);
+        ASSERT_FALSE(protocol.ok());
+        EXPECT_FALSE(answered) << "the observer's response was taken";
+        expect_nothing_after_the_closing_goaway(io.output);
+    }
+    {
+        SCOPED_TRACE("the client's GOAWAY of an error");
+        ActingOnGoawayIO io;
+        ActingProtocol   protocol(io);
+        do_handshake(protocol, io);
+        request_awaiting_its_response(protocol, io, 1);
+        ASSERT_EQ(io.request_count, 1);
+        bool answered = false;
+        io.act        = [&](const qb::protocol::http2::Http2GoAwayEvent &event) {
+            if (!event.sent) {
+                answered = protocol.send_response(1, late_response());
+            }
+        };
+        const std::size_t before = io.output.size();
+        push_frame(io, FrameType::GOAWAY, 0, 0, goaway_payload(0, ErrorCode::INTERNAL_ERROR));
+        drive(protocol, io);
+        ASSERT_FALSE(protocol.ok());
+        EXPECT_FALSE(answered) << "the observer's response was taken";
+        EXPECT_EQ(io.output.size(), before) << "written after the client's GOAWAY ended the connection";
+    }
 }
