@@ -728,6 +728,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `chunked ,` each answered `400`, nothing dispatched, the parser's error llhttp's with no status of its own; `,chunked`
   read as chunked).
 
+- **An HTTP/1.1 client closes at once the connection of a response a bound cut (Huly QB-1248 with QB-1270).** A
+  response refused for the client's body limit, or cut by qb-io's read cap, comes from a server that is still sending
+  it. Since qb-io closes a connection this side ends after its peer, that connection was handed to the thread's loop,
+  to be read and dropped for `linger()` -- up to 16 MiB of a body the client had just refused -- and a thread that
+  ran no loop pass after its request (`qb::http::run_sync()` returns, then other work) left the server blocked in
+  its write for as long as the thread lived. The persistent client's connection and the one-shot verbs' session now
+  set a linger of zero when a bound cut the response (`cut_by()`), which qb-io reads as "close at once": the server's
+  next write fails. A response failed for any other reason still closes after its peer. Witness:
+  `qbm-http-test-system-http1-client` (`ABodyPastTheClientsLimitFailsWithAnErrorThatNamesIt`: nothing left on the
+  loop after each refusal -- a declared, a chunked and a 100 MiB body, and the one-shot verb -- and one closing socket
+  after a response failed for a length that is no number, the control). On the composed train the case hung before
+  the fix, its server thread in a write nobody read; its server now writes without blocking, so a regression fails in
+  a quarter of a second. Mutants, the unmutated tree green before and after: the persistent client keeping its
+  linger (three expectations fail), the one-shot session keeping its own (one) -- 2 planted, 2 caught.
+
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,

@@ -35,6 +35,7 @@
 // `socket_type` alias and the `QB_CLOSESOCKET()` shim, so the harness builds on POSIX
 // and Windows alike. Winsock is initialised by qb-io's global ws2_32 guard, which
 // is linked in here because the test drives a qb HTTP server (qb-io sockets).
+#include <qb/io/async/lingering_close.h> // detail::closing_sockets(): what this thread's loop is closing after a peer
 #include <qb/io/system/sys__socket.h>
 
 #include "../../shared/loopback_server.h"
@@ -3162,12 +3163,22 @@ private:
                 return;
             request.append(buffer, static_cast<std::size_t>(n));
         }
-        const auto put = [&peer](std::string_view bytes) {
+        // Written without blocking: against a client that has stopped reading and left the connection open, a blocking
+        // write never returns and this thread is never joined -- the case would hang instead of failing.
+        if (peer.set_nonblocking(true) != 0)
+            return;
+        const auto put = [&](std::string_view bytes) {
             while (!bytes.empty()) {
                 const int n = peer.write(bytes.data(), bytes.size());
-                if (n <= 0)
-                    return false; // the client stopped reading: a body past its limit
-                bytes.remove_prefix(static_cast<std::size_t>(n));
+                if (n > 0) {
+                    bytes.remove_prefix(static_cast<std::size_t>(n));
+                    continue;
+                }
+                if (n < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno()))
+                    return false; // the client closed: a body past its limit
+                if (_stop || std::chrono::steady_clock::now() >= deadline)
+                    return false; // nobody reads any more, and the case is over
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             return true;
         };
@@ -3245,18 +3256,35 @@ TEST(Http1ClientTest, ABodyOfExactlyTheDefaultLimitIsDelivered) {
 
 TEST(Http1ClientTest, ABodyPastTheClientsLimitFailsWithAnErrorThatNamesIt) {
     using namespace http1_body_limit_test;
+    // A response the limit cut comes from a server that is still sending it. The client closes that connection AT ONCE: it
+    // does not hand the descriptor to its loop, to be read and dropped for linger() (Huly QB-1270) -- this thread runs no
+    // loop pass once a fetch has returned, so a connection handed over would hold its server in its write.
+    const auto closing = [] {
+        return qb::io::async::detail::closing_sockets();
+    };
+    (void) qb::io::async::detail::release_closing_sockets(); // what the cases before left on this thread's loop
     for (const auto how : {framing::length, framing::chunked, framing::close}) {
         const auto source   = peer(how, 2048);
         const auto response = fetch(*source, 1024);
         EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY) << static_cast<int>(how);
         EXPECT_NE(response.body().as<std::string>().find("limit of 1024 bytes"), std::string::npos)
             << static_cast<int>(how) << ": " << response.body().as<std::string>();
+        EXPECT_EQ(closing(), 0u) << static_cast<int>(how) << ": the connection of a refused body was handed to the loop, not closed at once";
     }
     {
         const auto source   = peer(framing::length, 1024); // the limit itself is accepted
         const auto response = fetch(*source, 1024);
         EXPECT_EQ(response.status(), qb::http::status::OK);
         EXPECT_EQ(response.body().size(), 1024u);
+    }
+    { // The control: a response the client fails for another reason -- a length that is no number -- ends a connection
+        // whose server is not sending anything refused: that one is closed after its peer, by the loop.
+        BodyPeer   malformed("HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n", 0, false, false);
+        const auto response = fetch(malformed, 1024);
+        EXPECT_NE(response.status(), qb::http::status::OK);
+        EXPECT_EQ(response.body().as<std::string>().find("limit of"), std::string::npos) << "no bound cut this response";
+        EXPECT_EQ(closing(), 1u) << "a failed response no longer leaves its connection to the loop: the zeros above prove nothing";
+        (void) qb::io::async::detail::release_closing_sockets();
     }
     { // the default, unchanged: one byte past 100 MiB fails, now naming the limit
         const auto source   = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
@@ -3265,12 +3293,14 @@ TEST(Http1ClientTest, ABodyPastTheClientsLimitFailsWithAnErrorThatNamesIt) {
         EXPECT_NE(response.body().as<std::string>().find("limit of " + std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE) + " bytes"),
                   std::string::npos)
             << response.body().as<std::string>();
+        EXPECT_EQ(closing(), 0u) << "a server sending 100 MiB to a client that refused them was left to the loop";
     }
     const auto source = peer(framing::length, qb::http::protocol_limits::MAX_BODY_SIZE + 1);
     auto       reply  = qb::http::run_sync(qb::http::GET(request(qb::http::method::GET, source->url()), std::chrono::seconds(30)));
     EXPECT_EQ(reply.response.status(), qb::http::status::BAD_GATEWAY);
     EXPECT_NE(reply.response.body().as<std::string>().find("limit of"), std::string::npos)
         << "the one-shot verb's error: " << reply.response.body().as<std::string>();
+    EXPECT_EQ(closing(), 0u) << "the one-shot verb left the connection of a refused body to the loop";
     drain_client_callbacks();
 }
 

@@ -1491,6 +1491,11 @@ public:
         }
         if (!_answered) {
             LOG_HTTP_WARN("HTTP/1.1 client disconnected before a complete response. Reason: " << event.reason);
+            // A response a bound cut -- the body limit, the read cap -- comes from a server that is still sending what this
+            // client refused: the peer to reset, closed at once (a linger of zero, read by the dispose() this handler runs
+            // under), not handed to the loop to be read for linger() (Huly QB-1270).
+            if (_http_protocol && !_http_protocol->cut_by(event.reason).empty())
+                this->set_linger(qb::duration::zero());
             answer(_http_protocol ? _http_protocol->failed_response(event.reason) : Response{qb::http::status::BAD_GATEWAY});
         } else {
             LOG_HTTP_DEBUG("HTTP/1.1 client disconnected. Reason: " << event.reason);

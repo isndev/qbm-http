@@ -188,8 +188,12 @@ public:
         if (_http_protocol && event.reason == 0) {
             _http_protocol->flush_eof();
         }
-        if (auto cut = _http_protocol ? _http_protocol->cut_by(event.reason) : std::string{}; !cut.empty())
+        if (auto cut = _http_protocol ? _http_protocol->cut_by(event.reason) : std::string{}; !cut.empty()) {
+            // The server is still sending what this client refused: the peer to reset. Closed at once -- a linger of zero,
+            // read by the dispose() this handler runs under -- not handed to the loop to be read for linger() (Huly QB-1270).
+            this->set_linger(qb::duration::zero());
             _owner.fail_active_request(cut); // the bound that cut the response, named: the body limit, the read cap (QB-1248)
+        }
         _owner.handle_disconnected(event.reason);
     }
 
