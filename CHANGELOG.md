@@ -265,6 +265,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the way past it; the HTTP/3 client's `set_max_body_size` takes 0 for none too, now written. Witnesses in the entry
   "The HTTP/1.1 clients read a body of exactly their limit" below.
 
+- **`qb::http2::Client::set_max_body_size(std::size_t)` and `max_body_size()` (Huly QB-1248).** The persistent HTTP/2
+  client takes the largest response body it accepts, as the HTTP/1.1 client does: `qb::http::protocol_limits::MAX_BODY_SIZE`
+  (100 MiB) by default, 0 for none. A response that declares a `content-length` past it is refused at its header block,
+  one that delivers more at the `DATA` frame that passes it: its stream is reset (`ENHANCE_YOUR_CALM`) and its request
+  fails with a 502 whose error names the limit -- "HTTP/2 response body exceeds the client's limit of N bytes", where it
+  read "exceeds configured limit" with no number. It had no setting: the constant was every response's bound. Only the
+  stream ends, the connection serving its other requests on, so the rule of the HTTP/1.1 client -- a connection a bound
+  cut is closed at once -- has no counterpart here. Witnesses: `qbm-http-test-system-http2-client` (past a limit of
+  1024, a declared and a streamed body each failing with the limit named while the other requests of the connection are
+  answered, 1024 itself delivered; the default read back; 0 delivering what 1024 refused),
+  `qbm-http-test-unit-http2-client-protocol` (the limit read from the io: past it, declared or delivered, the stream
+  reset `ENHANCE_YOUR_CALM` with the limit named; exactly it delivered; a declaration past the default accepted under 0;
+  the constant for an io without the setting) and `qbm-http-test-system-http2-client-huge-body` (under a limit of none,
+  a body past the default delivered, nothing reset; past the default, the error names 104857600 bytes).
+
 - **An HTTP/2 IO handler may keep the clock the bucket of the frames that make no progress reads (Huly QB-1270).**
   `qb::protocol::http2::keeps_no_progress_clock`: a handler with `std::int64_t no_progress_clock_seconds() const` is
   read by `Http2Protocol::refuse_no_progress_frame()` instead of `std::chrono::steady_clock`, a clock that reads earlier
@@ -690,6 +705,34 @@ All notable changes to the qbm-http module are documented here. The format is ba
   section dribbled from its first byte ends a timeout after it, a stalled body a timeout after its last read, an idle
   connection a timeout after its last response) and `qbm-http-test-system-http2-client` (the same body over the ALPN
   http/1.1 fallback is served).
+
+- **The HTTP/2 server's inactivity timeout restarts at a request's first `HEADERS` frame and at each `DATA` frame of
+  its body (Huly QB-1248).** It restarted on the server's writes and at a request's dispatch: a request had to arrive
+  whole within the timeout -- 60 s by default -- of the connection's last write. Measured: a body sent one `DATA` byte
+  every 5 s was cut at 60.0 s with no answer, and a request begun late had what was left of the timeout. And the
+  sweep's bound on a stream whose request is not complete, `STREAM_INCOMPLETE_TIMEOUT` (10 s), was an age, counted from
+  the stream's opening whatever happened on it, as readme/17 said: a sweep 10 s into an upload still arriving reset it
+  (`CANCEL`). Both now move on what the client sends of the request, and on nothing else. A header block has the whole
+  timeout from its first `HEADERS` frame -- the stream is created there, and its clock starts there -- and its
+  `CONTINUATION` frames restart nothing, so a header block dribbled is still cut. A `DATA` frame that brings octets of
+  the body restarts the timeout and moves the stream's clock: a body sent slowly but steadily is served, and one whose
+  octets stop arriving is cut a timeout after its last frame, its stream reset by a sweep once the incomplete bound
+  has passed. An empty `DATA` restarts nothing and moves nothing, by design: the frame layer counts it among the frames
+  that make no progress, and a peer that could restart the timeout with it would hold a connection, and an incomplete
+  request, for free -- no octet ever counted against the body limit. A stream `WINDOW_UPDATE` moves the stream's clock
+  once the request is dispatched -- the client reads the response, as before -- and not before, by design: until then
+  it acknowledges nothing of the request, and a peer must not keep an incomplete request alive by acknowledging the
+  server's window. The protocol tells the session through a hook found by a requires-expression, as the HTTP/1.1
+  protocol does: `http2_request_progress()`. Witnesses: `qbm-http-test-system-http2-client` (at a 1 s session timeout:
+  a body sent over 3 s is served; a request begun 0.75 s after a response, its header block sent over 0.5 s, is served;
+  a body that stalls ends a timeout after its last `DATA`, cut on the base before it stalled; empty `DATA` frames a
+  quarter of the timeout apart end the connection a timeout after its `HEADERS`; the controls: a header block dribbled
+  in `CONTINUATION` frames ends a timeout after its first `HEADERS`, an idle connection a timeout after its last
+  response) and `qbm-http-test-unit-http2-server-protocol` (the hook called at a request's first `HEADERS` and at each
+  `DATA` that brings octets, never at a `CONTINUATION`, an empty `DATA`, the frame that completes the request or a
+  `WINDOW_UPDATE`; the sweep sparing an incomplete request whose body arrives past the bound, resetting it once its
+  octets stop -- an empty `DATA` saves nothing -- and resetting one whose only frames since its last `DATA` are stream
+  `WINDOW_UPDATE`s).
 
 - **The HTTP/1.1 clients read a body of exactly their limit, and name the limit when a body passes it (Huly
   QB-1248).** Neither the persistent client nor the one-shot verbs read a response whose body is exactly the 100 MiB

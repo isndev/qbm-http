@@ -892,10 +892,14 @@ public:
         return this->server().router();
     }
 
-    /// Protocol hook: a read brought part of an HTTP/1.1 request of the ALPN fallback -- its first byte, a piece of its body:
-    /// the inactivity timeout restarts, as an HTTP/1.1 session's does (Huly QB-1248). Public for the protocol's `requires` test.
+    /// Protocol hooks (Huly QB-1248): a read brought part of an HTTP/1.1 request of the ALPN fallback, or a frame of an HTTP/2
+    /// request not yet complete (its first HEADERS, a DATA with octets): the timeout restarts. Public for the protocols' `requires`.
     void
     http1_request_progress() noexcept {
+        this->updateTimeout();
+    }
+    void
+    http2_request_progress() noexcept {
         this->updateTimeout();
     }
 };
@@ -913,28 +917,24 @@ private:
 public:
     io_handler() {}
 
-    /**
-     * @brief Get router reference
-     * @return Router reference
-     */
+    /// The router.
     Router &
     router() {
         return _router;
     }
 
     /**
-     * @brief Set the limits this server applies to every request it reads, over both protocols it speaks
-     *        (Huly QB-94); 0 in any of them means no limit of that kind.
+     * @brief Set the limits this server applies to every request it reads, over both protocols it speaks (Huly QB-94); 0 in any
+     *        of them means no limit of that kind.
      *
-     * Same call on the HTTP/1.1, HTTP/3 and dual-stack servers. Read live: a request that begins after the
-     * call is judged under the new limits. An HTTP/2 request over a limit is answered on its stream -- `414
-     * URI Too Long` for its `:path`, `431 Request Header Fields Too Large` for a field name, a field value or
-     * the number of fields of its header or trailer section, `413 Content Too Large` for a declared
-     * `content-length` (before a byte of the body is read) or for DATA that passes the body limit -- then
-     * RST_STREAM(NO_ERROR) asks the client to stop sending the rest (RFC 9113 §8.1); the connection and its
-     * other streams go on. Until 3.3 the body was reset with ENHANCE_YOUR_CALM against the HTTP/1.1 constant
-     * and the fields had no limit but the 1 MiB HPACK header list, which stays. The HTTP/1.1 requests of this
-     * server's ALPN fallback get the HTTP/1.1 answers. The defaults are `qb::http::protocol_limits`' constants.
+     * Same call on the HTTP/1.1, HTTP/3 and dual-stack servers. Read live: a request that begins after the call is judged under
+     * the new limits. An HTTP/2 request over a limit is answered on its stream -- `414 URI Too Long` for its `:path`, `431
+     * Request Header Fields Too Large` for a field name, a field value or the number of fields of its header or trailer section,
+     * `413 Content Too Large` for a declared `content-length` (before a byte of the body is read) or for DATA that passes the
+     * body limit -- then RST_STREAM(NO_ERROR) asks the client to stop sending the rest (RFC 9113 §8.1); the connection and its
+     * other streams go on. Until 3.3 the body was reset with ENHANCE_YOUR_CALM against the HTTP/1.1 constant and the fields had
+     * no limit but the 1 MiB HPACK header list, which stays. The HTTP/1.1 requests of this server's ALPN fallback get the
+     * HTTP/1.1 answers. The defaults are `qb::http::protocol_limits`' constants.
      * @param limits The limits.
      */
     void

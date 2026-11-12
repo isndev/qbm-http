@@ -477,8 +477,8 @@ public:
             const auto body_size = stream.assembled_response.body().size();
             // A body the stream is reset for: refuse_data() -- its octets count, and the WINDOW_UPDATE they make due
             // leaves with the reset. send_rst_stream() already closes/erases the stream context.
-            if (body_size > qb::http::protocol_limits::MAX_BODY_SIZE) {
-                refuse_data(stream, data_event.header.flags, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response body exceeds configured limit");
+            if (body_size > response_body_limit()) {
+                refuse_data(stream, data_event.header.flags, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error().c_str());
                 return;
             }
             if (stream.expected_content_length && body_size > *stream.expected_content_length) {
@@ -2733,8 +2733,8 @@ private:
                         send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers");
                         return false;
                     }
-                    if (stream.method != "HEAD" && *parsed > qb::http::protocol_limits::MAX_BODY_SIZE) {
-                        send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, "HTTP/2 response content-length exceeds configured limit");
+                    if (stream.method != "HEAD" && *parsed > response_body_limit()) {
+                        send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error());
                         return false;
                     }
                     stream.expected_content_length = *parsed;
@@ -3010,6 +3010,21 @@ private:
         return false;
     }
 
+    /// The largest response body the client accepts (Huly QB-1248): its `max_body_size()`, 0 none; the constant,
+    /// `qb::http::protocol_limits::MAX_BODY_SIZE`, for an io without the setting (a test's).
+    [[nodiscard]] std::size_t
+    response_body_limit() const noexcept {
+        if constexpr (requires(const IO_Handler &io) { io.max_body_size(); })
+            return this->_io.max_body_size() ? this->_io.max_body_size() : std::numeric_limits<std::size_t>::max();
+        else
+            return qb::http::protocol_limits::MAX_BODY_SIZE;
+    }
+
+    /// The error a response body past it gets -- its stream's reset, the request's failure: the limit, named.
+    [[nodiscard]] std::string
+    body_limit_error() const {
+        return "HTTP/2 response body exceeds the client's limit of " + std::to_string(response_body_limit()) + " bytes";
+    }
 }; // class ClientHttp2Protocol
 
 } // namespace qb::protocol::http2

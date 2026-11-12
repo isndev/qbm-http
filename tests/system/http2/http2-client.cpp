@@ -26,13 +26,12 @@
  *     (fails loud on timeout) instead of ad-hoc deadline/`sleep_for` spins.
  *   - `std::cout`/`std::cerr` debug noise and the file-local `main()` are stripped.
  *
- * New coverage added per spec: GOAWAY-adjacent graceful drain on disconnect,
- * the previously-dead `/api/large` route, and a bad-ALPN negative case (server
- * offers only `http/1.1`, so the `h2` client connect must fail observably).
- * The automatic reconnection (Huly QB-103) has its own section at the end: the
- * backoff run through `RetryPolicy`, its cap, its end on a connection that
- * comes up, a disconnect while connecting, and the retry pattern -- a request
- * pushed back from a failure callback -- queuing behind the scheduled attempt.
+ * New coverage added per spec: GOAWAY-adjacent graceful drain on disconnect, the previously-dead `/api/large` route,
+ * and a bad-ALPN negative case (server offers only `http/1.1`, so the `h2` client connect must fail observably). The
+ * automatic reconnection (Huly QB-103) has its own section: the backoff run through `RetryPolicy`, its cap, its end on a
+ * connection that comes up, a disconnect while connecting, and the retry pattern -- a request pushed back from a failure
+ * callback -- queuing behind the scheduled attempt. So do the server's inactivity timeout, driven by the raw client of
+ * `shared/http2_raw_client.h`, and the client's body limit (Huly QB-1248).
  *
  * REQUIRES: ssl + live. This TU stays inside the `if(QB_HAS_SSL)` block.
  *
@@ -73,6 +72,7 @@
 #include <qb/io/tcp/ssl/listener.h>
 
 #include "../../shared/http2_planned_peer.h"
+#include "../../shared/http2_raw_client.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
@@ -4045,3 +4045,264 @@ TEST_F(Http2ClientCrossingTest, AServersGoawaysAreLoggedOnceByTheClient) {
 #endif // QB_WITH_LOGGING
 
 } // namespace http2_client_crossing_test
+
+// ===========================================================================
+// The HTTP/2 server's inactivity timeout restarts at what the client sends of a request (Huly QB-1248): a request's first
+// HEADERS -- its header block has the whole timeout from there, its CONTINUATION frames restart nothing -- and each DATA
+// of a request not yet complete. It restarted on the server's writes and at a request's dispatch only: a request had to
+// arrive whole within the timeout of the connection's last write. The server is the fallback's above, its session's
+// timeout 1 s; the client the raw one of shared/http2_raw_client.h. Every wait is a read for the connection's end, so
+// nothing is written to a connection that ended; each end a control measures falls within 0.8 to 1.4 timeouts.
+// ===========================================================================
+namespace http2_native_timeout_test {
+using http2_fallback_timeout_test::kTimeout;
+using http2_fallback_timeout_test::Server;
+using Raw   = qb::http::test::Http2RawClient;
+using Clock = std::chrono::steady_clock;
+
+[[nodiscard]] std::vector<uint8_t>
+slice(std::vector<uint8_t> const &block, std::size_t from, std::size_t to) {
+    return {block.begin() + static_cast<std::ptrdiff_t>(from), block.begin() + static_cast<std::ptrdiff_t>(to)};
+}
+
+class Http2NativeTimeout : public ::testing::Test {
+protected:
+    std::unique_ptr<qb::http::test::ServerThread<Server>> thread;
+    Raw                                                   raw;
+
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread                 = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key](Server &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        ASSERT_TRUE(raw.connect(thread->port()));
+        ASSERT_TRUE(raw.read_until([this] { return raw.settings_acked; }, std::chrono::seconds(3)));
+    }
+
+    /// Reads what comes for at most @p window; true once the connection ended (a GOAWAY, or its close).
+    bool
+    ended_within(std::chrono::milliseconds window) {
+        return raw.read_until([this] { return raw.eof || raw.goaway_seen; }, window);
+    }
+
+    /// Reads until stream @p id is answered whole or reset, or the connection ends; the answer's status, 0 for none.
+    int
+    answer(std::uint32_t id) {
+        raw.read_until([this, id] { return raw.streams[id].end_stream || raw.streams[id].reset; }, std::chrono::seconds(3));
+        return raw.streams[id].end_stream ? raw.streams[id].status() : 0;
+    }
+
+    /// The connection ends within 0.8 to 1.4 timeouts of @p since.
+    void
+    expect_ended_a_timeout_after(Clock::time_point since, const char *what) {
+        ASSERT_TRUE(ended_within(kTimeout * 3)) << what << ": the connection did not end";
+        const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since);
+        EXPECT_GE(after, kTimeout * 8 / 10) << what;
+        EXPECT_LE(after, kTimeout * 14 / 10) << what;
+    }
+};
+} // namespace http2_native_timeout_test
+
+using http2_native_timeout_test::Http2NativeTimeout;
+
+TEST_F(Http2NativeTimeout, ABodySentSlowlyButSteadilyIsServed) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int piece = 0; piece < 12; ++piece) { // a quarter of the timeout apart: three timeouts in all
+        ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after " << piece << " pieces";
+        ASSERT_TRUE(raw.frame(Raw::DATA, piece == 11 ? Raw::END_STREAM : 0, block.first, std::vector<uint8_t>(1, 'x')));
+    }
+    EXPECT_EQ(answer(block.first), 200);
+    EXPECT_EQ(raw.streams[block.first].body(), "12");
+}
+
+TEST_F(Http2NativeTimeout, ARequestBegunJustBeforeTheTimeoutHasItsWholeHeaderBlock) {
+    using namespace http2_native_timeout_test;
+    ASSERT_EQ(answer(raw.request("/up", "POST")), 200);
+    ASSERT_FALSE(ended_within(kTimeout * 3 / 4)) << "the connection ended before the second request began";
+    const auto block = raw.next_header_block("/up");
+    ASSERT_GE(block.second.size(), 3u);
+    const std::size_t third = block.second.size() / 3;
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, slice(block.second, 0, third))); // the timeout restarts
+    ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after the header block's first frame";
+    ASSERT_TRUE(raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, third, 2 * third)));
+    ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut before the header block's last frame";
+    ASSERT_TRUE(raw.frame(Raw::CONTINUATION, Raw::END_HEADERS, block.first, slice(block.second, 2 * third, block.second.size())));
+    EXPECT_EQ(answer(block.first), 200);
+}
+
+TEST_F(Http2NativeTimeout, AHeaderBlockSentSlowlyStillEndsATimeoutAfterItsFirstHeaders) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up", "POST", {{"x-padding", std::string(48, 'p')}});
+    ASSERT_GE(block.second.size(), 16u) << "too short a block to dribble past the timeout";
+    const auto first = Clock::now();
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, slice(block.second, 0, 1)));
+    std::size_t at = 1;
+    while (at + 1 < block.second.size() && !ended_within(kTimeout / 4) // one octet a quarter of the timeout apart, never the last
+           && raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
+        ++at;
+    expect_ended_a_timeout_after(first, "a header block dribbled in CONTINUATION frames");
+}
+
+TEST_F(Http2NativeTimeout, ABodyThatStallsEndsATimeoutAfterItsLastData) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int piece = 0; piece < 6; ++piece) { // a timeout and a half of steady pieces, then nothing
+        ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after " << piece << " pieces";
+        ASSERT_TRUE(raw.frame(Raw::DATA, 0, block.first, std::vector<uint8_t>(1, 'x')));
+    }
+    expect_ended_a_timeout_after(Clock::now(), "a body that stalled");
+}
+
+// An empty DATA restarts nothing, by design: the frame layer counts it among the frames that make no progress, and a peer
+// that could restart the timeout with it would hold a connection for free.
+TEST_F(Http2NativeTimeout, EmptyDataFramesDoNotHoldTheConnection) {
+    using namespace http2_native_timeout_test;
+    const auto block   = raw.next_header_block("/up");
+    const auto headers = Clock::now();
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int frame = 0; frame < 12 && !ended_within(kTimeout / 4) && raw.frame(Raw::DATA, 0, block.first, {}); ++frame) {
+    } // a quarter of the timeout apart, three timeouts at most, nothing in them
+    expect_ended_a_timeout_after(headers, "empty DATA frames");
+}
+
+TEST_F(Http2NativeTimeout, AnIdleConnectionStillEndsATimeoutAfterItsLastResponse) {
+    using namespace http2_native_timeout_test;
+    ASSERT_EQ(answer(raw.request("/up", "POST")), 200);
+    expect_ended_a_timeout_after(Clock::now(), "an idle connection");
+}
+
+// ===========================================================================
+// The HTTP/2 client's body limit (Huly QB-1248): `set_max_body_size()`, the constant by default, 0 for none. Past it the
+// response's stream is reset and its request fails with a 502 whose error names the limit -- a body that declares its
+// length at its header block, one that delivers more at the DATA that passes it -- while the connection serves the
+// other requests on. A body past the default under a limit of none is http2-client-huge-body.cpp's: 100 MiB on the wire.
+// ===========================================================================
+namespace http2_client_body_limit_test {
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server)
+        : session(server) {}
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Server() {
+        router().get("/declared-2048", [](auto ctx) { sized(ctx, 2048); });
+        router().get("/declared-1024", [](auto ctx) { sized(ctx, 1024); });
+        router().get("/small", [](auto ctx) { sized(ctx, 5); });
+        router().get("/streamed-2048", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream(); // no content-length: the body is what the DATA frames bring
+            static_cast<void>(stream->write(std::string(2048, 's')));
+            stream->end();
+        });
+        router().compile();
+    }
+
+private:
+    template <typename Ctx>
+    static void
+    sized(Ctx const &ctx, std::size_t size) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().set_header("content-length", std::to_string(size));
+        ctx->response().body() = std::string(size, 'd');
+        ctx->complete();
+    }
+};
+
+class Http2ClientBodyLimit : public ::testing::Test {
+protected:
+    std::unique_ptr<qb::http::test::ServerThread<Server>> thread;
+    std::shared_ptr<qb::http2::Client>                    client;
+
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        qb::io::async::init();
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread                 = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key](Server &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        client = qb::http2::make_client("https://localhost:" + std::to_string(thread->port()));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        client->disable_auto_reconnect();
+    }
+
+    void
+    TearDown() override {
+        if (client)
+            client->disconnect();
+    }
+
+    /// The responses to @p paths, requested at once on the client's one connection.
+    std::vector<std::optional<qb::http::Response>>
+    get_all(std::vector<const char *> const &paths) {
+        std::vector<std::optional<qb::http::Response>> responses(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            qb::http::Request request;
+            request.method() = qb::http::Method::GET;
+            request.uri()    = qb::io::uri(paths[i]);
+            EXPECT_TRUE(client->push_request(request, [&responses, i](qb::http::Response r) { responses[i] = std::move(r); }));
+        }
+        client->connect(nullptr);
+        EXPECT_TRUE(qb::http::test::ServerThread<Server>::pump_until([&responses] {
+            return std::all_of(responses.begin(), responses.end(), [](auto const &r) { return r.has_value(); });
+        })) << "not every request was answered";
+        return responses;
+    }
+};
+} // namespace http2_client_body_limit_test
+
+using http2_client_body_limit_test::Http2ClientBodyLimit;
+
+TEST_F(Http2ClientBodyLimit, ABodyPastTheClientsLimitFailsWithAnErrorThatNamesItAndTheConnectionServesOn) {
+    client->set_max_body_size(1024);
+    EXPECT_EQ(client->max_body_size(), 1024u);
+    const auto responses = get_all({"/declared-2048", "/streamed-2048", "/declared-1024", "/small"});
+    ASSERT_EQ(responses.size(), 4u);
+    for (std::size_t i = 0; i < 2; ++i) {
+        SCOPED_TRACE(i == 0 ? "declared past the limit" : "delivered past the limit");
+        ASSERT_TRUE(responses[i].has_value());
+        EXPECT_EQ(responses[i]->status(), qb::http::status::BAD_GATEWAY);
+        EXPECT_NE(responses[i]->body().as<std::string>().find("HTTP/2 response body exceeds the client's limit of 1024 bytes"),
+                  std::string::npos)
+            << responses[i]->body().as<std::string>();
+    }
+    ASSERT_TRUE(responses[2].has_value() && responses[3].has_value());
+    EXPECT_EQ(responses[2]->status(), qb::http::status::OK) << "a body of exactly the limit: " << responses[2]->body().as<std::string>();
+    EXPECT_EQ(responses[2]->body().size(), 1024u);
+    EXPECT_EQ(responses[3]->status(), qb::http::status::OK);
+    EXPECT_TRUE(client->is_connected()) << "a stream reset ended the connection";
+}
+
+TEST_F(Http2ClientBodyLimit, TheClientsBodyLimitIsTheConstantByDefaultAndNoneAtZero) {
+    EXPECT_EQ(client->max_body_size(), qb::http::protocol_limits::MAX_BODY_SIZE);
+    client->set_max_body_size(1024);
+    client->set_max_body_size(0);
+    EXPECT_EQ(client->max_body_size(), 0u);
+    const auto responses = get_all({"/declared-2048", "/streamed-2048"});
+    ASSERT_EQ(responses.size(), 2u);
+    for (auto const &response : responses) {
+        ASSERT_TRUE(response.has_value());
+        EXPECT_EQ(response->status(), qb::http::status::OK) << response->body().as<std::string>();
+        EXPECT_EQ(response->body().size(), 2048u);
+    }
+}

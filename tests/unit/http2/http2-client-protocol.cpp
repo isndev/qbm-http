@@ -6618,3 +6618,97 @@ TEST(HTTP2ClientProtocol, AServersGoawaysAreLoggedAtEachPowerOfTwoOfTheirCount) 
     EXPECT_EQ(occurrences(log, "the same as the last: ignored"), 1u) << "a GOAWAY ignored was logged past the powers of two";
 }
 #endif // QB_WITH_LOGGING
+
+// The largest response body the client accepts is its io's `max_body_size()` (Huly QB-1248): 0 for none, the constant for
+// an io without the setting. Past it the stream is reset ENHANCE_YOUR_CALM -- a body that declares its length at its
+// header block, one that delivers more at the DATA that passes it -- and the error names the limit; a body of exactly
+// the limit is delivered.
+namespace qb1248_client_body_limit_test {
+struct LimitedHttp2ClientFakeIO : Http2ClientFakeIO {
+    using Http2ClientFakeIO::on;
+    std::size_t limit = 1024;
+    std::string last_stream_error_message;
+
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return limit;
+    }
+    void
+    on(const h2::Http2StreamErrorEvent &event) {
+        Http2ClientFakeIO::on(event);
+        last_stream_error_message = event.message;
+    }
+};
+
+template <typename IO>
+void
+open_get(h2::ClientHttp2Protocol<IO> &protocol, uint64_t app_id) {
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/body");
+    ASSERT_TRUE(protocol.send_request(std::move(req), app_id));
+}
+} // namespace qb1248_client_body_limit_test
+
+TEST(HTTP2ClientProtocol, AResponseBodyPastTheClientsLimitResetsItsStreamAndNamesTheLimit) {
+    using namespace qb1248_client_body_limit_test;
+    {
+        SCOPED_TRACE("declared past the limit");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "1025"}}));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.response_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_NE(io.last_stream_error_message.find("the client's limit of 1024 bytes"), std::string::npos) << io.last_stream_error_message;
+    }
+    {
+        SCOPED_TRACE("delivered past the limit");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+        protocol.on(make_data_frame(1, 0, std::string(1024, 'x')));
+        EXPECT_EQ(io.stream_error_count, 0) << "a body of exactly the limit was refused";
+        protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "y"));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.response_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_NE(io.last_stream_error_message.find("the client's limit of 1024 bytes"), std::string::npos) << io.last_stream_error_message;
+    }
+    {
+        SCOPED_TRACE("exactly the limit, declared");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "1024"}}));
+        protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, std::string(1024, 'x')));
+        EXPECT_EQ(io.stream_error_count, 0);
+        ASSERT_EQ(io.response_count, 1);
+        EXPECT_EQ(io.last_body->size(), 1024u);
+    }
+    {
+        SCOPED_TRACE("a limit of none");
+        LimitedHttp2ClientFakeIO io;
+        io.limit = 0;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                       {{":status", "200"}, {"content-length", std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)}}));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.stream_error_count, 0) << "a body past the default was refused under a limit of none";
+    }
+    {
+        SCOPED_TRACE("an io without the setting: the constant");
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                       {{":status", "200"}, {"content-length", std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)}}));
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+    }
+}

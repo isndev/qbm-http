@@ -154,6 +154,23 @@ public:
         return write_all(out) ? stream_id : 0;
     }
 
+    /// A request's header block, encoded by this client's HPACK encoder, and the stream id it is for (1, 3, 5, ...), sent by
+    /// the test as it likes: a HEADERS without END_STREAM, a block cut into CONTINUATION frames (Huly QB-1248).
+    std::pair<std::uint32_t, std::vector<uint8_t>>
+    next_header_block(std::string_view path, std::string_view method = "POST",
+                      std::vector<std::pair<std::string, std::string>> const &extra = {}) {
+        const std::uint32_t stream_id = _next_stream_id;
+        _next_stream_id += 2;
+        std::vector<qb::protocol::hpack::HeaderField> fields = {
+            {":method", std::string(method)}, {":scheme", "https"}, {":authority", "localhost"}, {":path", std::string(path)}
+        };
+        for (auto const &[name, value] : extra)
+            fields.emplace_back(name, value);
+        std::vector<uint8_t> block;
+        static_cast<void>(_encoder.encode(fields, block));
+        return {stream_id, std::move(block)};
+    }
+
     /// What `solicit()` sends: each frame draws one reply of the server -- a PONG, a SETTINGS ACK, or the RST_STREAM
     /// that answers a frame on a closed stream.
     enum class soliciting { pings, settings, data_on_a_closed_stream };

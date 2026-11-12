@@ -536,7 +536,7 @@ public:
             return;
         }
 
-        // Send WINDOW_UPDATE for stream if necessary
+        request_progress(stream, data_event.payload.data_payload.size()); // its octets (QB-1248); then its WINDOW_UPDATE, if due
         stream.processed_bytes_for_window_update += data_payload_size;
         if (stream.processed_bytes_for_window_update >= stream.window_update_threshold
             && stream.window_update_threshold > 0) { // only if threshold > 0
@@ -609,12 +609,12 @@ public:
                 this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
-
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
             auto              emp_res = _server_streams.emplace(stream_id, std::move(new_stream));
             stream_ptr                = &emp_res.first->second;
             _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_highest_client_stream_id, stream_id);
+            request_progress(); // a request's first HEADERS: its header block has the whole timeout from here (Huly QB-1248)
         } else {
             stream_ptr = &it->second;
         }
@@ -1159,7 +1159,7 @@ public:
             }
 
             stream.peer_window_size += window_increment;
-            stream.progressed_since_idle_sweep = true; // the client is reading this stream
+            stream.progressed_since_idle_sweep = stream.progressed_since_idle_sweep || stream.request_dispatched; // reads its response
 
             if (stream.has_pending_data_to_send) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
@@ -1792,14 +1792,14 @@ public:
      * Removes streams that have been idle for too long or incomplete for too long.
      * This prevents resource exhaustion from malicious clients opening many streams.
      *
-     * A stream's idle time runs from its last real progress -- response HEADERS or DATA sent, a
-     * stream WINDOW_UPDATE received -- as seen by the sweep that observed it (the frame path only
-     * marks the stream, the sweep stamps the time): a response still progressing is not idle
-     * (Huly QB-531). A request not yet complete is also bounded by its age since the stream
-     * opened, whatever happened on it, so a slow upload cannot hold a stream indefinitely.
+     * A stream's idle time runs from its opening, then from its last real progress -- a DATA of its request received, response
+     * HEADERS or DATA sent, a stream WINDOW_UPDATE received once its request is dispatched -- as seen by the sweep that observed
+     * it (the frame path only marks the stream, the sweep stamps the time): a response still progressing is not idle (Huly
+     * QB-531). A request not yet complete is bounded by the same clock at max_incomplete, which only its own frames move: a
+     * stalled upload cannot hold a stream, a flowing one is never cut (Huly QB-1248).
      *
      * @param max_idle Maximum idle time before cleanup (default: 30s)
-     * @param max_incomplete Maximum age of a stream whose request is not complete (default: 10s)
+     * @param max_incomplete Maximum time without progress of a stream whose request is not complete (default: 10s)
      * @return Number of streams cleaned up
      */
     uint32_t
@@ -1834,7 +1834,7 @@ public:
 
             // Check for idle timeout
             bool should_cleanup = false;
-            if (is_incomplete && now - stream.created_at > max_incomplete) {
+            if (is_incomplete && idle_time > max_incomplete) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
                 should_cleanup = true;
             } else if (idle_time > max_idle) {
@@ -3598,6 +3598,23 @@ private:
     /// The resets admit_solicited_reset() let go since the client last opened a stream (_client_streams_opened, as it was).
     std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
 
+    /// A frame of a request not yet complete arrived -- its first HEADERS, a DATA (Huly QB-1248): the session's inactivity
+    /// timeout restarts, through its `http2_request_progress()`, found by a requires-expression as `http_request_limits()` is.
+    void
+    request_progress() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http2_request_progress(); })
+            this->_io.http2_request_progress();
+    }
+
+    /// A DATA of a request not yet complete that brought @p octets of its body: when it brought some, the stream progressed
+    /// too, which the sweep reads (cleanup_idle_streams()). An empty one makes no progress, as the frame layer counts it.
+    void
+    request_progress(Http2ServerStream &stream, std::size_t octets) noexcept {
+        if (octets == 0)
+            return;
+        stream.progressed_since_idle_sweep = true;
+        request_progress();
+    }
 }; // class ServerHttp2Protocol
 
 } // namespace qb::protocol::http2
