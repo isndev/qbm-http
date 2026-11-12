@@ -573,7 +573,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   128 KiB chunk under a 64 KiB limit refused with 413 whatever pieces it arrives in, one at the limit dispatched; a
   response's chunk past the default limit read; a chunked request of 16 MiB + 5 written in frames of 64 KiB a server
   dispatches at its default limit and at 1 MiB, a chunk of 64 KiB one frame) and `qbm-http-test-system-http1-client` (a qb client's
-  chunked upload and a qb server's chunked response of 16 MiB + 5, both ways at the default limits).
+  chunked upload and a qb server's chunked response of 16 MiB + 5, both ways at the default limits). A chunk of one
+  frame at most -- every chunk but a whole body's -- is written by the serializer's straight path, past a single
+  branch; the frames of a larger one go out of line, the same bytes (the pilot's read of `bd11b0ad`: the frame loop
+  cost +30 to +46 instructions a chunked message against `develop`).
 
 - **A request whose framing is refused is answered `400`, then the connection closed (Huly QB-1248).** A
   `Content-Length` llhttp refuses -- past 2^64-1 (its overflow), not a number, given twice, beside `Transfer-Encoding`

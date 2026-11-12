@@ -25,39 +25,39 @@
 
 namespace qb::allocator {
 /**
- * @brief Serialize an HTTP Chunk into a byte stream
+ * @brief Serialize an HTTP Chunk (RFC 9112 section 7.1): its size in hexadecimal, CRLF, its data, CRLF; the zero-length chunk, `0`
+ *        CRLF CRLF, ends the data. Past qb::http::chunk_frame_size (64 KiB) it leaves as frames of that size (put_frames()), which a qb
+ *        server whose chunk limit is at least that takes (Huly QB-1248); a chunk of one frame at most takes the straight path (F3).
  * @param c HTTP Chunk to serialize
- * @return Reference to this pipe
- *
- * Formats an HTTP chunk according to the chunked transfer encoding specification (RFC 9112 section 7.1):
- * - Chunk size in hexadecimal, then CRLF
- * - Chunk data
- * - CRLF
- *
- * A zero-length chunk (with size "0") represents the end of the chunked data stream.
- *
- * A chunk past 64 KiB -- a server's read -- is written as frames of 64 KiB, so a qb server whose chunk limit is at least that takes
- * every chunk qb writes, whatever its size: the serializers write a whole chunked body as one chunk (Huly QB-1248).
  */
+namespace { // a chunk past one frame: frames of chunk_frame_size, out of line, each written by the straight path
+QB_NOINLINE void
+put_frames(pipe<char> &out, const qb::http::Chunk &c) {
+    std::size_t at = 0;
+    for (; c.size() - at > qb::http::chunk_frame_size; at += qb::http::chunk_frame_size)
+        out << qb::http::Chunk{c.data() + at, qb::http::chunk_frame_size}; // ResponseStream::chunk_overhead() budgets these
+    out << qb::http::Chunk{c.data() + at, c.size() - at};                  // the last frame, and the CRLF that ends it
+}
+} // namespace
 template <>
 pipe<char> &
 pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
-    constexpr std::size_t frame   = qb::http::chunk_frame_size; // ResponseStream::chunk_overhead() budgets the same frames
-    constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
-    for (std::size_t at = 0; at < c.size(); at += frame) {
-        const std::size_t size = std::min(frame, c.size() - at);
-        char              hex[hex_len]{};
-        const auto [ptr, ec] = std::to_chars(hex, hex + hex_len, size, 16);
+    if (c.size() > qb::http::chunk_frame_size) [[unlikely]] {
+        put_frames(*this, c);
+        return *this;
+    }
+    if (c.size()) {
+        constexpr std::size_t hex_len = sizeof(std::size_t) << 1u;
+        char                  hex[hex_len]{};
+        const auto [ptr, ec] = std::to_chars(hex, hex + hex_len, c.size(), 16);
         if (ec != std::errc{}) {
             throw std::length_error("qb::http::Chunk serialization: chunk size conversion failed.");
         }
         *this << std::string_view(hex, static_cast<std::size_t>(ptr - hex)) << qb::http::endl;
-        put(c.data() + at, size);
-        if (at + size != c.size())
-            *this << qb::http::endl; // the CRLF that ends this frame: the next one follows
-    }
-    if (!c.size())
+        put(c.data(), c.size());
+    } else {
         *this << '0' << qb::http::endl;
+    }
     *this << qb::http::endl;
     return *this;
 }
