@@ -4634,6 +4634,7 @@ get(const char *path) {
 // and the 1001st reply is not written (re-derived from AnEmptyDataDoesNotForgiveTheControlReplyBudget, whose octet of
 // the body was what forgave).
 TEST(HTTP2ClientProtocol, AServerThatNeverReadsIsCutOnceAThousandRepliesAreQueued) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     namespace fake = qb::http::test;
     enum class between { nothing, an_empty_data, an_octet_of_the_body, a_response_completed };
     for (const auto what : fake::all_solicited_replies) {
@@ -4683,6 +4684,7 @@ TEST(HTTP2ClientProtocol, AServerThatNeverReadsIsCutOnceAThousandRepliesAreQueue
 // connection at the 1001st. Each PONG leaves before the next PING comes: nothing is queued, 5000 are answered and the
 // connection stays open. The same for SETTINGS.
 TEST(HTTP2ClientProtocol, AServerThatReadsMaySolicitRepliesForEverWithNoRequestInFlight) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     namespace fake = qb::http::test;
     for (const auto what : fake::all_solicited_replies) {
         SCOPED_TRACE(what == fake::solicited_reply::pong ? "PING" : "SETTINGS");
@@ -4707,6 +4709,7 @@ TEST(HTTP2ClientProtocol, AServerThatReadsMaySolicitRepliesForEverWithNoRequestI
 // GOAWAY. What the server sends between the rounds plays no part: with nothing between them the 1001st PING closed the
 // connection (re-derived from the progress model's witness, where the octet was what forgave; Huly QB-1270).
 TEST(HTTP2ClientProtocol, ABusyServerThatReadsIsNeverCut) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     namespace fake = qb::http::test;
     enum class between { nothing, an_octet_of_the_body, a_response_completed };
     for (const auto unit : {between::nothing, between::an_octet_of_the_body, between::a_response_completed}) {
@@ -4747,6 +4750,7 @@ TEST(HTTP2ClientProtocol, ABusyServerThatReadsIsNeverCut) {
 // and one is solicited, 3000 times -- always a thousand queued, never the 1001st, no GOAWAY, with no response progress
 // in 4000 PINGs. Then one more with nothing read: the 1001st, and the connection is closed.
 TEST(HTTP2ClientProtocol, ASlowReaderIsNotCutWhileFewerThanAThousandRepliesAreQueued) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     namespace fake = qb::http::test;
     for (const auto what : fake::all_solicited_replies) {
         SCOPED_TRACE(what == fake::solicited_reply::pong ? "PING" : "SETTINGS");
@@ -5129,6 +5133,7 @@ TEST(HTTP2ClientProtocol, ASlowServerIsNotCutWhileFewerThanAThousandResetsAreQue
 // thousand: 999 PONGs are admitted behind it. Once it has left, a thousand are. (It was in no count: a thousand PONGs
 // were admitted either way. A HEADERS on a stream the client reset draws no reset since, and is no case here.)
 TEST(HTTP2ClientProtocol, AClientResetIsForgivenWhenItsLastByteHasLeft) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_reset_test;
     for (const auto how : closes_that_draw_a_reset) {
         for (const bool behind_a_request : {false, true}) {
@@ -5629,6 +5634,7 @@ TEST(HTTP2ClientProtocol, AStreamTheServerEndedIsNotRememberedWhenTheClientReset
 // were reset, 5000 replies queued until the 1001st closed the connection -- nothing is written, and the connection
 // stays open (re-derived from AServerThatNeverReadsIsCutOnceAThousandResetsAreQueued, whose third case was this stream).
 TEST(HTTP2ClientProtocol, HeadersOnAStreamTheClientResetDrawNothingHoweverMany) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_reset_test;
     Http2ClientFakeIO io;
     client_protocol   protocol(io);
@@ -5816,6 +5822,7 @@ occurrences(const std::string &text, std::string_view needle) {
 // on the connection reaches a power of two, with the count: 13 lines for 5000 -- 1, 2, 4 and so on to 4096 -- the
 // first naming its stream, the last the 4096th. A HEADERS on a stream the client reset is expected traffic: no line.
 TEST(HTTP2ClientProtocol, AServerSendingHeadersOnClosedStreamsCannotFloodTheLog) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_crossing_test;
     using namespace qb1270_reset_test;
     for (const auto how : {closed_by::a_response_completed, closed_by::a_reset_of_the_client}) {
@@ -6387,6 +6394,7 @@ expect_nothing_after_the_closing_goaway(const IO &io) {
 // of the bucket of the frames that make no progress, and one that changes nothing is not dispatched again: the
 // connection ends at the repeat past the burst, with GOAWAY(ENHANCE_YOUR_CALM).
 TEST(HTTP2ClientProtocol, ARepeatedGoawayIsDispatchedOnceAndCutWhenItNeverEnds) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_part6b_test;
     two_requests c;
     std::size_t  cut = 0;
@@ -6442,6 +6450,7 @@ TEST(HTTP2ClientProtocol, AGoawayThatLowersItsLastStreamIdOrEndsTheConnectionIsD
 // still cut, every GOAWAY after the first taking a token: only the copies that changed nothing were. And the bound it may
 // not raise is the last one it sent: a GOAWAY above the one dispatched last, if below the first, is a connection error.
 TEST(HTTP2ClientProtocol, AGoawayLoweredEachTimeIsCutAndOneRaisedAboveTheLastIsRefused) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_part6b_test;
     {
         SCOPED_TRACE("lowered by one each time");
@@ -6515,6 +6524,7 @@ TEST(HTTP2ClientProtocol, DataOnAStreamTheClientResetIsBoundedByTheWindowItHadLe
 // second when that clock reads earlier than it did, as on the server: a server that has spent the burst may send that
 // many again a second later and is cut at the next frame. The client had no test of its refill.
 TEST(HTTP2ClientProtocol, TheBucketOfFramesMakingNoProgressRegainsItsRateEachSecondAndNoMore) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_part6b_test;
     struct step {
         const char  *name;
@@ -6622,3 +6632,97 @@ TEST(HTTP2ClientProtocol, AServersGoawaysAreLoggedAtEachPowerOfTwoOfTheirCount) 
     EXPECT_EQ(occurrences(log, "the same as the last: ignored"), 1u) << "a GOAWAY ignored was logged past the powers of two";
 }
 #endif // QB_WITH_LOGGING
+
+// The largest response body the client accepts is its io's `max_body_size()` (Huly QB-1248): 0 for none, the constant for
+// an io without the setting. Past it the stream is reset ENHANCE_YOUR_CALM -- a body that declares its length at its
+// header block, one that delivers more at the DATA that passes it -- and the error names the limit; a body of exactly
+// the limit is delivered.
+namespace qb1248_client_body_limit_test {
+struct LimitedHttp2ClientFakeIO : Http2ClientFakeIO {
+    using Http2ClientFakeIO::on;
+    std::size_t limit = 1024;
+    std::string last_stream_error_message;
+
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return limit;
+    }
+    void
+    on(const h2::Http2StreamErrorEvent &event) {
+        Http2ClientFakeIO::on(event);
+        last_stream_error_message = event.message;
+    }
+};
+
+template <typename IO>
+void
+open_get(h2::ClientHttp2Protocol<IO> &protocol, uint64_t app_id) {
+    qb::http::Request req;
+    req.method() = qb::http::method::GET;
+    req.uri()    = qb::io::uri("https://example.test/body");
+    ASSERT_TRUE(protocol.send_request(std::move(req), app_id));
+}
+} // namespace qb1248_client_body_limit_test
+
+TEST(HTTP2ClientProtocol, AResponseBodyPastTheClientsLimitResetsItsStreamAndNamesTheLimit) {
+    using namespace qb1248_client_body_limit_test;
+    {
+        SCOPED_TRACE("declared past the limit");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "1025"}}));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.response_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_NE(io.last_stream_error_message.find("the client's limit of 1024 bytes"), std::string::npos) << io.last_stream_error_message;
+    }
+    {
+        SCOPED_TRACE("delivered past the limit");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}}));
+        protocol.on(make_data_frame(1, 0, std::string(1024, 'x')));
+        EXPECT_EQ(io.stream_error_count, 0) << "a body of exactly the limit was refused";
+        protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, "y"));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.response_count, 0);
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_NE(io.last_stream_error_message.find("the client's limit of 1024 bytes"), std::string::npos) << io.last_stream_error_message;
+    }
+    {
+        SCOPED_TRACE("exactly the limit, declared");
+        LimitedHttp2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS, {{":status", "200"}, {"content-length", "1024"}}));
+        protocol.on(make_data_frame(1, h2::FLAG_END_STREAM, std::string(1024, 'x')));
+        EXPECT_EQ(io.stream_error_count, 0);
+        ASSERT_EQ(io.response_count, 1);
+        EXPECT_EQ(io.last_body->size(), 1024u);
+    }
+    {
+        SCOPED_TRACE("a limit of none");
+        LimitedHttp2ClientFakeIO io;
+        io.limit = 0;
+        h2::ClientHttp2Protocol<LimitedHttp2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                       {{":status", "200"}, {"content-length", std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)}}));
+        EXPECT_TRUE(protocol.ok());
+        EXPECT_EQ(io.stream_error_count, 0) << "a body past the default was refused under a limit of none";
+    }
+    {
+        SCOPED_TRACE("an io without the setting: the constant");
+        Http2ClientFakeIO                          io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> protocol(io);
+        open_get(protocol, 1);
+        protocol.on(make_headers_frame(1, h2::FLAG_END_HEADERS,
+                                       {{":status", "200"}, {"content-length", std::to_string(qb::http::protocol_limits::MAX_BODY_SIZE + 1)}}));
+        EXPECT_EQ(io.stream_error_count, 1);
+        EXPECT_EQ(io.last_stream_error, h2::ErrorCode::ENHANCE_YOUR_CALM);
+    }
+}

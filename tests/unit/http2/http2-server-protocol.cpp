@@ -3577,8 +3577,8 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
 // ---------------------------------------------------------------------------
 // The idle sweep measures a dispatched stream's idleness from its last real
 // progress -- response HEADERS or DATA sent, a stream WINDOW_UPDATE received --
-// not from its creation; an incomplete request keeps an absolute age bound
-// (max_incomplete). It used to compare every stream's AGE with the idle budget,
+// not from its creation; an incomplete request is bounded (max_incomplete) from
+// its last frame (Huly QB-1248). It used to compare every stream's AGE with the idle budget,
 // so a response still progressing was cancelled like a dead one (Huly QB-531).
 // The sleeps only guarantee a minimum elapsed time (steady clock): the stream
 // that progressed is measured from the sweep that saw the progress, whatever the
@@ -3633,6 +3633,111 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsKeepsAnAgeBoundForIncompleteRequests
 
     EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1ms), 1u);
     EXPECT_TRUE(protocol.is_stream_closed(1));
+}
+
+// The bound of a request not yet complete counts from its last frame, as the idle bound counts from the last progress
+// (Huly QB-1248): a body still arriving keeps its stream past it, and a body that stops arriving -- an empty DATA brings
+// nothing -- is reset once it has waited that long. It was an age: the first sweep past it reset an upload still arriving.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsSparesAnIncompleteRequestWhoseBodyStillArrives) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/upload");
+    std::this_thread::sleep_for(5ms);                                    // the stream is older than the bound below
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(1, 'a')); // a piece of its body
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/3ms), 0u) << "a body still arriving lost its stream";
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+
+    std::this_thread::sleep_for(5ms);
+    push_frame(io, FrameType::DATA, 0, 1, {}); // nothing more of it: an empty DATA brings nothing
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 3ms), 1u) << "a body that stopped arriving kept its stream";
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+    EXPECT_EQ(io.last_stream_error, ErrorCode::CANCEL);
+}
+
+// A stream WINDOW_UPDATE moves the clock of a stream whose request is dispatched -- the client reads its response -- and
+// not of one whose request is not complete (Huly QB-1248): it acknowledges nothing of the request, and a peer must not
+// keep an incomplete request alive by acknowledging the server's window.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAStreamWindowUpdateDoesNotSaveAnIncompleteRequest) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/upload");
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(1, 'a')); // a piece of its body
+    drive(protocol, io);
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/3ms), 0u) << "the sweep that sees the piece";
+    for (int i = 0; i < 2; ++i) { // then the server's window acknowledged, and nothing of the body
+        std::this_thread::sleep_for(2ms);
+        make_window_update_frame(io, 1, 10);
+        drive(protocol, io);
+    }
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 3ms), 1u) << "a stream WINDOW_UPDATE saved an incomplete request";
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+}
+
+namespace {
+/// The session's inactivity hook, counted (Huly QB-1248).
+struct ProgressCountingHttp2FakeIO : Http2FakeIO {
+    int request_progress = 0;
+
+    void
+    http2_request_progress() noexcept {
+        ++request_progress;
+    }
+};
+using ProgressCountingServerProtocol = qb::protocol::http2::ServerHttp2Protocol<ProgressCountingHttp2FakeIO>;
+} // namespace
+
+// The session's inactivity timeout restarts at what the client sends of a request (Huly QB-1248): its first HEADERS --
+// the header block has the whole timeout from there, its CONTINUATION frames restart nothing -- and each DATA of a
+// request not yet complete that brings octets of its body. An empty DATA restarts nothing -- the frame layer counts it
+// among the frames that make no progress --, nor does the frame that completes the request (its dispatch does, in the
+// session) or a frame that is no request's.
+TEST(HTTP2ServerProtocol, TheInactivityTimeoutRestartsAtARequestsFirstHeadersAndAtEachDataOfItsBody) {
+    ProgressCountingHttp2FakeIO    io;
+    ProgressCountingServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_EQ(io.request_progress, 0) << "the handshake is no request";
+
+    const auto block = encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/up"}});
+    ASSERT_GE(block.size(), 3u);
+    const auto third = static_cast<std::ptrdiff_t>(block.size() / 3);
+    push_frame(io, FrameType::HEADERS, 0, 1, std::vector<uint8_t>(block.begin(), block.begin() + third));
+    push_frame(io, FrameType::CONTINUATION, 0, 1, std::vector<uint8_t>(block.begin() + third, block.begin() + 2 * third));
+    push_frame(io, FrameType::CONTINUATION, qb::protocol::http2::FLAG_END_HEADERS, 1,
+               std::vector<uint8_t>(block.begin() + 2 * third, block.end()));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(io.request_progress, 1) << "a header block in three frames: its first HEADERS, once";
+
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(1, 'a'));
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(1, 'b'));
+    drive(protocol, io);
+    EXPECT_EQ(io.request_progress, 3) << "each DATA of a request not yet complete";
+    push_frame(io, FrameType::DATA, 0, 1, {});
+    drive(protocol, io);
+    EXPECT_EQ(io.request_progress, 3) << "an empty DATA, a frame that makes no progress";
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, std::vector<uint8_t>(1, 'c'));
+    drive(protocol, io);
+    EXPECT_EQ(io.request_progress, 3) << "the DATA that completes the request";
+    EXPECT_EQ(io.request_count, 1);
+
+    make_window_update_frame(io, 0, 10);
+    drive(protocol, io);
+    EXPECT_EQ(io.request_progress, 3) << "a WINDOW_UPDATE is no request's";
+
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 3,
+               encode_hpack_headers(default_request_headers("/next")));
+    drive(protocol, io);
+    EXPECT_EQ(io.request_progress, 4) << "a request in one HEADERS that ends it: its first HEADERS";
+    EXPECT_EQ(io.request_count, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -7568,6 +7673,7 @@ TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
 // reply queued closes the connection (Huly QB-1270; first cut as "none of them moves a request forward", and since the
 // queued model for every frame -- APeerThatNeverReadsIsCutOnceAThousandRepliesAreQueued has the octet and the request).
 TEST(HTTP2ServerProtocol, AFrameThatMovesNoRequestForwardDoesNotForgiveThePingAndSettingsBudget) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     enum class nothing { empty_data, padding_only_data, malformed_headers, upload_headers };
     const std::vector<uint8_t> ping_payload(8, 0x00);
     for (const auto what : {nothing::empty_data, nothing::padding_only_data, nothing::malformed_headers, nothing::upload_headers}) {
@@ -7666,6 +7772,7 @@ TEST(HTTP2ServerProtocol, APeerThatNeverReadsIsCutOnceAThousandRepliesAreQueued)
 // leaves before the next PING comes: nothing is queued, 5000 are answered and the connection stays open. The same for
 // SETTINGS.
 TEST(HTTP2ServerProtocol, APeerThatReadsMaySolicitRepliesForEverWithoutOpeningAStream) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     for (const auto what : all_solicited_replies) {
         SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
         Http2FakeIO    io;
@@ -7690,6 +7797,7 @@ TEST(HTTP2ServerProtocol, APeerThatReadsMaySolicitRepliesForEverWithoutOpeningAS
 // the client sends between the rounds plays no part: with nothing between them the 1001st PING closed the connection
 // (re-derived from the progress model's witness, where the octet and the request were what forgave; Huly QB-1270).
 TEST(HTTP2ServerProtocol, ABusyPeerThatReadsIsNeverCut) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     enum class between { nothing, an_octet_of_a_body, a_request_served };
     for (const auto unit : {between::nothing, between::an_octet_of_a_body, between::a_request_served}) {
         SCOPED_TRACE(unit == between::nothing ? "nothing" : unit == between::an_octet_of_a_body ? "an octet of a body" : "a request served");
@@ -7724,6 +7832,7 @@ TEST(HTTP2ServerProtocol, ABusyPeerThatReadsIsNeverCut) {
 // and one is solicited, 3000 times -- always a thousand queued, never the 1001st, no GOAWAY, though the client opened no
 // stream and sent no body in 4000 PINGs. Then one more with nothing read: the 1001st, and the connection is closed.
 TEST(HTTP2ServerProtocol, ASlowReaderIsNotCutWhileFewerThanAThousandRepliesAreQueued) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     for (const auto what : all_solicited_replies) {
         SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
         const std::size_t reply = solicited_reply_size(what);
@@ -7842,6 +7951,7 @@ TEST(HTTP2ServerProtocol, AReplySplitAcrossAPartialWriteIsForgivenWhenItsLastByt
 // when its output is seen empty, and counted until then. A thousand queued and half of them gone, the output not
 // empty: the 1001st closes the connection; the output emptied between rounds of 999: never closed.
 TEST(HTTP2ServerProtocol, AnIoThatDoesNotCountWhatItsSocketTookIsForgivenWhenItsOutputIsEmpty) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using PeerProtocol = qb::protocol::http2::ServerHttp2Protocol<Http2PeerFakeIO>;
     for (const auto what : all_solicited_replies) {
         SCOPED_TRACE(what == solicited_reply::pong ? "PING" : "SETTINGS");
@@ -7976,6 +8086,7 @@ TEST(HTTP2ServerProtocol, AProtocolResetForgetsTheRepliesTheLastConnectionLeftQu
 // units of progress, the resets between two streams opened -- so a thousand of them queued closed nothing (Huly
 // QB-1270, the review of the queued model).
 TEST(HTTP2ServerProtocol, PongsSettingsAcksAndSolicitedResetsShareTheQueuedCount) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     struct kind {
         const char                                    *name;
         std::function<void(Http2FakeIO &, uint32_t &)> solicit; // one more reply of this kind; the next free stream id
@@ -8033,6 +8144,7 @@ TEST(HTTP2ServerProtocol, PongsSettingsAcksAndSolicitedResetsShareTheQueuedCount
 // PONGs are admitted behind it. Once it has left, a thousand are. A position taken before the reset is written -- where
 // it starts -- forgave it as soon as the output before it had left (Huly QB-1270).
 TEST(HTTP2ServerProtocol, ASolicitedResetIsForgivenWhenItsLastByteHasLeft) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     struct kind {
         std::string                                  name;
         std::function<void(Http2FakeIO &, uint32_t)> solicit; // one reset of this kind; the next free stream id
@@ -8742,6 +8854,7 @@ expect_nothing_after_the_closing_goaway(const qb::allocator::pipe<char> &output)
 // one that changes nothing is not dispatched again: the connection ends at the repeat past the burst, with
 // GOAWAY(ENHANCE_YOUR_CALM).
 TEST(HTTP2ServerProtocol, ARepeatedGoawayIsDispatchedOnceAndCutWhenItNeverEnds) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_part6b_test;
     an_upload_in_flight s;
     const auto          goaway = goaway_payload(0, ErrorCode::NO_ERROR);
@@ -8804,6 +8917,7 @@ TEST(HTTP2ServerProtocol, AGoawayThatLowersItsLastStreamIdOrEndsTheConnectionIsD
 // still cut, every GOAWAY after the first taking a token: only the copies that changed nothing were. And the bound it may
 // not raise is the last one it sent: a GOAWAY above the one dispatched last, if below the first, is a connection error.
 TEST(HTTP2ServerProtocol, AGoawayLoweredEachTimeIsCutAndOneRaisedAboveTheLastIsRefused) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_part6b_test;
     {
         SCOPED_TRACE("lowered by one each time");
