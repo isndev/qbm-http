@@ -93,27 +93,34 @@ public:
         this->_http_obj.reset();
     }
 
-    /// The response failed for its body: past the parser's body limit -- declared, chunked, or close-delimited, which once its
-    /// header section is read fails for nothing else (base::getMessageSize()). The clients name the limit then (Huly QB-1248).
-    [[nodiscard]] bool
-    body_over_limit() noexcept {
-        return this->_http_obj.refusal_status() == HTTP_STATUS_PAYLOAD_TOO_LARGE
-               || (!this->ok() && this->_http_obj.headers_completed() && http_message_needs_eof(&this->_http_obj));
-    }
-
-    /// The error that names it: the limit, in bytes.
+    /// The bound that cut the response a connection lost, named for the clients' errors -- empty for any other end (Huly
+    /// QB-1248). The body limit when the parser refused the body on it: a declared length before a byte of it is read, a
+    /// chunked body as its bytes pass it, a close-delimited one, which once its header section is read fails for nothing else.
+    /// qb-io's read cap when the connection ended for a full input buffer (`buffer_overflow`; @p reason, the disconnection's)
+    /// once the header section was read: a response is held whole until it completes, so a body under the limit is cut there
+    /// -- under a limit of none, or one raised past the cap. A limit of none is never named.
     [[nodiscard]] std::string
-    body_over_limit_error() const {
-        return "HTTP/1.1 response body exceeds the client's limit of " + std::to_string(this->_http_obj.max_body_size()) + " bytes";
+    cut_by(int reason) const {
+        const auto limit = this->_http_obj.max_body_size();
+        const auto named = "HTTP/1.1 response body exceeds the client's limit of " + std::to_string(limit) + " bytes";
+        if (this->_http_obj.refusal_status() == HTTP_STATUS_PAYLOAD_TOO_LARGE && limit != std::numeric_limits<std::size_t>::max())
+            return named;
+        if (!this->_http_obj.headers_completed())
+            return {};
+        if (reason == static_cast<int>(qb::io::async::event::disconnect_reason::buffer_overflow))
+            return "HTTP/1.1 response exceeds the connection's read buffer cap of " + std::to_string(QB_MAX_READ_BUFFER_SIZE)
+                   + " bytes (QB_MAX_READ_BUFFER_SIZE)";
+        if (!this->ok() && http_message_needs_eof(&this->_http_obj) && limit != std::numeric_limits<std::size_t>::max())
+            return named;
+        return {};
     }
 
-    /// The answer a one-shot request gets when its response failed: 502, the error as its text/plain body when the body passed
-    /// the limit.
+    /// The answer a one-shot request gets when its response failed: 502, the bound that cut it as its text/plain body.
     [[nodiscard]] qb::http::Response
-    failed_response() {
+    failed_response(int reason) const {
         qb::http::Response response{qb::http::status::BAD_GATEWAY};
-        if (body_over_limit()) {
-            response.body() = body_over_limit_error();
+        if (auto cut = cut_by(reason); !cut.empty()) {
+            response.body() = std::move(cut);
             response.set_header("content-type", "text/plain");
         }
         return response;

@@ -1480,7 +1480,7 @@ public:
      *
      * Every disposal passes here before on(dispose). A peer close (reason 0) first completes a
      * close-delimited response the protocol has buffered; flush_eof() never delivers a failed or
-     * oversized message. A session still unanswered then -- whatever the reason -- answers 502, naming the body limit (QB-1248).
+     * oversized message. A session still unanswered then -- whatever the reason -- answers 502, naming the bound that cut it.
      */
     void
     on(qb::io::async::event::disconnected const &event) {
@@ -1491,7 +1491,7 @@ public:
         }
         if (!_answered) {
             LOG_HTTP_WARN("HTTP/1.1 client disconnected before a complete response. Reason: " << event.reason);
-            answer(_http_protocol ? _http_protocol->failed_response() : Response{qb::http::status::BAD_GATEWAY});
+            answer(_http_protocol ? _http_protocol->failed_response(event.reason) : Response{qb::http::status::BAD_GATEWAY});
         } else {
             LOG_HTTP_DEBUG("HTTP/1.1 client disconnected. Reason: " << event.reason);
         }

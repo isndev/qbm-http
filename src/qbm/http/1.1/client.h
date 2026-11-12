@@ -268,7 +268,8 @@ public:
      * @details `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB) by default, read as each response begins: one that declares a
      *          `Content-Length` past it fails before a byte of its body is read, a chunked or close-delimited one once the bytes
      *          it delivered pass it, with a 502 whose error names the limit. A response is held in the connection's input buffer
-     *          until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever this is.
+     *          until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever this is: a response
+     *          it cut fails naming that cap instead.
      */
     void
     set_max_body_size(std::size_t value) noexcept {

@@ -188,8 +188,8 @@ public:
         if (_http_protocol && event.reason == 0) {
             _http_protocol->flush_eof();
         }
-        if (_http_protocol && _http_protocol->body_over_limit()) // past the client's body limit: the error names it (QB-1248)
-            _owner.fail_active_request(_http_protocol->body_over_limit_error());
+        if (auto cut = _http_protocol ? _http_protocol->cut_by(event.reason) : std::string{}; !cut.empty())
+            _owner.fail_active_request(cut); // the bound that cut the response, named: the body limit, the read cap (QB-1248)
         _owner.handle_disconnected(event.reason);
     }
 

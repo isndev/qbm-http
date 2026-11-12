@@ -644,11 +644,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   parser's body limit is the bound, and qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) the ceiling of a
   response held whole in the input buffer. A body past the limit failed with the same 502 "Connection closed"; the
   persistent client's error, and the one-shot verbs' 502 body, now name the limit, as the HTTP/2 client's names its
-  own. Witnesses (`qbm-http-test-system-http1-client`): a body of exactly 100 MiB delivered by both clients (a 502 on
-  the base); past a limit of 1024, a declared, chunked and close-delimited body each failing with an error naming it,
-  1024 itself delivered; the default unchanged, one byte past 100 MiB failing with the limit named by both clients; a
-  limit raised past 100 MiB, and 0, delivering a body the default refuses.
- llhttp keeps the reason a span
+  own -- and the bound that cut a response is the one named: qb-io's read cap when the input buffer filled once the
+  header section was read (under a limit of none, or one raised past the cap, which read "Connection closed"), the limit
+  only when the parser refused the body on it, never a limit of none. Witnesses (`qbm-http-test-system-http1-client`): a
+  body past the read cap under a limit of none and under one raised past it, each failing with the cap named; a body of
+  exactly 100 MiB delivered by both clients (a 502 on the base); past a limit of 1024, a declared, chunked and
+  close-delimited body each failing with an error naming it, 1024 itself delivered; the default unchanged, one byte past
+  100 MiB failing with the limit named by both clients; a limit raised past 100 MiB, and 0, delivering a body the default
+  refuses.
+
+- **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,
   `` `on_header_value_complete` callback error `` (a trailer field), `` `on_chunk_header` callback error ``. Ten of the

@@ -3288,3 +3288,22 @@ TEST(Http1ClientTest, TheClientsBodyLimitRaisedOrNoneDeliversWhatTheDefaultRefus
     }
     drain_client_callbacks();
 }
+
+// The error names the bound that cut the response (Huly QB-1248): qb-io's read cap when the response, held whole in the
+// connection's input buffer until it completes, filled it -- under a body limit of none, or one raised past the cap -- and
+// the body limit only when the parser refused the body on it. A limit of none is never named.
+TEST(Http1ClientTest, AResponseCutByTheReadBufferCapFailsNamingThatCap) {
+    using namespace http1_body_limit_test;
+    const std::size_t cap  = QB_MAX_READ_BUFFER_SIZE;
+    const std::string none = std::to_string(std::numeric_limits<std::size_t>::max());
+    for (const auto &[how, limit] : {std::pair{framing::close, std::size_t{0}}, std::pair{framing::length, cap + 64 * kMiB}}) {
+        const auto source   = peer(how, cap + kMiB);
+        const auto response = fetch(*source, limit);
+        const auto error    = response.body().as<std::string>();
+        EXPECT_EQ(response.status(), qb::http::status::BAD_GATEWAY) << "limit " << limit;
+        EXPECT_NE(error.find("read buffer cap of " + std::to_string(cap) + " bytes"), std::string::npos) << "limit " << limit << ": " << error;
+        EXPECT_EQ(error.find("client's limit"), std::string::npos) << "limit " << limit << ": the body limit named: " << error;
+        EXPECT_EQ(error.find(none), std::string::npos) << "limit " << limit << ": " << error;
+    }
+    drain_client_callbacks();
+}
