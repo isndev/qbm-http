@@ -674,7 +674,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
   callback's own `HPE_CB_*` code otherwise), and so is the status the peer is answered (`refusal_status()`): only the
   reason read locally changes. Witnesses: `qbm-http-test-unit-http1-parse-limits` (each of the ten reasons read back
   after its refusal; a span callback's three kept as before, the controls; a failed parser's next call keeps the
-  reason and `reset()` clears it).
+  reason and `reset()` clears it). The restore runs out of line, the result passing through it: kept in line, it held
+  a callee-saved register across the call in every message's parse -- +8 to +10 instructions a message on x86-64 (the
+  pilot's read of `bd11b0ad`), now the test of the reason and its branch.
 
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
