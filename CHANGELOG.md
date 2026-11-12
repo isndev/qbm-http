@@ -288,6 +288,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   Instructions (callgrind, g++ 14; nothing timed): a client GET is level; a server's browser GET costs about 110 more
   in 48 000 -- with the constructors' shapes changed, GCC inlines fewer of the header-name comparisons of the function
   that builds the request, which this entry does not touch.
+- **A connection the HTTP/2 server or client ends for a flood is closed at once (Huly QB-1270).** qb-io now closes a
+  connection an endpoint ended itself after its peer, reading what the peer still sends for `linger()`, up to 16 MiB
+  (qb's CHANGELOG). A connection ended with the endpoint's own `GOAWAY(ENHANCE_YOUR_CALM)` -- every flood rule of the
+  two protocols sends that code -- is the one case where that is wrong: the loop would read on the peer it has just
+  refused to read. The server session and `qb::http2::Client` set a linger of zero for that close, which is qb-io's
+  "close at once"; the client puts its own `linger()` back in `on(event::dispose)`, unless the application set
+  another, non-zero one meanwhile (a zero set during that close reads as the client's own and is replaced). Proven by
+  `Http2ServerCloseAfterPeerTest.AFloodingConnectionIsClosedAtOnceAndNeverReachesTheLoop` and
+  `Http2ClientCloseAfterPeerTest.AConnectionTheClientEndsForAFloodIsClosedAtOnceAndKeepsItsLinger` over real TLS
+  sockets (without the change the flooder's socket takes 17 MB after the close and the loop holds its descriptor) and
+  by `...ALingerTheApplicationSetsDuringAFloodsCloseIsKept`.
 - **The `debug_data` of a GOAWAY an HTTP/2 protocol sends itself is the frame's debug data alone (Huly QB-1270).** The
   client and server protocols dispatch `Http2GoAwayEvent` for their own `GOAWAY` with an error; its `debug_data` was
   the reason behind « GOAWAY sent by client: » or « GOAWAY sent by server: », and is the reason alone now, as on the
