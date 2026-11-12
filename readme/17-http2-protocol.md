@@ -226,7 +226,7 @@ Connection and stream lifetimes are governed by four `qb::duration` constants in
 
 | Constant | Default | Role |
 | --- | --- | --- |
-| `DEFAULT_SESSION_TIMEOUT` | 60 s | Connection inactivity deadline; the session disconnects with `ByTimeout` when it elapses. |
+| `DEFAULT_SESSION_TIMEOUT` | 60 s | Connection inactivity deadline; the session disconnects with `ByTimeout` when it elapses. The HTTP/1.1 requests of the ALPN fallback restart it at their first byte and at each read of their body, as an HTTP/1.1 session's ([inactivity timeout](./16-advanced-topics.md), Huly QB-1248). |
 | `STREAM_IDLE_TIMEOUT` | 30 s | Per-stream idle deadline used by the cleanup sweep, counted from the stream's last progress (response HEADERS or DATA sent, a stream `WINDOW_UPDATE` received): a response still progressing is not idle. |
 | `STREAM_INCOMPLETE_TIMEOUT` | 10 s | Age limit for a stream whose request has not completed (not yet dispatched), whatever happens on it. |
 | `CLEANUP_INTERVAL` | 5 s | Minimum gap between cleanup sweeps. |

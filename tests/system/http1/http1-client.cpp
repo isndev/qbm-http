@@ -2963,3 +2963,136 @@ TEST(Http1ClientTest, AResponseInFlightGoesOutBeforeTheRefusalOfTheMalformedRequ
     peer.send_all("GET /later HTTP/1.1\r\nHost: a\r\n\r\ngarbage\r\n\r\n");
     EXPECT_EQ(statuses(peer), "200 400") << "the response in flight was lost, or the malformed request not answered after it";
 }
+
+// The inactivity timeout restarts at a request's first byte and at each read of its body (Huly QB-1248): nginx's
+// client_header_timeout and client_body_timeout, at the session's one timeout -- 1 s here, set by the session as an
+// application's own may set it. Until 3.4 only the server's writes restarted it: a body sent slowly but steadily was cut
+// with no answer, and a request begun just before the timeout of the last response had what was left of it. Each wait
+// below is a watch for the close, so nothing is written to a connection the server has closed.
+namespace http1_inactivity_timeout_test {
+constexpr std::chrono::milliseconds kTimeout{1000};
+
+class Server;
+class Session : public qb::http::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http::use<Server>::server<Session> {
+public:
+    Server() {
+        router().post("/up", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(ctx->request().body().size());
+            ctx->complete();
+        });
+        router().get("/", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    this->setTimeout(kTimeout);
+}
+
+std::unique_ptr<qb::http::test::ServerThread<Server>>
+start() {
+    return std::make_unique<qb::http::test::ServerThread<Server>>([](Server &server) {
+        if (server.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        server.start();
+        return true;
+    });
+}
+
+std::chrono::milliseconds
+since(std::chrono::steady_clock::time_point from) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - from);
+}
+} // namespace http1_inactivity_timeout_test
+
+TEST(Http1ClientTest, ABodySentSlowlyButSteadilyIsServed) {
+    using namespace http1_inactivity_timeout_test;
+    const auto thread = start();
+    ASSERT_TRUE(thread->ready());
+    for (const bool chunked : {false, true}) {
+        raw_socket peer(thread->port());
+        peer.send_all(chunked ? "POST /up HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n"
+                              : "POST /up HTTP/1.1\r\nHost: a\r\nContent-Length: 12\r\n\r\n");
+        // Twelve pieces a quarter of the timeout apart: three timeouts in all, never one without a read.
+        for (int piece = 0; piece < 12; ++piece) {
+            ASSERT_FALSE(peer.closes_within(kTimeout / 4)) << (chunked ? "chunked" : "length") << ": cut after " << piece << " pieces";
+            peer.send_all(chunked ? "1\r\nx\r\n" : "x");
+        }
+        if (chunked)
+            peer.send_all("0\r\n\r\n");
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.rfind("HTTP/1.1 200 ", 0), 0u) << (chunked ? "chunked: " : "length: ") << answer;
+    }
+}
+
+TEST(Http1ClientTest, ARequestBegunJustBeforeTheTimeoutHasItsWholeHeaderSection) {
+    using namespace http1_inactivity_timeout_test;
+    const auto thread = start();
+    ASSERT_TRUE(thread->ready());
+    raw_socket peer(thread->port());
+    peer.send_all("GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    ASSERT_EQ(peer.read_until("\r\n\r\n", std::chrono::seconds(3)).rfind("HTTP/1.1 200 ", 0), 0u);
+    // Three quarters of the timeout after the response a request begins; its header section takes half a timeout more.
+    ASSERT_FALSE(peer.closes_within(kTimeout * 3 / 4));
+    peer.send_all("GET / HTTP/1.1\r\n");
+    ASSERT_FALSE(peer.closes_within(kTimeout / 2)) << "the request was cut a timeout after the last response";
+    peer.send_all("Host: a\r\n\r\n");
+    const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+    EXPECT_EQ(answer.rfind("HTTP/1.1 200 ", 0), 0u) << answer;
+}
+
+// The controls: the timeout still bounds a header section from its first byte, a body from its last read, an idle
+// connection from its last response.
+TEST(Http1ClientTest, AHeaderSectionSentSlowlyStillEndsATimeoutAfterItsFirstByte) {
+    using namespace http1_inactivity_timeout_test;
+    const auto thread = start();
+    ASSERT_TRUE(thread->ready());
+    raw_socket peer(thread->port());
+    const auto first = std::chrono::steady_clock::now();
+    peer.send_all("GET / HTTP/1.1\r\n");
+    for (const char *piece : {"X-Slow: a", "a", "a"}) { // a quarter of the timeout apart, all within it
+        ASSERT_FALSE(peer.closes_within(kTimeout / 4));
+        peer.send_all(piece);
+    }
+    ASSERT_TRUE(peer.closes_within(std::chrono::seconds(3))) << "a header section sent slowly kept its connection";
+    const auto took = since(first);
+    EXPECT_GE(took, kTimeout * 8 / 10) << took.count() << " ms";
+    EXPECT_LT(took, kTimeout * 14 / 10) << "a read inside the header section restarted the timeout: " << took.count() << " ms";
+}
+
+TEST(Http1ClientTest, ABodyThatStallsEndsATimeoutAfterItsLastRead) {
+    using namespace http1_inactivity_timeout_test;
+    const auto thread = start();
+    ASSERT_TRUE(thread->ready());
+    raw_socket peer(thread->port());
+    peer.send_all("POST /up HTTP/1.1\r\nHost: a\r\nContent-Length: 10\r\n\r\nab");
+    ASSERT_FALSE(peer.closes_within(kTimeout / 2));
+    peer.send_all("cd");
+    const auto last = std::chrono::steady_clock::now();
+    ASSERT_TRUE(peer.closes_within(std::chrono::seconds(3))) << "a stalled body kept its connection";
+    const auto took = since(last);
+    EXPECT_GE(took, kTimeout * 8 / 10) << "cut before a timeout after the body's last read: " << took.count() << " ms";
+    EXPECT_LT(took, kTimeout * 14 / 10) << took.count() << " ms";
+}
+
+TEST(Http1ClientTest, AnIdleConnectionStillEndsATimeoutAfterItsLastResponse) {
+    using namespace http1_inactivity_timeout_test;
+    const auto thread = start();
+    ASSERT_TRUE(thread->ready());
+    raw_socket peer(thread->port());
+    peer.send_all("GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    ASSERT_EQ(peer.read_until("\r\n\r\n", std::chrono::seconds(3)).rfind("HTTP/1.1 200 ", 0), 0u);
+    const auto answered = std::chrono::steady_clock::now();
+    ASSERT_TRUE(peer.closes_within(std::chrono::seconds(3))) << "an idle connection was kept";
+    const auto took = since(answered);
+    EXPECT_GE(took, kTimeout * 8 / 10) << took.count() << " ms";
+    EXPECT_LT(took, kTimeout * 14 / 10) << took.count() << " ms";
+}

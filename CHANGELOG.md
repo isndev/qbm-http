@@ -608,6 +608,26 @@ All notable changes to the qbm-http module are documented here. The format is ba
   response in flight answered before the `400`; behind a "close" request answered at once or 50 ms later, a request, no
   request and a target past the limit, each unanswered.
 
+- **The HTTP/1.1 server's inactivity timeout restarts at a request's first byte and at each read of its body (Huly
+  QB-1248).** Only the server's writes restarted it, as readme/16 said: a request had to arrive whole within the
+  timeout -- 60 s by default -- of the connection's opening or of the last response. A body sent slowly but steadily
+  was cut with no answer (a chunk of one byte every 5 s: closed at 60.0 s), and a request begun 59 s after a response
+  had 1 s left to arrive. The timeout now runs as nginx's three: between two requests from the last write (the
+  keep-alive close is unchanged); over a request's header section from its first byte, however the section is cut --
+  a header section sent slowly is still cut, its bound unchanged; over its body between two reads of it
+  (`client_body_timeout`). No setting is added: the session's timeout is the one value, and a session that sets its own
+  (`setTimeout()`) gets the three with it. The HTTP/1.1 requests of an HTTP/2 server's ALPN fallback restart it the same
+  way. A body sent at one byte per timeout keeps its connection, as on nginx: its memory stays under the body limit,
+  the connections under `set_max_sessions()`. HTTP/3 needs none of it: its inactivity is QUIC's idle timeout, which
+  every packet restarts (readme/19, with the measurements and its residual). Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing` (the hook called at a request's first byte and at each read of its body,
+  either framing, never inside a header section nor for the read that completes a message),
+  `qbm-http-test-system-http1-client` (at a 1 s timeout: a body sent over 3 s is served
+  in both framings; a request begun 0.75 s after a response and sent over 0.5 s is served; the controls: a header
+  section dribbled from its first byte ends a timeout after it, a stalled body a timeout after its last read, an idle
+  connection a timeout after its last response) and `qbm-http-test-system-http2-client` (the same body over the ALPN
+  http/1.1 fallback is served).
+
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,

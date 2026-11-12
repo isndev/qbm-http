@@ -863,21 +863,21 @@ public:
         }
     }
 
-    /**
-     * @brief Get router reference
-     * @return Router reference
-     */
+    /// The server's router.
     Router &
     router() {
         return this->server().router();
     }
+
+    /// Protocol hook: a read brought part of an HTTP/1.1 request of the ALPN fallback -- its first byte, a piece of its body:
+    /// the inactivity timeout restarts, as an HTTP/1.1 session's does (Huly QB-1248). Public for the protocol's `requires` test.
+    void
+    http1_request_progress() noexcept {
+        this->updateTimeout();
+    }
 };
 
-/**
- * @brief HTTP/2 I/O handler with routing
- * @tparam Derived CRTP derived type
- * @tparam Session Session type
- */
+/// HTTP/2 I/O handler with routing (Derived: the CRTP derived type; Session: the session type).
 template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {
 public:

@@ -1123,8 +1123,7 @@ public:
         if (!_http_obj.headers_completed()) {
             const auto *const buf   = this->_io.in().begin();
             const auto        total = this->_io.in().size();
-            // Nothing new since the last call (the buffer may be memmoved/reallocated between
-            // calls, but the logical position of every unread byte relative to begin() is stable).
+            // Nothing new since the last call: the buffer may move between calls, but each unread byte keeps its place from begin().
             if (total <= header_parsed) {
                 return 0;
             }
@@ -1135,6 +1134,7 @@ public:
                     _http_obj.set_request_limits(this->_io.http_request_limits());
                 if constexpr (requires(IO_Handler &io) { io.http1_response_body_forbidden(); })
                     _http_obj._body_forbidden = this->_io.http1_response_body_forbidden();
+                read_progress(); // its first byte: the header section has the whole inactivity timeout from now (Huly QB-1248)
             }
             const auto ret = _http_obj.parse(buf + header_parsed, total - header_parsed);
             if (ret == HPE_OK) {
@@ -1172,7 +1172,7 @@ public:
             }
             if (ret == HPE_OK) {
                 body_offset = this->_io.in().size();
-                return 0;
+                return read_progress(); // a read of the body: the inactivity timeout restarts (Huly QB-1248)
             }
             return fail_message();
         }
@@ -1201,7 +1201,7 @@ public:
 
         const auto full_size = body_offset + _http_obj.content_length;
         if (this->_io.in().size() < full_size) {
-            return 0; // incomplete body, keep accumulating
+            return read_progress(); // incomplete body, keep accumulating: a read of it restarts the inactivity timeout
         }
 
         if (_http_obj.content_length)
@@ -1212,14 +1212,10 @@ public:
         return full_size;
     }
 
-    /**
-     * @brief Deliver a close-delimited response body on connection EOF.
-     *
-     * A response with no Content-Length and no Transfer-Encoding (RFC 9112 §6.3) has its body
-     * delimited by the connection close; getMessageSize() buffered it (returning 0) rather than
-     * framing an empty body. The client calls this on disconnect to hand the accumulated body to
-     * the message handler exactly once. No-op unless such a body is pending.
-     */
+    /// Deliver a close-delimited response body on connection EOF: a response with no Content-Length and no Transfer-Encoding
+    /// (RFC 9112 §6.3) has its body delimited by the connection close; getMessageSize() buffered it (returning 0) rather than
+    /// framing an empty body. The client calls this on disconnect to hand the accumulated body to the message handler exactly
+    /// once. No-op unless such a body is pending.
     void
     flush_eof() noexcept {
         // this->ok() guards the oversize/error path: getMessageSize calls not_ok() (and clears
@@ -1240,13 +1236,7 @@ public:
         this->onMessage(total); // derived onMessage: parse cookies, dispatch to handler, reset()
     }
 
-    /**
-     * @brief Reset the protocol handler
-     *
-     * Resets the internal state of the protocol handler, clearing
-     * any partially parsed message data and preparing for a new message.
-     * This is called when a message is completed or when an error occurs.
-     */
+    /// Reset the protocol handler: any partially parsed message is cleared, for the next one (after a message, or an error).
     void
     reset() noexcept final {
         body_offset      = 0;
@@ -1254,6 +1244,16 @@ public:
         _close_delimited = false;
         _refused         = false;
         _http_obj.reset();
+    }
+
+private:
+    /// A read brought part of a request -- its first byte, a piece of its body: a server's io restarts its inactivity
+    /// timeout (`http1_request_progress()`, Huly QB-1248). 0: what getMessageSize() answers while more is needed.
+    std::size_t
+    read_progress() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http1_request_progress(); })
+            this->_io.http1_request_progress();
+        return 0;
     }
 };
 } // namespace qb::protocol::http

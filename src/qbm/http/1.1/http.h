@@ -839,20 +839,20 @@ public:
         _ready_response = ctx.response();
         drain_ready_response();
     }
+
+    /// Protocol hook: a read brought part of a request -- its first byte, a piece of its body: the inactivity timeout restarts
+    /// (Huly QB-1248). Public for the same reason as http_request_limits().
+    void
+    http1_request_progress() noexcept {
+        this->updateTimeout();
+    }
 };
 
 /**
- * @brief IO handler for HTTP sessions
+ * @brief IO handler for HTTP sessions: it routes their requests and dispatches their events, and holds the router a server
+ *        configures before it handles requests. CRTP, so a derived class specializes it with static polymorphism.
  * @tparam Derived Derived class type (CRTP pattern)
  * @tparam Session Session type
- *
- * Handles IO operations for HTTP sessions including routing
- * and event dispatching. Maintains the router instance and provides
- * access to it for configuring routes and handling requests.
- *
- * This class follows the Curiously Recurring Template Pattern (CRTP)
- * to allow specialized behavior in derived classes while maintaining
- * static polymorphism for better performance.
  */
 template <typename Derived, typename Session>
 class io_handler : public qb::io::async::io_handler<Derived, Session> {

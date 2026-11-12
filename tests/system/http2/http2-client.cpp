@@ -3708,3 +3708,89 @@ TEST(Http2Extraction, ASessionDeclaringItsOwnOnCancelsItsStreamsContextsAndStops
 }
 
 } // namespace http2_extraction_test
+
+// An HTTP/2 server's HTTP/1.1 fallback restarts the inactivity timeout as an HTTP/1.1 session does (Huly QB-1248): a body
+// sent over ALPN http/1.1 slowly but steadily is served. The fallback runs the same protocol on the session's timer, which
+// only the server's writes restarted. At 1 s, set by the session as an application's own may set it.
+namespace http2_fallback_timeout_test {
+constexpr std::chrono::milliseconds kTimeout{1000};
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Server() {
+        router().post("/up", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(ctx->request().body().size());
+            ctx->complete();
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    this->setTimeout(kTimeout);
+}
+} // namespace http2_fallback_timeout_test
+
+TEST(Http2FallbackTimeout, ABodySentSlowlyButSteadilyOverTheHttp11FallbackIsServed) {
+    using namespace http2_fallback_timeout_test;
+    const std::string                    cert = qb::http::test::ssl_cert_path().string();
+    const std::string                    key  = qb::http::test::ssl_key_path().string();
+    qb::http::test::ServerThread<Server> thread([cert, key](Server &srv) -> bool {
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    qb::io::tcp::ssl::socket sock{qb::io::ssl::Context::client().alpn({"http/1.1"})};
+    sock.set_insecure();
+    ASSERT_EQ(sock.connect_v4("127.0.0.1", thread.port()), 0);
+    ASSERT_EQ(sock.get_alpn_selected_protocol(), "http/1.1");
+    ASSERT_EQ(sock.set_nonblocking(true), 0);
+
+    std::string answer;
+    const auto  closed_within = [&](std::chrono::milliseconds window) { // reads what comes; true once the connection ended
+        const auto deadline = std::chrono::steady_clock::now() + window;
+        char       buffer[4096];
+        while (std::chrono::steady_clock::now() < deadline) {
+            const int n = sock.read(buffer, sizeof buffer);
+            if (n < 0)
+                return true;
+            if (n > 0)
+                answer.append(buffer, static_cast<std::size_t>(n));
+            else
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+    const auto send = [&](std::string const &bytes) {
+        std::size_t sent = 0;
+        while (sent < bytes.size()) {
+            const int n = sock.write(bytes.data() + sent, bytes.size() - sent);
+            if (n < 0)
+                return false;
+            if (n == 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            sent += static_cast<std::size_t>(n);
+        }
+        return true;
+    };
+
+    ASSERT_TRUE(send("POST /up HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\n\r\n"));
+    for (int piece = 0; piece < 12; ++piece) { // a quarter of the timeout apart: three timeouts in all
+        ASSERT_FALSE(closed_within(kTimeout / 4)) << "cut after " << piece << " pieces";
+        ASSERT_TRUE(send("x"));
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (answer.find("\r\n\r\n") == std::string::npos && std::chrono::steady_clock::now() < deadline
+           && !closed_within(std::chrono::milliseconds(50))) {
+    }
+    EXPECT_EQ(answer.rfind("HTTP/1.1 200 ", 0), 0u) << answer;
+}

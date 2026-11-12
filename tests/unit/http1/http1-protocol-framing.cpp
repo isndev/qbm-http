@@ -2027,3 +2027,73 @@ TEST(Http1ProtocolFraming, AContentLengthGivenTwiceIsRefusedEvenWhenTheValuesAgr
         EXPECT_EQ(io.refusals, std::vector<int>{400}) << fields;
     }
 }
+
+// The inactivity timeout restarts at what a read brings of a request (Huly QB-1248): at its first byte -- the header section
+// has the whole timeout from there, however it is cut, so a read inside it restarts nothing -- and at each read of its body,
+// either framing. The read that completes a message restarts nothing: the response will. Until 3.4 only the session's
+// writes restarted it: a request had to arrive whole within the timeout of the connection's opening or of its last response.
+struct ProgressServerFakeIO {
+    using base_io_t = ProgressServerFakeIO;
+
+    qb::allocator::pipe<char> input;
+    int                       request_count = 0;
+    int                       progress      = 0;
+
+    qb::allocator::pipe<char> &
+    in() noexcept {
+        return input;
+    }
+    void
+    on(qb::http::Request &&) {
+        ++request_count;
+    }
+    void
+    http1_request_progress() noexcept {
+        ++progress;
+    }
+};
+
+TEST(Http1ProtocolFraming, TheInactivityTimeoutRestartsAtARequestsFirstByteAndAtEachReadOfItsBody) {
+    ProgressServerFakeIO                             io;
+    qb::protocol::http::server<ProgressServerFakeIO> proto(io);
+
+    // A header section in three reads: its first byte restarts the timeout, the two reads after it nothing.
+    for (const char *piece : {"GET / HT", "TP/1.1\r\nHost:", " h\r\n\r\n"}) {
+        feed(io, piece);
+        (void) step(proto, io);
+    }
+    EXPECT_EQ(io.request_count, 1);
+    EXPECT_EQ(io.progress, 1) << "a read inside a header section restarted the timeout, or its first byte did not";
+
+    // A declared length: the first byte, then each read of the body but the one that completes it.
+    feed(io, "POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 6\r\n\r\nab");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.progress, 3) << "the read that ends the header section and begins the body";
+    feed(io, "cd");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.progress, 4) << "a read of the body";
+    feed(io, "ef");
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 2);
+    EXPECT_EQ(io.progress, 4) << "the read that completes the message";
+
+    // A chunked body, likewise.
+    feed(io, "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.progress, 6);
+    feed(io, "\r\n2\r\ncd\r\n");
+    EXPECT_EQ(step(proto, io), 0u);
+    EXPECT_EQ(io.progress, 7);
+    feed(io, "0\r\n\r\n");
+    EXPECT_GT(step(proto, io), 0u);
+    EXPECT_EQ(io.request_count, 3);
+    EXPECT_EQ(io.progress, 7);
+
+    // Two requests in one read: each begins, and only its first byte restarts the timeout.
+    feed(io, "GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n");
+    while (step(proto, io) > 0) {
+    }
+    EXPECT_EQ(io.request_count, 5);
+    EXPECT_EQ(io.progress, 9);
+    EXPECT_TRUE(proto.ok());
+}
