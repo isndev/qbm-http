@@ -760,6 +760,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `TheErrorGoawayReachesAClientThatWasStillSending` is red on the base on Windows,
   `AServerThatWritesWithoutReadingIntoAConnectionTheClientEndedSeesItsWritesFail` and
   `AnErrorGoawayLeavesThroughTheLoopUntilTheClientCloses` on both systems.
+- **The test suite builds with MSVC 19.52 again (Huly QB-1109).** `tests/system/server/tls-operations.cpp` declared a
+  class inside a lambda's body and called a member template on a member of it
+  (`result->response.body().as<std::string>()`). MSVC 19.52 reads a class local to a lambda's body as a dependent type
+  and reports C4864, « expected 'template' keyword before dependent template name », an error under `/WX`: the Windows
+  gate stopped building in four presets when its runner's compiler moved from 19.51 to 19.52. The class is declared at
+  the test's scope. The cause was isolated on that compiler -- ten minimal reproductions, and the translation unit
+  compiled eight ways with its own command line: only the place of the class matters, not the lambda's return type, the
+  `shared_ptr`, a generic lambda beside it or the class template behind `Response` -- and the release preset built to
+  the end reports no other site.
+
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
   section `send_response()` sends to the bound RFC 9113 §6.5.2 counts -- judged before it is encoded, and again when it
