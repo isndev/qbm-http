@@ -1240,9 +1240,9 @@ private:
                 return;
             if (!_disconnect_pending || !_disconnect_notified)
                 return;
-            // dispose() closes the transport itself when the peer's EOF or a socket error ended the
-            // connection (qb-io, Huly QB-1060): nothing is left to retire, and a connect() from the
-            // disconnect callback, deferred after this one, must start at once (Huly QB-1069).
+            // dispose() ends the transport itself, whoever ended the connection: closed, or handed to the loop when
+            // this side ended it (qb-io, Huly QB-1060, QB-1270). Nothing is left to retire: the second branch has no
+            // case left, and a connect() from the disconnect callback, deferred after this one, starts at once (QB-1069).
             if (!this->transport().is_open()) {
                 _disconnect_pending  = false;
                 _disconnect_notified = false;

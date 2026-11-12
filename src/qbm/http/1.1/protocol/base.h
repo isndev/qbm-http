@@ -825,7 +825,7 @@ public:
 
 private:
     /// parse()'s cold half, out of line: the reason a refusal gave, written back over llhttp's -- @p result passes through, so
-    /// the parse every message takes keeps nothing live across the restore (Huly QB-1248, F2; defined at the file's tail).
+    /// the parse every message takes keeps nothing live across the restore (Huly QB-1248; defined at the file's tail).
     QB_NOINLINE http_errno_t restore_failure_reason(http_errno_t result) noexcept;
 
 public:
@@ -1285,7 +1285,7 @@ Parser<MessageType>::restore_body_buffer(std::size_t expected) {
     }
 }
 
-/// parse()'s cold half (Huly QB-1279; out of line since the pilot's read, QB-1248 F2): llhttp wrote its own reason over the one
+/// parse()'s cold half (Huly QB-1279; out of line for what it cost every parse, QB-1248): llhttp wrote its own reason over the one
 /// a refusal gave, after a callback it checks itself; the refusal's is written back, and @p result returned as it came.
 template <typename MessageType>
 http_errno_t

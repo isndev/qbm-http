@@ -2099,7 +2099,7 @@ TEST(Http1ProtocolFraming, TheInactivityTimeoutRestartsAtARequestsFirstByteAndAt
 }
 
 // `Transfer-Encoding: chunked,` -- an empty list element after the final coding -- is refused 400, a deliberate deviation
-// (Huly QB-1248, F4): RFC 9110 §5.6.1.2 lets a recipient ignore an empty list element, but Transfer-Encoding is the field
+// (Huly QB-1248): RFC 9110 §5.6.1.2 lets a recipient ignore an empty list element, but Transfer-Encoding is the field
 // request smuggling plays on, and a value two parsers in a chain could read differently is refused, as a Content-Length given
 // twice is. The refusal is llhttp's -- it marks a body chunked only when `chunked` ends the field -- with no status of the
 // parser's own (qb's scan reads `chunked` last and passes it); the general rule answers it 400. `,chunked`, the control, ends in

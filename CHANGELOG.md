@@ -627,8 +627,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   dispatches at its default limit and at 1 MiB, a chunk of 64 KiB one frame) and `qbm-http-test-system-http1-client` (a qb client's
   chunked upload and a qb server's chunked response of 16 MiB + 5, both ways at the default limits). A chunk of one
   frame at most -- every chunk but a whole body's -- is written by the serializer's straight path, past a single
-  branch; the frames of a larger one go out of line, the same bytes (the pilot's read of `bd11b0ad`: the frame loop
-  cost +30 to +46 instructions a chunked message against `develop`).
+  branch; the frames of a larger one go out of line, the same bytes (measured with g++ 14 on x86-64: written as one
+  loop over the frames, the serializer cost every chunked message +30 to +46 instructions against the one it replaced).
 
 - **A request whose framing is refused is answered `400`, then the connection closed (Huly QB-1248).** A
   `Content-Length` llhttp refuses -- past 2^64-1 (its overflow), not a number, given twice, beside `Transfer-Encoding`
@@ -711,7 +711,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
 - **A streamed chunked response's admission counts every frame its piece leaves as (Huly QB-1248).** Since the chunk
   serializer writes a piece past 64 KiB as frames of 64 KiB, each with its own size line and CRLF pair, `ResponseStream`
   budgeted the framing of one chunk for a piece that leaves as several: under a write cap, a piece it admitted could
-  pass it (the pilot's second read of `bd11b0ad`; measured: under a 1 MiB cap, a piece one byte past the room admitted,
+  pass it (measured: under a 1 MiB cap, a piece one byte past the room admitted,
   and both pieces written). `chunk_overhead()` counts the frames from the constant the serializer writes them with,
   `qb::http::chunk_frame_size`, so the two cannot drift. Witnesses (`qbm-http-test-system-response-stream`): the
   overhead equal to the serializer's framing to the byte across frame boundaries; under a 1 MiB cap, the largest piece
@@ -741,8 +741,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   reason read locally changes. Witnesses: `qbm-http-test-unit-http1-parse-limits` (each of the ten reasons read back
   after its refusal; a span callback's three kept as before, the controls; a failed parser's next call keeps the
   reason and `reset()` clears it). The restore runs out of line, the result passing through it: kept in line, it held
-  a callee-saved register across the call in every message's parse -- +8 to +10 instructions a message on x86-64 (the
-  pilot's read of `bd11b0ad`), now the test of the reason and its branch.
+  a callee-saved register across the call in every message's parse -- +8 to +10 instructions a message on x86-64
+  (g++ 14, callgrind) --, now the test of the reason and its branch.
 
 - **The HTTP/2 server's error GOAWAY reaches a client that was still sending, and a server that keeps writing into a
   connection `qb::http2::Client` ended is no longer left blocked (Huly QB-1270, after QB-1060; qb-io's close of a

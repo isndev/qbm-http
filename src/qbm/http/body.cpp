@@ -24,12 +24,6 @@
 #include <qb/utility/branch_hints.h> // QB_NOINLINE, QB_COLD
 
 namespace qb::allocator {
-/**
- * @brief Serialize an HTTP Chunk (RFC 9112 section 7.1): its size in hexadecimal, CRLF, its data, CRLF; the zero-length chunk, `0`
- *        CRLF CRLF, ends the data. Past qb::http::chunk_frame_size (64 KiB) it leaves as frames of that size (put_frames()), which a qb
- *        server whose chunk limit is at least that takes (Huly QB-1248); a chunk of one frame at most takes the straight path (F3).
- * @param c HTTP Chunk to serialize
- */
 namespace { // a chunk past one frame: frames of chunk_frame_size, out of line, each written by the straight path
 QB_NOINLINE void
 put_frames(pipe<char> &out, const qb::http::Chunk &c) {
@@ -39,6 +33,12 @@ put_frames(pipe<char> &out, const qb::http::Chunk &c) {
     out << qb::http::Chunk{c.data() + at, c.size() - at};                  // the last frame, and the CRLF that ends it
 }
 } // namespace
+/**
+ * @brief Serialize an HTTP Chunk (RFC 9112 section 7.1): its size in hexadecimal, CRLF, its data, CRLF; the zero-length chunk, `0`
+ *        CRLF CRLF, ends the data. Past qb::http::chunk_frame_size (64 KiB) it leaves as frames of that size (put_frames()), which a qb
+ *        server whose chunk limit is at least that takes (Huly QB-1248); a chunk of one frame at most takes the straight path below.
+ * @param c HTTP Chunk to serialize
+ */
 template <>
 pipe<char> &
 pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
