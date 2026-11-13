@@ -110,11 +110,11 @@ struct Options {
  * wait, `send_async()` for a coroutine that wants one call to do both. The client may go away at any time: the
  * session cancels the stream, `cancelled()` holds, every later write answers `closed`, and the producer stops.
  *
- * A stream that writes nothing for the session's inactivity timeout -- and, on HTTP/2, one whose stream sent no frame
- * for the connection's idle sweep (30 s, `RST_STREAM(CANCEL)`), whatever its window -- ends like a peer that left: `heartbeat()`
- * writes a comment line at an interval while the stream lives, on a `qb::io::async::callback` timer that holds the
- * stream weakly -- it stops by itself at its next tick once the stream is gone, ended or cancelled (a dropped
- * handle's timer fires once more, finds no stream and stops).
+ * A stream that writes nothing for the session's inactivity timeout -- on HTTP/2 the stream alone, reset `RST_STREAM(CANCEL)`
+ * by the stream sweep at that timeout from its last piece while other streams keep the connection alive -- ends like a peer that left:
+ * `heartbeat()` writes a comment line at an interval while the stream lives, on a `qb::io::async::callback` timer that holds the stream weakly
+ * -- it stops by itself at its next tick once the stream is gone, ended or cancelled (a dropped handle's timer fires once more, finds no stream
+ * and stops).
  */
 template <typename SessionType>
 class Stream : public std::enable_shared_from_this<Stream<SessionType>> {
