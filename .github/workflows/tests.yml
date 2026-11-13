@@ -75,6 +75,7 @@ jobs:
       - name: Link the reported target, and the two controls
         run: |
           set -uo pipefail
+          set +e  # the step shell is `bash -e`: a target that fails to link must not stop the others
           o="${RUNNER_TEMP}/oracle"
           for t in ${{ inputs.targets }}; do
             ninja -C build -v "$t" > "$o/build-$t.log" 2>&1; rc=$?
@@ -185,8 +186,10 @@ jobs:
           done 2>&1 | tee "$o/ir.txt"
 
       - name: Run what linked
+        if: always()
         run: |
           set -uo pipefail
+          set +e  # the step shell is `bash -e`: a test that fails must not stop the others
           o="${RUNNER_TEMP}/oracle"
           for t in ${{ inputs.targets }}; do
             b="$(find build -type f -perm -u+x -name "$t" | head -1)"
@@ -194,6 +197,7 @@ jobs:
           done
 
       - name: Verdict -- red on a duplicate symbol, a strong wrapper, a target that did not link or did not run clean
+        if: always()
         run: |
           set -uo pipefail
           o="${RUNNER_TEMP}/oracle"
