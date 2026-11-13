@@ -173,19 +173,19 @@ jobs:
       # later.
       #
       # A FLOOR IS PER PLATFORM, AND HTTP/3 IS A CAPABILITY RATHER THAN A CONSTANT.
-      # tests/CMakeLists.txt wraps exactly four tests -- http3-validation,
-      # http3-connection-direct, http3-loopback, http3-interop, all carrying the `http3`
-      # label -- in if(QBM_HTTP_HAS_HTTP3), and CMakeLists.txt sets that only when QB_HAS_SSL
-      # AND QB_HAS_QUIC AND Nghttp3_FOUND. ubuntu-latest ships OpenSSL 3.0.13; qb's QUIC
-      # transport needs the ngtcp2 OpenSSL crypto helper, which needs OpenSSL >= 3.5, so
-      # ci-install-linux-dependencies.sh reports `libngtcp2-crypto-ossl-dev not available` and
-      # QUIC is auto-disabled. A maintainer's macOS box has all three and registers 106.
+      # tests/CMakeLists.txt wraps exactly five tests -- http3-validation,
+      # http3-connection-direct, http3-loopback, http3-response-stream (Huly QB-86),
+      # http3-interop, all carrying the `http3` label -- in if(QBM_HTTP_HAS_HTTP3), and
+      # CMakeLists.txt sets that only when QB_HAS_SSL AND QB_HAS_QUIC AND Nghttp3_FOUND.
+      # ubuntu-latest ships OpenSSL 3.0.13; qb's QUIC transport needs the ngtcp2 OpenSSL crypto
+      # helper, which needs OpenSSL >= 3.5: ci-install-linux-dependencies.sh reports
+      # `libngtcp2-crypto-ossl-dev not available`, QUIC is auto-disabled. A macOS box registers the five.
       #
       # So the floor is BUILT rather than written down, and is stronger than the constant it
       # replaces: 102 non-http3 tests is host-independent -- it is what macOS registers too,
-      # minus the same four -- so it cannot be satisfied by the wrong host; and the http3
+      # minus the same five -- so it cannot be satisfied by the wrong host; and the http3
       # group is checked against the capability the configure step actually reported, so `all
-      # four` and `none` are the only accepted shapes. Editing a floor DOWN to make this lane
+      # five` and `none` are the only accepted shapes. Editing a floor DOWN to make this lane
       # green is the one thing that must not happen here.
       - name: Registration floor (before building)
         run: |
@@ -195,8 +195,8 @@ jobs:
           # Read the decision from the single line of CMake that makes it, not from a guess
           # about the host.
           if grep -q 'HTTP/3 support enabled' "${RUNNER_TEMP}/configure.log"; then
-            http3=4
-            echo "HTTP/3: available on this runner -> the 4 http3 tests must be registered"
+            http3=5
+            echo "HTTP/3: available on this runner -> the 5 http3 tests must be registered"
           elif grep -q 'HTTP/3 support disabled' "${RUNNER_TEMP}/configure.log"; then
             http3=0
             echo "HTTP/3: not available on this runner (no ngtcp2/nghttp3) -> 0 http3 tests"
