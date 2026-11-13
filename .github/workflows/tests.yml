@@ -23,6 +23,14 @@ on:
         description: "the targets to link, then run (space-separated)"
         required: false
         default: "qbm-http-test-system-http2-client-coro qbm-http-test-system-http2-client qb-io-test-unit-listener-after-loop"
+      sanitize:
+        description: "QB_SANITIZE (empty: none)"
+        required: false
+        default: thread
+      ir:
+        description: "source paths (suffixes) whose LLVM IR to emit, for the TLS wrapper's linkage (space-separated)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -54,7 +62,7 @@ jobs:
           cmake -S module/.github/ci/superbuild -B build -G Ninja \
                 -DCMAKE_BUILD_TYPE="${{ inputs.build_type || 'RelWithDebInfo' }}" -DQB_CXX_STANDARD=20 \
                 -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-                -DQB_SANITIZE=thread -DQB_WITH_SSL=ON -DQB_USE_SYSTEM_GTEST=ON -DQB_ENABLE_NATIVE_ARCH=OFF \
+                -DQB_SANITIZE="${{ inputs.sanitize }}" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DQB_WITH_SSL=ON -DQB_USE_SYSTEM_GTEST=ON -DQB_ENABLE_NATIVE_ARCH=OFF \
                 -DOPENSSL_EXECUTABLE="${OPENSSL_EXECUTABLE}" \
                 -DQBM_CI_QB_DIR="${GITHUB_WORKSPACE}/qb" -DQBM_CI_MODULE_DIR="${GITHUB_WORKSPACE}/module" \
                 2>&1 | tee "${RUNNER_TEMP}/oracle/configure.log"
@@ -81,6 +89,48 @@ jobs:
               echo "== $a"; nm -m "$a" 2>/dev/null | grep -E 'listener7current' | sort | uniq -c | head -30
             done
           } | tee "$o/symbols.txt"
+
+      - name: The IR of the named sources, for listener::current's TLS wrapper
+        if: inputs.ir != ''
+        run: |
+          set -uo pipefail
+          o="${RUNNER_TEMP}/oracle"
+          for src in ${{ inputs.ir }}; do
+            python3 - "$src" "$o" <<'PY'
+          import json, os, re, shlex, subprocess, sys
+          suffix, out = sys.argv[1], sys.argv[2]
+          db = json.load(open("build/compile_commands.json"))
+          hits = [e for e in db if e["file"].endswith(suffix)]
+          print(f"== {suffix}: {len(hits)} entr(y/ies)")
+          for e in hits[:2]:
+              args = shlex.split(e["command"]) if "command" in e else e["arguments"]
+              a, skip = [], False
+              for x in args:
+                  if skip: skip = False; continue
+                  if x in ("-o", "-MF", "-MT", "-MQ"): skip = True; continue
+                  if x in ("-c", "-MD", "-MMD"): continue
+                  a.append(x)
+              name = re.sub(r"[^A-Za-z0-9]+", "_", e["file"])[-80:]
+              ll = os.path.join(out, name + ".ll")
+              r = subprocess.run(a + ["-S", "-emit-llvm", "-o", ll], cwd=e["directory"], capture_output=True, text=True)
+              print("  rc", r.returncode, r.stderr[-400:])
+              if r.returncode: continue
+              text = open(ll).read().splitlines()
+              for line in text:
+                  if "_ZTWN2qb2io5async8listener7currentE" in line and (line.startswith("define") or line.startswith("declare") or line.startswith("@")):
+                      print("  ", line[:220])
+              # the functions that call the wrapper, first ten
+              cur, users = None, []
+              for line in text:
+                  if line.startswith("define"):
+                      cur = line
+                  elif cur and "@_ZTWN2qb2io5async8listener7currentE" in line and cur not in users:
+                      users.append(cur)
+              print("  callers:", len(users))
+              for u in users[:10]:
+                  print("    ", u[:200])
+          PY
+          done 2>&1 | tee "$o/ir.txt"
 
       - name: Run what linked
         run: |
