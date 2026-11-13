@@ -36,6 +36,10 @@ on:
         description: "source paths (suffixes) whose LLVM IR to emit, for the TLS wrapper's linkage (space-separated)"
         required: false
         default: ""
+      gtest_args:
+        description: "extra arguments for every test binary run (a filter, --gtest_repeat=N)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -193,7 +197,7 @@ jobs:
           o="${RUNNER_TEMP}/oracle"
           for t in ${{ inputs.targets }}; do
             b="$(find build -type f -perm -u+x -name "$t" | head -1)"
-            if [ -n "$b" ]; then (cd "$(dirname "$b")" && TSAN_OPTIONS=halt_on_error=1 perl -e 'alarm shift; exec @ARGV' 300 "./$t" --gtest_brief=1) > "$o/run-$t.log" 2>&1; echo "$t: run exit $?" | tee -a "$o/verdicts.txt"; tail -5 "$o/run-$t.log"; else echo "$t: no binary" | tee -a "$o/verdicts.txt"; fi
+            if [ -n "$b" ]; then (cd "$(dirname "$b")" && TSAN_OPTIONS=halt_on_error=1 perl -e 'alarm shift; exec @ARGV' 300 "./$t" --gtest_brief=1 ${{ inputs.gtest_args }}) > "$o/run-$t.log" 2>&1; echo "$t: run exit $?" | tee -a "$o/verdicts.txt"; tail -5 "$o/run-$t.log"; else echo "$t: no binary" | tee -a "$o/verdicts.txt"; fi
           done
 
       - name: Verdict -- red on a duplicate symbol, a strong wrapper, a target that did not link or did not run clean
