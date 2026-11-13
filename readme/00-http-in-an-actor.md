@@ -124,7 +124,7 @@ Read off it the four facts that matter:
    synchronously from the protocol's `noexcept onMessage`, so an exception escaping your handler chain would cross a
    `noexcept` boundary and call `std::terminate`. It is contained: the session disconnects and the server keeps
    serving.
-   <!-- src: qbm/http/src/qbm/http/1.1/http.h:274-294 (start_request contains the throw and disconnects) -->
+   <!-- src: qbm/http/src/qbm/http/1.1/http.h:272-294 (start_request contains the throw and disconnects) -->
 4. **The response is written when the loop says so.** `complete()` serialises into the session's output pipe; the write
    watcher drains it over one or more turns, and `event::eos` fires when the last byte is gone. Only then does the
    `POST_RESPONSE_SEND` hook run, the context reset, and the keep-alive decision get taken.

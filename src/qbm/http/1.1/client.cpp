@@ -149,11 +149,17 @@ public:
     void
     on(typename http_protocol::response response) {
         const auto status = response.status().code();
-        if (status >= 100 && status < 200 && status != 101) [[unlikely]]
-            return; // RFC 9110 section 15.2: the active request, its deadline and queue await the final response.
+        if (status >= 100 && status < 200 && status != 101) [[unlikely]] {
+            // RFC 9110 section 15.2: the active request, its deadline and queue await the final response. An interim response of a
+            // version other than 1.1 that names a Transfer-Encoding has faulty framing (RFC 9112 §6.1): remembered for the final one.
+            _faulty_interim =
+                _faulty_interim || (response.has_header("Transfer-Encoding") && !(response.major_version > 0 && response.minor_version > 0));
+            return;
+        }
         if (status == 101) [[unlikely]]
             return _owner.handle_switched_protocols(std::move(response)); // HTTP/1.1 ends at a 101 on its connection (QB-1248)
-        auto owner_guard = _owner.weak_from_this().lock();
+        response.keep_alive = response.keep_alive && !std::exchange(_faulty_interim, false); // such a connection is retired after it
+        auto owner_guard    = _owner.weak_from_this().lock();
         this->setTimeout(qb::duration::zero());
 #ifdef QB_HAS_COMPRESSION
         try {
@@ -188,17 +194,19 @@ public:
         if (_http_protocol && event.reason == 0) {
             _http_protocol->flush_eof();
         }
-        if (auto cut = _http_protocol ? _http_protocol->cut_by(event.reason) : std::string{}; !cut.empty()) {
+        const auto cut = _http_protocol ? _http_protocol->cut_by(event.reason) : std::string{};
+        if (!cut.empty()) {
             // The server is still sending what this client refused: the peer to reset. Closed at once -- a linger of zero,
             // read by the dispose() this handler runs under -- not handed to the loop to be read for linger() (Huly QB-1270).
             this->set_linger(qb::duration::zero());
-            _owner.fail_active_request(cut); // the bound that cut the response, named: the body limit, the read cap (QB-1248)
         }
-        _owner.handle_disconnected(event.reason);
+        _owner.handle_disconnected(event.reason, cut); // a cut names its bound, the body limit or the read cap, once retired (QB-1248)
     }
 
     void
     on(qb::io::async::event::dispose const &) {}
+
+    bool _faulty_interim = false; ///< An interim response had faulty framing: the final response's connection is not kept (QB-1248)
 };
 
 class Client::callback_scope {
@@ -753,16 +761,16 @@ Client::handle_timeout() {
 }
 
 void
-Client::handle_disconnected(int reason) {
+Client::handle_disconnected(int reason, std::string const &cut) {
     if (_deferred_connection_reset) {
         return;
     }
-    auto       self_guard  = weak_from_this().lock();
-    const bool intentional = _intentional_disconnect || reason != 0;
-    auto       cohort      = detach_failure_cohort(!_auto_reconnect);
+    auto       self_guard = weak_from_this().lock();
+    const auto error      = !cut.empty() ? cut : std::string(_intentional_disconnect || reason != 0 ? "Connection closed" : "Connection lost");
+    auto       cohort     = detach_failure_cohort(!_auto_reconnect);
+    // Retired before any callback, a cut response's included: what one pushes is for the next connection, never this one (QB-1248).
     retire_connection();
-    fail_retired_requests(cohort, intentional ? "Connection closed" : "Connection lost", qb::http::status::BAD_GATEWAY, "Connection lost",
-                          qb::http::status::SERVICE_UNAVAILABLE);
+    fail_retired_requests(cohort, error, qb::http::status::BAD_GATEWAY, "Connection lost", qb::http::status::SERVICE_UNAVAILABLE);
 }
 
 void

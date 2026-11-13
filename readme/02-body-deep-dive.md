@@ -451,7 +451,7 @@ std::size_t back = body.uncompress("gzip");    // body holds the original bytes 
 ```
 
 The transformation belongs to the path you choose. With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an **uncompressed** request body when `Content-Encoding` is set and decompress an encoded response; do not precompress that request. Server response serialization writes existing body bytes unchanged, even if `Content-Encoding` is set: either call `body().compress(...)` yourself before setting the header, or attach compression middleware to negotiate, compress when worthwhile, and set the header. That middleware can also decompress encoded requests before the handler; it skips response compression when a `Content-Encoding` header already exists. HTTP/2 and HTTP/3 have no such HTTP/1.1 client compression step, so manage their encoding explicitly. Always guard direct `Body` codec calls with `#ifdef QB_HAS_COMPRESSION`, since the methods do not exist in a build without it.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1476-1521; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-168; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:392-407,421-463 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1476-1521; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-174; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:392-407,421-463 -->
 
 ## Pitfalls
 

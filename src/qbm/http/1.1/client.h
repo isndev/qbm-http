@@ -336,7 +336,7 @@ private:
     void handle_response(qb::http::Response response);
     void handle_switched_protocols(qb::http::Response response); // a 101: the connection retired, one not offered failed
     void handle_timeout();
-    void handle_disconnected(int reason);
+    void handle_disconnected(int reason, std::string const &cut = {});
     void fail_active_request(std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     void fail_all_requests(std::string const &error, qb::http::status status = qb::http::status::SERVICE_UNAVAILABLE);
     [[nodiscard]] bool               has_pending_work() const noexcept;

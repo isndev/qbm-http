@@ -2394,6 +2394,11 @@ static llparse_state_t http__internal__run(
         return s_n_http__internal__n_header_value_connection_ws;
       }
       switch (*p) {
+        case 9: {
+          /* qb local patch (Huly QB-1248): HTAB is OWS too (RFC 9110 5.6.3), as SP below. */
+          p++;
+          goto s_n_http__internal__n_header_value_connection_ws;
+        }
         case 10: {
           goto s_n_http__internal__n_header_value_otherwise;
         }
