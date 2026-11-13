@@ -1214,9 +1214,22 @@ TEST(Http1ProtocolFraming, ARequestLineOfHttp20IsRefusedWith505) {
 // The two ways an HTTP/2 client meets a server over cleartext, neither of which qbm-http speaks -- its HTTP/2 is TLS
 // and ALPN only -- keep their HTTP/1.1 answers. The prior-knowledge connection preface (RFC 9113 §3.3) names the target
 // `*` for the method PRI: refused 400 as a target that names no resource, before its version is read, and the frames
-// after it are dropped with the connection. An `Upgrade: h2c` request (RFC 7540 §3.2) is an HTTP/1.1 request: served as
-// one, the upgrade left to the application, and the connection keeps reading HTTP/1.1.
+// after it are dropped with the connection. A preface whose target names a resource passes that check, and llhttp stops
+// at its `SM` line, before any field: 400 too (Huly QB-1248) -- it was closed with no answer. An `Upgrade: h2c` request
+// (RFC 7540 §3.2) is an HTTP/1.1 request: served as one, the upgrade left to the application, and the connection keeps
+// reading HTTP/1.1.
 TEST(Http1ProtocolFraming, AnHttp2ClientOverCleartextKeepsItsHttp11Answers) {
+    for (const std::string_view preface :
+         {"PRI /x HTTP/2.0\r\n\r\nSM\r\n\r\n", "PRI /x HTTP/2.0\r\n\r\nSM\r\n\r\nGET /y HTTP/1.1\r\nHost: h\r\n\r\n"}) {
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, preface);
+        EXPECT_EQ(step(proto, io), 0u) << preface;
+        EXPECT_EQ(io.request_count, 0) << preface;
+        EXPECT_EQ(io.refusals, std::vector<int>{400}) << preface << ": a preface whose target names a resource had no answer";
+        EXPECT_TRUE(proto.ok()) << preface << ": the io answers before the connection ends";
+        EXPECT_EQ(io.input.size(), 0u) << preface << ": what follows the preface is dropped";
+    }
     {
         RefusingServerFakeIO                             io;
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
@@ -1902,7 +1915,11 @@ TEST(Http1ProtocolFraming, AChunkedBodyPastTheChunkLimitIsWrittenInFramesAServer
 // Huly QB-1248): 400 for a Content-Length that is no length -- past 2^64-1 (llhttp's overflow), not a number, given twice,
 // beside Transfer-Encoding -- for a Transfer-Encoding whose final coding is not `chunked` or that names it twice, for a
 // chunk size llhttp refuses (not hex, past 2^64-1) and for a field the trailer section must not carry; 501 for a coding
-// before a final `chunked`, which the server does not implement (§6.1). The connection closed with no answer.
+// before a final `chunked`, which the server does not implement (§6.1). The connection closed with no answer. `chunked`
+// named on two field lines is 400 as on one: llhttp refuses both. So is a CONNECT that declares content (RFC 9110 §9.3.6: it
+// has none): one that named `chunked` was dispatched at the end of its header section, what followed left in the buffer as
+// the next request, one that named `gzip, chunked` was answered 501, and one that declared a length had that many octets
+// read as its content -- a request written behind its header section swallowed.
 TEST(Http1ProtocolFraming, ARequestWhoseFramingIsRefusedIsAnswered) {
     const std::string                              chunked = "POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n";
     const std::vector<std::pair<std::string, int>> table   = {
@@ -1921,6 +1938,17 @@ TEST(Http1ProtocolFraming, ARequestWhoseFramingIsRefusedIsAnswered) {
         {chunked + "1\r\na\r\n0\r\nContent-Length: 1\r\n\r\n", 400}, // llhttp refuses it
         {chunked + "1\r\na\r\n0\r\nHost: elsewhere\r\n\r\n", 400},   // the parser does (store_trailer_field())
         {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", 501},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 501},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked, gzip\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nTransfer-Encoding: chunked\r\n\r\n", 400}, // the next request right behind it
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", 400},
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", 400},
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n", 400},
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nContent-Length: 1\r\n\r\na", 400}, // a length: no content to declare
+        {"CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\nContent-Length: 32\r\n\r\nGET /admin HTTP/1.1\r\nHost: a\r\n\r\n", 400}, // 32 octets
+        {"CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nContent-Length: 5\r\n\r\n", 400},                         // declared, not sent
+        {"POST /up HTTP/1.0\r\nHost: h\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\nabc", 400}, // HTTP/1.0 as HTTP/1.1
     };
     for (auto const &[wire, status] : table) {
         RefusingServerFakeIO                             io;
@@ -1934,7 +1962,9 @@ TEST(Http1ProtocolFraming, ARequestWhoseFramingIsRefusedIsAnswered) {
     }
     // The control: a well-formed request with each framing is dispatched, and nothing is refused.
     for (std::string const &wire :
-         {std::string("POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\na"), chunked + "1\r\na\r\n0\r\n\r\n"}) {
+         {std::string("POST /up HTTP/1.1\r\nHost: h\r\nContent-Length: 1\r\n\r\na"), chunked + "1\r\na\r\n0\r\n\r\n",
+          std::string("CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\n\r\n"),                         // a CONNECT that declares no content: routed
+          std::string("CONNECT h:443 HTTP/1.1\r\nHost: h:443\r\nContent-Length: 0\r\n\r\n")}) { // nor does a length of 0
         RefusingServerFakeIO                             io;
         qb::protocol::http::server<RefusingServerFakeIO> proto(io);
         feed(io, wire);
@@ -2132,4 +2162,175 @@ TEST(Http1ProtocolFraming, ATransferEncodingEndingInAnEmptyElementIsRefused400) 
     EXPECT_EQ(io.request_count, 1);
     ASSERT_TRUE(io.last_request.has_value());
     EXPECT_EQ(io.last_request->body().as<std::string>(), "hello");
+}
+
+// An HTTP/1.0 message with Transfer-Encoding (RFC 9112 §6.1): its framing is treated as faulty -- the message is processed,
+// its chunked body read -- and its connection closes after it, `Connection: keep-alive` notwithstanding (Huly QB-1248), a
+// request's as a response's. Both kept their connection.
+TEST(Http1ProtocolFraming, AnHttp10MessageWithTransferEncodingIsProcessedThenItsConnectionCloses) {
+    const auto request_of = [](std::string_view wire) {
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, wire);
+        EXPECT_GT(step(proto, io), 0u) << wire;
+        EXPECT_EQ(io.request_count, 1) << wire;
+        return io.last_request.value_or(qb::http::Request{});
+    };
+    const auto chunked = request_of("POST /up HTTP/1.0\r\nHost: h\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n"
+                                    "3\r\nabc\r\n0\r\n\r\n");
+    EXPECT_EQ(chunked.body().as<std::string>(), "abc") << "the message is processed";
+    EXPECT_FALSE(chunked.keep_alive) << "an HTTP/1.0 request with Transfer-Encoding kept its connection";
+    EXPECT_FALSE(http1_head_keep_alive_test::keep_alive_of(
+        "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n", false))
+        << "an HTTP/1.0 response with Transfer-Encoding kept its connection";
+    // Whatever the response: one to HEAD, a 204, and one of a version before 1.0, which llhttp reads the same way.
+    for (auto const &[wire, answers_head] : std::vector<std::pair<std::string, bool>>{
+             {"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n", true},
+             {"HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n", false},
+             {"HTTP/0.9 200 OK\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n", false}
+         })
+        EXPECT_FALSE(http1_head_keep_alive_test::keep_alive_of(wire, answers_head)) << wire;
+    // The controls: the same keep-alive request framed by its length, and an HTTP/1.1 one with Transfer-Encoding, keep it.
+    EXPECT_TRUE(request_of("POST /up HTTP/1.0\r\nHost: h\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nabc").keep_alive);
+    EXPECT_TRUE(request_of("POST /up HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n").keep_alive);
+    EXPECT_TRUE(http1_head_keep_alive_test::keep_alive_of("HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok", false));
+}
+
+// `close` has precedence over `keep-alive` (RFC 9112 §9.3) on every version, in a request as in a response, and an option
+// of Connection ends at the whitespace after it, a HTAB as a SP (RFC 9110 §5.6.3; Huly QB-1248). Below HTTP/1.1 llhttp
+// reads `keep-alive` alone, so a message that named both was kept; and it did not read an option followed by a HTAB at
+// all: `close<HTAB>` kept an HTTP/1.1 connection, `keep-alive<HTAB>` did not keep an HTTP/1.0 one, and `Upgrade<HTAB>`
+// beside `Upgrade: websocket` was no upgrade.
+TEST(Http1ProtocolFraming, CloseHasPrecedenceAndAnOptionEndsAtTheWhitespaceAfterIt) {
+    const auto request_keeps = [](std::string const &version, std::string const &fields) {
+        const std::string                        wire = "GET /x HTTP/" + version + "\r\nHost: h\r\n" + fields + "\r\n";
+        ServerFakeIO                             io;
+        qb::protocol::http::server<ServerFakeIO> proto(io);
+        feed(io, wire);
+        EXPECT_GT(step(proto, io), 0u) << wire;
+        EXPECT_EQ(io.request_count, 1) << wire;
+        return io.last_request.has_value() && io.last_request->keep_alive;
+    };
+    const auto response_keeps = [](std::string const &version, std::string const &fields) {
+        return http1_head_keep_alive_test::keep_alive_of("HTTP/" + version + " 200 OK\r\nContent-Length: 2\r\n" + fields + "\r\nok", false);
+    };
+    struct Row {
+        const char *version;
+        const char *fields;
+        bool        kept;
+    };
+    for (auto const &row : std::vector<Row>{
+             {"1.0", "Connection: keep-alive, close\r\n", false},
+             {"1.0", "Connection: close, keep-alive\r\n", false},
+             {"1.0", "Connection: Keep-Alive\r\nConnection: Close\r\n", false},
+             {"1.0", "Connection: close\r\nConnection: keep-alive\r\n", false},
+             {"1.0", "Proxy-Connection: keep-alive, close\r\n", false},
+             {"1.1", "Connection: keep-alive, close\r\n", false},
+             {"1.1", "Connection: close\t\r\n", false},
+             {"1.1", "Connection: close \t \r\n", false},
+             {"1.1", "Connection: close\t, te\r\n", false},
+             {"1.1", "Connection: te\t,\tclose\t\r\n", false},
+             {"1.0", "Connection: keep-alive\t\r\n", true},
+             {"1.0", "Connection: keep-alive\t, te\r\n", true},
+             // The controls, as they were.
+             {"1.0", "Connection: keep-alive\r\n", true},
+             {"1.0", "Connection: keep-alive , te\r\n", true},
+             {"1.0", "", false},
+             {"1.0", "Connection: close\r\n", false},
+             {"1.1", "", true},
+             {"1.1", "Connection: keep-alive\r\n", true},
+             {"1.1", "Connection: close\r\n", false},
+             {"1.1", "Connection: close , te\r\n", false},
+             {"1.1", "Connection: closed\t\r\n", true},      // no option of that name
+             {"1.1", "Connection: close\tx\r\n", true},      // one option, `close<HTAB>x`, as `close x` is: not `close`
+             {"1.0", "Connection: keep-alive\tx\r\n", false} // nor is this one `keep-alive`
+         }) {
+        EXPECT_EQ(request_keeps(row.version, row.fields), row.kept) << "request HTTP/" << row.version << " " << row.fields;
+        EXPECT_EQ(response_keeps(row.version, row.fields), row.kept) << "response HTTP/" << row.version << " " << row.fields;
+    }
+    // `upgrade` too: a request whose option is followed by a HTAB is an upgrade -- `upgrade`, which the WebSocket handshake
+    // reads, set -- where it read false. The controls: the option alone, and followed by another octet (no `upgrade` then).
+    for (auto const &[fields, upgrade] : std::vector<std::pair<std::string, bool>>{
+             {"Connection: Upgrade\t\r\nUpgrade: websocket\r\n", true},
+             {"Connection: keep-alive, Upgrade\t\r\nUpgrade: websocket\r\n", true},
+             {"Connection: Upgrade\r\nUpgrade: websocket\r\n", true},
+             {"Connection: Upgrade\tx\r\nUpgrade: websocket\r\n", false}
+         }) {
+        const std::string                                wire = "GET / HTTP/1.1\r\nHost: h\r\n" + fields + "\r\n";
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, wire);
+        EXPECT_GT(step(proto, io), 0u) << wire;
+        ASSERT_EQ(io.request_count, 1) << wire;
+        ASSERT_TRUE(io.last_request.has_value()) << wire;
+        EXPECT_EQ(io.last_request->upgrade, upgrade) << wire;
+    }
+}
+
+// What the session's keep-alive override relies on: an HTTP/1.1 request the parser does not keep carries a Connection or
+// a Proxy-Connection field -- nothing else ends an HTTP/1.1 request's connection -- so a request with neither that is not
+// kept is an HTTP/1.0 one, whatever else it carries.
+TEST(Http1ProtocolFraming, AnHttp11RequestThatIsNotKeptCarriesAConnectionOrAProxyConnectionField) {
+    int not_kept = 0, kept = 0;
+    for (const char *version : {"1.1", "1.0"})
+        for (const char *connection :
+             {"", "Connection: close\r\n", "Connection: te, close\r\n", "Connection: keep-alive\r\n", "Connection: te\r\n",
+              "Proxy-Connection: close\r\n", "Proxy-Connection: keep-alive\r\n", "Connection: upgrade\r\nUpgrade: x\r\n"})
+            for (const char *framing :
+                 {"\r\n", "Content-Length: 3\r\n\r\nabc", "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+                  "Expect: 100-continue\r\nContent-Length: 3\r\n\r\nabc", "Keep-Alive: timeout=1\r\n\r\n"}) {
+                const std::string wire = std::string("POST /x HTTP/") + version + "\r\nHost: h\r\n" + connection + framing;
+                ServerFakeIO      io;
+                qb::protocol::http::server<ServerFakeIO> proto(io);
+                feed(io, wire);
+                ASSERT_GT(step(proto, io), 0u) << wire;
+                ASSERT_TRUE(io.last_request.has_value()) << wire;
+                auto const &request = *io.last_request;
+                ++(request.keep_alive ? kept : not_kept);
+                if (request.minor_version != 0) {
+                    EXPECT_TRUE(request.keep_alive || request.has_header("Connection") || request.has_header("Proxy-Connection")) << wire;
+                }
+            }
+    EXPECT_GT(kept, 0);
+    EXPECT_GT(not_kept, 0) << "the table holds no request that is not kept";
+    { // And HTTP/1.1 is the only version past 1.0 a request is read with: llhttp refuses any other minor version.
+        RefusingServerFakeIO                             io;
+        qb::protocol::http::server<RefusingServerFakeIO> proto(io);
+        feed(io, "GET /x HTTP/1.2\r\nHost: h\r\n\r\n");
+        EXPECT_EQ(step(proto, io), 0u);
+        EXPECT_EQ(io.request_count, 0);
+        EXPECT_EQ(io.refusals, std::vector<int>{400});
+    }
+    // The control: an HTTP/1.0 request with neither field is not kept -- the silence the override fills.
+    ServerFakeIO                             io;
+    qb::protocol::http::server<ServerFakeIO> proto(io);
+    feed(io, "GET /x HTTP/1.0\r\nHost: h\r\n\r\n");
+    ASSERT_GT(step(proto, io), 0u);
+    ASSERT_TRUE(io.last_request.has_value());
+    EXPECT_FALSE(io.last_request->keep_alive);
+    EXPECT_FALSE(io.last_request->has_header("Connection") || io.last_request->has_header("Proxy-Connection"));
+}
+
+// `chunked` named twice is no framing (RFC 9112 §6.1: a sender applies it once): 400, not the 501 of a coding the server does
+// not implement before a final `chunked` (§6.1). llhttp refuses both shapes of it for a request before the parser's own scan
+// is reached (ARequestWhoseFramingIsRefusedIsAnswered); the scan's own verdict is read here behind an llhttp told to let
+// every Transfer-Encoding through, which qb never does. It answered 501 for each (Huly QB-1248).
+TEST(Http1ProtocolFraming, TheParsersOwnScanRefusesChunkedNamedTwiceWith400) {
+    const auto status_of = [](std::string const &fields) {
+        const std::string                   wire = "POST /u HTTP/1.1\r\nHost: h\r\n" + fields + "\r\n\r\n";
+        qb::http::Parser<qb::http::Request> parser;
+        http_set_lenient_transfer_encoding(static_cast<http_t *>(&parser), 1);
+        (void) parser.parse(wire.data(), wire.size());
+        return parser.refusal_status();
+    };
+    for (const char *twice :
+         {"Transfer-Encoding: chunked, chunked", "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked",
+          "Transfer-Encoding: CHUNKED,chunked", "Transfer-Encoding: gzip, chunked, chunked",
+          "Transfer-Encoding: chunked, gzip\r\nTransfer-Encoding: chunked"})
+        EXPECT_EQ(status_of(twice), 400) << twice;
+    // The controls: a coding before a final `chunked` is 501, on one field line or two; `chunked` alone is accepted.
+    EXPECT_EQ(status_of("Transfer-Encoding: gzip, chunked"), 501);
+    EXPECT_EQ(status_of("Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked"), 501);
+    EXPECT_EQ(status_of("Transfer-Encoding: chunked"), 0);
+    EXPECT_EQ(status_of("Transfer-Encoding: chunked,"), 0);
 }

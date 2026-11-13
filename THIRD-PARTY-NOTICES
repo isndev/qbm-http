@@ -58,6 +58,10 @@ installed tree alone, without going back to the source repository.
        after `chunked` is optional whitespace, as a trailing SP already was
        (RFC 9110 §5.6.3, Huly QB-555) -- two `case 9:` branches, each marked
        "qb local patch (Huly QB-555)";
+     - not-qb/llhttp/src/llhttp.c: an HTAB after an option of Connection (`close`,
+       `keep-alive`, `upgrade`) is optional whitespace too, as a SP already was --
+       without it `Connection: close<HTAB>` set no close flag (RFC 9110 §5.6.3,
+       Huly QB-1248) -- one `case 9:` branch, marked "qb local patch (Huly QB-1248)";
      - src/qbm/http/vendor/llhttp.h: the link names (Huly QB-1139) -- one `#define`
        per function the fork defines, mapping its http_ spelling to `qb_` + the
        upstream name (http_execute -> qb_llhttp_execute), read before any
@@ -71,11 +75,12 @@ installed tree alone, without going back to the source repository.
 
    Regenerating: in a checkout of nodejs/llhttp at that commit, `npm ci`, then
    `make build/c/llhttp.c build/llhttp.h`, then the prefix rename above. The result
-   equals not-qb/llhttp/src/llhttp.c byte for byte apart from the MIT notice and the
-   QB-555 branches (verified 2026-10-15), and build/llhttp.h equals the public header
-   apart from the notice, the comment wording, HTTP_UNINITIALIZED and the link-name
-   block; re-apply the local changes listed above. Output generated at a later commit
-   does not compare line for line: dc5dc9a also changed upstream's code generator.
+   equals not-qb/llhttp/src/llhttp.c byte for byte apart from the MIT notice, the
+   QB-555 branches (verified 2026-10-15) and the QB-1248 branch (the file's one
+   change since), and build/llhttp.h equals the public header apart from the notice,
+   the comment wording, HTTP_UNINITIALIZED and the link-name block; re-apply the
+   local changes listed above. Output generated at a later commit does not compare
+   line for line: dc5dc9a also changed upstream's code generator.
 
    Both the compiled parser (inside libqbm-http) and the public header reach the
    consumer, so the MIT permission notice is distributed two ways: inside every

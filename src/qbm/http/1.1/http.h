@@ -265,15 +265,15 @@ private:
 
     void
     start_request(Request &&request) {
-        // This runs synchronously from the protocol's noexcept onMessage
-        // (and from the noexcept eos event). Routing builds a Context,
-        // decodes path parameters, runs lifecycle hooks and the handler
-        // chain, and serializes the response — any of which can throw.
-        // Contain it here so a throw fails the connection instead of
-        // escaping the noexcept boundary and calling std::terminate.
-        try {
+        // This runs synchronously from the protocol's noexcept onMessage (and from the noexcept eos event). Routing builds a Context,
+        // decodes path parameters, runs lifecycle hooks and the handler chain, and serializes the response — any of which can throw.
+        // Contain it here so a throw fails the connection instead of escaping the noexcept boundary and calling std::terminate.
+        // The keep-alive override fills a silence: it keeps no request that carries a Connection or a Proxy-Connection field (the
+        try { // parser reads both; one that says `close` ends its connection, RFC 9112 §9.6), nor one with a Transfer-Encoding (§6.1).
             _active_request_method    = request.method();
-            _active_should_keep_alive = request.keep_alive || _keep_alive;
+            _active_should_keep_alive = request.keep_alive;
+            if (!request.keep_alive && _keep_alive && !request.has_header("Connection") && !request.has_header("Proxy-Connection")) [[unlikely]]
+                _active_should_keep_alive = !request.has_header("Transfer-Encoding"); // HTTP/1.0 alone gets here: faulty framing (QB-1248)
             _ready_response.reset();
 
             auto context = this->server().router().route(this->shared_from_this(), std::move(request));
@@ -635,11 +635,11 @@ public:
     }
 
     /**
-     * @brief Set the keep-alive flag
-     * @param value Keep-alive flag value
+     * @brief Set the session's keep-alive override
+     * @param value Whether the session keeps a connection its request left to its version's default
      *
-     * Sets the keep-alive flag for the session. If set to true,
-     * the session will not disconnect after sending the response.
+     * It fills a silence: it applies to a request that does not keep its connection and carries neither a `Connection` nor a
+     * `Proxy-Connection` field -- HTTP/1.0 with none -- and never to one that says `close` or carries a `Transfer-Encoding`.
      */
     void
     keep_alive(bool value = true) {

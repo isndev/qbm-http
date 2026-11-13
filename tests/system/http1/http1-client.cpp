@@ -3337,3 +3337,404 @@ TEST(Http1ClientTest, AResponseCutByTheReadBufferCapFailsNamingThatCap) {
     }
     drain_client_callbacks();
 }
+
+// A response the client's body limit cut (Huly QB-1248): its failure callback runs once the connection is retired, as the
+// callback of a response that closes the connection does (CloseResponseCallbackQueuesItsNextRequestOnANewConnection), so
+// a request the callback pushes is never written to that connection. With automatic reconnection it goes to a new one;
+// without, it is refused at once, as after any other end of a connection. It was written to the dying connection while
+// the client still read it as connected, and the disconnect that followed failed it: 502 "Connection closed". A request
+// QUEUED behind the cut one goes the same way: out on the new connection, or failed once, 503 -- it was written to the dying
+// connection first, and failed with it, 502. Its 503 reads "HTTP/1.1 client is not connected" when the callback itself
+// switches reconnection off -- it waited for a connection that is then never made -- and "Connection lost" when
+// reconnection was off before the cut: it ends with the connection it waited behind.
+TEST(Http1ClientTest, ACallbackOfAResponseTheBodyLimitCutQueuesItsNextRequestOnANewConnection) {
+    using namespace http1_callback_reentry_test;
+    qb::io::async::init();
+    for (const std::string_view policy : {"reconnects", "switched off in the callback", "off before the cut"}) {
+        SCOPED_TRACE(policy);
+        const bool          auto_reconnect = policy == "reconnects";
+        LoopbackHttp1Server server;
+        auto                client   = qb::http1::make_client(server.url(""));
+        auto                observed = std::make_shared<Observation>();
+        Cleanup             cleanup{client, observed};
+        qb::http::Response  cut, queued;
+        bool                connected_in_callback = true;
+        int                 answered_in_callback  = -1; // the pushed request's answers by the time its push returned
+        int                 queued_callbacks      = 0;
+        client->set_max_body_size(1024);
+        if (policy == "off before the cut") { // a client that does not reconnect is connected by hand
+            client->set_auto_reconnect(false);
+            ASSERT_TRUE(client->connect([observed](bool ok, std::string const &) {
+                if (!observed->cleaning)
+                    observed->reconnected = ok;
+            }));
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->reconnected; }));
+        }
+        auto big   = request(qb::http::method::POST, "/echo");
+        big.body() = std::string(4096, 'x'); // echoed: a response body past the limit
+        ASSERT_TRUE(client->push_request(std::move(big), [&, observed, auto_reconnect](auto response) {
+            if (observed->cleaning)
+                return;
+            ++observed->closing_callbacks;
+            cut                   = std::move(response);
+            connected_in_callback = client->is_connected();
+            client->set_auto_reconnect(auto_reconnect);
+            EXPECT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [observed](auto result) {
+                if (observed->cleaning)
+                    return;
+                observed->response = std::move(result);
+                ++observed->new_callbacks;
+            }));
+            answered_in_callback = observed->new_callbacks;
+        }));
+        ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&, observed](auto response) { // queued behind it
+            if (observed->cleaning)
+                return;
+            queued = std::move(response);
+            ++queued_callbacks;
+        }));
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return observed->new_callbacks != 0 && queued_callbacks != 0; }));
+        EXPECT_EQ(observed->closing_callbacks, 1);
+        EXPECT_EQ(queued_callbacks, 1);
+        EXPECT_EQ(cut.status(), qb::http::status::BAD_GATEWAY);
+        EXPECT_NE(cut.body().as<std::string>().find("limit of 1024 bytes"), std::string::npos) << cut.body().as<std::string>();
+        EXPECT_FALSE(connected_in_callback) << "the cut must retire the connection before it calls user code";
+        EXPECT_EQ(observed->new_callbacks, 1);
+        if (auto_reconnect) {
+            EXPECT_EQ(answered_in_callback, 0);
+            EXPECT_EQ(observed->response.status(), qb::http::status::OK) << observed->response.body().as<std::string>();
+            EXPECT_EQ(observed->response.body().as<std::string>(), "pong");
+            EXPECT_EQ(queued.status(), qb::http::status::OK) << "the request queued behind the cut one: " << queued.body().as<std::string>();
+            EXPECT_EQ(queued.body().as<std::string>(), "pong");
+            EXPECT_EQ(server.connection_count(), 2);
+        } else {
+            EXPECT_EQ(answered_in_callback, 1) << "a client that is down and does not reconnect refuses the request at once";
+            EXPECT_EQ(observed->response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+            EXPECT_EQ(observed->response.body().as<std::string>(), "HTTP/1.1 client is not connected");
+            EXPECT_EQ(queued.status(), qb::http::status::SERVICE_UNAVAILABLE) << "the request queued behind the cut one";
+            EXPECT_EQ(queued.body().as<std::string>(), policy == "off before the cut" ? "Connection lost" : "HTTP/1.1 client is not connected");
+            EXPECT_EQ(server.connection_count(), 1);
+        }
+    }
+}
+
+// Framing on the wire: what is refused, and what closes its connection (Huly QB-1248; RFC 9112 §6.1, §6.3, §9.6; RFC 9110 §9.3.6).
+namespace http1_framing_on_the_wire_test {
+class Server;
+class Session : public qb::http::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http::use<Server>::server<Session> {
+public:
+    std::atomic<int> served{0};
+    Server() {
+        router().post("/up", [this](auto ctx) {
+            ++served;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = ctx->request().body().template as<std::string>();
+            ctx->complete();
+        });
+        router().get("/now", [this](auto ctx) {
+            ++served;
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().get("/persist", [this](auto ctx) { // the session's keep-alive override, set for what follows
+            ++served;
+            ctx->session()->keep_alive(true);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {}
+
+// Everything the peer reads until the connection ends (the marker is never sent).
+std::string
+until_close(raw_socket &peer) {
+    return peer.read_until("\r\n\r\n\r\n\r\n", std::chrono::seconds(3));
+}
+
+// The status of every response in `all`, in order, whatever version its status line carries.
+std::string
+statuses(std::string const &all) {
+    std::string out;
+    for (auto at = all.find("HTTP/1."); at != std::string::npos; at = all.find("HTTP/1.", at + 1))
+        if (at + 12 <= all.size() && all[at + 8] == ' ')
+            out += (out.empty() ? "" : " ") + all.substr(at + 9, 3);
+    return out;
+}
+
+const std::string http10_chunked =
+    "POST /up HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+} // namespace http1_framing_on_the_wire_test
+
+// An HTTP/1.0 request with Transfer-Encoding (RFC 9112 §6.1): its framing is treated as faulty -- it is served, its chunked
+// body read -- and its connection closes after it, `Connection: keep-alive` and the session's keep-alive override
+// notwithstanding: nothing pipelined behind it is served. The connection was kept, and the request behind it served.
+TEST(Http1ClientTest, AnHttp10RequestWithTransferEncodingIsServedThenItsConnectionCloses) {
+    using namespace http1_framing_on_the_wire_test;
+    Server              *server = nullptr;
+    ServerThread<Server> thread([&server](Server &s) {
+        server = &s;
+        if (s.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        s.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    { // The control: the same keep-alive request framed by its length keeps its connection.
+        raw_socket peer(thread.port());
+        peer.send_all("POST /up HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\nContent-Length: 3\r\n\r\nabc"
+                      "GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+        EXPECT_EQ(statuses(until_close(peer)), "200 200");
+    }
+    {
+        const int  before = server->served.load();
+        raw_socket peer(thread.port());
+        peer.send_all(http10_chunked + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        const auto all = until_close(peer);
+        EXPECT_EQ(statuses(all), "200") << all;
+        EXPECT_NE(all.find("abc"), std::string::npos) << "the request is served, its body read: " << all;
+        EXPECT_EQ(server->served.load() - before, 1) << "the request pipelined behind it was served";
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(1))) << "the connection stayed open";
+    }
+    // Under the session's keep-alive override, set by the request before it: with `Connection: keep-alive`, and with no
+    // Connection field at all -- the silence the override fills for a request framed by its length (the control below).
+    for (const std::string &chunked10 :
+         {http10_chunked, std::string("POST /up HTTP/1.0\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")}) {
+        const int  before = server->served.load();
+        raw_socket peer(thread.port());
+        peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\n" + chunked10 + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        const auto all = until_close(peer);
+        EXPECT_EQ(statuses(all), "200 200") << chunked10 << all;
+        EXPECT_EQ(server->served.load() - before, 2) << "the override kept the connection of an HTTP/1.0 message with Transfer-Encoding";
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(1))) << "the connection stayed open";
+    }
+    { // The control: what the override is for, it keeps -- an HTTP/1.0 request framed by its length that asks nothing. The
+        // connection stays open: the three answers are read, not its end.
+        raw_socket peer(thread.port());
+        peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\nPOST /up HTTP/1.0\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc"
+                      "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        std::string all;
+        for (int reads = 0; reads < 6 && statuses(all).size() < std::string_view("200 200 200").size(); ++reads)
+            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(statuses(all), "200 200 200") << all;
+    }
+}
+
+// A request that carries the `close` connection option ends its connection after its response (RFC 9112 §9.6: a server
+// that receives it MUST initiate the closure), under the session's keep-alive override too: the answer says
+// `Connection: close`, the connection closes, and nothing pipelined behind it is served. The override kept the
+// connection, and served what followed. It now fills a silence only: it keeps no request that carries a Connection
+// field, whatever the options it names -- nor one that carries a Proxy-Connection field, which the parser reads as
+// Connection: `Proxy-Connection: close` on an HTTP/1.1 request ends its connection, with a Transfer-Encoding as without.
+TEST(Http1ClientTest, TheKeepAliveOverrideNeverKeepsARequestThatSaysClose) {
+    using namespace http1_framing_on_the_wire_test;
+    Server              *server = nullptr;
+    ServerThread<Server> thread([&server](Server &s) {
+        server = &s;
+        if (s.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        s.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    for (const std::string &closing :
+         {std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: keep-alive, Close\r\n\r\n"), // one option of a list, any case
+          std::string("POST /up HTTP/1.1\r\nHost: a\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: close\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: te\r\n\r\n"), // the field, and no `keep-alive`: no silence to fill
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nProxy-Connection: close\r\n\r\n"),
+          std::string("POST /up HTTP/1.1\r\nHost: a\r\nProxy-Connection: close\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nProxy-Connection: te\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: keep-alive, close\r\n\r\n"), // `close` first (§9.3)
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\t\r\n\r\n")}) {        // whitespace after the option
+        const int  before = server->served.load();
+        raw_socket peer(thread.port());
+        peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\n" + closing + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        const auto all = until_close(peer);
+        EXPECT_EQ(statuses(all), "200 200") << closing << all;
+        EXPECT_NE(lowercase(all).find("connection: close"), std::string::npos) << closing << all;
+        EXPECT_EQ(server->served.load() - before, 2) << closing << "the request pipelined behind a request that said close was served";
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(1))) << closing << "the connection stayed open";
+    }
+    // The controls: under the override, a request that says nothing of the connection keeps it, HTTP/1.1 or HTTP/1.0; one
+    // that asks to be kept through Proxy-Connection is; and an HTTP/1.1 request with a Transfer-Encoding keeps its connection.
+    for (const std::string &kept :
+         {std::string("GET /now HTTP/1.1\r\nHost: a\r\n\r\n"), std::string("GET /now HTTP/1.0\r\nHost: a\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: closed\r\n\r\n"), // no option of that name
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nProxy-Connection: keep-alive\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nProxy-Connection: keep-alive\r\n\r\n"),
+          std::string("POST /up HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")}) {
+        raw_socket peer(thread.port());
+        peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\n" + kept + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        std::string all;
+        for (int reads = 0; reads < 6 && statuses(all).size() < std::string_view("200 200 200").size(); ++reads)
+            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(statuses(all), "200 200 200") << kept << all;
+    }
+}
+
+// `close` has precedence over `keep-alive` on every version (RFC 9112 §9.3), and an option of Connection ends at the
+// whitespace after it, a HTAB as a SP (RFC 9110 §5.6.3): a request that says `close` either way is answered, its answer says
+// `Connection: close`, its connection closes, and nothing pipelined behind it is served (Huly QB-1248). An HTTP/1.0
+// request that named both options was kept -- only `keep-alive` was read below HTTP/1.1 -- and an option followed by a HTAB
+// was not read at all: `close<HTAB>` kept an HTTP/1.1 connection, `keep-alive<HTAB>` closed an HTTP/1.0 one.
+TEST(Http1ClientTest, ARequestThatSaysCloseEndsItsConnectionWhateverElseItsConnectionFieldSays) {
+    using namespace http1_framing_on_the_wire_test;
+    Server              *server = nullptr;
+    ServerThread<Server> thread([&server](Server &s) {
+        server = &s;
+        if (s.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        s.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    for (const std::string &closing :
+         {std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: keep-alive, close\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: Close, Keep-Alive\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nProxy-Connection: keep-alive, close\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\t\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close \t \r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: te\t,\tclose\t\r\n\r\n")}) {
+        const int  before = server->served.load();
+        raw_socket peer(thread.port());
+        peer.send_all(closing + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        const auto all = until_close(peer);
+        EXPECT_EQ(statuses(all), "200") << closing << all;
+        EXPECT_NE(lowercase(all).find("connection: close"), std::string::npos) << closing << all;
+        EXPECT_EQ(server->served.load() - before, 1) << closing << "the request pipelined behind a request that said close was served";
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(1))) << closing << "the connection stayed open";
+    }
+    // Kept: an HTTP/1.0 request that asks for it -- a HTAB after the option included, which closed its connection -- and an
+    // HTTP/1.1 request whose field names no `close` option, whatever follows a name that starts like it.
+    for (const std::string &kept :
+         {std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\n\r\n"),
+          std::string("GET /now HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\t\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: closed\t\r\n\r\n"),
+          std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\tx\r\n\r\n")}) { // one option, `close<HTAB>x`: not `close`
+        raw_socket peer(thread.port());
+        peer.send_all(kept + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
+        std::string all;
+        for (int reads = 0; reads < 4 && statuses(all).size() < std::string_view("200 200").size(); ++reads)
+            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(statuses(all), "200 200") << kept << all;
+    }
+}
+
+// An HTTP/2 connection preface sent to this HTTP/1.1 server is answered 400, then the connection closes, whatever its
+// target (RFC 9112 §2.2; Huly QB-1248). The preface a client sends (`PRI * HTTP/2.0`, RFC 9113 §3.4) is refused at its
+// target, before and after this change. One whose target names a resource (`PRI /x HTTP/2.0`) passes that check and stops
+// llhttp at its `SM` line, before any field: the connection was closed with no answer.
+TEST(Http1ClientTest, AnHttp2PrefaceIsAnswered400WhateverItsTarget) {
+    LoopbackHttp1Server server;
+    for (const char *target : {"*", "/x", "/ping"}) {
+        raw_socket peer(server.port);
+        peer.send_all(std::string("PRI ") + target + " HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.rfind("HTTP/1.1 400 ", 0), 0u) << target << ": " << answer;
+        EXPECT_NE(lowercase(answer).find("connection: close"), std::string::npos) << target << ": " << answer;
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(3))) << target;
+    }
+    EXPECT_EQ(server.request_count(), 0);
+}
+
+// A CONNECT has no content (RFC 9110 §9.3.6): one that declares some -- a transfer coding, or a Content-Length other than
+// 0 -- is answered 400, then the connection closes, nothing it carried served. One that named `chunked` was routed at the
+// end of its header section -- llhttp completes a CONNECT there -- and what followed was read as the next request of the
+// connection: a request written right behind the header section was served. One that named `gzip, chunked` was answered
+// 501. One that declared a length had that many octets read as its content: a request written behind its header section
+// was swallowed, where llhttp, and a peer that ends a CONNECT at its header section, see the next request. A CONNECT that
+// declares none -- no field, or a Content-Length of 0 -- is routed as before: here, to no route.
+TEST(Http1ClientTest, AConnectRequestThatDeclaresContentIsAnswered400ThenClosed) {
+    LoopbackHttp1Server                                    server;
+    const std::string                                      next  = "GET /ping HTTP/1.1\r\nHost: a\r\n\r\n";
+    const std::vector<std::pair<std::string, std::string>> table = {
+        {"Transfer-Encoding: chunked", next}, // the next request right behind the header section
+        {"Transfer-Encoding: chunked", "0\r\n\r\n" + next},
+        {"Transfer-Encoding: chunked", "3\r\nabc\r\n0\r\n\r\n" + next},
+        {"Transfer-Encoding: chunked", "3\r\nabc\r\n" + next},
+        {"Transfer-Encoding: gzip, chunked", "0\r\n\r\n" + next},
+        {"Content-Length: 32", "GET /admin HTTP/1.1\r\nHost: a\r\n\r\n"}, // 32 octets: a request, or this one's content
+        {"Content-Length: 3", "abc" + next},
+        {"Content-Length: 1", ""}, // declared, and not sent
+    };
+    for (const auto &[field, after] : table) {
+        raw_socket peer(server.port);
+        peer.send_all("CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n" + field + "\r\n\r\n" + after);
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.rfind("HTTP/1.1 400 ", 0), 0u) << field << " " << after.size() << ": " << answer;
+        EXPECT_NE(lowercase(answer).find("connection: close"), std::string::npos) << field << " " << after.size() << ": " << answer;
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(3))) << field << " " << after.size();
+    }
+    EXPECT_EQ(server.request_count(), 0) << "a request a refused CONNECT carried was served";
+    for (const char *none : {"", "Content-Length: 0\r\n"}) { // the controls
+        raw_socket peer(server.port);
+        peer.send_all(std::string("CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n") + none + "\r\n");
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.rfind("HTTP/1.1 404 ", 0), 0u) << none << answer;
+    }
+}
+
+// `chunked` applied twice is no framing (RFC 9112 §6.1: a sender applies it once): 400 whether the field names it twice on
+// one line or one field line names it after another -- llhttp refuses both, before and after this change, and the
+// parser's own scan now agrees (TheParsersOwnScanRefusesChunkedNamedTwiceWith400). Another coding before a final
+// `chunked` is 501 (§6.1).
+TEST(Http1ClientTest, ATransferEncodingThatNamesChunkedTwiceIsAnswered400) {
+    LoopbackHttp1Server                                    server;
+    const std::vector<std::pair<std::string, std::string>> table = {
+        {"Transfer-Encoding: chunked, chunked", "400"},
+        {"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked", "400"},
+        {"Transfer-Encoding: chunked, gzip\r\nTransfer-Encoding: chunked", "400"},
+        {"Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked", "501"},
+        {"Transfer-Encoding: gzip, chunked", "501"},
+    };
+    for (auto const &[fields, status] : table) {
+        raw_socket peer(server.port);
+        peer.send_all("POST /echo HTTP/1.1\r\nHost: a\r\n" + fields + "\r\n\r\n0\r\n\r\n");
+        const auto answer = peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        EXPECT_EQ(answer.substr(0, 13), "HTTP/1.1 " + status + " ") << fields << ": " << answer;
+        EXPECT_TRUE(peer.closes_within(std::chrono::seconds(3))) << fields;
+    }
+    EXPECT_EQ(server.request_count(), 0);
+}
+
+// An HTTP/1.0 response with Transfer-Encoding that asks to be kept (RFC 9112 §6.1; Huly QB-1248): the persistent client
+// reads it, then retires its connection -- the next request goes to a new one. It kept the connection. The control, the
+// same response framed by its length, keeps it. An interim response counts: `HTTP/1.0 100 Continue` that names a coding
+// is such a message, and the connection is retired after the final response, whatever that one says -- it was kept, the
+// client returning on a 1xx before it looked. The controls: an HTTP/1.0 interim response that names none, and an HTTP/1.1
+// one that names `chunked`, keep the connection.
+TEST(Http1ClientTest, AnHttp10ResponseWithTransferEncodingRetiresItsConnection) {
+    using http1_switched_protocols_test::pong;
+    const std::string kept10 = "HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\nok";
+    for (auto const &[head, connections] : std::vector<std::pair<std::string, int>>{
+             {"HTTP/1.0 200 OK\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n", 2},
+             {kept10, 1},
+             {"HTTP/1.0 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\n" + kept10, 2},
+             {"HTTP/1.0 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 2},
+             {"HTTP/1.0 100 Continue\r\n\r\n" + kept10, 1},
+             {"HTTP/1.1 100 Continue\r\nTransfer-Encoding: chunked\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 1}
+         }) {
+        http1_head_no_length_test::ScriptedPeer peer({head, pong});
+        auto                                    client = qb::http1::make_client(peer.url("/"));
+        client->set_request_timeout(std::chrono::seconds(3));
+        std::vector<qb::http::Request> queued;
+        queued.push_back(request(qb::http::method::GET, "/first"));
+        queued.push_back(request(qb::http::method::GET, "/ping"));
+        auto replies = qb::http::run_sync(client->push_requests(std::move(queued)));
+        ASSERT_EQ(replies.size(), 2u) << head;
+        EXPECT_EQ(replies[0].status(), qb::http::status::OK) << head;
+        EXPECT_EQ(replies[0].body().template as<std::string>(), "ok") << head;
+        EXPECT_EQ(replies[1].body().template as<std::string>(), "pong") << head;
+        EXPECT_EQ(peer.connections.load(), connections) << head;
+        drain_client_callbacks();
+    }
+}

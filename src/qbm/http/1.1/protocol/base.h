@@ -211,8 +211,8 @@ private:
     /// Refuses the message for the exception a callback caught. llhttp is C and calls every callback from its own
     /// frames, which no exception may unwind: each callback is noexcept, and each that allocates -- the target, a field
     /// line, the Host value it rewrites, a chunk, a trailer field -- ends in a handler that calls this. The exception
-    /// used to unwind through llhttp up to the protocol's noexcept getMessageSize(), which terminated (review r1 N2,
-    /// Huly QB-1186). An allocation failure is 503: the server cannot take the request now, which a client may send
+    /// used to unwind through llhttp up to the protocol's noexcept getMessageSize(), which terminated the process
+    /// (Huly QB-1186). An allocation failure is 503: the server cannot take the request now, which a client may send
     /// again (RFC 9110 §15.6.4), not a request it judged; any other exception 500, a condition it did not expect
     /// (§15.6.1). The session answers it as any refusal, and closes the connection if it cannot build the answer.
     static int
@@ -238,24 +238,24 @@ private:
         return value;
     }
 
-    static bool
-    is_supported_transfer_encoding(MessageType const &msg) {
+    static int // the status a message's Transfer-Encoding is refused with, 0 for `chunked` alone (RFC 9112 §6.1, §6.3; QB-1248)
+    transfer_encoding_refusal(http_t const *parser, MessageType const &msg) {
         auto it = msg.headers().find("Transfer-Encoding");
-        if (it == msg.headers().end()) {
-            return true;
-        }
+        if (it == msg.headers().end())
+            return 0;
+        const bool  connect = parser->type == HTTP_REQUEST && parser->method == HTTP_CONNECT; // no content, so no coding (RFC 9110 §9.3.6)
         std::size_t tokens  = 0; // the non-empty tokens of every field line, scanned in place: nothing allocated (Huly QB-1248)
-        bool        chunked = false;
+        std::size_t chunked = 0; // how many of them are `chunked`: applied twice it is no framing (§6.1), 400 whatever llhttp let through
         for (const auto &value : it->second) {
             for (std::size_t from = 0; from != std::string_view::npos;) {
                 const auto comma = value.find(',', from);
                 const auto token = utility::trim_http_whitespace(std::string_view(value).substr(from, comma - from));
-                if (!token.empty())
-                    chunked = ++tokens == 1 && utility::iequals(token, "chunked");
+                tokens += !token.empty();
+                chunked += utility::iequals(token, "chunked");
                 from = comma == std::string_view::npos ? comma : comma + 1;
             }
         }
-        return tokens == 1 && chunked;
+        return connect ? 400 : tokens == 1 && chunked == 1 ? 0 : chunked < 2 && (parser->flags & F_CHUNKED) ? 501 : 400; // 501: §6.1
     }
 
     /**
@@ -595,19 +595,17 @@ private:
         if constexpr (MessageType::type == HTTP_REQUEST) {
             // A major version other than 1 is one the server does not support: 505 (RFC 9110 §15.6.6). llhttp reads two,
             // HTTP/0.9 -- a request line with no version, read with the field lines after it, or 0.9 written out -- and
-            // HTTP/2.0, which is no text protocol; both were served as HTTP/1.x (review r1 N3 and its follow-up).
+            // HTTP/2.0, which is no text protocol; both were served as HTTP/1.x.
             if (parser->http_major != 1) [[unlikely]]
                 return refuse_with_status(parser, "HTTP request version is not 1.x", HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED);
         }
-        if (msg.has_header("Transfer-Encoding")) {
+        if (msg.has_header("Transfer-Encoding")) { // a HEAD's response, a 1xx, a 204, a 304: nothing follows to decode, whatever it names
             if (msg.has_header("Content-Length"))
                 return refuse_with_status(parser, "HTTP Transfer-Encoding with Content-Length is forbidden", HTTP_STATUS_BAD_REQUEST);
-            // Nothing follows a HEAD's response, a 1xx, a 204 or a 304 to decode, whatever coding it names (RFC 9112 §6.1, §6.3; QB-1248).
-            // A request's: 501 for a coding before a final chunked, which it does not implement (§6.1), else 400 (§6.3; QB-1248)
-            if (!is_supported_transfer_encoding(msg)
-                && !(self->_body_forbidden || parser->status_code / 100 == 1 || parser->status_code == 204 || parser->status_code == 304))
-                return refuse_with_status(parser, "Unsupported HTTP Transfer-Encoding",
-                                          parser->flags & F_CHUNKED ? HTTP_STATUS_NOT_IMPLEMENTED : HTTP_STATUS_BAD_REQUEST);
+            if (const int code = transfer_encoding_refusal(parser, msg); // 501 or 400 (RFC 9112 §6.1, §6.3; Huly QB-1248)
+                code && !(self->_body_forbidden || parser->status_code / 100 == 1 || parser->status_code == 204 || parser->status_code == 304))
+                return refuse_with_status(parser, "Unsupported HTTP Transfer-Encoding", static_cast<http_status>(code));
+            parser->flags    = static_cast<uint16_t>(parser->flags & ~F_CONNECTION_KEEP_ALIVE); // faulty framing before HTTP/1.1: close (§6.1)
             parser->settings = const_cast<http_settings_s *>(&trailer_settings); // a chunked body's trailers (QB-1067); harmless on no body
         }
         if constexpr (MessageType::type == HTTP_REQUEST) {
@@ -620,6 +618,8 @@ private:
             if (parser->content_length == ULLONG_MAX && !msg.has_header("Transfer-Encoding")) {
                 parser->content_length = 0;
             }
+            if (parser->content_length != 0 && parser->method == HTTP_CONNECT) [[unlikely]] // a CONNECT has no content (RFC 9110 §9.3.6)
+                return refuse_with_status(parser, "HTTP CONNECT request declares content", HTTP_STATUS_BAD_REQUEST);
         } else if constexpr (MessageType::type == HTTP_RESPONSE) {
             const auto status = parser->status_code;
             if (self->_body_forbidden || (status >= 100 && status < 200)) // a HEAD's response, a 1xx: llhttp's no-body mark (QB-1248)
@@ -643,7 +643,7 @@ private:
                 self->body_buffer(hint).reserve(hint);
         }
         msg.upgrade              = static_cast<bool>(parser->upgrade);
-        msg.keep_alive           = static_cast<bool>(http_should_keep_alive(parser));
+        msg.keep_alive           = http_should_keep_alive(parser) && !(parser->flags & F_CONNECTION_CLOSE); // `close` first (§9.3)
         self->_headers_completed = true;
         return HPE_PAUSED;
     } catch (...) {
@@ -1018,9 +1018,9 @@ class base : public qb::io::async::AProtocol<IO_Handler> {
         if constexpr (requires(IO_Handler &io) { io.http1_refuse_request(qb::http::Status{}); }) {
             int        status = _http_obj.refusal_status(); // the refusal's own: a limit, the target, Host, the version, a framing
             const auto failed = http_get_errno(static_cast<http_t *>(&_http_obj));
-            // Any other refusal llhttp makes of a request is of a malformed one: 400 (RFC 9112 §2.2; Huly QB-1248). A pause is no
-            // refusal -- the header section's, an upgrade's -- and never reaches here: it would not be answered.
-            if (!status && failed != HPE_OK && failed != HPE_PAUSED && failed != HPE_PAUSED_UPGRADE && failed != HPE_PAUSED_H2_UPGRADE)
+            // Any other refusal llhttp makes of a request is of a malformed one, its pause on an HTTP/2 preface included: 400 (RFC 9112
+            // §2.2; QB-1248). The pauses left out never get here: HPE_PAUSED ends the headers, on_message_complete()'s 1 stops an upgrade's.
+            if (!status && failed != HPE_OK && failed != HPE_PAUSED && failed != HPE_PAUSED_UPGRADE)
                 status = HTTP_STATUS_BAD_REQUEST;
             if (status != 0) {
                 _refused      = true;

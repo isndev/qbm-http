@@ -791,6 +791,182 @@ All notable changes to the qbm-http module are documented here. The format is ba
   a quarter of a second. Mutants, the unmutated tree green before and after: the persistent client keeping its
   linger (three expectations fail), the one-shot session keeping its own (one) -- 2 planted, 2 caught.
 
+- **A request pushed from the failure callback of a response a bound cut goes to a new connection (Huly QB-1248).**
+  The persistent HTTP/1.1 client failed the request of a response its body limit, or qb-io's read cap, cut before it
+  retired the connection: the callback ran while `is_connected()` was still true and the transport open -- the
+  disconnection's handler runs before the transport ends -- so the request next in line, one the callback pushed or
+  one already queued behind the cut one, was written to the connection being closed, and the disconnect that followed
+  failed it with 502 "Connection closed", whatever the reconnection policy. Every other end of a connection retired it
+  first: a response that closes, a `101`, a timeout, a disconnect. A cut now fails through the same path as a
+  disconnect -- the cohort detached, the connection retired, then the callbacks -- and its error names the bound as
+  before. A request pushed from that callback goes to a new connection; with automatic reconnection off it is refused
+  at once, 503 "HTTP/1.1 client is not connected", inside the push, as any work a disconnected client is given. A
+  request QUEUED behind the cut one goes the same way: out on the new connection, or failed once, 503 -- "HTTP/1.1
+  client is not connected" when the callback itself switches reconnection off, the request having waited for a
+  connection that is then never made, and "Connection lost" when reconnection was off before the cut: it ends with the
+  connection it waited behind. Witness (`qbm-http-test-system-http1-client`,
+  `ACallbackOfAResponseTheBodyLimitCutQueuesItsNextRequestOnANewConnection`, under three policies -- reconnection on,
+  switched off in the callback, off before the cut): a callback that pushes a request after a response of 4096 bytes
+  cut at a limit of 1024, a second request queued behind it. On the base `is_connected()` read true in the callback
+  and the queued request, next in line, failed 502 "Connection closed" under each policy; with reconnection off the
+  pushed request failed after its push had returned, 503 "Connection lost". Now it reads false, and both requests are
+  answered 200 on a second connection, or, with reconnection off, the pushed one is refused 503 before its push
+  returns and the queued one fails once, 503, with the text of its policy. Mutants, the unmutated tree green first:
+  the callbacks before the retirement, the cut no longer named -- 2 planted, 2 caught.
+
+- **An HTTP/1.0 message with `Transfer-Encoding` closes its connection after it (Huly QB-1248).** HTTP/1.0 defines no
+  transfer coding: a recipient of such a message treats its framing as faulty and closes the connection after
+  processing it (RFC 9112 §6.1). The server read an HTTP/1.0 request's chunked body and kept the connection when the
+  request said `Connection: keep-alive`, or under the session's keep-alive override; measured on the wire, the request
+  pipelined behind it was served in both cases, and the persistent client kept the connection of such a response. The
+  parser now reads the `keep_alive` of a message that carries the field as false whenever its version is not HTTP/1.1
+  -- every version but HTTP/1.1 reads llhttp's keep-alive flag --, a request's and a response's, and the session's
+  override keeps no such request: the message is processed, its answer says `Connection: close`, the connection closes
+  and nothing behind it is served; a client retires the connection of such a response, one to HEAD or a `204`
+  included. An interim response is such a message too: after `HTTP/1.0 100 Continue` that names a coding, the
+  persistent client retires the connection once the final response is delivered, whatever that one says -- it returned
+  on a 1xx before it looked at it, and kept the connection. Decided against answering `400`, which nginx does, and
+  against ignoring the field, which Go's `net/http` does on an HTTP/1.0 message: the wording of §6.1 is what qb does.
+  `Transfer-Encoding` beside `Content-Length` stays refused `400` on HTTP/1.0 as on HTTP/1.1, and nothing changes for
+  an HTTP/1.1 message. Nothing is added to a message without the field, nor to a request that keeps its connection:
+  the flag is cleared in the branch a `Transfer-Encoding` field already takes, and the override's test runs only for a
+  request that does not keep its connection, under an override that is set. Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing`
+  (`AnHttp10MessageWithTransferEncodingIsProcessedThenItsConnectionCloses`: a chunked HTTP/1.0 request and response
+  that ask to be kept, read whole, a response to HEAD, a `204` and an `HTTP/0.9` response, `keep_alive` false -- true
+  for each on the base; the controls keep theirs: the same request and response framed by a length, an HTTP/1.1
+  chunked request) and `qbm-http-test-system-http1-client`
+  (`AnHttp10RequestWithTransferEncodingIsServedThenItsConnectionCloses`: on the base the statuses read `200 200` then,
+  under the override, `200 200 200` -- with `Connection: keep-alive` and with no `Connection` field --, the pipelined
+  request served and the connection left open; now `200` and `200 200`, then the close; the controls: a length-framed
+  HTTP/1.0 keep-alive request keeps its connection, and the override still keeps a length-framed HTTP/1.0 request;
+  `AnHttp10ResponseWithTransferEncodingRetiresItsConnection`: the request after such a response goes to a second
+  connection, one on the base, and after the same response framed by its length to the same one; so does the request
+  after `HTTP/1.0 100 Continue` that names a coding, whatever version the final response carries -- one connection on
+  the base --, where an HTTP/1.0 interim response that names none and an HTTP/1.1 one that names `chunked` keep
+  theirs). Mutants: the flag not cleared, the flag cleared for a minor version of 0 only, the override keeping the
+  request, the override refusing every request with the field -- 4 planted, 4 caught; for the interim response, its
+  faulty framing never remembered, remembered for any interim response of such a version, remembered whatever the
+  version, not applied to the final response -- 4 planted, 4 caught, and a fifth, what was remembered never forgotten,
+  is equivalent: the connection it retires is not used again.
+
+- **The session's keep-alive override never keeps a request that says `Connection: close` (Huly QB-1248).** A server
+  that receives the `close` connection option MUST initiate the closure of the connection after it sends the final
+  response (RFC 9112 §9.6). `session::keep_alive(true)`, the application's override, kept such a connection: measured
+  on the wire, three requests of which the second said `close` were answered `200 200 200` -- HTTP/1.1 or HTTP/1.0,
+  the option alone or one of a list --, the request behind it served and the connection left open. The override now
+  fills a silence, and never contradicts the request: it applies only to a request that does not keep its connection
+  and carries neither a `Connection` nor a `Proxy-Connection` field -- llhttp reads the second as the first, so
+  `Proxy-Connection: close` ends an HTTP/1.1 request's connection as `Connection: close` does. One that says `close`
+  in either field is answered with `Connection: close`, the connection closes, and nothing behind it is served; so is
+  an HTTP/1.0 request that carries either field without `keep-alive`, whatever its options. What the override keeps is
+  what it is for: HTTP/1.0 with neither field, which closes by default -- the only request it applies to, as an
+  HTTP/1.1 request the parser does not keep carries one of the two, and llhttp reads no minor version past 1. The rule
+  is a lookup of the two fields, not a scan of their options, made only under an override that is set, for a request
+  the parser read as closing: a request that keeps its connection pays nothing, and the response's path is the code it
+  was, instruction for instruction (Apple clang 21 and g++ 16, arm64). Witnesses: `qbm-http-test-system-http1-client`
+  (`TheKeepAliveOverrideNeverKeepsARequestThatSaysClose`: ten requests -- eight that say `close`, in `Connection` or
+  in `Proxy-Connection`, alone, in a list, before a HTAB, beside `keep-alive` on HTTP/1.0, with a chunked body, and
+  two HTTP/1.0 ones whose only option is `te` --, each `200 200 200` on the base, now `200 200`, `Connection: close`
+  and the close; the controls keep their connection: an HTTP/1.1 and an HTTP/1.0 request that carry neither field, an
+  HTTP/1.1 one whose option is `closed`, one of each version that asks `keep-alive` through `Proxy-Connection`, and an
+  HTTP/1.1 request with a chunked body) and `qbm-http-test-unit-http1-protocol-framing`
+  (`AnHttp11RequestThatIsNotKeptCarriesAConnectionOrAProxyConnectionField`, what the rule relies on, green before and
+  after: of 80 requests -- two versions, eight shapes of the two fields, five framings -- every HTTP/1.1 one the
+  parser does not keep carries one of the fields, and `HTTP/1.2` is refused `400`). Mutants: the `Connection` field
+  not looked up, the `Proxy-Connection` field not looked up, the override keeping nothing, its test run for a request
+  that keeps its connection too, the override applied whatever the session's setting -- 5 planted, 5 caught.
+
+- **`close` has precedence over `keep-alive` on every version, and a HTAB after a `Connection` option ends it as a SP
+  does (Huly QB-1248).** Two shapes of a message that says `close` kept their connection. An HTTP/1.0 message whose
+  `Connection` field names both options -- `keep-alive, close`, in either order, on one field line or on two -- was
+  kept: below HTTP/1.1 llhttp's `http_should_keep_alive()` reads its keep-alive flag alone, where `close` has
+  precedence when both are present (RFC 9112 §9.3). The parser now reads `keep_alive` false for any message whose
+  close flag is set, a request's and a response's, on every version. And an option followed by a HTAB was not read at
+  all: llhttp's state after `close`, `keep-alive` or `upgrade` accepted a SP, a comma and the end of the line, and
+  took a HTAB for more of the option's name, so `Connection: close<HTAB>` set no close flag -- an HTTP/1.1 connection
+  kept, the request pipelined behind it served -- and `Connection: keep-alive<HTAB>` no keep-alive flag: an HTTP/1.0
+  connection closed. HTAB is optional whitespace as SP is (RFC 9110 §5.6.3): the vendored llhttp now reads it so, one
+  `case` in that state, a local patch recorded in `THIRD-PARTY-NOTICES` beside the earlier ones. `keep-alive` and
+  `upgrade` followed by a HTAB are read as such too: an HTTP/1.0 request with `Connection: keep-alive<HTAB>` keeps its
+  connection, and a request with `Connection: Upgrade<HTAB>` beside `Upgrade: websocket` is an upgrade -- its
+  `upgrade` set --, which the server's WebSocket handshake and the client's check of a `101` read: both accept now
+  what they refused. `Proxy-Connection`, which llhttp reads as `Connection`, follows both rules. Nothing changes for
+  an option followed by other octets (`close<HTAB>x`, as `close x`, is no `close`), for an HTTP/1.1 message that names
+  both options, nor for a message that names one. Cost: one test of the close flag where `keep_alive` is computed, 2
+  or 3 instructions for a message that keeps its connection (g++ 16, Apple clang 21; arm64), none for one that does
+  not. Witnesses: `qbm-http-test-unit-http1-protocol-framing`
+  (`CloseHasPrecedenceAndAnOptionEndsAtTheWhitespaceAfterIt`, 23 rows read as a request and as a response: on the base
+  the five HTTP/1.0 rows that name both options, one of them through `Proxy-Connection`, and the four HTTP/1.1 rows
+  with a HTAB after `close` read `keep_alive` true, the two HTTP/1.0 rows with a HTAB after `keep-alive` false; the
+  twelve controls read as before; and four upgrade requests: with `Upgrade<HTAB>`, alone and after `keep-alive`,
+  `upgrade` false on the base, now true; the option alone, and followed by another octet, as before) and
+  `qbm-http-test-system-http1-client` (`ARequestThatSaysCloseEndsItsConnectionWhateverElseItsConnectionFieldSays`:
+  seven requests, each answered and the request pipelined behind it served on the base, `200 200`, the connection left
+  open; now `200`, `Connection: close` and the close; `keep-alive<HTAB>` on HTTP/1.0 read `200` and the close on the
+  base, now `200 200`; three controls keep their connection before and after). Mutants: llhttp's verdict taken alone,
+  the HTAB not read as whitespace, the HTAB read as a list separator -- 3 planted, 3 caught.
+
+- **A `CONNECT` request that declares content is answered `400` (Huly QB-1248).** A `CONNECT` has no content (RFC 9110
+  §9.3.6). Measured on the base: one that named `chunked` was routed at the end of its header section, as a `CONNECT`
+  with no content is -- llhttp completes it there, for the tunnel -- and what followed was read as the next request of
+  the connection: a request written right behind the header section, where a peer that reads the coding sees a chunked
+  body, was served. One that named `gzip, chunked` was answered `501`. One that declared a `Content-Length` had that
+  many octets read as its content: `CONNECT a:443` with `Content-Length: 32` and the 32 octets of a `GET /admin`
+  behind its header section was one request, answered once, the `GET` swallowed -- where llhttp, and a peer that ends
+  a `CONNECT` at its header section, read two. It is the same disagreement on where the message ends, in the other
+  direction. Each is now refused at the end of its header section, as every refused framing is: `400` with
+  `Connection: close`, then the close, nothing it carried served. A `CONNECT` that declares no content -- no field, or
+  a `Content-Length` of 0 -- is routed as before. The check is a comparison of the request's length with 0 and, for a
+  length other than 0, of its method: a request with neither framing field pays the first at most. In the compiled
+  parser (Apple clang 21 and g++ 16, arm64, `-O3`) such a request runs the instructions it ran; one that declares a
+  length other than 0 runs 3 to 7 more, one with a chunked body 3 or 4, once per request. Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing` (`ARequestWhoseFramingIsRefusedIsAnswered`, seven `CONNECT` rows: on the
+  base the three chunked ones were dispatched at the end of their header section, what followed left in the buffer,
+  the fourth answered `501`, and the three that declare a length dispatched with what followed as their content, or
+  left waiting for it; the controls: a `CONNECT` with no field, and one with a length of 0, dispatched) and
+  `qbm-http-test-system-http1-client` (`AConnectRequestThatDeclaresContentIsAnswered400ThenClosed`: a request right
+  behind the header section, three shapes of a chunked body, `gzip, chunked`, and three lengths -- 32 octets that are
+  a request, 3 that are not, 1 never sent; on the base `404` or `501` and the request behind the header section
+  served, and for a length `404` with what followed swallowed, or no answer; now `400`, `Connection: close` and the
+  close, no request served; the controls, a `CONNECT` with no field and one with a length of 0, still routed).
+  Mutants: the refusal of a coding removed, the refusal of a length removed, any method refused for a length, a length
+  of 0 refused -- 4 planted, 4 caught; a fifth, the method read whatever the parser's type, is equivalent: llhttp
+  leaves the method of a response parser at 0.
+
+- **An HTTP/2 connection preface whose target names a resource is answered `400` (Huly QB-1248).** The preface an
+  HTTP/2 client sends, `PRI * HTTP/2.0` (RFC 9113 §3.4), is refused at its target, `400`. One whose target names a
+  resource -- `PRI /x HTTP/2.0` and the preface's `SM` line -- passes that check, and llhttp stops at the `SM` line,
+  before any field, with a code of its own (`HPE_PAUSED_H2_UPGRADE`) that the rule "every malformed request is
+  answered `400`" left out with the pauses: the connection closed with no answer. It is no pause the parser resumes
+  from, and no request this HTTP/1.1 server reads: `400` with `Connection: close`, then the close, what follows the
+  preface dropped, as for `PRI *` (RFC 9112 §2.2). The two pauses still left out never reach the refusal: the header
+  section's is no failure, and the parser stops at the end of a message before an upgrade's. Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing` (`AnHttp2ClientOverCleartextKeepsItsHttp11Answers`: the preface with a
+  target that names a resource, alone and with a request behind it -- no refusal recorded on the base, the protocol
+  failed and its input left unread; now one `400`, the input dropped; `PRI *` and `Upgrade: h2c` as before) and
+  `qbm-http-test-system-http1-client` (`AnHttp2PrefaceIsAnswered400WhateverItsTarget`: the targets `/x` and `/ping`
+  closed with no answer on the base, now `400`, `Connection: close` and the close; `*` answered `400` before and
+  after; no request served). Mutants: llhttp's code left out again -- 1 planted, 1 caught; two more, each of the two
+  pauses no longer left out, are equivalent: neither reaches the refusal.
+
+- **`chunked` named twice is `400` by the parser's own scan too (Huly QB-1248).** No request qb serves is answered
+  differently: llhttp refuses `chunked` named twice in a request, on one field line or on two, before the parser's
+  scan of the field is reached -- of 762 shapes of one to three list elements on one or two field lines, the 351 that
+  name it twice were each refused by llhttp itself on the base (`HPE_INVALID_TRANSFER_ENCODING`), which the server
+  answers `400`. The scan's own verdict for such a list was `501`, the answer to a coding the server does not
+  implement before a final `chunked`: read behind an llhttp told to let every coding through
+  (`http_set_lenient_transfer_encoding`, which qb never sets), 288 of the 351 got it, the others `400`. The scan now
+  counts the `chunked` it reads: named twice is `400` -- applied twice it is no framing (RFC 9112 §6.1) -- and `501`
+  stays the answer to another coding before a final `chunked` (§6.1). Witnesses:
+  `qbm-http-test-unit-http1-protocol-framing` (`TheParsersOwnScanRefusesChunkedNamedTwiceWith400`, behind the lenient
+  llhttp: five shapes `501` on the base, now `400`; the controls `gzip, chunked` on one line and on two `501`,
+  `chunked` alone accepted; and two rows more in `ARequestWhoseFramingIsRefusedIsAnswered`, `chunked` on two field
+  lines, `400` before and after) and `qbm-http-test-system-http1-client`
+  (`ATransferEncodingThatNamesChunkedTwiceIsAnswered400`: on the wire three shapes `400`, two `501`, before and
+  after). Mutants: the count ignored, `501` never answered, any list that names `chunked` once accepted -- 3 planted,
+  3 caught.
+
 - **Every refusal of the HTTP/1.1 parser keeps the reason it gave (Huly QB-1279).** llhttp keeps the reason a span
   callback sets (the target, a field line, a body piece), but writes its own over the reason of a callback it checks
   itself: `User callback error` after `on_headers_complete`, `` `on_url_complete` callback error ``,

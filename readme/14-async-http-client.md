@@ -118,7 +118,7 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1399-1405,1484-1494; qbm/http/src/qbm/http/1.1/client.cpp:149-168,385-403; qbm/http/src/qbm/http/headers.cpp:320-325 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1399-1405,1484-1494; qbm/http/src/qbm/http/1.1/client.cpp:149-174,393-411; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:249-262,605-620; qbm/http/src/qbm/http/3/client.cpp:198-210,767-776; qbm/http/src/qbm/http/body.h:307-328 -->
@@ -379,10 +379,10 @@ Notes specific to the persistent HTTP/1.1 client:
 
 ### Reentry from a response or failure callback
 
-A closing response marks the client disconnected **before** its callback runs. The active response is delivered once, while queued remainder follows the normal reconnect policy. On disconnect, connect failure, or timeout, the old request and connect-callback cohort is detached before its notifications. A request submitted by one of those callbacks belongs to the next cycle and cannot be consumed by the old failure loop. Batch order, callback counts, and existing pending-request deadlines are preserved.
+A closing response marks the client disconnected **before** its callback runs. The active response is delivered once, while queued remainder follows the normal reconnect policy. On disconnect, connect failure, or timeout, the old request and connect-callback cohort is detached before its notifications. A response a bound cut -- the body limit, qb-io's read cap -- fails the same way: its callback runs once the connection is retired, so a request it pushes is sent on a new connection -- or, with automatic reconnection off, refused at once with 503, as any work a disconnected client is given. Until 3.4 that one callback ran first, while the client still read connected: the request next in line -- one the callback pushed, or one already queued behind the cut one -- was written to the connection being closed and failed with it, 502 "Connection closed", whatever the reconnection policy (Huly QB-1248). A request submitted by one of those callbacks belongs to the next cycle and cannot be consumed by the old failure loop. Batch order, callback counts, and existing pending-request deadlines are preserved.
 
 If a callback requests `connect()`, the new attempt is accepted but starts only after the old callbacks and protocol/I/O dispatch have unwound. `is_connecting()` can therefore be true while `is_connected()` remains false. Work queued behind this explicit intent is admitted even with `set_auto_reconnect(false)`; without such an intent, a disconnected client with automatic reconnect disabled still rejects work with 503. A direct `disconnect()` outside callback dispatch releases the retired connection before returning. Callback exceptions remain contained, so one throwing old callback does not prevent the remaining old notifications.
-<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:244-252,288-323,354-365,510-526,581-609,613-646,706-765 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:252-260,296-331,362-373,518-534,589-617,621-654,714-773 -->
 
 ## Persistent HTTP/2 client (`qb::http2::Client`)
 
