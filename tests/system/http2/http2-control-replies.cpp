@@ -292,6 +292,9 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
             taking = client.solicit(999, what, closed) && client.request("/served") != 0;
             solicited += 999;
         }
+        // The flood ends on a write the closed connection refuses: the session closed it at the verdict, at once. A server
+        // that stopped reading and kept the connection would have left the client's write waiting out its budget.
+        EXPECT_TRUE(client.write_failed) << "the flood stopped after " << solicited << " solicited without the connection breaking";
         // Now the client reads. A server that still serves answers one last request, after everything else it wrote.
         const std::uint32_t last = taking ? client.request("/served") : 0;
         (void) client.read_until([&] { return client.eof || (last != 0 && client.stream(last).end_stream); }, 120s);

@@ -97,6 +97,7 @@ public:
     std::map<std::uint32_t, RawStream> streams;
     std::vector<RawFrame>              frames;                     ///< every frame read, in order
     bool                               eof                = false; ///< the connection is over (read -1)
+    bool                               write_failed       = false; ///< a write failed (-1): the connection is broken
     bool                               settings_acked     = false; ///< the server acknowledged our SETTINGS
     std::uint32_t                      goaway_last_stream = 0;
     bool                               goaway_seen        = false;
@@ -304,7 +305,11 @@ private:
                 sent += static_cast<std::size_t>(n);
                 continue;
             }
-            if (n < 0 || std::chrono::steady_clock::now() >= deadline)
+            if (n < 0) {
+                write_failed = true;
+                return false;
+            }
+            if (std::chrono::steady_clock::now() >= deadline)
                 return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
