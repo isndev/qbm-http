@@ -97,7 +97,7 @@ public:
     std::map<std::uint32_t, RawStream> streams;
     std::vector<RawFrame>              frames;                     ///< every frame read, in order
     bool                               eof                = false; ///< the connection is over (read -1)
-    bool                               write_failed       = false; ///< a write failed (-1): the connection is broken
+    bool                               write_failed       = false; ///< a write failed (-1): the connection is broken (Huly QB-1270)
     bool                               settings_acked     = false; ///< the server acknowledged our SETTINGS
     std::uint32_t                      goaway_last_stream = 0;
     bool                               goaway_seen        = false;
