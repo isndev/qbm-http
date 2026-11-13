@@ -50,15 +50,18 @@ Client::Client(const qb::io::uri &uri)
 
 Client::~Client() {
     LOG_HTTP_DEBUG_PA(_client_id, "HTTP/2 Client destructor called");
-
-    // Fail all pending and active requests
+    // A destructor arms nothing and connects nothing: in static storage the client is destroyed after its thread's event loop, where a
+    // timer started writes into the freed loop (Huly QB-1246). No deadline, no reconnection, and no connect for a request pushed again.
+    _reconnect_scheduled = false;
+    _reconnect_attempts  = 0;
+    _connect_timeout     = qb::duration::zero();
+    _request_timeout     = qb::duration::zero();
+    _in_failure_pass     = true;
     fail_all_requests("Client destroyed");
-
-    // Disconnect if connected
     if (_is_connected || _is_connecting) {
         disconnect();
     }
-
+    fail_all_requests("Client destroyed"); // what those callbacks pushed again fails too: nothing is left to carry it
     LOG_HTTP_INFO_PA(_client_id, "HTTP/2 Client destroyed");
 }
 
@@ -66,13 +69,10 @@ void
 Client::initialize_from_uri(const qb::io::uri &uri) {
     _base_uri = uri;
     _host     = std::string(uri.host());
-
-    // This implementation is TLS+ALPN only; plaintext h2c is not supported.
-    if (!qb::http::origin::scheme_eq(uri.scheme(), "https")) {
+    if (!qb::http::origin::scheme_eq(uri.scheme(), "https")) { // TLS+ALPN only: plaintext h2c is not supported
         throw std::invalid_argument("HTTP/2 client only supports https scheme");
     }
-
-    // Parse port using std::from_chars for better performance and no exceptions
+    // The port by std::from_chars: no exceptions
     if (!uri.port().empty()) {
         std::string port_str   = std::string(uri.port());
         int         port_value = 0;

@@ -566,8 +566,27 @@ All notable changes to the qbm-http module are documented here. The format is ba
   EOF, never a reset) and asks LeakSanitizer. On the code as it was, 19 of its 65 cases fail under AddressSanitizer
   and 17 failed in a g++ 14 Release build, where a write into freed memory does not always stop the process; the
   HTTP/1.1 client and the WebSocket clients passed every state but the retry pattern. What a client in static storage does at exit is written in
-  `readme/14-async-http-client.md` and in the `llm/` reference. The HTTP/2 client is not among them: its destructor
-  arms its timer after the loop in four states; its fix, under `2/`, and its witness are a change of their own.
+  `readme/14-async-http-client.md` and in the `llm/` reference. The HTTP/2 client has a binary of its own, in the
+  entry below.
+
+- **An HTTP/2 client kept in static storage ends cleanly at process exit (Huly QB-1246).** `qb::http2::Client`'s
+  destructor failed its requests first, and a failure ends in the client re-arming its timer for the deadlines left
+  (`arm_request_timeout()`). With a connect or a TLS handshake in flight, a reconnection waiting for its next attempt,
+  or a request whose failure callback pushed it again, a deadline was left: a client in static storage, destroyed
+  after its thread's event loop, started a timer in the freed loop. Measured on Linux with g++ 14, the process ended
+  on an abort or a segmentation fault; under AddressSanitizer, on a heap-use-after-free in each of the four states;
+  under MSVC, it did not end, or ended on 0xC0000374, a heap corruption; on macOS, two of the cases failed in a Release
+  build and every one under AddressSanitizer. The destructor now arms nothing and connects nothing: before it fails
+  anything it clears the reconnection run, zeroes the connect and request timeouts and marks a failure pass, so a
+  request pushed again from one of its callbacks queues with no deadline and starts no connection; it fails every
+  request once, disconnects, and fails what those callbacks pushed again. Every request in flight or queued hears once,
+  with `503` and "Client destroyed", and a `connect()` still waiting hears `false`. Witness:
+  `qbm-http-test-system-http2-client-static-exit`, the client in twelve states to the end of a child process, each
+  ended from `main` and from a callback of the loop where both apply -- 23 cases; on the code as it was, 9 fail under
+  AddressSanitizer and 2 in a Release build. One of them, a reconnection run whose request the destructor's own
+  failure pushes again, is the one where only the second pass fails that request and where a request pushed again
+  would otherwise connect after the loop. Mutants, each caught under AddressSanitizer: the timeouts not zeroed, the
+  reconnection not cleared, the second failure pass dropped, the failure pass not marked.
 
 - **A response to HEAD that declares a `Content-Length` past the client's body limit is delivered (Huly QB-1248).** A
   response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2). The HTTP/1.1 client's

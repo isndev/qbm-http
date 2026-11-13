@@ -551,12 +551,15 @@ storage, and the event loop of qb-io (`listener::current`) is a thread-local. A 
 `std::shared_ptr`, or a WebSocket client declared `static`, is therefore destroyed after the loop it ran on, where
 nothing can be registered, armed or resumed any more: a request for the loop there stops the process on a line that
 names it (qb's [coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md) page, "What outlives
-a thread's listener"). The HTTP/1.1 client, the HTTP/3 client, the one-shot verbs and the WebSocket clients end
+a thread's listener"). The HTTP/1.1, HTTP/2 and HTTP/3 clients, the one-shot verbs and the WebSocket clients end
 without asking for it (Huly QB-1246):
 
 - **`qb::http1::Client`.** Every request in flight or queued hears once, with `503` and "Connection closed", as
   `disconnect()` fails it. The callbacks of a `connect()` still waiting are abandoned, never called. The connection
   is closed with the client.
+- **`qb::http2::Client`.** Every request in flight or queued hears once, with `503` and "Client destroyed", and a
+  `connect()` still waiting hears `false`. A request one of those callbacks pushes again fails too, with nothing armed
+  and nothing connected for it. The connection is closed with the client.
 - **`qb::http3::Client`.** Every request hears once, with `503` and "HTTP/3 client destroyed", and a `connect()` still
   waiting hears `false`. The close of the connection leaves in the call.
 - **The one-shot verbs.** The session of a request in flight is the loop's, and goes with it -- when the process exits
@@ -572,12 +575,6 @@ without asking for it (Huly QB-1246):
 The peer of each connection reads a clean end of stream when the client had read everything the peer sent; closed
 with bytes of its peer still unread, a TCP connection is reset, here as anywhere.
 
-**`qb::http2::Client` is not in that list yet.** Destroyed after the loop with a `connect()` or a TLS handshake in
-flight, with a reconnection waiting for its next attempt, or with a request whose failure callback pushes it again,
-its destructor arms its own timer on the loop that is gone: the process can crash at exit, or not end. In its other
-states -- never connected, connected and idle or with requests in flight, disconnected by the program -- it ends as
-the HTTP/1.1 client does, a request in flight hearing `503` and "Client destroyed".
-
 The callbacks a destructor runs are your code running after the loop: they must ask nothing of it -- no
 `qb::io::async::callback`, no coroutine, no new client. Pushing the request again from there, the retry pattern, is
 answered at once with a `503` (the client has no owner left, or accepts nothing any more) and arms nothing. Two ends
@@ -586,7 +583,7 @@ the dispatch that called the callback holds the client and never unwinds, so onl
 the connection is closed by the end of the process. A WebSocket client, which nothing shares, is destroyed even
 then. And `exit()` called from a coroutine makes the thread's scheduler abandon the coroutines it owns and say so on
 one line of stderr.
-<!-- src: qbm/http/src/qbm/http/1.1/client.cpp (Client::~Client, Client::disconnect); qbm/http/src/qbm/http/3/client.cpp (Client::~Client); qbm/http/src/qbm/http/1.1/http.h (async::session, on_loop_teardown) -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp (Client::~Client, Client::disconnect); qbm/http/src/qbm/http/2/client.cpp (Client::~Client); qbm/http/src/qbm/http/3/client.cpp (Client::~Client); qbm/http/src/qbm/http/1.1/http.h (async::session, on_loop_teardown) -->
 
 ## Pitfalls
 
