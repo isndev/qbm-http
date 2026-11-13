@@ -304,10 +304,12 @@ TEST(Http2ServerStream, TrailersWaitForTheSocketsRoomUnencodedAndLeaveWholeOnThe
     EXPECT_FALSE(h.protocol.streams_wait_for_socket());
 }
 
-TEST(Http2ServerStream, TheIdleSweepResetsAStreamThatSentNothingAndSparesOneThatDid) {
-    // The connection's idle sweep (cleanup_idle_streams, 30 s in the session) counts a stream's frames, not its window:
-    // a streamed response that writes nothing is reset CANCEL like any idle stream -- the heartbeat's reason.
-    Harness    h;
+TEST(Http2ServerStream, TheSweepLeavesAStreamThatWaitsOnItsProducerAndResetsOneItsPeerDoesNotTake) {
+    // The connection's sweep (cleanup_idle_streams, 30 s in the session) resets at the idle bound what waits on the peer
+    // (Huly QB-1248): a streamed response that writes nothing has nothing queued and waits on its producer -- the sweep
+    // holds it to the session's timeout instead, and that is the heartbeat's reason. One whose piece the window does not
+    // take is reset CANCEL once it has not left for the idle bound.
+    Harness    h({{SETTINGS_INITIAL_WINDOW_SIZE, 4}});
     const auto id = h.open("/stream");
     ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
     h.clear();
@@ -315,9 +317,15 @@ TEST(Http2ServerStream, TheIdleSweepResetsAStreamThatSentNothingAndSparesOneThat
     ASSERT_TRUE(h.protocol.write_streamed_body(id, "beat"));
     EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "a frame left since the last sweep: spared";
     EXPECT_TRUE(h.protocol.is_streaming_response(id));
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "a stream that waits on its producer was reset as idle";
+    EXPECT_TRUE(h.protocol.is_streaming_response(id));
+    ASSERT_TRUE(h.protocol.write_streamed_body(id, "held")); // the window is spent: the piece waits on the peer
+    ASSERT_EQ(h.protocol.streamed_body_pending(id), 4u);
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "reset at the sweep that first found its output queued";
     h.clear();
     std::this_thread::sleep_for(5ms);
-    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 1u) << "nothing left for longer than the idle bound: reset";
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 1u) << "a piece its peer did not take for longer than the idle bound: reset";
     const auto frames = h.frames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FrameType::RST_STREAM);
@@ -607,4 +615,62 @@ TEST(Http2ServerStream, AConnectionThatFailedTakesNoEndOfAStreamedResponse) {
     EXPECT_EQ(h.io.output.size(), after_goaway) << "a frame left after the GOAWAY";
 }
 
+// Streamed responses that wait for the socket's room resume in turn (Huly QB-1248): each write pass begins with the stream
+// after the last one the pass before served, as the connection's window is drained. Three streams, a room of some 150000
+// octets a pass: the first ends early in the first pass and the second takes the rest of it, so the third leads the next
+// pass, then the second, then the third. They resumed in the map's order: the first streams took all the room every pass,
+// and the last waited -- past its bound, its peer reading all along -- until they had nothing left.
+TEST(Http2ServerStream, StreamedResponsesThatWaitForTheSocketResumeInTurn) {
+    Harness h;
+    h.io.write_cap   = 200000; // a room of 150000 octets a pass under the headroom
+    const uint32_t a = h.open("/a"), b = h.open("/b"), c = h.open("/c");
+    for (const uint32_t id : {a, b, c}) {
+        ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
+        h.window_update(id, 1000000);
+    }
+    h.window_update(0, 2000000);
+    h.clear();
+    ASSERT_TRUE(h.protocol.write_streamed_body(a, std::string(200000, 'a')));
+    ASSERT_TRUE(h.protocol.write_streamed_body(b, std::string(500000, 'b')));
+    ASSERT_TRUE(h.protocol.write_streamed_body(c, std::string(500000, 'c')));
+    ASSERT_TRUE(h.protocol.streams_wait_for_socket()) << "nothing waits for the socket: the case proves nothing";
+    std::vector<uint32_t> led; // the stream each pass served first
+    for (int pass = 0; pass < 4; ++pass) {
+        h.clear(); // the socket drained
+        h.protocol.resume_streamed_responses();
+        for (auto const &f : h.frames())
+            if (f.type == FrameType::DATA) {
+                led.push_back(f.stream_id);
+                break;
+            }
+    }
+    EXPECT_EQ(led, (std::vector<uint32_t>{a, c, b, c})) << "the room did not go to the stream after the last one served";
+}
+
+// A streamed response that waits for the socket's room waits on its peer, and the connection's progress is not its own
+// (Huly QB-1248): whole responses written into the output -- whatever the socket -- move the connection a frame's worth
+// between two sweeps, its own window and the connection's open, and it is reset at its idle bound. The rate floor is for a
+// stream that waits on the connection's window alone: counting for this one, it kept a response its peer did not read.
+TEST(Http2ServerStream, AStreamedResponseThatWaitsForTheSocketDoesNotProgressWithTheConnection) {
+    Harness h;
+    h.io.write_cap      = 200000;
+    const uint32_t held = h.open("/held");
+    ASSERT_TRUE(h.protocol.begin_streamed_response(held, ok_response(), false));
+    h.window_update(held, 1000000);
+    h.window_update(0, 1u << 30);
+    ASSERT_TRUE(h.protocol.write_streamed_body(held, std::string(400000, 'h')));
+    ASSERT_TRUE(h.protocol.streams_wait_for_socket()) << "nothing waits for the socket: the case proves nothing";
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(/*max_idle=*/30ms, /*max_incomplete=*/1h), 0u);
+    qb::http::Response whole = ok_response();
+    std::size_t        reset = 0;
+    for (int i = 0; i < 12 && reset == 0; ++i) {
+        std::this_thread::sleep_for(10ms);
+        const uint32_t other = h.open("/whole");
+        whole.body()         = std::string(16384, 'w');
+        ASSERT_TRUE(h.protocol.send_response(other, whole)); // written whole: the connection moves a frame's worth
+        reset += h.protocol.cleanup_idle_streams(30ms, 1h);
+    }
+    EXPECT_EQ(reset, 1u) << "a streamed response its peer did not read was kept by the connection's progress";
+    EXPECT_TRUE(h.protocol.is_stream_closed(held));
+}
 } // namespace http2_server_stream_test
