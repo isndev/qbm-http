@@ -335,3 +335,8 @@ qhttp_test(unit router-observer unit/routing/router-observer.cpp EXTRA_LABELS ro
 qhttp_test(unit middleware-access-log unit/middleware/middleware-access-log.cpp EXTRA_LABELS middleware)
 qhttp_test(unit middleware-metrics unit/middleware/middleware-metrics.cpp EXTRA_LABELS middleware)
 qhttp_test(system metrics-endpoint system/middleware/metrics-endpoint.cpp EXTRA_LABELS middleware requires-multicore coroutine)
+# Huly QB-1246: the HTTP/2 client with static storage at process exit (the other clients: client-static-exit above).
+qhttp_test(system http2-client-static-exit system/http2/http2-client-static-exit.cpp REQUIRES ssl live EXTRA_LABELS http2 ssl)
+if (TARGET qbm-http-test-system-http2-client-static-exit)
+    target_include_directories(qbm-http-test-system-http2-client-static-exit PRIVATE "${QB_ROOT_DIR}/tests/io/shared")
+endif ()
