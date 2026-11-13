@@ -37,6 +37,14 @@ on:
         description: "extra arguments to the test binary"
         required: false
         default: ""
+      probe:
+        description: "the socket probe's trials per configuration (empty: no probe)"
+        required: false
+        default: ""
+      test:
+        description: "run the test (no: the probe alone)"
+        required: false
+        default: "yes"
       restore_ref:
         description: "a qbm-http commit whose src/ and tests/ are built instead of this branch's (empty: this branch's)"
         required: false
@@ -95,7 +103,16 @@ jobs:
           } 2>&1 | tee "${RUNNER_TEMP}/oracle/host.txt"
           true
 
+      - name: The socket probe (does a filled loopback socket stay full?)
+        if: inputs.probe != ''
+        run: |
+          set +e
+          clang++ -std=c++20 -O2 -Wall -Wextra -o "${RUNNER_TEMP}/sockprobe" module/diag/sockprobe.cpp
+          "${RUNNER_TEMP}/sockprobe" ${{ inputs.probe }} 2>&1 | tee "${RUNNER_TEMP}/oracle/sockprobe.txt"
+          true
+
       - name: Configure and build against openssl@${{ matrix.major }}
+        if: inputs.test == 'yes'
         run: |
           set -euo pipefail
           p="$(brew --prefix openssl@${{ matrix.major }})"
@@ -118,6 +135,7 @@ jobs:
           otool -L "$b" | grep -iE 'ssl|crypto'
 
       - name: Run the flood case
+        if: inputs.test == 'yes'
         run: |
           set -uo pipefail
           set +e  # the step shell is `bash -e`: a red test must not stop the counting
