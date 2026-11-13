@@ -113,7 +113,7 @@ constexpr std::uint32_t MAX_RAPID_RESETS = 100;
  *  CVE-2019-9515, and the reset flood, CVE-2019-9514; modelled on nghttp2's max_outbound_ack --
  *  Http2Protocol::queue_control_reply()). The server's are bounded by the same number on a count of their own as well,
  *  between two streams the client opens (ServerHttp2Protocol::admit_solicited_reset(); Huly QB-1270). */
-constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 500;
+constexpr std::uint32_t MAX_QUEUED_CONTROL_REPLIES = 1000;
 
 /** @brief How many of the streams it reset the HTTP/2 client remembers, the most recent resets: a frame the server sent
  *  on one before it read the reset is discarded -- a DATA counted against the connection window and given back, a header

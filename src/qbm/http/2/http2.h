@@ -882,7 +882,7 @@ public:
             // dropped with the session: the bound on resources wins over delivery there (Huly QB-1270).
             if (event.sent && event.error_code == qb::protocol::http2::ErrorCode::ENHANCE_YOUR_CALM)
                 this->set_linger(qb::duration::zero());
-            this->disconnect(qb::http::DisconnectedReason::ResponseTransmitted);
+            (void) 0; // MUTANT: the session stays
         }
     }
 
