@@ -282,6 +282,45 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **An HTTPS or `wss` connection qb ends now ends its TLS stream with a `close_notify`: an OpenSSL peer reads a
+  clean end of stream where it read an unexpected EOF (qb 3.4, Huly QB-1270).** qb-io sends the alert before the
+  TCP FIN whenever this side ends a TLS connection and has written everything it queued, and every TLS connection
+  of qbm-http is a qb-io stream: the HTTPS/1.1 server's response with `Connection: close`, a session its
+  inactivity timeout or a drain closes, the HTTP/2 server's and client's connections, the HTTP/1.1 clients
+  (`qb::http::async::HTTPS`, the persistent `qb::http1::Client`), and `wss` sessions and clients. A browser, curl or
+  any OpenSSL 3 program that read such a connection got `SSL_ERROR_SSL` with `SSL_R_UNEXPECTED_EOF_WHILE_READING`
+  (reason 294), which it cannot tell from a truncated stream; it now reads the last bytes, then
+  `SSL_ERROR_ZERO_RETURN`, then the FIN -- measured on the HTTPS/1.1 server against a raw OpenSSL client, a
+  response with `Connection: close`, an idle timeout and a server destroyed after a completed response (the test
+  of the next entry). Nothing changes in qbm-http's API, and a plain HTTP connection is untouched. No
+  `close_notify` is sent when output still queued is dropped -- that stream is cut, and its peer reads the unexpected
+  EOF as before -- nor when the peer ended the connection with a bare EOF or a reset; a peer that ended the TLS
+  session with its own `close_notify` is answered with this side's. The rule, its limits and its cost are in qb's
+  CHANGELOG, under the same issue.
+- **An HTTPS/1.1 streamed response the server abandons ends its TLS session without the `close_notify`, so the
+  peer reads the cut as one (Huly QB-1270).** qb-io announces a stream whole whenever what it queued is written,
+  and a streamed response the server abandons usually has nothing queued: the alert of the entry above would tell
+  the peer that a truncated response is complete. The HTTP/1.1 session knows better -- a streamed head is out and
+  its `end()` is not -- and ends the TLS session quietly first (`transport().quiet_shutdown()`, compiled away on a
+  plain transport). In `stream_abort()`, which every abort reaches -- `ResponseStream::abort()`, an `end()` short
+  of a declared `Content-Length`, a piece past it, a content coding that fails on a piece or at `end()`, a dropped
+  stream, a cancellation of the context, the idle deadline or the rate floor -- before the context's cancellation
+  runs any application code. In `on(event::disconnected)`, before the session class's own handler, for a
+  connection that ends under a live stream for any other reason: the inactivity timeout, the drain's deadline, a
+  pipelining limit, a local `disconnect()`, the peer's own `close_notify` (which qb-io answers when nothing is
+  queued). And in the session's destructor, for a server destroyed with a live
+  stream. A session extracted under a live stream (`extractSession()`) does not end its TLS session, which goes on
+  with the socket's next owner: it marks the stream cut (`transport().mark_cut()`), so that the next owner's close
+  sends no alert, whatever it wrote. An OpenSSL peer now reads `SSL_ERROR_SSL`, reason 294, after the bytes that
+  left, which is what HTTP's own framing says too (no last-chunk, a short body). A response that completes keeps
+  its alert, whatever closes or takes over the connection after it. HTTP/2 and HTTP/3 reset the stream alone and
+  keep the connection, WebSocket ends with its Close frame, and the HTTP/1.1 clients write a request whole, so none
+  of them needs the same. Proven by `qbm-http-test-system-http1-tls-cut-response` (23 cases, a raw OpenSSL client):
+  on the unchanged session the 17 abandoning cases read `SSL_ERROR_ZERO_RETURN` -- each response short of what it
+  promised, no last-chunk or a body under its `Content-Length` -- and with the change they read the unexpected EOF,
+  the 6 completed ones the clean end (g++ 14, OpenSSL 3.5.7). Eighteen mutants of the change, planted one at a
+  time -- each call removed, each guard dropped, each call moved after the application code it must precede, the
+  call planted on the completed path, the session ended where it must only be marked -- are each caught.
 - **`Request` and `Response` build a message with no body without making one: their constructors are overloads, not
   one form with two defaulted arguments (Huly QB-1270).** `Response{status}`, `Request{method, uri}` and
   `Request{uri}`, and the forms with headers alone, made an empty header map and an empty `Body` for the call and

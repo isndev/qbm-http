@@ -462,6 +462,8 @@ private:
         // registered in the current backend until the session destructor runs,
         // causing spurious read events to fire in the wrong handler.
         this->stop();
+        if (_stream_live) // the transport leaves under a response it cut: whoever ends its stream must not say it is whole
+            mark_cut_tls_stream();
         cancel_live_stream();
         if (_context) {
             _context->cancel(); // no-op when suppress_response() was already called
@@ -481,6 +483,8 @@ private:
      */
     void
     on(qb::io::async::event::disconnected &&e) {
+        if (_stream_live) // whoever ended the connection, a streamed response is cut: TLS says so, before any handler runs
+            end_cut_tls_stream();
         // The close that follows the last response (close_after_response()) ends without a reason of the io's own: it
         // is still the one it always reported.
         if (_closing && e.reason == 0)
@@ -562,6 +566,8 @@ public:
      * context is not cancelled here: its hooks are user code, and this is a destructor.
      */
     ~session() {
+        if (_stream_live) // the transport's close follows: under a live stream it must not tell the peer the stream is whole
+            end_cut_tls_stream();
         cancel_live_stream();
     }
 
@@ -815,11 +821,13 @@ public:
         this->ready_to_write();
     }
 
-    /// A streamed body cannot be completed correctly: the context ends now and the connection is closed.
+    /// A streamed body cannot be completed correctly: the context ends now and the connection is closed -- over TLS
+    /// without the close_notify that would announce the cut message whole (Huly QB-1270).
     void
     stream_abort(ResponseStream<Derived> const &) noexcept {
         if (!_stream_live)
             return;
+        end_cut_tls_stream(); // first: nothing may be queued, and qb-io would end such a connection as a whole stream
         _stream_live = false;
         _stream.reset();
         if (_context && !_context->is_completed())
@@ -845,6 +853,25 @@ public:
     void
     http1_request_progress() noexcept {
         this->updateTimeout();
+    }
+
+private:
+    /// The connection ends under a streamed response its end() did not complete (Huly QB-1270): a TLS transport ends its
+    /// session without a close_notify, which would tell the peer the stream is whole -- qb-io sends one whenever what it
+    /// queued is written, and cannot know that the response still owed bytes -- so the peer reads the cut as one (OpenSSL's
+    /// unexpected EOF). A plain transport has no TLS session: the call compiles away.
+    void
+    end_cut_tls_stream() noexcept {
+        if constexpr (requires(typename Transport::transport_io_type &io) { io.quiet_shutdown(); })
+            this->transport().quiet_shutdown();
+    }
+
+    /// The transport leaves this session (an extraction) under a streamed response its end() did not complete: the TLS
+    /// stream goes on with its next owner, marked cut, so that whoever ends it sends no close_notify (Huly QB-1270).
+    void
+    mark_cut_tls_stream() noexcept {
+        if constexpr (requires(typename Transport::transport_io_type &io) { io.mark_cut(); })
+            this->transport().mark_cut();
     }
 };
 

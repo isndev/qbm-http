@@ -407,9 +407,11 @@ server->listen(qb::io::uri("https://0.0.0.0:8443"), "cert.pem", "key.pem");  // 
 server->start();
 ```
 
-For mTLS/cipher policy, configure a fresh `qb::io::ssl::Context::server(cert,key)` and pass it to `server->listen(uri, context)` (or `listen_no_start(uri, context)` then `start()`). HTTPS pins ALPN `http/1.1`; HTTP/2 pins `h2,http/1.1`. Rotate on the listener's owner thread with `set_tls_context(context)`: invalid input keeps the current context, and accepted connections keep their old context even if their handshake has not begun. **Context copies share `SSL_CTX`**; the setter mutates the supplied context's ALPN, so never pass a copy already in service or mutate it after publication. Preserve SNI by configuring each child with the protocol's ALPN before publishing a fresh root whose callback captures the child contexts by value. `reload_certificates(cert,key)` is synchronous sugar that replaces the **entire configuration with defaults**; mTLS, cipher policy, callbacks and session caches are not retained. Build a complete fresh context when those matter. Rotation does not guarantee TLS session resumption across contexts. These operations are SSL-only and cover h1/h2, not HTTP/3 or dual-stack. _(src/qbm/http/1.1/http.h:1228,1242,1252,1263; src/qbm/http/2/http2.h:1208,1219,1227,1238)_
+For mTLS/cipher policy, configure a fresh `qb::io::ssl::Context::server(cert,key)` and pass it to `server->listen(uri, context)` (or `listen_no_start(uri, context)` then `start()`). HTTPS pins ALPN `http/1.1`; HTTP/2 pins `h2,http/1.1`. Rotate on the listener's owner thread with `set_tls_context(context)`: invalid input keeps the current context, and accepted connections keep their old context even if their handshake has not begun. **Context copies share `SSL_CTX`**; the setter mutates the supplied context's ALPN, so never pass a copy already in service or mutate it after publication. Preserve SNI by configuring each child with the protocol's ALPN before publishing a fresh root whose callback captures the child contexts by value. `reload_certificates(cert,key)` is synchronous sugar that replaces the **entire configuration with defaults**; mTLS, cipher policy, callbacks and session caches are not retained. Build a complete fresh context when those matter. Rotation does not guarantee TLS session resumption across contexts. These operations are SSL-only and cover h1/h2, not HTTP/3 or dual-stack. _(src/qbm/http/1.1/http.h:1255,1269,1279,1290; src/qbm/http/2/http2.h:1208,1219,1227,1238)_
 
 Client verification is secure by default (`verify_peer=true`); disable only for trusted/self-signed endpoints, and set it before connecting.
+
+A TLS connection qb ends sends a `close_notify` before the FIN once everything queued is written (qb 3.4, QB-1270): the peer reads a clean end of stream. An HTTP/1.1 streamed response cut before its `end()` -- an abort, a cancellation, the connection ended under it -- ends its TLS session without it, so the peer reads OpenSSL's unexpected EOF, and a session extracted under one leaves with its stream marked cut, so that its next owner's close says nothing either; the session does it, the application has nothing to call.
 
 The server setter accepts TLS server/generic contexts, including fresh raw `Context::adopt`/`share` wrappers, and rejects client-only or DTLS contexts before publication. Its checks establish usability and role, not complete handshake validity; the caller supplies certificates, SNI and/or custom authentication. _(src/qbm/http/detail/server_tls.cpp:11)_
 
@@ -578,7 +580,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   stream error it is, whatever limit it also passes (Huly QB-1195, QB-1197): `414` target, `431` field name, value or a section's
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the
   stream then `RST_STREAM(NO_ERROR)`, h3 on the stream then STOP_SENDING(`H3_NO_ERROR`) (Huly QB-168, QB-94; until 3.3
-  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:896-898; 2/http2.h:941-943;
+  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:923-925; 2/http2.h:941-943;
   3/http3.h:818-820)_
 - An h1 request whose framing is refused is answered `400`, then closed (RFC 9112 §6.3; QB-1248): a `Content-Length`
   llhttp refuses (past 2^64-1, not a number, twice, beside `Transfer-Encoding`), `chunked` named twice or not last, a
@@ -590,7 +592,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   on the server's loop (Huly QB-167). An in-place WebSocket upgrade still owned by that server receives Close
   `1001 Going Away` and counts until it closes or the deadline aborts it (QB-1097); an extracted session belongs
   to its new owner and remains outside this drain. Close observers still run; a custom observer checks the
-  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:1003-1044,1083-1104,1135-1149;
+  protocol's `server_draining()` before echoing an already initiated Close. _(1.1/http.h:1030-1071,1110-1131,1162-1176;
   ws/ws.h:510-563,655-674)_
 - HTTP/2 and HTTP/3 drain connections in two GOAWAYs (Huly QB-91). The notice names the largest stream id.
   HTTP/2 sends its final GOAWAY on the notice PING's ACK and names the last stream opened; HTTP/3 names the first

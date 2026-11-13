@@ -210,6 +210,9 @@ qhttp_test(system http1-client         system/http1/http1-client.cpp         REQ
 qhttp_test(system http1-loopback-basic system/http1/http1-loopback-basic.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl live EXTRA_LABELS http1)
 qhttp_test(system http1-extraction system/http1/http1-extraction.cpp REQUIRES live EXTRA_LABELS http1) # Huly QB-1182
+# An HTTPS/1.1 response the server abandons ends its TLS stream without a close_notify, one it completes with it, as a raw
+# OpenSSL client reads them (Huly QB-1270).
+qhttp_test(system http1-tls-cut-response system/http1/http1-tls-cut-response.cpp REQUIRES ssl live EXTRA_LABELS http1 ssl)
 qhttp_test(system router-e2e-advanced  system/routing/router-e2e-advanced.cpp REQUIRES live EXTRA_LABELS http1 routing)
 qhttp_test(system response-stream      system/routing/response-stream.cpp      REQUIRES live EXTRA_LABELS http1 routing) # Huly QB-86
 # The buffered body's bound (protocol_limits::MAX_BODY_SIZE, Huly QB-86) allocates ~200 MiB: the same source, built with
