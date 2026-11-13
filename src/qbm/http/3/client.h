@@ -94,6 +94,12 @@ struct BatchRequestContext {
 };
 
 /**
+ * @brief Test seam: reaches the one state no call leaves behind, a disconnect() deferred by a read that never completed
+ *        it. Declared only; the qbm-http test suite defines it, no production code names it.
+ */
+struct ClientTestPeer;
+
+/**
  * @brief Persistent single-origin HTTP/3 client over a QUIC connection.
  *
  * A Client owns one QUIC connection to a single @c https origin and
@@ -112,6 +118,7 @@ class Client
     , public qb::io::async::quic::endpoint {
 public:
     using h3_connection = qb::protocol::http3::connection<Client>;
+    friend struct ClientTestPeer;
 
 private:
     qb::io::uri   _base_uri;
@@ -122,6 +129,8 @@ private:
     bool          _h3_ready               = false;
     bool          _remote_shutdown        = false;
     bool          _closing_failed_attempt = false;
+    bool          _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
+    bool          _connect_after_close    = false; ///< A connect() asked while a close is deferred: started when it has completed
     std::uint64_t _connect_epoch          = 0;
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
@@ -131,8 +140,9 @@ private:
     // nghttp3_conn_del while the outer read is still on the stack (use-after-free), and fire
     // user callbacks reentrantly. While _read_depth > 0 the teardown is DEFERRED into
     // _deferred_close and executed once the outermost read returns.
-    int _read_depth   = 0;
-    int _submit_depth = 0;
+    int _read_depth        = 0;
+    int _submit_depth      = 0;
+    int _failure_callbacks = 0; ///< handle_connection_failure() runs its callbacks: the coroutine connect() answers at once
     // Empty value means explicit disconnect; a nonempty value is a transport failure.
     std::optional<std::string> _deferred_close;
 
@@ -151,6 +161,7 @@ private:
     bool                            _auto_reconnect         = true;
     bool                            _verify_peer            = true;
     std::vector<ConnectionCallback> _connection_callbacks;
+    std::vector<ConnectionCallback> _deferred_connects; ///< The callbacks of the connect() calls `_connect_after_close` holds
 
     std::uint64_t _total_requests      = 0;
     std::uint64_t _successful_requests = 0;
@@ -171,10 +182,10 @@ public:
     explicit Client(qb::io::uri const &uri);
     /**
      * @brief Destructor: fails all outstanding requests and tears down the connection.
-     * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and a
-     *          `connect()` still waiting hears `false`. From the first of those callbacks on the client accepts
-     *          nothing, as during `disconnect()`: a request pushed again is answered at once ("HTTP/3 client
-     *          disconnect") and a `connect()` refused -- nothing is queued, armed or connected from a destructor.
+     * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and every
+     *          `connect()` still waiting hears `false` once. From one of those callbacks a request pushed, alone or
+     *          in a batch, is answered inside the push (503, "HTTP/3 client disconnect"), and a `connect()` is
+     *          refused: it returns false and its callback is never called. A callback that throws is logged.
      *          A client with static storage is destroyed after its thread's event loop (`listener::current`,
      *          which `exit()` destroys first): the callbacks then run there, where nothing can be asked of the
      *          loop any more (Huly QB-1246). The coroutines parked on the awaiter forms were destroyed with it.
@@ -186,14 +197,18 @@ public:
 
     /**
      * @brief Begin connecting (if not already connected/connecting).
-     * @param callback Invoked with the connection outcome; may be null.
-     * @return @c true if the connection is already established or a connect
-     *         attempt was started/joined; @c false if it could not be started.
+     * @param callback Invoked with the connection outcome; may be null. Never called inside this call unless the
+     *                 client is already connected. Asked while a close is under way -- from a callback of disconnect(),
+     *                 of a read that has just disconnected, or of a read that lost its connection -- the attempt starts
+     *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
+     * @return @c true when the callback will hear the outcome. @c false when nothing starts -- the client is being
+     *         destroyed, or the attempt cannot start (no address, no UDP socket) -- and the callback is never called.
      */
     bool connect(ConnectionCallback callback);
     /**
      * @brief Coroutine-awaiter variant of connect().
-     * @return An awaiter resolving to the ConnectResult of the attempt.
+     * @return An awaiter resolving to the ConnectResult of the attempt -- `false` at once, "HTTP/3 connection is
+     *         closing", when awaited from a callback the client runs for a close or a failure.
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
     /// Fail all outstanding requests and close the QUIC connection.
@@ -387,12 +402,17 @@ private:
     void close_failed_transport(std::string_view reason);
     /// Fail every pending/active request and batch with @p error.
     [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error);
+    void complete_disconnect(); ///< The close itself, no read or submission on the stack: starts, at its end, a connect() queued meanwhile
     /// Fail the active request on @p stream_id with @p status and @p error.
     void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// Fail the pending request with @p request_id with @p status and @p error.
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// Arm the one-shot connect-timeout callback.
     void arm_connect_timeout();
+    /// Starts the connect() asked while a close was deferred, its teardown now complete: each callback joins the one attempt.
+    void start_deferred_connect();
+    /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.
+    void give_up_deferred_connects();
     /// Arm the per-request timeout for @p request_id.
     void arm_request_timeout(std::uint64_t request_id);
     /// (Re)schedule the request-timeout callback for @p request_id after @p delay.

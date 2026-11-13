@@ -10,12 +10,17 @@
 #include "client.h"
 
 #include <algorithm>
+#include <exception>
+#include <utility>
 
 #include <nghttp3/nghttp3.h>
 
+#include "../detail/client_callback.h"
 #include "../origin.h"
 
 namespace qb::http3 {
+
+using qb::http::detail::notify; // a user callback's call: contained while the client is being destroyed (Huly QB-1246)
 
 namespace {
 // Endpoint dispatch continues after a derived callback returns. If user code
@@ -33,6 +38,21 @@ struct EventLifetime {
         }
     }
 };
+
+/// Counts a failure while it runs the callbacks of what it ends, however it is left: what such a callback awaits of
+/// connect() is answered at once (Huly QB-1246).
+struct FailureScope {
+    int &depth;
+    explicit FailureScope(int &value) noexcept
+        : depth(value) {
+        ++depth;
+    }
+    FailureScope(FailureScope const &)            = delete;
+    FailureScope &operator=(FailureScope const &) = delete;
+    ~FailureScope() noexcept {
+        --depth;
+    }
+};
 } // namespace
 
 Client::Client(std::string const &base_uri)
@@ -46,23 +66,18 @@ Client::Client(qb::io::uri const &uri)
 }
 
 Client::~Client() {
-    // Nothing is accepted from here on, as during disconnect(): a request a failure callback pushes below -- the
-    // retry pattern -- is answered at once, and a connect() refused. It was queued, a deadline armed for it and a
-    // connection started for it, from the destructor; a client with static storage is destroyed after its thread's
-    // event loop, where the first of those stops the process (Huly QB-1246).
-    _remote_shutdown = true;
-    _deferred_close.emplace();
+    // The destruction contract of the three HTTP clients (Huly QB-1246): every request in flight or queued hears once, every
+    // connect() still waiting hears `false` once, and from `_destroying` on nothing is accepted, armed or connected -- a request
+    // pushed from one of those callbacks is answered inside its push, a connect() refused by its return value alone. A client
+    // with static storage is destroyed after its thread's event loop, where a timer or a connection asked stops the process.
+    _destroying = true;
     try {
-        (void) fail_all_requests("HTTP/3 client destroyed");
+        (void) fail_all_requests("HTTP/3 client destroyed"); // what a callback throws is logged where it is thrown: notify()
     } catch (...) {
-        // A destructor cannot propagate an application callback's exception.
+        // An allocation the pass makes for itself failed: nothing leaves a destructor. The close below still runs.
     }
-    _deferred_close.reset(); // disconnect() below is the close itself
-    try {
-        disconnect();
-    } catch (...) {
-        // Complete object destruction even if closing reports an exception.
-    }
+    _deferred_close.reset(); // a close a read left half done is not this one: disconnect() below is the full close,
+    qb::http::detail::contained("HTTP/3", [&] { disconnect(); }, "destructor's close"); // every connect() still waiting hears it
 }
 
 void
@@ -81,14 +96,22 @@ Client::set_verify_peer(bool value) noexcept {
 
 bool
 Client::connect(ConnectionCallback callback) {
+    if (_destroying) {
+        return false; // refused, by the return value alone: the callback of a connect() that starts nothing is never called (QB-1246)
+    }
     auto owner = weak_from_this().lock();
     if (_deferred_close && (_read_depth > 0 || _deferred_close->empty())) {
-        // The old connection is still on nghttp3's stack. A new handshake must
-        // wait until its teardown has completed after the outer read.
+        // The old connection is still on nghttp3's stack, or its explicit close is notifying: a new handshake waits for that
+        // teardown. The connect is queued and started once it has completed (start_deferred_connect()), so its callback hears the
+        // attempt's own outcome -- it used to hear `false` here, inside the call, and a callback that dialled again on `false`
+        // recursed without end (Huly QB-1246; the HTTP/2 client's `_connect_after_close` does the same). Two places complete
+        // such a teardown: disconnect(), for an explicit close, and dispatch(stream_data) once its read has returned, for a
+        // connection lost during that read. A close deferred by a submission alone queues nothing: no read is on the stack.
         if (callback) {
-            callback(false, "HTTP/3 connection is closing");
+            _deferred_connects.push_back(std::move(callback));
         }
-        return false;
+        _connect_after_close = true;
+        return true;
     }
     if (_is_connected) {
         if (callback) {
@@ -102,7 +125,8 @@ Client::connect(ConnectionCallback callback) {
         }
         return true;
     }
-    if (callback) {
+    const bool heard_by_callback = static_cast<bool>(callback);
+    if (heard_by_callback) {
         _connection_callbacks.push_back(std::move(callback));
     }
     ++_connect_epoch;
@@ -114,6 +138,14 @@ Client::connect(ConnectionCallback callback) {
     tls.server_name = _host;
     tls.verify_peer = _verify_peer;
     if (!qb::io::async::quic::endpoint::connect(_base_uri, std::move(tls), {"h3"})) {
+        // An attempt that cannot start -- the host is not an address (this client resolves no name), or the UDP socket cannot
+        // be opened or bound -- answers this call by its return value alone, like a refusal: its own callback is dropped unheard
+        // (it was called here, inside the call, where one that dials again on `false` recursed without end). What was already
+        // waiting -- queued requests, a connect() this attempt was started for -- hears.
+        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: not an address, or no UDP socket opened and bound");
+        if (heard_by_callback) {
+            _connection_callbacks.pop_back();
+        }
         close_failed_transport("Unable to start QUIC connection");
         handle_connection_failure("Unable to start QUIC connection");
         return false;
@@ -125,7 +157,8 @@ Client::connect(ConnectionCallback callback) {
 void
 Client::disconnect() {
     if (_deferred_close && _deferred_close->empty()) {
-        return; // an explicit close is already notifying its old requests
+        give_up_deferred_connects(); // a connect() asked since then is given up: the last word is this disconnect()
+        return;                      // an explicit close is already notifying its old requests
     }
     if (_read_depth > 0 || _submit_depth > 0) {
         // A pending callback may call disconnect from nghttp3_conn_read_stream2.
@@ -138,8 +171,20 @@ Client::disconnect() {
         _h3_ready        = false;
         _remote_shutdown = true;
         _deferred_close.emplace();
+        give_up_deferred_connects(); // a connect() queued before this disconnect() hears `false` when the close runs
         return;
     }
+    give_up_deferred_connects(); // and one queued while a lost connection was torn down hears `false` from this close
+    complete_disconnect();
+}
+
+void
+Client::complete_disconnect() {
+    // The close itself: disconnect() with no read on the stack, and the end of a disconnect() that was deferred to the end of
+    // a read or of a submission. A connect() queued when it starts is NOT given up here: after a deferred disconnect() it was
+    // asked after it (disconnect() gave up the ones before), and it starts once this close has run. disconnect() gives up
+    // every one first -- its caller's last word -- so a disconnect() from a failure callback of a lost connection never
+    // starts the connect() asked of that connection (Huly QB-1246).
     // Mark the old connection unavailable before invoking failure callbacks.
     // They may call connect(), push_request(), or disconnect() again.
     auto owner = weak_from_this().lock();
@@ -149,32 +194,68 @@ Client::disconnect() {
     _h3_ready        = false;
     _remote_shutdown = true;
     _deferred_close.emplace();
-    auto callbacks = std::move(_connection_callbacks);
-    _connection_callbacks.clear();
+    // The mark goes with this close however it ends: left behind by an allocation the pass makes for itself -- the one thing
+    // that can leave it before its end --, it would keep every later disconnect() out, the destructor's included.
+    struct close_mark {
+        Client &client;
+        bool    held = true;
+        ~close_mark() {
+            if (held) {
+                client._deferred_close.reset();
+                client._remote_shutdown = false;
+            }
+        }
+    } mark{*this};
     std::exception_ptr callback_error;
-    const auto         capture = [&](auto &&notify) {
+    const auto         capture = [&](auto &&call) {
         try {
-            notify();
+            call();
         } catch (...) {
             if (!callback_error) {
                 callback_error = std::current_exception();
             }
         }
     };
-    for (auto &callback : callbacks) {
-        if (callback) {
-            capture([&] { callback(false, "HTTP/3 client disconnect"); });
+    const auto fail_connects = [&] {
+        while (!_connection_callbacks.empty()) {
+            auto callbacks = std::exchange(_connection_callbacks, {});
+            for (auto &callback : callbacks) {
+                if (callback) {
+                    capture([&] { notify(_destroying, "HTTP/3", [&] { callback(false, "HTTP/3 client disconnect"); }); });
+                }
+            }
         }
-    }
+    };
+    fail_connects();
     if (auto error = fail_all_requests("HTTP/3 client disconnect"); error && !callback_error) {
         callback_error = error;
     }
+    fail_connects(); // a connect() one of those callbacks asked, then gave up by a disconnect() of its own
     _h3.reset();
     capture([&] { qb::io::async::quic::endpoint::close(0, "HTTP/3 client disconnect"); });
     _deferred_close.reset();
     _remote_shutdown = false;
+    mark.held        = false;
+    capture([&] { start_deferred_connect(); }); // a connect() one of those callbacks asked: the close has completed
     if (callback_error) {
         std::rethrow_exception(callback_error);
+    }
+}
+
+void
+Client::give_up_deferred_connects() {
+    for (auto &callback : _deferred_connects) {
+        _connection_callbacks.push_back(std::move(callback)); // where the close, or the attempt, that answers them finds them
+    }
+    _deferred_connects.clear();
+    _connect_after_close = false;
+}
+
+void
+Client::start_deferred_connect() {
+    if (_connect_after_close) {
+        give_up_deferred_connects(); // not given up: their callbacks wait for the attempt started here, and hear its outcome
+        (void) connect(nullptr);     // (an attempt that cannot start fails them with everything else that waits)
     }
 }
 
@@ -234,6 +315,12 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
         return 0;
     }
     ++_total_requests;
+    if (_destroying) { // pushed from a callback the destructor runs: answered here, never queued, nothing armed (Huly QB-1246)
+        ++_failed_requests;
+        notify(_destroying, "HTTP/3",
+               [&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client disconnect")); });
+        return 0;
+    }
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
         callback(std::move(*error));
@@ -297,23 +384,26 @@ bool
 Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback) {
     if (requests.empty()) {
         if (callback) {
-            callback({});
+            notify(_destroying, "HTTP/3", [&] { callback({}); });
         }
         return true;
     }
     if (!callback) {
         return false;
     }
-    if (_remote_shutdown) {
-        std::vector<qb::http::Response> responses;
-        responses.reserve(requests.size());
-        const auto *reason = _deferred_close && _deferred_close->empty() ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
-        for (std::size_t i = 0; i < requests.size(); ++i) {
-            responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
-        }
+    if (_destroying || _remote_shutdown) { // while destroying: as push_request(), every member answered here (Huly QB-1246)
+        const auto *reason =
+            _destroying || (_deferred_close && _deferred_close->empty()) ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
         _total_requests += requests.size();
         _failed_requests += requests.size();
-        callback(std::move(responses));
+        notify(_destroying, "HTTP/3", [&] {
+            std::vector<qb::http::Response> responses;
+            responses.reserve(requests.size());
+            for (std::size_t i = 0; i < requests.size(); ++i) {
+                responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
+            }
+            callback(std::move(responses));
+        });
         return true;
     }
 
@@ -434,7 +524,7 @@ Client::process_pending_requests() {
             _deferred_close.reset();
             try {
                 if (reason.empty()) {
-                    disconnect();
+                    complete_disconnect(); // the disconnect() deferred to the end of this submission
                 } else {
                     close_failed_transport("HTTP/3 connection closed");
                     handle_connection_failure(reason);
@@ -447,6 +537,7 @@ Client::process_pending_requests() {
             }
         }
         if (closed_during_submit || attempt_epoch != _connect_epoch || !_h3 || !is_connected()) {
+            const FailureScope failing{_failure_callbacks}; // the request of a connection that has just ended (Huly QB-1246)
             ++_failed_requests;
             try {
                 ctx->callback(
@@ -505,6 +596,7 @@ Client::handle_connection_success(std::string const &alpn) {
 
 void
 Client::handle_connection_failure(std::string const &error) {
+    const FailureScope failing{_failure_callbacks};
     ++_connect_epoch;
     _is_connected    = false;
     _is_connecting   = false;
@@ -557,9 +649,9 @@ Client::fail_all_requests(std::string const &error) {
     pending.swap(_pending_requests);
     batches.swap(_active_batches);
     std::exception_ptr callback_error;
-    const auto         capture = [&](auto &&notify) {
+    const auto         capture = [&](auto &&call) { // what `call` allocates for its answer is contained with it
         try {
-            notify();
+            notify(_destroying, "HTTP/3", call);
         } catch (...) {
             if (!callback_error) {
                 callback_error = std::current_exception();
@@ -586,13 +678,15 @@ Client::fail_all_requests(std::string const &error) {
     }
     for (auto &[id, batch] : batches) {
         (void) id;
-        for (std::size_t i = 0; i < batch->responses.size(); ++i) {
-            if (i >= batch->completed.size() || !batch->completed[i]) {
-                ++_failed_requests;
-                batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error);
+        capture([&] {
+            for (std::size_t i = 0; i < batch->responses.size(); ++i) {
+                if (i >= batch->completed.size() || !batch->completed[i]) {
+                    ++_failed_requests;
+                    batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error);
+                }
             }
-        }
-        capture([&] { batch->callback(std::move(batch->responses)); });
+            batch->callback(std::move(batch->responses));
+        });
     }
     return callback_error;
 }
@@ -629,8 +723,8 @@ Client::has_pending_or_active_work() const noexcept {
 
 void
 Client::arm_connect_timeout() {
-    if (_connect_timeout <= qb::duration::zero()) {
-        return;
+    if (_destroying || _connect_timeout <= qb::duration::zero()) {
+        return; // nothing is armed for a client being destroyed (Huly QB-1246)
     }
     auto       weak_self = weak_from_this();
     const auto epoch     = _connect_epoch;
@@ -648,8 +742,8 @@ Client::arm_connect_timeout() {
 
 void
 Client::arm_request_timeout(std::uint64_t request_id) {
-    if (_request_timeout <= qb::duration::zero()) {
-        return;
+    if (_destroying || _request_timeout <= qb::duration::zero()) {
+        return; // nothing is armed for a client being destroyed (Huly QB-1246)
     }
     schedule_request_timeout(request_id, _request_timeout);
 }
@@ -821,6 +915,12 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
     if (!_h3) {
         return;
     }
+    if (_deferred_close && _deferred_close->empty() && _read_depth == 0 && _submit_depth == 0) {
+        // An explicit close is notifying -- nothing else leaves its mark with no read or submission on the stack --, and a
+        // loop pumped from one of its callbacks delivers what its connection still carried: it goes with that connection.
+        // Read, it would complete the close from inside the close (Huly QB-1246).
+        return;
+    }
     EventLifetime lifetime{*this};
     // Guard the read: a response callback reached from nghttp3_conn_read_stream2 can
     // reentrantly fail the connection (see _read_depth in client.h). While the read is on
@@ -838,23 +938,42 @@ Client::dispatch(qb::io::async::quic::event::stream_data const &ev) {
             --d;
         }
     };
-    {
-        DepthGuard guard(_read_depth);
-        _h3->read_stream(ev.id, ev.payload, ev.fin);
-    }
-    if (_read_depth == 0 && _submit_depth == 0 && _deferred_close) {
+    const auto finish_deferred_close = [this] {
+        if (_read_depth != 0 || _submit_depth != 0 || !_deferred_close) {
+            return;
+        }
         const std::string reason = std::move(*_deferred_close);
         _deferred_close.reset();
         if (reason.empty()) {
-            disconnect(); // explicit intent: fail once and close after nghttp3 unwinds
+            complete_disconnect(); // explicit intent: fail once and close after nghttp3 unwinds
             return;
         }
         close_failed_transport("HTTP/3 connection closed");
-        handle_connection_failure(reason);
+        try {
+            handle_connection_failure(reason);
+        } catch (...) {
+            start_deferred_connect();
+            throw;
+        }
         if (_auto_reconnect && has_pending_or_active_work()) {
             connect(nullptr);
         }
+        start_deferred_connect(); // a connect() asked while this close was deferred: the teardown has completed
+    };
+    try {
+        DepthGuard guard(_read_depth);
+        _h3->read_stream(ev.id, ev.payload, ev.fin);
+    } catch (...) {
+        // A read cut short by an exception -- an allocation, as the engine's callbacks contain their own -- still completes
+        // the close it deferred: left pending, its mark would keep every later disconnect() out (Huly QB-1246).
+        try {
+            finish_deferred_close();
+        } catch (...) {
+            // what a callback of that close throws: the read's own exception is the one that goes on
+        }
+        throw;
     }
+    finish_deferred_close();
 }
 
 void
@@ -887,20 +1006,20 @@ Client::connect() {
             complete(ConnectResult{false, "HTTP/3 client no longer available"});
             return;
         }
-        auto completed       = std::make_shared<bool>(false);
-        auto complete_holder = std::make_shared<std::function<void(ConnectResult &&)>>(std::move(complete));
-        auto callback        = [completed, complete_holder](bool ok, std::string const &error) mutable {
-            if (*completed) {
-                return;
-            }
-            *completed = true;
-            (*complete_holder)(ConnectResult{ok, error});
-        };
-        if (!self->connect(std::move(callback))) {
-            if (!*completed) {
-                *completed = true;
-                (*complete_holder)(ConnectResult{self->is_connected(), self->is_connected() ? "" : "Unable to start connection"});
-            }
+        if (self->_failure_callbacks > 0 || (self->_deferred_close && (self->_read_depth > 0 || self->_deferred_close->empty()))) {
+            // Awaited from a callback of a close or of a failure, it answers at once. connect(callback) queues the attempt for
+            // the end of a close, which cannot come before the callback returns; and a failure runs its callbacks inside the
+            // endpoint's dispatch, which delivers an attempt's `connected` only once it has returned. A coroutine blocked on
+            // either there -- run_sync() pumps the loop until it completes -- waited for ever (Huly QB-1246).
+            complete(ConnectResult{false, "HTTP/3 connection is closing"});
+            return;
+        }
+        // connect() answers through its callback -- at once when connected, at the attempt's end otherwise -- and returns false,
+        // given one, only when nothing starts (a client being destroyed, an attempt it cannot start), where it never calls it:
+        // the awaiter then completes here.
+        // `complete` is COPIED into the callback so this end still holds one (one allocation on a connection attempt: a cold path).
+        if (!self->connect([complete](bool ok, std::string const &error) mutable { complete(ConnectResult{ok, error}); })) {
+            complete(ConnectResult{false, "Unable to start QUIC connection"});
         }
     });
 }

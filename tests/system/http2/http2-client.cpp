@@ -75,6 +75,8 @@
 #include "../../shared/http2_raw_client.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
+#include "../../shared/tls_closing_peer.h"
+#include "../../shared/watchdog.h"
 
 using namespace std::chrono_literals;
 
@@ -1596,6 +1598,765 @@ ms_between(const Failure &earlier, const Failure &later) {
 
 } // namespace reconnect
 
+namespace http2_run_sync_connect_test {
+
+/// What run_sync(client->connect()) gave, called from a callback of a close, and how long it blocked.
+struct Blocked {
+    bool                      returned = false;
+    qb::http2::ConnectResult  result;
+    std::chrono::milliseconds took{0};
+};
+
+/// Completes at its first resumption: a run_sync() of it is one pass of the loop.
+qb::io::async::task<void>
+completes_at_once() {
+    co_return;
+}
+
+/// run_sync(client->connect()) -- a coroutine the caller blocks on, the loop pumped until it completes -- bounded by a
+/// watchdog that ends the process, saying so, instead of letting the test hang.
+void
+run_sync_connect(qb::http2::Client &client, Blocked &blocked, char const *const from) {
+    const auto               started = std::chrono::steady_clock::now();
+    qb::http::test::watchdog bound(std::string("run_sync(connect()) from ") + from, 5s);
+    blocked.result   = qb::io::async::run_sync(client.connect());
+    blocked.took     = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    blocked.returned = true;
+}
+
+/// A TLS peer, ALPN h2, on its own thread, for two connections. On the first it sends an empty SETTINGS -- the client's
+/// handshake event comes with the first thing it reads -- and reads until the client ends it. On the second it opens every
+/// window as wide as HTTP/2 allows, then reads nothing more: what the client sends past the socket buffers -- a body, then
+/// the GOAWAY of its close -- stays in the client.
+class StallingPeer {
+public:
+    StallingPeer() {
+        _listener.init(qb::io::ssl::Context::server(qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path())
+                           .alpn({"h2"})
+                           .max_version(qb::io::ssl::TlsVersion::v1_2));
+        if (_listener.listen_v4(0, "127.0.0.1") != 0 || _listener.set_optval(SOL_SOCKET, SO_RCVBUF, 16384) != 0)
+            return;
+        _listener.set_nonblocking(true);
+        _port   = _listener.local_endpoint().port();
+        _thread = std::thread([this] { run(); });
+    }
+    ~StallingPeer() {
+        _release = true;
+        if (_thread.joinable())
+            _thread.join();
+    }
+    StallingPeer(StallingPeer const &)            = delete;
+    StallingPeer &operator=(StallingPeer const &) = delete;
+
+    [[nodiscard]] std::uint16_t
+    port() const noexcept {
+        return _port;
+    }
+
+    /// The second connection is up and its windows open: from here on the peer reads nothing.
+    [[nodiscard]] bool
+    stalled() const noexcept {
+        return _stalled.load();
+    }
+
+private:
+    bool
+    accept_one(qb::io::tcp::ssl::socket &socket) {
+        const auto deadline = std::chrono::steady_clock::now() + 20s;
+        while (!_release && std::chrono::steady_clock::now() < deadline) {
+            if (_listener.accept(socket) == 0 && socket.is_open())
+                break;
+            std::this_thread::sleep_for(1ms);
+        }
+        if (!socket.is_open())
+            return false;
+        socket.set_nonblocking(true);
+        while (!socket.handshake_complete() && !_release && std::chrono::steady_clock::now() < deadline) {
+            if (socket.do_handshake() < 0)
+                return false;
+            if (!socket.handshake_complete())
+                std::this_thread::sleep_for(1ms);
+        }
+        return socket.handshake_complete();
+    }
+
+    bool
+    send_all(qb::io::tcp::ssl::socket &socket, std::string const &bytes) {
+        std::size_t sent = 0;
+        while (!_release && sent < bytes.size()) {
+            const int n = socket.write(bytes.data() + sent, bytes.size() - sent);
+            if (n < 0)
+                return false;
+            sent += static_cast<std::size_t>(n);
+            if (n == 0)
+                std::this_thread::sleep_for(1ms);
+        }
+        return sent == bytes.size();
+    }
+
+    void
+    run() {
+        static std::string const empty_settings("\x00\x00\x00\x04\x00\x00\x00\x00\x00", 9);
+        // SETTINGS_INITIAL_WINDOW_SIZE = 2^31-1, then WINDOW_UPDATE on the connection by 2^31-1 - 65535.
+        static std::string const open_windows("\x00\x00\x06\x04\x00\x00\x00\x00\x00\x00\x04\x7f\xff\xff\xff"
+                                              "\x00\x00\x04\x08\x00\x00\x00\x00\x00\x7f\xff\x00\x00",
+                                              28);
+        {
+            qb::io::tcp::ssl::socket socket;
+            if (!accept_one(socket) || !send_all(socket, empty_settings))
+                return;
+            char buffer[16384];
+            while (!_release && socket.read(buffer, sizeof(buffer)) >= 0)
+                std::this_thread::sleep_for(1ms);
+            socket.close();
+        }
+        qb::io::tcp::ssl::socket socket;
+        if (!accept_one(socket) || !send_all(socket, open_windows))
+            return;
+        _stalled = true;
+        while (!_release)
+            std::this_thread::sleep_for(5ms);
+        socket.close();
+    }
+
+    qb::io::tcp::ssl::listener _listener;
+    std::uint16_t              _port = 0;
+    std::atomic<bool>          _stalled{false};
+    std::atomic<bool>          _release{false};
+    std::thread                _thread; // last: started once every member it reads is built
+};
+
+} // namespace http2_run_sync_connect_test
+
+// run_sync(client->connect()) from a failure callback of an explicit disconnect() of a live connection returns at once,
+// `false`, "HTTP/2 connection is closing", and nothing connects for it. The connect() it asked waited for the end of the
+// transport: the GOAWAY the close announced was delivered and the transport closed inside the pump, the attempt connected
+// and the awaiter heard `true` -- then the close, resumed, ended that connection (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromAFailureCallbackOfAnExplicitDisconnectAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    bool    connected = false;
+    Blocked blocked;
+    int     failed = 0;
+    auto    client = make_test_client();
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+    qb::http::Request held;
+    held.method() = qb::http::Method::GET;
+    held.uri()    = qb::io::uri("/api/hang");
+    ASSERT_TRUE(client->push_request(std::move(held), [&](qb::http::Response) {
+        ++failed;
+        http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of disconnect()");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() >= 1; }));
+
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    const auto until = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// The same from a failure callback of a handshake that fails -- the server speaks no h2 over ALPN, so the client closes
+// the transport after its failure pass, with no GOAWAY --, with no connect timeout set. It returns at once, `false`. The
+// connect() it asked waited for the end of a transport the pass had not closed yet: for the connect timeout when one is
+// set (2 s, measured), for ever with none (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromAFailureCallbackOfAFailedHandshakeAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    Blocked blocked;
+    int     failed = 0;
+    auto    client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    client->set_connect_timeout(qb::duration::zero());
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        if (++failed == 1)
+            http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of a failed handshake");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    const auto until = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+    client->disconnect();
+}
+
+// A connect() whose connection the peer ends once its TLS handshake is complete -- before the client has read anything of
+// it -- hears `false`, "Connection lost", and a connect() its callback asks starts an attempt of its own, whose callback
+// hears its outcome. The handler of the transport's end called the waiting callbacks before it cleared the connecting
+// state: the redial joined the attempt that had just ended and returned true, nothing started for it, and its callback
+// was never called -- nor by the destructor, which disconnects only a client connected or connecting (Huly QB-1246; in
+// 3.3.0 as well).
+TEST_F(Http2ClientTest, ARedialFromTheCallbackOfAConnectionThePeerEndedAfterItsTlsHandshakeStartsAnAttemptOfItsOwn) {
+    qb::http::test::TlsClosingPeer peer(2);
+    ASSERT_NE(peer.port(), 0);
+    int         first = 0, second = 0;
+    bool        redialled = false, second_ok = true;
+    std::string first_error;
+    auto        client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &error) {
+        ++first;
+        first_error = error;
+        if (!ok) {
+            redialled = client->connect([&](bool again, const std::string &) {
+                ++second;
+                second_ok = again;
+            });
+        }
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first != 0; }));
+    EXPECT_EQ(first_error, "Connection lost") << "the transport's end, read once the connector handed it over";
+    EXPECT_TRUE(redialled);
+    EXPECT_TRUE(ServerThread::pump_until([&] { return second != 0; }, 5s)) << "the callback of the redial was never called";
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(second, 1);
+    EXPECT_FALSE(second_ok);
+    EXPECT_EQ(peer.ended(), 2) << "the redial reached the peer: an attempt of its own";
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// The same through run_sync(client->connect()) from that callback: it returns at once, `false`, "HTTP/2 connection is
+// closing", and nothing connects for it. It joined the attempt that had just ended and waited for its connect timeout --
+// 1 s with a 1 s one --, for ever with none (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromTheCallbackOfAConnectionThePeerEndedAfterItsTlsHandshakeAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    qb::http::test::TlsClosingPeer peer(2);
+    ASSERT_NE(peer.port(), 0);
+    Blocked     blocked;
+    int         heard = 0;
+    std::string error;
+    auto        client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(1s);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &why) {
+        error = why;
+        if (++heard == 1 && !ok)
+            http2_run_sync_connect_test::run_sync_connect(*client, blocked, "the callback of a connect() whose connection the peer ended");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return heard != 0; }));
+    EXPECT_EQ(heard, 1);
+    EXPECT_EQ(error, "Connection lost");
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 500ms);
+    const auto until = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_EQ(peer.ended(), 1);
+}
+
+// run_sync(client->connect()) from the failure callback of a request whose connection the server closed returns at once,
+// `false`, and nothing connects for it. The attempt it asked started inside the handler of the transport's end, and
+// connected in the pump -- the server back on its port --: the awaiter heard `true`, and dispose(), resumed once that
+// handler returned, ended the connection (Huly QB-1246; in 3.3.0 as well).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromAFailureCallbackOfAConnectionTheServerClosedAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    auto first = reconnect::make_h2_server_on(0); // a port of its own, which a later server of the case binds again
+    ASSERT_TRUE(first->ready()) << "could not start the first server";
+    const std::uint16_t port      = reconnect::port_of(*first);
+    bool                connected = false;
+    Blocked             blocked;
+    int                 failed = 0;
+    auto                client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+    qb::http::Request held;
+    held.method() = qb::http::Method::GET;
+    held.uri()    = qb::io::uri("/api/hang");
+    ASSERT_TRUE(client->push_request(std::move(held), [&](qb::http::Response) {
+        ++failed;
+        http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of a connection the server closed");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first->server().hang_routed() >= 1; }));
+
+    first.reset();                                   // the server's thread ends, and with it the connection
+    auto again = reconnect::make_h2_server_on(port); // back on its port before the client reads that end
+    ASSERT_TRUE(again->ready());
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    const auto until = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// The same from a failure callback of a disconnect() asked while the connector is in flight -- no transport yet: the close
+// ends the io all the same, once its callbacks have returned. It returns at once, `false`. The attempt it asked connected
+// in the pump, the awaiter heard `true`, and the close, resumed, ended that connection (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromAFailureCallbackOfADisconnectBeforeAnyTransportAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    Blocked blocked;
+    int     failed = 0;
+    auto    client = make_test_client();
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        ++failed;
+        http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of disconnect() before any transport");
+    }));
+    ASSERT_TRUE(client->is_connecting()) << "the push asked a connection: its connector is in flight";
+
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    const auto until = std::chrono::steady_clock::now() + 500ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// The same from the failure callback of a request a graceful GOAWAY's drain fails -- pushed while the connection drained,
+// automatic reconnection off. It returns at once, `false`. The drain's close runs that callback before it ends the
+// transport, and the attempt connect() asked waits for that end (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromAFailureCallbackOfAGracefulGoawaysDrainAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::goaways_lowered, 30s);
+    ASSERT_NE(peer.port(), 0);
+    Blocked     blocked;
+    int         answered = 0, failed = 0;
+    std::string failure;
+    auto        client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        ++answered;
+        // The connection drains: a request pushed now waits for the drain's end, which fails it.
+        EXPECT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+            ++failed;
+            failure = response.body().as<std::string>();
+            http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of a graceful GOAWAY's drain");
+        }));
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 10s));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(failure, "Server sent GOAWAY and automatic reconnection is disabled");
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// The same from the callback of a connect() whose connector failed at once -- the port refuses it, no transport was handed
+// over --: it returns at once, `false`. qb-io delivers such a failure through the loop's deferred queue, which runs no
+// nested drain: the next attempt's failure, deferred the same way, could not be delivered in the pump, and run_sync()
+// returned with the connect timeout's -- after 3 s with a 3 s one, for ever with none (Huly QB-1246). The deadline is 3 s
+// for Winsock, which reports a refusal after some 2 s.
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromTheCallbackOfAConnectWhoseConnectorFailedAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    const std::uint16_t port = 1; // refused: nothing listens on it, and no test binds it, nor does an ephemeral bind
+    Blocked             blocked;
+    int                 heard = 0;
+    std::string         error;
+    auto                client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(3s);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &why) {
+        error = why;
+        if (++heard == 1 && !ok)
+            http2_run_sync_connect_test::run_sync_connect(*client, blocked, "the callback of a connect() whose connector failed");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return heard != 0; }));
+    EXPECT_EQ(heard, 1);
+    EXPECT_EQ(error, "TCP/SSL connection failed");
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 500ms);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// The same from the callback of a connect deadline, the connector still in flight -- a listener that completes TCP and
+// never answers the ClientHello: it returns at once, `false`. A failure run from a timer: there run_sync() started the
+// next attempt and returned its outcome, after another deadline. One rule for every close and failure (Huly QB-1246).
+TEST_F(Http2ClientTest, ARunSyncOfConnectFromTheCallbackOfAConnectDeadlineAnswersFalseAtOnce) {
+    using http2_run_sync_connect_test::Blocked;
+    qb::io::tcp::listener silent;
+    ASSERT_EQ(silent.listen_v4(0, "127.0.0.1"), 0);
+    Blocked     blocked;
+    int         heard = 0;
+    std::string error;
+    auto        client = reconnect::make_client_for(silent.local_endpoint().port());
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(300ms);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &why) {
+        error = why;
+        if (++heard == 1 && !ok)
+            http2_run_sync_connect_test::run_sync_connect(*client, blocked, "the callback of a connect deadline");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return heard != 0; }));
+    EXPECT_EQ(heard, 1);
+    EXPECT_EQ(error, "Connection timeout");
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/2 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// A connection started right after an explicit disconnect() whose failure callback ran the loop for a pass -- a refused
+// run_sync(client->connect()) -- is not cut by that close's flush limit. The pass delivered the GOAWAY and ended the
+// transport; the close then armed its limit for a transport already gone, and the new connection was closed by it,
+// GOAWAY_FLUSH_LIMIT later. A request that callback pushed before the pump rides the connection the close's end starts:
+// it was failed "Connection lost" by that end, which found the queue's flag not yet set (Huly QB-1246).
+TEST_F(Http2ClientTest, AConnectionStartedAfterADisconnectWhoseFailureCallbackRanTheLoopOutlivesItsFlushLimit) {
+    using http2_run_sync_connect_test::Blocked;
+    bool             connected = false;
+    Blocked          blocked;
+    int              failed        = 0;
+    int              pushed        = 0;
+    qb::http::status pushed_status = qb::http::status::INTERNAL_SERVER_ERROR;
+    bool             again         = false;
+    int              answered      = 0;
+    qb::http::status status        = qb::http::status::INTERNAL_SERVER_ERROR;
+    auto             client        = make_test_client();
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+    qb::http::Request held;
+    held.method() = qb::http::Method::GET;
+    held.uri()    = qb::io::uri("/api/hang");
+    ASSERT_TRUE(client->push_request(std::move(held), [&](qb::http::Response) {
+        ++failed;
+        // Pushed before the pump: it waits for the connection the close's end starts (a connect of its own).
+        EXPECT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+            ++pushed;
+            pushed_status = response.status();
+        }));
+        http2_run_sync_connect_test::run_sync_connect(*client, blocked, "a failure callback of disconnect()");
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() >= 1; }));
+
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_TRUE(ServerThread::pump_until([&] { return pushed != 0; }, 2s));
+    EXPECT_EQ(pushed_status, qb::http::status::OK) << "the request pushed before the pump was failed with the transport it never rode";
+    client->connect([&](bool ok, const std::string &) { again = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return again; })) << "the next connection never came up";
+    const auto until = std::chrono::steady_clock::now() + qb::http2::Client::GOAWAY_FLUSH_LIMIT + 500ms;
+    while (std::chrono::steady_clock::now() < until)
+        qb::io::async::run(EVRUN_NOWAIT);
+    EXPECT_TRUE(client->is_connected()) << "the flush limit of the previous close ended the new connection";
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s));
+    EXPECT_EQ(status, qb::http::status::OK);
+    client->disconnect();
+}
+
+// An explicit disconnect() whose failure callback ran the loop for a pass leaves nothing behind for the next connection: a
+// request pushed afterwards, whose connection ends before its handshake -- a peer on the port that closes each connection
+// once TLS is complete --, is failed with that end. The flag that keeps the queue for the end of a closing transport was
+// set after the callbacks, for a transport already gone, and kept it for the next one: the request waited for its
+// deadline, for ever with none (Huly QB-1246; in 3.3.0 as well).
+TEST_F(Http2ClientTest, ARequestPushedAfterADisconnectWhoseFailureCallbackRanTheLoopHearsTheEndOfItsOwnConnection) {
+    int              answered = 0; // before the client, which answers what it still holds when it is destroyed
+    qb::http::status status   = qb::http::status::OK;
+    auto             first    = reconnect::make_h2_server_on(0); // a port of its own, which a later server of the case binds again
+    ASSERT_TRUE(first->ready()) << "could not start the first server";
+    const std::uint16_t port      = reconnect::port_of(*first);
+    bool                connected = false;
+    bool                pumped    = false;
+    auto                client    = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
+    qb::http::Request held;
+    held.method() = qb::http::Method::GET;
+    held.uri()    = qb::io::uri("/api/hang");
+    ASSERT_TRUE(client->push_request(std::move(held), [&](qb::http::Response) {
+        qb::io::async::run_sync(http2_run_sync_connect_test::completes_at_once()); // one pass of the loop
+        pumped = true;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return first->server().hang_routed() >= 1; }));
+    client->disconnect();
+    ASSERT_TRUE(pumped);
+    EXPECT_FALSE(client->is_connecting());
+
+    first.reset(); // the port now ends each connection once its TLS handshake is complete
+    qb::http::test::TlsClosingPeer peer(1, port);
+    ASSERT_EQ(peer.port(), port) << "could not bind the port the server just released";
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s)) << "the request waited behind the previous close's flag";
+    EXPECT_EQ(answered, 1);
+    EXPECT_NE(status, qb::http::status::OK);
+}
+
+// A request pushed in the same turn of the loop as a disconnect() of a connector still in flight rides its own connection
+// and is served. That close has no transport to end, and ends no io: closing one, it had qb-io raise a `disconnected` a
+// loop pass later -- for an io not yet disposed, a first connection's --, and the request was failed by it, "Connection
+// lost (reason: 1)", with a server up (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedRightAfterADisconnectOfAConnectorInFlightIsServedByItsOwnConnection) {
+    int              answered = 0; // before the client, which answers what it still holds when it is destroyed
+    qb::http::status status   = qb::http::status::INTERNAL_SERVER_ERROR;
+    std::string      body;
+    auto             server = reconnect::make_h2_server_on(0); // up from the start: the abandoned connector may reach it, its epoch drops it
+    ASSERT_TRUE(server->ready()) << "could not start the server";
+    const std::uint16_t port   = reconnect::port_of(*server);
+    auto                client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    client->disconnect(); // the connector is in flight: nothing to end
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+        body   = response.body().as<std::string>();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 3s));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(status, qb::http::status::OK) << body;
+}
+
+// A connect() whose connector fails at once -- the port refuses it, no transport was handed over -- leaves nothing behind
+// for the next connection: a request pushed afterwards, whose connection ends before its handshake, is failed by that end,
+// the first its connection meets. No `disconnected` comes for such a failure, so the flag that keeps the queue for one is
+// not set by it: set, the request outlived that end and waited for a second connection (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedAfterAConnectorFailureHearsTheFirstEndOfItsOwnConnection) {
+    int                   answered = 0, failed = 0; // before the client, which answers what it still holds when it is destroyed
+    qb::http::status      status = qb::http::status::OK;
+    qb::io::tcp::listener holder; // a port of ours, closed: the first attempt is refused there, and the peer then binds it
+    ASSERT_EQ(holder.listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = holder.local_endpoint().port();
+    holder.close();
+    auto client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) { failed += ok ? 0 : 1; }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }));
+    qb::http::test::TlsClosingPeer peer(2, port);
+    ASSERT_EQ(peer.port(), port) << "could not bind the port the holder released";
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s));
+    EXPECT_EQ(answered, 1);
+    EXPECT_NE(status, qb::http::status::OK);
+    EXPECT_EQ(peer.accepted(), 1) << "the request outlived the end of its first connection: the failure's flag";
+}
+
+// A connect() asked in the same turn of the loop as a disconnect() of the client's first connector, still in flight,
+// hears its own attempt, once: connected. That close has no transport to end, and closed the io anyway: qb-io raised a
+// `disconnected` for it -- an io not yet disposed --, which failed the waiting connect(), "Connection lost (reason: 1)";
+// the attempt then connected and nobody was told, and a connect() asked again from that `false` started a second one
+// beside it (Huly QB-1246).
+TEST_F(Http2ClientTest, AConnectAskedRightAfterADisconnectOfAFirstConnectorInFlightHearsItsOwnAttempt) {
+    std::vector<std::pair<bool, std::string>> heard; // before the client, which answers what it still holds when it is destroyed
+    int                                       given_up = 0;
+    std::string                               given_up_with;
+    auto                                      server = reconnect::make_h2_server_on(0);
+    ASSERT_TRUE(server->ready()) << "could not start the server";
+    auto client = reconnect::make_client_for(reconnect::port_of(*server));
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &why) {
+        given_up += ok ? 0 : 1;
+        given_up_with = why;
+    }));
+    client->disconnect(); // the connector is in flight: no transport to end
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &why) { heard.emplace_back(ok, why); }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return !heard.empty() && client->is_connected(); }, 3s));
+    for (const auto settle = std::chrono::steady_clock::now() + 300ms; std::chrono::steady_clock::now() < settle;)
+        qb::io::async::run(EVRUN_NOWAIT); // what a stray close would still deliver
+    EXPECT_EQ(given_up, 1);
+    EXPECT_EQ(given_up_with, "Connection closed");
+    ASSERT_EQ(heard.size(), 1u);
+    EXPECT_TRUE(heard[0].first) << heard[0].second;
+    EXPECT_TRUE(client->is_connected());
+}
+
+// The same close on a later connector -- the client's first connection over, its io disposed -- leaves nothing behind:
+// a request pushed afterwards, whose connection ends before its handshake, is failed by that end. qb-io raises no
+// `disconnected` for an io already disposed, and the flag that keeps the queue for one stayed set: the request outlived
+// the end of its connection and waited for its deadline -- 60 s by default, for ever with none (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedAfterADisconnectOfALaterConnectorInFlightHearsTheEndOfItsOwnConnection) {
+    int                            ended = 0, answered = 0; // before the client, which answers what it still holds when it is destroyed
+    qb::http::status               status = qb::http::status::OK;
+    qb::http::test::TlsClosingPeer peer(3); // ends each connection once its TLS handshake is complete, on a port of its own
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) { ended += ok ? 0 : 1; }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return ended != 0 && !client->transport().is_open(); }));
+    for (const auto settle = std::chrono::steady_clock::now() + 100ms; std::chrono::steady_clock::now() < settle;)
+        qb::io::async::run(EVRUN_NOWAIT); // the first connection's io disposed
+    ASSERT_TRUE(client->connect(nullptr));
+    client->disconnect(); // a later connector in flight: no transport to end
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 3s)) << "the request outlived the end of its connection";
+    EXPECT_EQ(answered, 1);
+    EXPECT_NE(status, qb::http::status::OK);
+}
+
+// A connect deadline that expires once the transport is up -- the peer completes TLS, never sends its SETTINGS, and ends
+// the connection a little later -- and whose failure callback runs the loop until that end leaves nothing behind for the
+// next connection: a request pushed afterwards, whose connection ends before its handshake, is failed with that end. The
+// flags that keep a connect() and the queue for the end of the transport were set after the callbacks, for a transport
+// already gone: the request waited for an end that never came, for ever with no deadline (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedAfterAConnectTimeoutWhoseFailureCallbackRanTheLoopHearsTheEndOfItsOwnConnection) {
+    int              failed = 0, answered = 0; // before the client, which answers what it still holds when it is destroyed
+    bool             open_at_entry = false, ended_in_pump = false;
+    qb::http::status status = qb::http::status::OK;
+    // Two connections, each held 800 ms past its TLS handshake with no SETTINGS, then ended: the first outlives the
+    // connect deadline, the second ends before its handshake.
+    qb::http::test::TlsClosingPeer silent(2, 0, std::vector<std::string>{"h2"}, 800ms);
+    const auto                     port = silent.port();
+    ASSERT_NE(port, 0);
+    auto client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(300ms);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        if (++failed != 1)
+            return;
+        open_at_entry = client->transport().is_open(); // the deadline found TLS done: the end below is this transport's
+        for (const auto until = std::chrono::steady_clock::now() + 3s;
+             client->transport().is_open() && std::chrono::steady_clock::now() < until;)
+            qb::io::async::run(EVRUN_NOWAIT); // the peer's end is read here
+        ended_in_pump = !client->transport().is_open();
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 5s));
+    ASSERT_TRUE(open_at_entry) << "the deadline fired before the TLS handshake: no transport for the callback to see end";
+    ASSERT_TRUE(ended_in_pump) << "the peer's end was not read inside the failure callback: the case proves nothing";
+
+    client->set_connect_timeout(qb::duration::zero()); // no deadline rescues the next request
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s)) << "the request waited behind the timed-out attempt's flags";
+    EXPECT_EQ(answered, 1);
+    EXPECT_NE(status, qb::http::status::OK);
+}
+
+// The same after a graceful GOAWAY's drain that a request deadline ends -- the peer names the request's stream in its
+// GOAWAY, never answers it, and ends the connection a little later. The deadline fails that request, whose callback
+// pushes another; the drain then fails that one -- automatic reconnection off --, and its failure callback runs the loop
+// until the peer's end. A request pushed afterwards, whose connection ends before its handshake, is failed with that end.
+// The queue's flag was set after that callback, for a transport already gone, and kept the queue of the next one from
+// hearing its end (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedAfterAGracefulGoawaysDrainWhoseFailureCallbackRanTheLoopHearsTheEndOfItsOwnConnection) {
+    int              first = 0, failed = 0, answered = 0; // before the client, which answers what it still holds when it is destroyed
+    bool             ended_in_pump = false;
+    std::string      failure;
+    qb::http::status status = qb::http::status::OK;
+    auto       planned = std::make_unique<qb::http::test::Http2PlannedPeer>(qb::http::test::Http2PlannedPeer::Plan::goaway_then_close, 30s);
+    const auto port    = planned->port();
+    ASSERT_NE(port, 0);
+    auto client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    bool up = false;
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    client->set_request_timeout(200ms); // from here: the connection is up, the deadline bounds the request alone
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        ++first;
+        // The connection drains: a request pushed now waits for the drain's end, which fails it.
+        EXPECT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+            ++failed;
+            failure = response.body().as<std::string>();
+            for (const auto until = std::chrono::steady_clock::now() + 3s;
+                 client->transport().is_open() && std::chrono::steady_clock::now() < until;)
+                qb::io::async::run(EVRUN_NOWAIT); // the peer's end is read here
+            ended_in_pump = !client->transport().is_open();
+        }));
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 10s));
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(failure, "Server sent GOAWAY and automatic reconnection is disabled");
+    ASSERT_TRUE(ended_in_pump) << "the peer's end was not read inside the failure callback: the case proves nothing";
+
+    client->set_request_timeout(qb::duration::zero()); // no deadline rescues the next request
+    planned.reset();                                   // the port now ends each connection once its TLS handshake is complete
+    qb::http::test::TlsClosingPeer peer(1, port);
+    ASSERT_EQ(peer.port(), port) << "could not bind the port the planned peer just released";
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        ++answered;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s)) << "the request waited behind the drain's flag";
+    EXPECT_EQ(answered, 1);
+    EXPECT_NE(status, qb::http::status::OK);
+}
+
+// A close whose GOAWAY cannot be delivered -- the peer reads nothing, the client's output full of a body -- keeps its
+// transport while its callbacks run, whatever an earlier close armed: a callback that pumps the loop past the flush limit
+// of the close before it finds this transport still open. That limit matches no later close (Huly QB-1246).
+TEST_F(Http2ClientTest, AnEarlierCloseFlushLimitNeverEndsALaterCloseWhileItsCallbacksRun) {
+    http2_run_sync_connect_test::StallingPeer peer;
+    ASSERT_NE(peer.port(), 0);
+    bool                                  up = false;
+    std::chrono::steady_clock::time_point first_close;
+    bool                                  again           = false;
+    int                                   failed          = 0;
+    bool                                  open_after_pump = false;
+    auto                                  client          = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    first_close = std::chrono::steady_clock::now();
+    client->disconnect(); // its GOAWAY is read, its transport ends, its limit is armed for GOAWAY_FLUSH_LIMIT
+    client->connect([&](bool ok, const std::string &) { again = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return again && peer.stalled(); }, 2s));
+    ASSERT_EQ(qb::io::socket::set_optval(client->transport().native_handle(), SOL_SOCKET, SO_SNDBUF, 16384), 0);
+
+    qb::http::Request big{qb::http::method::POST, qb::io::uri("/upload")};
+    big.body() = std::string(1024 * 1024, 'x'); // far more than the capped socket buffers hold: the peer reads nothing
+    ASSERT_TRUE(client->push_request(std::move(big), [&](qb::http::Response) {
+        ++failed;
+        const auto until = first_close + qb::http2::Client::GOAWAY_FLUSH_LIMIT + 300ms;
+        while (std::chrono::steady_clock::now() < until)
+            qb::io::async::run(EVRUN_NOWAIT);
+        open_after_pump = client->transport().is_open();
+    }));
+    for (const auto settle = std::chrono::steady_clock::now() + 100ms; std::chrono::steady_clock::now() < settle;)
+        qb::io::async::run(EVRUN_NOWAIT);
+    ASSERT_GT(client->out().size(), 0u) << "the body left the client: nothing would hold its GOAWAY back";
+    if (std::chrono::steady_clock::now() >= first_close + qb::http2::Client::GOAWAY_FLUSH_LIMIT - 200ms)
+        GTEST_SKIP() << "the host ran too slowly: the second close must come well before the first one's limit";
+
+    client->disconnect(); // its GOAWAY waits behind the body
+    EXPECT_EQ(failed, 1);
+    EXPECT_TRUE(open_after_pump) << "the first close's flush limit ended the transport of the second while its callbacks ran";
+    EXPECT_TRUE(ServerThread::pump_until([&] { return !client->transport().is_open(); }, 3s)) << "its own limit ends it";
+}
+
 // The whole run, observed from outside: a request against a server that will never speak h2, a
 // retry callback that pushes it back on every failure, a policy of four attempts at 40/80/160 ms.
 // The failures must come 6 deep (the explicit auto-connect, the four attempts, the verdict), the
@@ -1946,12 +2707,9 @@ TEST_F(Http2ClientTest, ADeferredConnectAndAFollowUpPushBothReachTheReconnectedS
 // back. The drop is the server's: its thread is stopped while `/api/hang` holds the stream open,
 // and a new server takes the port back during the run's first wait.
 TEST_F(Http2ClientTest, WorkPushedBackFromAPeerDropIsServedByTheReconnectionRun) {
-    qb::io::tcp::listener holder; // keeps a port of ours until the first server takes it
-    ASSERT_EQ(holder.listen_v4(0, "127.0.0.1"), 0);
-    const std::uint16_t port = holder.local_endpoint().port();
-    holder.close();
-    auto first = reconnect::make_h2_server_on(port);
-    ASSERT_TRUE(first->ready()) << "could not bind the port the holder just released";
+    auto first = reconnect::make_h2_server_on(0); // a port of its own, which a later server of the case binds again
+    ASSERT_TRUE(first->ready()) << "could not start the first server";
+    const std::uint16_t port = reconnect::port_of(*first);
 
     auto client = reconnect::make_client_for(port);
     client->set_connect_timeout(3s);

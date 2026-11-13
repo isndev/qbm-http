@@ -40,10 +40,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -62,12 +64,16 @@
 
 #include "static_exit_support.h"
 
+#include "../../shared/static_exit_calls.h"
+
 using namespace std::chrono_literals;
 
 namespace client_static_exit_test {
 
 namespace async = qb::io::async;
 using namespace qb::io::test::static_exit;
+using qb::http::test::static_exit::answered_inside;
+using qb::http::test::static_exit::heard;
 
 std::string
 origin(char const *const scheme, relay const &peer) {
@@ -81,8 +87,134 @@ get(std::string const &target) {
 
 void
 in_flight(qb::http::Response response) {
-    called_with(static_cast<int>(response.status().code()));
+    heard(static_cast<int>(response.status().code()));
 }
+
+/// A callback that throws once it has recorded its call: the destructor that runs it lets nothing out, and goes on.
+void
+throws(qb::http::Response response) {
+    in_flight(std::move(response));
+    throw std::runtime_error("thrown by the callback of a request the destructor fails");
+}
+
+/// The callback of a connect() that throws once it has recorded what it heard.
+void
+connect_throws(bool const ok, std::string const &) {
+    heard(ok ? 1 : 2);
+    throw std::runtime_error("thrown by the callback of a connect() the destructor fails");
+}
+
+/// How many times a request is pushed again after the loop by the cases that keep pushing: more than the passes a
+/// destructor could make over its queues, so a generation left queued and never answered is counted.
+constexpr int k_late_pushes = 4;
+int           g_late_pushes = 0;
+
+/// A batch of two, each member answered 503: the status the judge reads, 0 for any other answer.
+int
+batch_outcome(std::vector<qb::http::Response> const &responses) {
+    if (responses.size() != 2)
+        return 0;
+    for (auto const &response : responses)
+        if (response.status().code() != 503)
+            return 0;
+    return 503;
+}
+
+/// The retry pattern of a client of type `Client`, kept up through its destruction. One client a child process.
+template <typename Client>
+struct through_the_exit {
+    static inline Client     *client = nullptr;
+    static inline std::string target;
+
+    /// A request pushed again each time it fails, `k_late_pushes` times: one callback a push, run inside the push.
+    /// The first of them asks for a deadline too: none is armed (a timer asked of the loop after it stops the process).
+    static void
+    retry(qb::http::Response response) {
+        in_flight(std::move(response));
+        if (g_late_pushes < k_late_pushes) {
+            if (g_late_pushes++ == 0)
+                client->set_request_timeout(5s);
+            answered_inside([] { client->push_request(get(target), retry); });
+        }
+    }
+
+    /// A batch of two requests for `target`.
+    static std::vector<qb::http::Request>
+    two_requests() {
+        std::vector<qb::http::Request> batch;
+        batch.push_back(get(target));
+        batch.push_back(get(target));
+        return batch;
+    }
+
+    /// The batch form: each batch that fails pushes the next, three in all, each answered inside its push.
+    static void
+    next_batch(std::vector<qb::http::Response> responses) {
+        heard(batch_outcome(responses));
+        if (g_late_pushes < 3) {
+            ++g_late_pushes;
+            answered_inside([] {
+                if (!client->push_requests(two_requests(), next_batch))
+                    heard(-3); // a batch pushed while the client is destroyed is answered, not refused
+            });
+        }
+    }
+
+    /// The failure of one request, counted as a batch of two 503 that pushes the first real batch.
+    static void
+    first_batch(qb::http::Response response) {
+        std::vector<qb::http::Response> first;
+        first.push_back(response);
+        first.push_back(std::move(response));
+        next_batch(std::move(first));
+    }
+
+    /// A callback that throws, and first -- once -- pushes a request whose callback throws too. What that one throws
+    /// stays inside the push: the line after it runs, and is counted as a call. What this one throws goes no further
+    /// than the destructor.
+    static void
+    throws_after_a_push(qb::http::Response response) {
+        in_flight(std::move(response));
+        if (g_late_pushes++ == 0) {
+            client->push_request(get(target), throws);
+            heard(503);
+        }
+        throw std::runtime_error("thrown by the callback of a request the destructor fails");
+    }
+
+    /// The callback of a batch that throws once it has recorded its call, and first -- once -- pushes a batch whose
+    /// callback throws too. What that one throws stays inside the push: the line after it runs, and is counted.
+    static void
+    batch_throws(std::vector<qb::http::Response> responses) {
+        heard(batch_outcome(responses));
+        if (g_late_pushes++ == 0) {
+            client->push_requests(two_requests(), batch_throws);
+            heard(503);
+        }
+        throw std::runtime_error("thrown by the callback of a batch the destructor fails");
+    }
+
+    /// A callback that disconnects the client that is destroying itself, then pushes the request again, once.
+    static void
+    disconnects(qb::http::Response response) {
+        in_flight(std::move(response));
+        if (g_late_pushes++ == 0) {
+            client->disconnect();
+            client->push_request(get(target), in_flight);
+        }
+    }
+
+    /// The callback of a connect() still waiting when the client is destroyed: it hears `false` (2) and calls
+    /// connect() again, as a program that dials again does. That connect() is refused by its return value alone: its
+    /// callback never runs (it would record 4, and one that dialled again from there would never end), and nothing
+    /// is started (3).
+    static void
+    redial(bool const ok, std::string const &) {
+        heard(ok ? 1 : 2);
+        if (!ok && client->connect([](bool, std::string const &) { heard(4); }))
+            heard(3);
+    }
+};
 
 /// A scripted HTTP/1.1 server: every request is answered 200, on a connection kept alive.
 std::string
@@ -99,16 +231,24 @@ answer_200(std::string &unread) {
 
 enum class h1 {
     never_connected,
-    plain_object,     ///< `static qb::http1::Client client{...}`, no shared owner: it can only be built and destroyed
-    connecting,       ///< connect() asked, no pass of the loop since
-    idle,             ///< connected, nothing asked
-    request,          ///< a request written, its callback pending
-    queued,           ///< one request written, a second queued behind it
-    retried,          ///< a request written, whose callback pushes it again when it fails: the retry pattern
-    coroutine,        ///< a coroutine parked on a request
-    own_callback,     ///< `exit()` called by the callback of a response
-    disconnected,     ///< disconnect() and `exit()` at once
-    disconnected_run, ///< disconnect(), the loop run until the peer read the end
+    plain_object,       ///< `static qb::http1::Client client{...}`, no shared owner: it can only be built and destroyed
+    connecting,         ///< connect() asked, no pass of the loop since
+    connecting_redials, ///< the same, and the callback that hears `false` calls connect() again
+    connecting_throws,  ///< the same, and the callback that hears `false` throws
+    idle,               ///< connected, nothing asked
+    request,            ///< a request written, its callback pending
+    queued,             ///< one request written, a second queued behind it
+    retried,            ///< a request written, whose callback pushes it again when it fails: the retry pattern
+    retried_on,         ///< the same, pushed again each time it fails: every generation is answered
+    batches,            ///< a request written, whose failure pushes a batch, whose callback pushes the next, three in all
+    throwing,           ///< one request written and one queued, the callback of each throws, and the first pushes a third
+    batch_throwing,     ///< two batches of two, the callback of each throws, and the first pushes a third
+    disconnecting,      ///< a request written, whose callback disconnects the client and pushes the request again
+    coroutine,          ///< a coroutine parked on a request
+    own_callback,       ///< `exit()` called by the callback of a response
+    disconnected,       ///< disconnect() and `exit()` at once
+    disconnected_run,   ///< disconnect(), the loop run until the peer read the end
+    handshake_redials,  ///< https: the ClientHello read by a peer that answers nothing, and the callback that hears `false` connects again
 };
 
 void
@@ -144,7 +284,7 @@ h1_parked(qb::http1::Client &client, std::string target) {
 run_h1(h1 const state, site const where) {
     std::atexit(judge); // first: it runs after the destructor of `object`
     relay            &peer = new_peer();
-    const std::string url  = origin("http", peer);
+    const std::string url  = origin(state == h1::handshake_redials ? "https" : "http", peer);
     if (state == h1::plain_object) {
         static at_exit<qb::http1::Client> plain{url};
         leave(where);
@@ -156,7 +296,16 @@ run_h1(h1 const state, site const where) {
         case h1::plain_object:
             break;
         case h1::connecting:
-            if (!client.connect([](bool ok, std::string const &) { called_with(ok ? 1 : 2); }))
+            if (!client.connect([](bool ok, std::string const &) { heard(ok ? 1 : 2); }))
+                setup_failed("connect() started nothing");
+            break;
+        case h1::connecting_redials:
+            through_the_exit<qb::http1::Client>::client = &client;
+            if (!client.connect(through_the_exit<qb::http1::Client>::redial))
+                setup_failed("connect() started nothing");
+            break;
+        case h1::connecting_throws:
+            if (!client.connect(connect_throws))
                 setup_failed("connect() started nothing");
             break;
         case h1::idle:
@@ -172,6 +321,51 @@ run_h1(h1 const state, site const where) {
                 setup_failed("the second request was refused");
             if (!pump_until(&peer, [&] { return peer.from_client() != 0; }))
                 setup_failed("the request never reached the peer");
+            g.want_peer = 0;
+            break;
+        case h1::retried_on:
+        case h1::batches:
+        case h1::throwing:
+        case h1::disconnecting: {
+            using pattern = through_the_exit<qb::http1::Client>;
+            h1_connect(client, peer);
+            pattern::client                            = &client;
+            pattern::target                            = url + "/again";
+            void (*const callback)(qb::http::Response) = state == h1::retried_on ? pattern::retry
+                                                         : state == h1::batches  ? pattern::first_batch
+                                                         : state == h1::throwing ? pattern::throws_after_a_push
+                                                                                 : pattern::disconnects;
+            if (!client.push_request(get(url + "/first"), callback))
+                setup_failed("the request was refused");
+            if (state == h1::throwing && !client.push_request(get(url + "/second"), callback))
+                setup_failed("the second request was refused");
+            if (!pump_until(&peer, [&] { return peer.from_client() != 0; }))
+                setup_failed("the request never reached the peer");
+            g.want_peer = 0;
+            break;
+        }
+        case h1::batch_throwing: {
+            using pattern = through_the_exit<qb::http1::Client>;
+            h1_connect(client, peer);
+            pattern::client = &client;
+            pattern::target = url + "/again";
+            if (!client.push_requests(pattern::two_requests(), pattern::batch_throws)
+                || !client.push_requests(pattern::two_requests(), pattern::batch_throws))
+                setup_failed("a batch was refused");
+            if (!pump_until(&peer, [&] { return peer.from_client() != 0; }))
+                setup_failed("the first request never reached the peer");
+            g.want_peer = 0;
+            break;
+        }
+        case h1::handshake_redials:
+            through_the_exit<qb::http1::Client>::client = &client;
+            client.set_verify_peer(false);
+            if (!client.connect(through_the_exit<qb::http1::Client>::redial))
+                setup_failed("connect() started nothing");
+            if (!pump_until(&peer, [&] { return peer.from_client() != 0; })) // the transport is up: its first flight was read
+                setup_failed("the ClientHello never reached the peer");
+            if (!client.is_connecting())
+                setup_failed("the HTTP/1.1 client is not in its handshake");
             g.want_peer = 0;
             break;
         case h1::retried:
@@ -253,6 +447,49 @@ TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackPushesAgain)
     EXPECT_EXIT(run_h1(h1::retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
+// The same, kept up: each failure the destructor delivers pushes the request again, `k_late_pushes` times. Every
+// generation is answered inside its push -- one callback a push --, and the deadline the first of them asks for is
+// not armed (Huly QB-1246).
+TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackKeepsPushingAfterTheLoop) {
+    EXPECT_EXIT(run_h1(h1::retried_on, GetParam()), ::testing::ExitedWithCode(0),
+                stderr_is(verdict(0, 1 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+}
+
+// The batch form: the request's failure pushes a batch of two, whose callback pushes the next, three batches in all,
+// each answered inside its push -- its two members 503, its callback called once (Huly QB-1246).
+TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseFailurePushesBatchAfterBatch) {
+    EXPECT_EXIT(run_h1(h1::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 4, 4, 503, 0, 0, 0)));
+}
+
+// Callbacks that throw from the destructor: what one throws goes no further -- the process does not terminate, the
+// request queued behind it is answered all the same -- and what the callback of a request pushed from there throws
+// stays inside that push. Four calls: the two requests, the one the first pushes, and the line after that push
+// (Huly QB-1246).
+TEST_P(Http1ClientStaticExitDeathTest, TwoRequestsWhoseCallbacksThrow) {
+    EXPECT_EXIT(run_h1(h1::throwing, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 4, 4, 503, 0, 0, 0)));
+}
+
+// The same of batches: two batches of two, the callback of each throws, and the first pushes a third whose callback
+// throws inside that push. Four calls: the two batches, the one the first pushes, and the line after that push.
+TEST_P(Http1ClientStaticExitDeathTest, TwoBatchesWhoseCallbacksThrow) {
+    EXPECT_EXIT(run_h1(h1::batch_throwing, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 4, 4, 503, 0, 0, 0)));
+}
+
+#ifdef QB_HAS_SSL
+// The connect() that waits for the TLS handshake -- the transport is up, the peer has read the ClientHello and answers
+// nothing -- hears `false` once from the client's destructor, and calls connect() again from there: refused by its return
+// value alone, the callback of the second never runs, and the peer reads its end (Huly QB-1246).
+TEST_P(Http1ClientStaticExitDeathTest, InItsTlsHandshakeWhoseCallbackConnectsAgain) {
+    EXPECT_EXIT(run_h1(h1::handshake_redials, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 1, 1, 2, 0, 0, 0)));
+}
+#endif
+
+// A callback the destructor runs disconnects the client, then pushes the request again: the disconnect() finds
+// nothing left to close, and the push is answered where it is made.
+TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackDisconnects) {
+    EXPECT_EXIT(run_h1(h1::disconnecting, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
+}
+
 TEST_P(Http1ClientStaticExitDeathTest, ACoroutineParkedOnARequest) {
     EXPECT_EXIT(run_h1(h1::coroutine, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 0, 0, 0, 0, 1, 0)));
 }
@@ -270,9 +507,21 @@ INSTANTIATE_TEST_SUITE_P(Exit, Http1ClientStaticExitDeathTest, ::testing::Values
 class Http1ClientStaticExitOnceDeathTest : public in_a_child {};
 
 // A connect() asked and no pass of the loop since: the connector is the loop's, its completion never comes, and the
-// client's destructor abandons the callback that waited for it (it never runs).
+// callback that waited for it hears `false` from the client's destructor, once, as the HTTP/2 and HTTP/3 clients'
+// does (Huly QB-1246). It was abandoned: destroyed without a word.
 TEST_F(Http1ClientStaticExitOnceDeathTest, AConnectInFlight) {
-    EXPECT_EXIT(run_h1(h1::connecting, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 0, 0, 0, 0, 0, 0)));
+    EXPECT_EXIT(run_h1(h1::connecting, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
+}
+
+// The same, and the callback that hears `false` calls connect() again: refused by its return value alone -- the
+// callback of the second never runs, and nothing is started.
+TEST_F(Http1ClientStaticExitOnceDeathTest, AConnectInFlightWhoseCallbackConnectsAgain) {
+    EXPECT_EXIT(run_h1(h1::connecting_redials, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
+}
+
+// The same, and the callback that hears `false` throws: what it throws goes no further than the destructor.
+TEST_F(Http1ClientStaticExitOnceDeathTest, AConnectInFlightWhoseCallbackThrows) {
+    EXPECT_EXIT(run_h1(h1::connecting_throws, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
 }
 
 // `exit()` from the callback of a response: the client's own dispatch is on the stack, and holds the client. Its
@@ -448,11 +697,11 @@ public:
     on(base::message &&) {}
     void
     on(base::closed &&) {
-        called_with(ws_closed);
+        heard(ws_closed);
     }
     void
     on(base::error &&) {
-        called_with(ws_error);
+        heard(ws_error);
     }
     void
     on(base::ping &&) {}
@@ -460,7 +709,7 @@ public:
     on(base::pong &&) {}
     void
     on(base::disconnected &&) {
-        called_with(ws_disconnected);
+        heard(ws_disconnected);
     }
 };
 
@@ -524,14 +773,14 @@ run_ws_callback(ws const state, site const where) {
     static at_exit<qb::http::ws::Client<>> object;
     if (state == ws::own_callback)
         object.client.on_connected([](auto &) {
-            called_with(1);
+            heard(1);
             std::exit(3); // inside the client's own dispatch: its io handler, its protocol, its callback
         });
     else
         object.client.on_connected([](auto &) { g_ws_up = true; });
-    object.client.on_disconnected([](auto &) { called_with(ws_disconnected); });
-    object.client.on_error([](auto &) { called_with(ws_error); });
-    object.client.on_closed([](auto &) { called_with(ws_closed); });
+    object.client.on_disconnected([](auto &) { heard(ws_disconnected); });
+    object.client.on_error([](auto &) { heard(ws_error); });
+    object.client.on_closed([](auto &) { heard(ws_closed); });
     drive_ws(object.client, peer, state, where);
 }
 
@@ -656,8 +905,10 @@ TEST_F(WsClientStaticExitOnceDeathTest, ACoroutineParkedOnReceiveAndExitFromACor
 
 using h3_server = std::remove_reference_t<decltype(*qb::http3::make_server())>;
 
-std::shared_ptr<h3_server>  g_h3_server;
-std::shared_ptr<void const> g_h3_held; ///< the context of a request the server never answers
+std::shared_ptr<h3_server>               g_h3_server;
+std::shared_ptr<void const>              g_h3_held;      ///< the context of a request the server never answers
+std::shared_ptr<void const>              g_h3_also_held; ///< and of a second one
+std::vector<std::shared_ptr<void const>> g_h3_all_held;  ///< and of every request of the batches
 
 std::string
 start_h3_server() {
@@ -669,6 +920,8 @@ start_h3_server() {
         ctx->complete();
     });
     g_h3_server->router().get("/held", [](auto ctx) { g_h3_held = ctx; });
+    g_h3_server->router().get("/also-held", [](auto ctx) { g_h3_also_held = ctx; });
+    g_h3_server->router().get("/all-held", [](auto ctx) { g_h3_all_held.push_back(ctx); });
     g_h3_server->router().compile();
     const std::string url = "https://127.0.0.1:" + std::to_string(qb::http::test::ephemeral_udp_port());
     if (!g_h3_server->listen(qb::io::uri(url), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()))
@@ -678,14 +931,43 @@ start_h3_server() {
 
 enum class h3 {
     never_connected,
-    connecting,   ///< connect() asked, no pass of the loop since
-    idle,         ///< connected, nothing asked
-    request,      ///< a request the server holds, its callback pending
-    retried,      ///< such a request, whose callback pushes it again when it fails: the retry pattern
-    coroutine,    ///< a coroutine parked on such a request
-    own_callback, ///< `exit()` called by the callback of a response
-    disconnected, ///< disconnect(), then `exit()`
+    connecting,         ///< connect() asked, no pass of the loop since
+    connecting_redials, ///< the same, and the callback that hears `false` calls connect() again
+    connecting_throws,  ///< the same, and the callback that hears `false` throws
+    handshake_redials,  ///< the first flight read by a peer that answers nothing, and the callback that hears `false` connects again
+    batch_throwing,     ///< two batches of two the server holds, the callback of each throws, and the first pushes a third
+    idle,               ///< connected, nothing asked
+    request,            ///< a request the server holds, its callback pending
+    retried,            ///< such a request, whose callback pushes it again when it fails: the retry pattern
+    retried_on,         ///< the same, pushed again each time it fails: every generation is answered
+    batches,            ///< such a request, whose failure pushes a batch, whose callback pushes the next, three in all
+    throwing,           ///< two such requests, the callback of each throws, and the first pushes a third
+    disconnecting,      ///< such a request, whose callback disconnects the client and pushes the request again
+    coroutine,          ///< a coroutine parked on such a request
+    own_callback,       ///< `exit()` called by the callback of a response
+    disconnected,       ///< disconnect(), then `exit()`
 };
+
+/// A UDP peer that reads what a client sends and answers nothing: the client's QUIC handshake stays in flight. On the heap
+/// and never destroyed, as the relay of the other cases is.
+qb::io::udp::socket *g_h3_silent_peer = nullptr;
+
+std::string
+start_h3_silent_peer() {
+    g_h3_silent_peer = new qb::io::udp::socket;
+    if (!g_h3_silent_peer->init(AF_INET) || g_h3_silent_peer->bind_v4(0, "127.0.0.1") != 0)
+        setup_failed("the silent UDP peer did not bind");
+    static_cast<void>(g_h3_silent_peer->set_nonblocking(true));
+    return "https://127.0.0.1:" + std::to_string(g_h3_silent_peer->local_endpoint().port());
+}
+
+/// The silent peer read a datagram: the client's first flight left it.
+bool
+h3_silent_peer_read() {
+    char             datagram[2048];
+    qb::io::endpoint from;
+    return g_h3_silent_peer->read(datagram, sizeof(datagram), from) > 0;
+}
 
 void
 h3_connect(qb::http3::Client &client) {
@@ -700,13 +982,15 @@ qb::http3::Client *g_h3_client = nullptr;
 std::string        g_h3_target;
 
 /// The retry pattern: a request that failed is pushed again, once, and the client asked to connect. Both are refused
-/// in the call: the request with a 503, the connect() with `false` -- outcome 2, the last one the judge reads.
+/// in the call: the request with a 503, the connect() by its return value alone -- its callback never runs (it would
+/// record 4), and nothing is started (3).
 void
 h3_retry(qb::http::Response response) {
     in_flight(std::move(response));
     if (g.calls == 1) {
+        if (g_h3_client->connect([](bool, std::string const &) { heard(4); }))
+            heard(3);
         g_h3_client->push_request(get(g_h3_target), in_flight);
-        static_cast<void>(g_h3_client->connect([](bool ok, std::string const &) { called_with(ok ? 1 : 2); }));
     }
 }
 
@@ -723,7 +1007,7 @@ h3_parked(qb::http3::Client &client, std::string target) {
 run_h3(h3 const state, site const where) {
     std::atexit(judge);
     static_cast<void>(async::listener::current.size()); // the thread's listener exists: the client goes after it
-    const std::string                                  url = start_h3_server();
+    const std::string                                  url = state == h3::handshake_redials ? start_h3_silent_peer() : start_h3_server();
     static at_exit<std::shared_ptr<qb::http3::Client>> object{qb::http3::make_client(url)};
     qb::http3::Client                                 &client = *object.client;
     client.set_verify_peer(false); // the test's certificate is self-signed
@@ -731,22 +1015,70 @@ run_h3(h3 const state, site const where) {
         case h3::never_connected:
             break;
         case h3::connecting:
-            if (!client.connect([](bool ok, std::string const &) { called_with(ok ? 1 : 2); }))
+            if (!client.connect([](bool ok, std::string const &) { heard(ok ? 1 : 2); }))
                 setup_failed("connect() started nothing");
             break;
+        case h3::connecting_redials:
+            through_the_exit<qb::http3::Client>::client = &client;
+            if (!client.connect(through_the_exit<qb::http3::Client>::redial))
+                setup_failed("connect() started nothing");
+            break;
+        case h3::connecting_throws:
+            if (!client.connect(connect_throws))
+                setup_failed("connect() started nothing");
+            break;
+        case h3::handshake_redials: {
+            through_the_exit<qb::http3::Client>::client = &client;
+            if (!client.connect(through_the_exit<qb::http3::Client>::redial))
+                setup_failed("connect() started nothing");
+            bool first_flight_read = false;
+            if (!pump_until(nullptr, [&] { return first_flight_read = first_flight_read || h3_silent_peer_read(); }))
+                setup_failed("the client's first flight never reached the peer");
+            if (!client.is_connecting())
+                setup_failed("the HTTP/3 client is not in its handshake");
+            break;
+        }
+        case h3::batch_throwing: {
+            using pattern = through_the_exit<qb::http3::Client>;
+            h3_connect(client);
+            pattern::client = &client;
+            pattern::target = url + "/all-held";
+            if (!client.push_requests(pattern::two_requests(), pattern::batch_throws)
+                || !client.push_requests(pattern::two_requests(), pattern::batch_throws))
+                setup_failed("a batch was refused");
+            if (!pump_until(nullptr, [] { return g_h3_all_held.size() == 4; }))
+                setup_failed("the batches never reached the server");
+            break;
+        }
         case h3::idle:
             h3_connect(client);
             break;
         case h3::request:
         case h3::retried:
+        case h3::retried_on:
+        case h3::batches:
+        case h3::throwing:
+        case h3::disconnecting: {
             h3_connect(client);
-            g_h3_client = &client;
-            g_h3_target = url + "/held";
-            if (!client.push_request(get(url + "/held"), state == h3::retried ? h3_retry : in_flight))
+            g_h3_client                                 = &client;
+            g_h3_target                                 = url + "/held";
+            through_the_exit<qb::http3::Client>::client = &client;
+            through_the_exit<qb::http3::Client>::target = url + "/held";
+            using pattern                               = through_the_exit<qb::http3::Client>;
+            void (*const callback)(qb::http::Response)  = state == h3::retried         ? h3_retry
+                                                          : state == h3::retried_on    ? pattern::retry
+                                                          : state == h3::batches       ? pattern::first_batch
+                                                          : state == h3::throwing      ? pattern::throws_after_a_push
+                                                          : state == h3::disconnecting ? pattern::disconnects
+                                                                                       : in_flight;
+            if (!client.push_request(get(url + "/held"), callback))
                 setup_failed("the request was refused");
-            if (!pump_until(nullptr, [] { return g_h3_held != nullptr; }))
+            if (state == h3::throwing && !client.push_request(get(url + "/also-held"), callback))
+                setup_failed("the second request was refused");
+            if (!pump_until(nullptr, [&] { return g_h3_held != nullptr && (state != h3::throwing || g_h3_also_held != nullptr); }))
                 setup_failed("the request never reached the server");
             break;
+        }
         case h3::coroutine:
             h3_connect(client);
             async::coro_scheduler().spawn(h3_parked(client, url + "/held"));
@@ -788,10 +1120,51 @@ TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlight) {
 }
 
 // The retry pattern, from the client's destructor after the loop: the request pushed again is answered at once and
-// the connect() asked with it is refused, as during disconnect() -- nothing is queued, armed or connected. Three
-// calls after the loop: the request (503), the request pushed again (503), the connect() (false).
+// the connect() asked with it is refused by its return value alone -- nothing is queued, armed or connected. Two
+// calls after the loop: the request (503) and the request pushed again (503); the connect()'s callback never runs
+// (Huly QB-1246). It heard `false` inside the call, where a callback that dials again on `false` never returns.
 TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackPushesAgain) {
-    EXPECT_EXIT(run_h3(h3::retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 3, 3, 2, 0, 0, 0)));
+    EXPECT_EXIT(run_h3(h3::retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 2, 2, 503, 0, 0, 0)));
+}
+
+// The same, kept up: each failure the destructor delivers pushes the request again, `k_late_pushes` times. Every
+// generation is answered inside its push -- one callback a push --, and the deadline the first of them asks for is
+// not armed.
+TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackKeepsPushingAfterTheLoop) {
+    EXPECT_EXIT(run_h3(h3::retried_on, GetParam()), ::testing::ExitedWithCode(0),
+                stderr_is(verdict(-1, 1 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+}
+
+// The batch form: the request's failure pushes a batch of two, whose callback pushes the next, three batches in all,
+// each answered inside its push -- its two members 503, its callback called once.
+TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseFailurePushesBatchAfterBatch) {
+    EXPECT_EXIT(run_h3(h3::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 4, 503, 0, 0, 0)));
+}
+
+// Callbacks that throw from the destructor: what one throws goes no further -- the process does not terminate, the
+// request after it is answered all the same -- and what the callback of a request pushed from there throws stays
+// inside that push. Four calls: the two requests, the one the first pushes, and the line after that push.
+TEST_P(Http3ClientStaticExitDeathTest, TwoRequestsInFlightWhoseCallbacksThrow) {
+    EXPECT_EXIT(run_h3(h3::throwing, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 4, 503, 0, 0, 0)));
+}
+
+// The same of batches: two batches of two, the callback of each throws, and the first pushes a third whose callback
+// throws inside that push. Four calls: the two batches, the one the first pushes, and the line after that push.
+TEST_P(Http3ClientStaticExitDeathTest, TwoBatchesInFlightWhoseCallbacksThrow) {
+    EXPECT_EXIT(run_h3(h3::batch_throwing, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 4, 503, 0, 0, 0)));
+}
+
+// The connect() that waits for the QUIC handshake -- the peer has read the client's first flight and answers nothing --
+// hears `false` once from the client's destructor, and calls connect() again from there: refused by its return value
+// alone, the callback of the second never runs (Huly QB-1246).
+TEST_P(Http3ClientStaticExitDeathTest, InItsHandshakeWhoseCallbackConnectsAgain) {
+    EXPECT_EXIT(run_h3(h3::handshake_redials, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
+}
+
+// A callback the destructor runs disconnects the client, then pushes the request again: that disconnect() is the
+// close -- the destructor's own, after it, finds nothing left to close -- and the push is answered where it is made.
+TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackDisconnects) {
+    EXPECT_EXIT(run_h3(h3::disconnecting, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 2, 2, 503, 0, 0, 0)));
 }
 
 TEST_P(Http3ClientStaticExitDeathTest, ACoroutineParkedOnARequest) {
@@ -809,6 +1182,17 @@ class Http3ClientStaticExitOnceDeathTest : public in_a_child {};
 // A connect() asked and no pass of the loop since: it hears `false` from the client's destructor, after the loop.
 TEST_F(Http3ClientStaticExitOnceDeathTest, AConnectInFlight) {
     EXPECT_EXIT(run_h3(h3::connecting, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
+}
+
+// The same, and the callback that hears `false` calls connect() again: refused by its return value alone -- the
+// callback of the second never runs, and nothing is started (Huly QB-1246).
+TEST_F(Http3ClientStaticExitOnceDeathTest, AConnectInFlightWhoseCallbackConnectsAgain) {
+    EXPECT_EXIT(run_h3(h3::connecting_redials, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
+}
+
+// The same, and the callback that hears `false` throws: what it throws goes no further than the destructor.
+TEST_F(Http3ClientStaticExitOnceDeathTest, AConnectInFlightWhoseCallbackThrows) {
+    EXPECT_EXIT(run_h3(h3::connecting_throws, site::main), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 1, 1, 2, 0, 0, 0)));
 }
 
 // `exit()` from the callback of a response: the client's own dispatch is on the stack, and holds the client. Its

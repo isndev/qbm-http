@@ -229,7 +229,7 @@ private:
     bool        _reconnect_firing       = false;
     bool        _in_failure_pass        = false;
     bool        _intentional_disconnect = false; ///< disconnect() was asked: the disconnected that follows starts no run (as http1)
-    bool        _destroying             = false; ///< The destructor runs: connect() is refused (Huly QB-1246)
+    bool        _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
     // An explicit disconnect() of a live connection delivers GOAWAY(NO_ERROR) before the socket closes (Huly QB-1059):
     // `_graceful_close_pending` while that delivery runs, bounded by GOAWAY_FLUSH_LIMIT; the epoch ties the limit's timer to its close.
     bool                                  _graceful_close_pending = false;
@@ -263,8 +263,9 @@ public:
      */
     explicit Client(const qb::io::uri &uri);
 
-    /// Every request in flight or queued hears once (503, "Client destroyed"), a pending connect() hears false; from one of those callbacks
-    /// a request pushed again fails too and a connect() is refused (its callback hears false, it returns false): safe in static storage.
+    /// Every request in flight or queued hears once (503, "Client destroyed"), every connect() still waiting hears `false` once. From
+    /// one of those callbacks a request pushed, alone or in a batch, is answered inside the push (503), and a connect() is refused: it
+    /// returns false and its callback is never called. A callback that throws is logged. Nothing is armed: safe in static storage.
     ~Client();
     Client(const Client &)            = delete; // non-copyable and non-movable: the base class supports neither
     Client &operator=(const Client &) = delete;
@@ -277,7 +278,9 @@ public:
      *                 for fire-and-forget (you will still be able to
      *                 `push_request` before connection completes; they will
      *                 be queued and flushed on handshake).
-     * @return true if connection attempt started, false if already connected/connecting.
+     * @return true when the callback will hear the outcome -- at once when already connected, with the attempt under way
+     *         or the one this call starts otherwise. false only while the client is being destroyed: nothing starts, and
+     *         the callback is never called.
      *
      * @note The default argument is intentionally removed (compared to pre-coroutine
      *       versions of this API) so that the coroutine overload `connect()` is
@@ -290,7 +293,8 @@ public:
      * @brief Connect to the server (coroutine-style).
      *
      * Yields a `ConnectResult` once the HTTP/2 handshake is complete (or
-     * failed). Usage:
+     * failed) -- `false` at once, "HTTP/2 connection is closing", when awaited
+     * from a callback the client runs for a close or a failure. Usage:
      *
      * @code
      * if (!co_await client->connect()) {
@@ -606,6 +610,12 @@ private:
      * @param error_message Error description
      */
     void fail_all_requests(const std::string &error_message);
+    /// fail_all_requests() runs: it detached the registries, so a batch member it fails finds no batch. Expected there, and
+    /// not logged once per member -- the pass said "Failing all requests" once (Huly QB-1246).
+    bool _failing_all = false;
+    /// A close or a failure runs the callbacks of what it ends: the coroutine connect() answers there at once -- one rule, as
+    /// what it would wait for is, after most of them, heard only once those callbacks return (Huly QB-1246).
+    int _closing_callbacks = 0;
 
     /**
      * @brief Check and handle request timeouts

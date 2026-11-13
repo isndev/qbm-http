@@ -38,8 +38,10 @@
 
 #if defined(QBM_HTTP_HAS_HTTP3)
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <coroutine>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -55,6 +57,7 @@
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
+#include "../../shared/watchdog.h"
 
 #include <qbm/http/middleware/static_files.h>
 
@@ -2001,19 +2004,20 @@ TEST_F(Http3LoopbackTest, PendingGoawayCallbackMayDisconnectDuringNativeRead) {
     server->router().compile();
     ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
 
-    auto client = qb::http3::make_client(https_origin(port));
-    client->set_verify_peer(false);
-    client->set_max_concurrent_streams(1);
-
+    // What the callbacks capture is declared before the client: it answers what it still holds when it is destroyed.
     int                             active_calls = 0, pending_calls = 0;
     std::size_t                     states_before_disconnect = 0, states_inside_disconnect_callback = 0;
-    bool                            connected_after_disconnect = true, reentrant_connect_started = true, reentrant_connect_succeeded = true;
-    int                             reentrant_connect_calls = 0;
+    bool                            connected_after_disconnect = true, reentrant_connect_started = false, reentrant_connect_succeeded = false;
+    int                             reentrant_connect_calls = 0, reentrant_connect_calls_inside = -1;
     int                             late_calls = 0, late_batch_calls = 0;
     qb::http3::request_id           late_request_id = 1;
     qb::http::Response              late_response;
     std::vector<qb::http::Response> late_batch_responses;
     qb::http::Response              active_response, pending_response;
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_max_concurrent_streams(1);
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response response) {
         ++active_calls;
         active_response = std::move(response);
@@ -2032,6 +2036,7 @@ TEST_F(Http3LoopbackTest, PendingGoawayCallbackMayDisconnectDuringNativeRead) {
             ++reentrant_connect_calls;
             reentrant_connect_succeeded = ok;
         });
+        reentrant_connect_calls_inside    = reentrant_connect_calls;
         late_request_id                   = client->push_request_with_id(qb::http::Request{qb::io::uri("/late")}, [&](qb::http::Response late) {
             ++late_calls;
             late_response = std::move(late);
@@ -2056,9 +2061,8 @@ TEST_F(Http3LoopbackTest, PendingGoawayCallbackMayDisconnectDuringNativeRead) {
     EXPECT_GT(states_before_disconnect, 0u) << "the callback must run while an HTTP/3 stream still exists";
     EXPECT_GT(states_inside_disconnect_callback, 0u) << "native GOAWAY reading must retain the HTTP/3 connection through the callback";
     EXPECT_FALSE(connected_after_disconnect) << "disconnect must mark the client logically down before teardown";
-    EXPECT_FALSE(reentrant_connect_started) << "a new handshake cannot start on nghttp3's active stack";
-    EXPECT_EQ(reentrant_connect_calls, 1);
-    EXPECT_FALSE(reentrant_connect_succeeded);
+    EXPECT_TRUE(reentrant_connect_started) << "a handshake asked on nghttp3's active stack waits for the teardown: it is accepted";
+    EXPECT_EQ(reentrant_connect_calls_inside, 0) << "the callback of a connect() is never called inside the call";
     EXPECT_EQ(late_request_id, 0u);
     EXPECT_EQ(late_calls, 1);
     EXPECT_EQ(late_response.status(), qb::http::status::SERVICE_UNAVAILABLE);
@@ -2070,6 +2074,13 @@ TEST_F(Http3LoopbackTest, PendingGoawayCallbackMayDisconnectDuringNativeRead) {
     EXPECT_EQ(client->get_stream_state_count(), 0u) << "deferred teardown must finish after the native read returns";
     EXPECT_EQ(pending_route_calls, 0);
     EXPECT_EQ(late_route_calls, 0);
+    // The teardown done, the attempt the callback asked for has started. No pass of the loop since: the disconnect() below
+    // gives it up, and its callback hears that, once.
+    EXPECT_TRUE(client->is_connecting());
+    EXPECT_EQ(reentrant_connect_calls, 0);
+    client->disconnect();
+    EXPECT_EQ(reentrant_connect_calls, 1);
+    EXPECT_FALSE(reentrant_connect_succeeded);
     EXPECT_FALSE(client->is_connecting());
 
     held_context.reset();
@@ -2103,7 +2114,10 @@ TEST_F(Http3LoopbackTest, ResponseCallbackMayReleaseLastClientOwnerDuringNativeR
     server->close();
 }
 
-TEST_F(Http3LoopbackTest, ExplicitDisconnectRejectsWorkFromFailureCallback) {
+// A failure callback of an explicit disconnect() asks for the next connection and pushes a request. The request is answered
+// in the push, as during any close. The connect() is accepted and waits for the close: its callback is not called inside the
+// call -- it heard `false` there (Huly QB-1246) -- and hears the outcome of the attempt started once the close has run.
+TEST_F(Http3LoopbackTest, ExplicitDisconnectStartsTheConnectItsFailureCallbackAsks) {
     const auto                                                    port   = next_port();
     auto                                                          server = qb::http3::make_server();
     std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
@@ -2116,11 +2130,12 @@ TEST_F(Http3LoopbackTest, ExplicitDisconnectRejectsWorkFromFailureCallback) {
     server->router().compile();
     ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
 
-    auto client = qb::http3::make_client(https_origin(port));
-    client->set_verify_peer(false);
-    int                   failed_calls = 0, connect_calls = 0, late_calls = 0;
-    bool                  connected_in_callback = true, connect_started = true, connect_succeeded = true;
+    // What the callbacks capture is declared before the client: it answers what it still holds when it is destroyed.
+    int                   failed_calls = 0, connect_calls = 0, connect_calls_inside = -1, late_calls = 0;
+    bool                  connected_in_callback = true, connect_started = false, connect_succeeded = false;
     qb::http3::request_id late_id = 1;
+    auto                  client  = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response response) {
         ++failed_calls;
         EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
@@ -2129,6 +2144,7 @@ TEST_F(Http3LoopbackTest, ExplicitDisconnectRejectsWorkFromFailureCallback) {
             ++connect_calls;
             connect_succeeded = ok;
         });
+        connect_calls_inside  = connect_calls;
         late_id               = client->push_request_with_id(qb::http::Request{qb::io::uri("/late")}, [&](qb::http::Response late) {
             ++late_calls;
             EXPECT_EQ(late.status(), qb::http::status::SERVICE_UNAVAILABLE);
@@ -2140,15 +2156,684 @@ TEST_F(Http3LoopbackTest, ExplicitDisconnectRejectsWorkFromFailureCallback) {
     client->disconnect();
     EXPECT_EQ(failed_calls, 1);
     EXPECT_FALSE(connected_in_callback);
-    EXPECT_FALSE(connect_started);
-    EXPECT_EQ(connect_calls, 1);
-    EXPECT_FALSE(connect_succeeded);
+    EXPECT_TRUE(connect_started);
+    EXPECT_EQ(connect_calls_inside, 0) << "the callback of a connect() is never called inside the call";
+    EXPECT_EQ(connect_calls, 0) << "nor by the close it waits for";
     EXPECT_EQ(late_id, 0u);
     EXPECT_EQ(late_calls, 1);
     EXPECT_EQ(late_route_calls, 0);
     EXPECT_FALSE(client->is_connected());
+    EXPECT_TRUE(client->is_connecting()) << "the close done, the connect() the callback asked for has started";
+    ASSERT_TRUE(pump([&] { return connect_calls == 1; }));
+    EXPECT_TRUE(connect_succeeded);
+    EXPECT_TRUE(client->is_connected());
+    EXPECT_EQ(late_route_calls, 0);
+    client->disconnect();
+    EXPECT_EQ(connect_calls, 1);
     held_context.reset();
     server->close();
+}
+
+namespace qb::http3 {
+
+/// An explicit disconnect() deferred by a read that an exception cut short: the read's depth is restored, the close it
+/// should have completed is not. No call leaves a client there -- an allocation failure inside the read does --, so the test
+/// reaches it by hand, as the one friend the client declares for it.
+struct ClientTestPeer {
+    static void
+    disconnect_in_a_read_cut_short(Client &client) {
+        ++client._read_depth;
+        client.disconnect();
+        --client._read_depth;
+    }
+};
+
+} // namespace qb::http3
+
+namespace http3_client_redial_test {
+
+// A client the test takes the connection from in the middle of its own read -- what a close the transport delivers
+// re-entrantly is, while nghttp3 reads. The teardown is then deferred to the end of that read.
+struct LosingClient : qb::http3::Client {
+    using qb::http3::Client::Client;
+
+    void
+    lose_connection() {
+        qb::io::async::quic::event::connection_closed lost;
+        lost.reason_phrase = "lost in the middle of a read";
+        dispatch(lost);
+    }
+};
+
+// The callback a program dials again from: on `false`, connect() again -- bounded here, so that a client that answers
+// inside the call is measured by its depth, not by the stack it overflows.
+struct Redial {
+    qb::http3::Client *client = nullptr; ///< set once the client exists: a Redial is declared before it, and outlives it
+    int                dials = 0, heard_true = 0, heard_false = 0, depth = 0, deepest = 0;
+
+    bool
+    dial() {
+        ++dials;
+        return client->connect([this](bool ok, std::string const &) {
+            deepest = std::max(deepest, ++depth);
+            ++(ok ? heard_true : heard_false);
+            if (!ok && dials < 64) {
+                static_cast<void>(dial());
+            }
+            --depth;
+        });
+    }
+};
+
+} // namespace http3_client_redial_test
+
+using http3_client_redial_test::LosingClient;
+using http3_client_redial_test::Redial;
+
+// A callback that dials again on `false`, asked from a response callback that has just disconnected -- the native read is
+// on the stack, the close deferred. The connect() waits for that close and its callback hears the new connection: it was
+// answered `false` inside the call, and dialled again from there, without end (Huly QB-1246).
+TEST_F(Http3LoopbackTest, ARedialAskedDuringADeferredCloseConnectsOnceTheCloseHasRun) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    Redial             redial;
+    int                first_calls = 0, second_calls = 0;
+    bool               dial_accepted = false;
+    qb::http::Response second;
+    auto               client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    redial.client = client.get();
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+        ++first_calls;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        client->disconnect(); // from nghttp3's read: deferred
+        dial_accepted = redial.dial();
+    }));
+    ASSERT_TRUE(pump([&] { return first_calls == 1 && redial.heard_true + redial.heard_false != 0; }));
+    EXPECT_TRUE(dial_accepted);
+    EXPECT_EQ(redial.dials, 1);
+    EXPECT_EQ(redial.deepest, 1) << "the callback of a connect() is never called inside the call";
+    EXPECT_EQ(redial.heard_true, 1);
+    EXPECT_EQ(redial.heard_false, 0);
+    ASSERT_TRUE(client->is_connected());
+
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+        ++second_calls;
+        second = std::move(response);
+    }));
+    ASSERT_TRUE(pump([&] { return second_calls == 1; }));
+    EXPECT_EQ(second.status(), qb::http::status::OK) << "the connection the redial asked for carries the next request";
+    client->disconnect();
+    server->close();
+}
+
+// The same of a connection LOST during the read -- the close the transport delivers there is deferred to the end of that
+// read, as an explicit one is. The teardown done, the redial connects; a request in flight whose failure callback throws
+// does not keep it from starting.
+TEST_F(Http3LoopbackTest, ARedialAskedOfAConnectionLostDuringItsReadConnectsOnceTheTeardownHasRun) {
+    for (const bool a_failure_callback_throws : {false, true}) {
+        SCOPED_TRACE(a_failure_callback_throws ? "a request in flight, whose failure callback throws" : "nothing else in flight");
+        const auto                                                    port   = next_port();
+        auto                                                          server = qb::http3::make_server();
+        std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+        Redial redial;
+        int    held_calls = 0, first_calls = 0;
+        bool   dial_accepted = false;
+        auto   losing        = std::make_shared<LosingClient>(qb::io::uri(https_origin(port)));
+        auto  *client        = losing.get();
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false); // nothing but the redial asks for the next connection
+        redial.client = client;
+        if (a_failure_callback_throws) {
+            ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+                ++held_calls;
+                throw std::runtime_error("the failure callback of a request in flight");
+            }));
+            ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+        }
+        ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+            ++first_calls;
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            losing->lose_connection(); // from nghttp3's read: the teardown is deferred
+            dial_accepted = redial.dial();
+        }));
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (redial.heard_true + redial.heard_false == 0 && std::chrono::steady_clock::now() < deadline) {
+            try {
+                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
+                    std::this_thread::sleep_for(1ms);
+                }
+            } catch (std::runtime_error const &) {
+                // what the failure callback threw, where the loop lets it out
+            }
+        }
+        EXPECT_EQ(first_calls, 1);
+        EXPECT_EQ(held_calls, a_failure_callback_throws ? 1 : 0);
+        EXPECT_TRUE(dial_accepted);
+        EXPECT_EQ(redial.dials, 1);
+        EXPECT_EQ(redial.deepest, 1) << "the callback of a connect() is never called inside the call";
+        EXPECT_EQ(redial.heard_true, 1);
+        EXPECT_EQ(redial.heard_false, 0);
+        EXPECT_TRUE(client->is_connected());
+        client->disconnect();
+        held_context.reset();
+        server->close();
+    }
+}
+
+// A connect() the client accepted while a close was deferred, then a disconnect(): the last word is the disconnect().
+// The connect() is given up -- its callback hears `false` once, from the close -- and no connection starts.
+TEST_F(Http3LoopbackTest, ADisconnectAfterAConnectAskedDuringACloseGivesThatConnectUp) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int  failed_calls = 0, connect_calls = 0, connect_calls_inside = -1;
+    bool connect_accepted = false, connect_succeeded = true;
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        connect_accepted     = client->connect([&](bool ok, std::string const &) {
+            ++connect_calls;
+            connect_succeeded = ok;
+        });
+        connect_calls_inside = connect_calls;
+        client->disconnect();
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    client->disconnect();
+    EXPECT_EQ(failed_calls, 1);
+    EXPECT_TRUE(connect_accepted);
+    EXPECT_EQ(connect_calls_inside, 0);
+    EXPECT_EQ(connect_calls, 1) << "a connect() given up hears, once, from the close that gave it up";
+    EXPECT_FALSE(connect_succeeded);
+    EXPECT_FALSE(client->is_connecting()) << "and nothing connects for it";
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_EQ(connect_calls, 1);
+    held_context.reset();
+    server->close();
+}
+
+// The same of a connection lost during the read: the connect() asked of it there, then a disconnect().
+TEST_F(Http3LoopbackTest, ADisconnectAfterAConnectAskedOfAConnectionLostDuringItsReadGivesThatConnectUp) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int  response_calls = 0, connect_calls = 0, connect_calls_inside = -1;
+    bool connect_accepted = false, connect_succeeded = true;
+    auto losing = std::make_shared<LosingClient>(qb::io::uri(https_origin(port)));
+    losing->set_verify_peer(false);
+    losing->set_auto_reconnect(false);
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) {
+        ++response_calls;
+        losing->lose_connection(); // from nghttp3's read: the teardown is deferred
+        connect_accepted     = losing->connect([&](bool ok, std::string const &) {
+            ++connect_calls;
+            connect_succeeded = ok;
+        });
+        connect_calls_inside = connect_calls;
+        losing->disconnect();
+    }));
+    ASSERT_TRUE(pump([&] { return response_calls == 1 && connect_calls != 0; }));
+    EXPECT_TRUE(connect_accepted);
+    EXPECT_EQ(connect_calls_inside, 0);
+    EXPECT_EQ(connect_calls, 1) << "a connect() given up hears, once, from the close that gave it up";
+    EXPECT_FALSE(connect_succeeded);
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(losing->is_connecting()) << "and nothing connects for it";
+    EXPECT_FALSE(losing->is_connected());
+    EXPECT_EQ(connect_calls, 1);
+    server->close();
+}
+
+// The same, the disconnect() made from ANOTHER callback: the failure callback of a request that was in flight when the
+// connection was lost. The connect() asked of the lost connection waits for the end of its teardown, and that callback
+// runs in that teardown, with no read on the stack: its disconnect() is the close itself, and the caller's last word. The
+// connect() is given up -- its callback hears `false` once --: disconnect() never starts a connect() asked before it (one
+// its own callbacks ask starts at its end). It started this one itself: it returned with an attempt under way, and the
+// callback heard `true` (Huly QB-1246).
+TEST_F(Http3LoopbackTest, ADisconnectFromAFailureCallbackGivesUpTheConnectAskedOfTheLostConnection) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int  response_calls = 0, held_calls = 0, connect_calls = 0;
+    bool connect_accepted = false, connect_succeeded = true, connecting_after_disconnect = true;
+    auto losing = std::make_shared<LosingClient>(qb::io::uri(https_origin(port)));
+    losing->set_verify_peer(false);
+    losing->set_auto_reconnect(false);
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response response) {
+        ++held_calls;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        losing->disconnect(); // from a failure callback of the teardown: no read on the stack, the close itself
+        connecting_after_disconnect = losing->is_connecting();
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) {
+        ++response_calls;
+        losing->lose_connection(); // from nghttp3's read: the teardown is deferred
+        connect_accepted = losing->connect([&](bool ok, std::string const &) {
+            ++connect_calls;
+            connect_succeeded = ok;
+        });
+    }));
+    ASSERT_TRUE(pump([&] { return response_calls == 1 && held_calls == 1 && connect_calls != 0; }));
+    EXPECT_TRUE(connect_accepted);
+    EXPECT_EQ(connect_calls, 1) << "a connect() given up hears, once, from the close that gave it up";
+    EXPECT_FALSE(connect_succeeded);
+    EXPECT_FALSE(connecting_after_disconnect) << "disconnect() returned with a connection attempt under way";
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(losing->is_connecting()) << "and nothing connects for it";
+    EXPECT_FALSE(losing->is_connected());
+    EXPECT_EQ(connect_calls, 1);
+    held_context.reset();
+    server->close();
+}
+
+// A client destroyed with a close left half done -- a disconnect() a read deferred and never completed -- is closed whole
+// by its destructor all the same: a connect() still waiting hears `false` once. The destructor's close stopped at the
+// mark the unfinished one had left, and that connect() was destroyed unheard (Huly QB-1246).
+TEST_F(Http3LoopbackTest, AClientDestroyedWithACloseLeftHalfDoneStillAnswersItsWaitingConnect) {
+    int  connect_calls    = 0;
+    bool connect_accepted = false, connect_succeeded = true;
+    {
+        auto client = qb::http3::make_client("https://127.0.0.1:1"); // it never connects: nothing here needs a peer
+        qb::http3::ClientTestPeer::disconnect_in_a_read_cut_short(*client);
+        connect_accepted = client->connect([&](bool ok, std::string const &) {
+            ++connect_calls;
+            connect_succeeded = ok;
+        });
+        EXPECT_TRUE(connect_accepted) << "a connect() asked while a close is under way waits for it";
+        EXPECT_EQ(connect_calls, 0);
+        EXPECT_FALSE(client->is_connecting());
+    }
+    EXPECT_EQ(connect_calls, 1) << "a connect() still waiting when the client is destroyed hears `false`, once";
+    EXPECT_FALSE(connect_succeeded);
+}
+
+namespace http3_client_redial_test {
+
+/// A coroutine that awaits connect(), and counts how many times it got past it.
+qb::io::async::task<void>
+await_connect(qb::http3::Client &client, qb::http3::ConnectResult &result, int &completions) {
+    result = co_await client.connect();
+    ++completions;
+}
+
+} // namespace http3_client_redial_test
+
+// connect() awaited for an attempt that cannot start: connect() returns false and never calls the awaiter's callback, so
+// the awaiter completes itself -- once, `false`, with the reason.
+TEST_F(Http3LoopbackTest, AConnectAwaitedForAnAttemptThatCannotStartCompletesFalseOnce) {
+    int                      completions = 0;
+    qb::http3::ConnectResult result{true, "not completed"};
+    auto                     client = qb::http3::make_client("https://qb-http3-client.invalid:4433");
+    qb::io::async::coro_scheduler().spawn(http3_client_redial_test::await_connect(*client, result, completions));
+    ASSERT_TRUE(pump([&] { return completions != 0; }));
+    const auto settle = std::chrono::steady_clock::now() + 50ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(completions, 1);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "Unable to start QUIC connection");
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// The awaiter of the coroutine connect() asks connect() when it is awaited. Awaited from a callback of a close -- a
+// coroutine resumed by a loop pumped there, or started by hand, as here -- it completes at once, `false`, "HTTP/3
+// connection is closing", as in 3.3.0, and nothing is queued for it: connect(callback) queues an attempt for the end of
+// that close, which cannot come before the callback returns. It waited for that attempt (Huly QB-1246).
+TEST_F(Http3LoopbackTest, AConnectAwaitedDuringACloseCompletesFalseAtOnce) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                                                                 failed_calls = 0;
+    std::optional<qb::http3::ConnectResult>                             at_once;
+    std::unique_ptr<qb::http::async::awaiter<qb::http3::ConnectResult>> awaited; // before the client: its callback holds it
+    auto                                                                client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        awaited.reset(new auto(client->connect()));
+        awaited->await_suspend(std::noop_coroutine()); // what `co_await` does first: the awaiter asks connect() now
+        at_once = awaited->await_resume();             // what it holds when await_suspend() returns
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    client->disconnect();
+    EXPECT_EQ(failed_calls, 1);
+    ASSERT_TRUE(at_once.has_value());
+    EXPECT_FALSE(at_once->ok);
+    EXPECT_EQ(at_once->error_message, "HTTP/3 connection is closing");
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for the awaiter";
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connecting());
+    EXPECT_FALSE(client->is_connected());
+    held_context.reset();
+    server->close();
+}
+
+// The same from the response callback of a read that lost its connection: the teardown waits for the end of that read,
+// and the awaiter answers at once, `false`, as in 3.3.0. It waited for the teardown's attempt (Huly QB-1246).
+TEST_F(Http3LoopbackTest, AConnectAwaitedDuringAReadThatLostItsConnectionCompletesFalseAtOnce) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                                                                 response_calls = 0;
+    std::optional<qb::http3::ConnectResult>                             at_once;
+    std::unique_ptr<qb::http::async::awaiter<qb::http3::ConnectResult>> awaited; // before the client: its callback holds it
+    auto losing = std::make_shared<LosingClient>(qb::io::uri(https_origin(port)));
+    losing->set_verify_peer(false);
+    losing->set_auto_reconnect(false);
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) {
+        ++response_calls;
+        losing->lose_connection(); // from nghttp3's read: the teardown is deferred
+        awaited.reset(new auto(losing->connect()));
+        awaited->await_suspend(std::noop_coroutine());
+        at_once = awaited->await_resume();
+    }));
+    ASSERT_TRUE(pump([&] { return response_calls == 1; }));
+    ASSERT_TRUE(at_once.has_value());
+    EXPECT_FALSE(at_once->ok);
+    EXPECT_EQ(at_once->error_message, "HTTP/3 connection is closing");
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(losing->is_connecting()) << "nothing was queued for the awaiter";
+    EXPECT_FALSE(losing->is_connected());
+    server->close();
+}
+
+// The same through run_sync(): a coroutine the callback blocks on, the loop pumped until it completes. It returns at
+// once, `false`. With nothing left for the connection to deliver -- the loop run until it is quiet --, it never returned:
+// the connect() it asked was queued for the end of the close, and the pump it ran could not get there (Huly QB-1246; it
+// answered `false` at once in 3.3.0). A watchdog ends the process, saying so, instead of letting the test hang.
+TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromAFailureCallbackOfACloseReturnsFalseAtOnce) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                      failed_calls = 0;
+    bool                     returned     = false;
+    qb::http3::ConnectResult result{true, "not returned"};
+    auto                     client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        qb::http::test::watchdog bound("run_sync(connect()) from a failure callback of disconnect()", 5s);
+        result   = qb::io::async::run_sync(client->connect());
+        returned = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+    const auto quiet = std::chrono::steady_clock::now() + 100ms; // what the connection still had to deliver is read
+    while (std::chrono::steady_clock::now() < quiet) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+
+    client->disconnect();
+    EXPECT_EQ(failed_calls, 1);
+    EXPECT_TRUE(returned);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "HTTP/3 connection is closing");
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    held_context.reset();
+    server->close();
+}
+
+// The same while the connection still has data to deliver -- the close made as soon as the request was routed: the loop
+// run_sync() pumps delivers it. It returns at once, `false`, and nothing connects. The data's read completed the close
+// from inside the close, and the attempt connect() then started was the one the awaiter heard: `true`, for a connection
+// the close, resumed, then ended -- in 3.3.0 as well (Huly QB-1246).
+TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromAFailureCallbackOfACloseReturnsFalseWhileItsConnectionStillDeliversData) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                      failed_calls = 0;
+    bool                     returned     = false;
+    qb::http3::ConnectResult result{true, "not returned"};
+    auto                     client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        qb::http::test::watchdog bound("run_sync(connect()) from a failure callback of disconnect()", 5s);
+        result   = qb::io::async::run_sync(client->connect());
+        returned = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    client->disconnect();
+    EXPECT_EQ(failed_calls, 1);
+    EXPECT_TRUE(returned);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "HTTP/3 connection is closing");
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connected());
+    EXPECT_FALSE(client->is_connecting());
+    held_context.reset();
+    server->close();
+}
+
+// run_sync(client->connect()) from the failure callback of a request whose connection was lost during the read of
+// another -- the teardown deferred to the end of that read -- returns at once, `false`, and nothing connects for it. The
+// teardown ran that callback inside the endpoint's dispatch: the attempt connect() then started could not be heard -- the
+// endpoint delivers its `connected` once that dispatch has returned --, and with no connect timeout run_sync() never
+// returned, the server answering (Huly QB-1246; in 3.3.0 as well).
+TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromAFailureCallbackOfAConnectionLostDuringAReadReturnsFalseAtOnce) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                      failed_calls = 0, ok_calls = 0;
+    bool                     returned = false;
+    qb::http3::ConnectResult result{true, "not returned"};
+    auto                     losing = std::make_shared<LosingClient>(qb::io::uri(https_origin(port)));
+    losing->set_verify_peer(false);
+    losing->set_auto_reconnect(false);
+    losing->set_connect_timeout(qb::duration::zero());
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        qb::http::test::watchdog bound("run_sync(connect()) from a failure callback of a connection lost during a read", 5s);
+        result   = qb::io::async::run_sync(losing->connect());
+        returned = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+    ASSERT_TRUE(losing->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) {
+        ++ok_calls;
+        losing->lose_connection(); // from nghttp3's read: the teardown runs at its end
+    }));
+    ASSERT_TRUE(pump([&] { return failed_calls != 0; }));
+    EXPECT_EQ(ok_calls, 1);
+    EXPECT_EQ(failed_calls, 1);
+    EXPECT_TRUE(returned);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "HTTP/3 connection is closing");
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(losing->is_connecting()) << "nothing was queued for it";
+    held_context.reset();
+    server->close();
+}
+
+// The same from the failure callback of a request whose connection the server closed, its close read with no read on the
+// stack: the teardown runs in the endpoint's dispatch of that close. It returns at once, `false`. The attempt it started
+// -- a server back on the port -- was never heard: run_sync() never returned (Huly QB-1246; in 3.3.0 as well).
+TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromAFailureCallbackOfAConnectionTheServerClosedReturnsFalseAtOnce) {
+    const auto                                                    port   = next_port();
+    auto                                                          server = qb::http3::make_server();
+    std::shared_ptr<qb::http::Context<qb::http3::DefaultSession>> held_context;
+    server->router().get("/hold", [&](auto ctx) { held_context = ctx; });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                      failed_calls = 0;
+    bool                     returned     = false;
+    qb::http3::ConnectResult result{true, "not returned"};
+    auto                     client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_connect_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/hold")}, [&](qb::http::Response) {
+        ++failed_calls;
+        qb::http::test::watchdog bound("run_sync(connect()) from a failure callback of a connection the server closed", 5s);
+        result   = qb::io::async::run_sync(client->connect());
+        returned = true;
+    }));
+    ASSERT_TRUE(pump([&] { return held_context != nullptr; }));
+
+    held_context.reset();
+    server->close(); // the connection's close is on its way to the client
+    auto again = qb::http3::make_server();
+    again->router().get("/hold", [](auto ctx) { ctx->text("again"); });
+    again->router().compile();
+    ASSERT_TRUE(again->listen(qb::io::uri(https_origin(port)), cert_path(), key_path())) << "the port could not be taken back";
+    ASSERT_TRUE(pump([&] { return failed_calls != 0; }));
+    EXPECT_EQ(failed_calls, 1);
+    EXPECT_TRUE(returned);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "HTTP/3 connection is closing");
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    again->close();
+}
+
+// run_sync(client->connect()) from the failure callback of a request whose connection closed during its own submission
+// -- its body past the transport's queue bound, pushed on a connection that is up -- returns at once, `false`, and nothing
+// connects for it: that callback answers a connection that has just ended, as every failure's does. It ran after the
+// teardown's callbacks, outside their count: run_sync() started the next attempt there and returned its outcome, `true`
+// with the server answering. One rule for every close and failure (Huly QB-1246).
+TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromTheFailureCallbackOfARequestWhoseSubmissionClosedItsConnectionReturnsFalseAtOnce) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().post("/upload", [](auto ctx) { ctx->text("unexpected"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    int                       calls    = 0;
+    bool                      returned = false;
+    std::string               answer;
+    std::chrono::milliseconds took{0};
+    qb::http3::ConnectResult  result{true, "not returned"};
+    auto                      client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    auto settings                     = client->settings();
+    settings.max_pending_stream_bytes = 16 * 1024;
+    client->set_settings(settings);
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    qb::http::Request upload{qb::http::method::POST, qb::io::uri("/upload")};
+    upload.body() = std::string(256 * 1024, 'x');
+    ASSERT_TRUE(client->push_request(std::move(upload), [&](qb::http::Response response) {
+        ++calls;
+        answer                           = response.body().as<std::string>();
+        const auto               started = std::chrono::steady_clock::now();
+        qb::http::test::watchdog bound("run_sync(connect()) from a failure callback of a submission that closed its connection", 5s);
+        result   = qb::io::async::run_sync(client->connect());
+        took     = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+        returned = true;
+    }));
+    ASSERT_TRUE(pump([&] { return calls != 0; }));
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(answer, "HTTP/3 connection closed during request submission") << "the submission's own answer";
+    EXPECT_TRUE(returned);
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.error_message, "HTTP/3 connection is closing");
+    EXPECT_LT(took, 1s);
+    const auto settle = std::chrono::steady_clock::now() + 100ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+    server->close();
+}
+
+// An attempt that cannot start -- the host is not an address, and this client resolves no name -- is answered by connect()'s
+// return value alone. Its callback is never called: it was, inside the call, and one that dials again on `false` recursed
+// without end (Huly QB-1246). A request such a client is given is answered inside its push.
+TEST_F(Http3LoopbackTest, AConnectThatCannotStartIsAnsweredByItsReturnValueAlone) {
+    Redial             redial;
+    int                calls = 0;
+    qb::http::Response response;
+    auto               client = qb::http3::make_client("https://qb-http3-client.invalid:4433");
+    redial.client             = client.get();
+    EXPECT_FALSE(redial.dial());
+    EXPECT_EQ(redial.heard_true + redial.heard_false, 0) << "the callback of a connect() that starts nothing is never called";
+    EXPECT_EQ(redial.dials, 1);
+    EXPECT_FALSE(client->is_connecting());
+
+    client->push_request(qb::http::Request{qb::io::uri("/")}, [&](qb::http::Response answered) {
+        ++calls;
+        response = std::move(answered);
+    });
+    EXPECT_EQ(calls, 1) << "a request the client cannot connect for is answered inside its push";
+    EXPECT_NE(response.status(), qb::http::status::OK);
+    EXPECT_EQ(redial.heard_true + redial.heard_false, 0);
 }
 
 TEST_F(Http3LoopbackTest, ConnectFailureCallbackMaySubmitFreshRequest) {

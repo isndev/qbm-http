@@ -272,7 +272,7 @@ The coroutine overloads carry the same `verify_peer` parameter and `co_await` th
 
 `qb::http1::Client` reuses one connection across requests. It defaults `verify_peer` to `true`; toggle it with `set_verify_peer(bool)` **before** connecting, since it is applied when the secure connection opens. The connect timeout is a `qb::duration` (default 30 seconds).
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:133, 137, 242, 267 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:134, 138, 246, 271 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -289,7 +289,7 @@ client->connect([client](bool ok, const std::string &err) {
 
 `qb::http2::Client` is HTTPS-only — `make_client` requires an `https://` base URI and the client offers **only** `{"h2"}` in ALPN, failing the connection if the server does not negotiate `h2`. It defaults `verify_peer` to `true`; call `set_verify_peer(false)` before `connect()` for trusted self-signed servers.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:215, 403-406 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:215, 407-410 -->
 ```cpp
 #include <qbm/http/http.h>
 
