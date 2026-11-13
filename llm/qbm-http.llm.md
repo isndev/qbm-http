@@ -578,7 +578,7 @@ HTTP/1.1 closing response callbacks see the client down. Disconnect/failure/time
   stream error it is, whatever limit it also passes (Huly QB-1195, QB-1197): `414` target, `431` field name, value or a section's
   field count, `413` body (or an h1 chunk); h1 with `Connection: close` and the close after its delivery, h2 on the
   stream then `RST_STREAM(NO_ERROR)`, h3 on the stream then STOP_SENDING(`H3_NO_ERROR`) (Huly QB-168, QB-94; until 3.3
-  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:896-898; 2/http2.h:941-943;
+  h1 closed with no answer, h2 had no field limits and h3 reset the stream). _(1.1/http.h:896-898; 2/http2.h:965-967;
   3/http3.h:818-820)_
 - An h1 request whose framing is refused is answered `400`, then closed (RFC 9112 §6.3; QB-1248): a `Content-Length`
   llhttp refuses (past 2^64-1, not a number, twice, beside `Transfer-Encoding`), `chunked` named twice or not last, a
