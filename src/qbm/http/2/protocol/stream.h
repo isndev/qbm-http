@@ -365,10 +365,11 @@ struct Http2ServerStream : public Http2StreamBase {
     /// pipe allocates 4 KiB at construction, and a stream that is not streamed must pay neither that nor the words of
     /// a vector it never fills (measured on a plain GET, Huly QB-86).
     std::unique_ptr<Http2StreamedBody> streamed;
-    /// Real progress since the server's last idle sweep: response HEADERS or DATA sent, a stream
-    /// WINDOW_UPDATE received. A store on the frame path; the sweep, which reads the clock anyway,
-    /// turns it into `last_activity` (ServerHttp2Protocol::cleanup_idle_streams).
-    bool progressed_since_idle_sweep = false;
+    /// Real progress since the server's last sweep -- octets of the request received, its dispatch, response HEADERS or DATA
+    /// sent: a store on the frame path, which the sweep turns into `last_activity` (cleanup_idle_streams()).
+    bool                                  progressed_since_idle_sweep = false;
+    std::chrono::steady_clock::time_point queued_since{}; ///< The sweep that first found the response queued; zero while none is
+    std::uint64_t                         data_mark = 0; ///< The connection's DATA total at the stream's last progress (cleanup_idle_streams())
 
     /**
      * @brief Construct a new server stream

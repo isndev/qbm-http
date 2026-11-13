@@ -66,6 +66,12 @@ public:
         this->setTimeout(after);
     }
 
+    /// Whether the timer is armed: its action is still to run -- false from the moment it runs.
+    [[nodiscard]] bool
+    armed() const noexcept {
+        return this->_async_event.is_active() || this->_async_event.is_pending();
+    }
+
     /// The timer expired: runs the action.
     void
     on(qb::io::async::event::timer const &) noexcept {
