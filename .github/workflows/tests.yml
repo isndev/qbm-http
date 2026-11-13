@@ -7,6 +7,11 @@ name: tests
 # QB_SANITIZE=thread, links that target with ninja -v, prints the Mach-O symbols each object carries for
 # listener::current (nm -m), and builds two controls: another HTTP/2 system test of the module, and qb's own
 # listener-after-loop test.
+#
+# Lot T7-TLW adds two steps: a census of the wrapper's linkage in EVERY object and archive member the build produced
+# (a strong `external` definition is the defect; a census that finds no carrier is vacuous and reads red), and a
+# verdict that fails the job on any duplicate-symbol line in a link log, any strong wrapper, any target that did not
+# link and any target that did not run to exit 0.
 
 on:
   workflow_dispatch:
@@ -90,6 +95,53 @@ jobs:
             done
           } | tee "$o/symbols.txt"
 
+      - name: Census -- the linkage of listener::current's thread wrapper in every object and archive member
+        run: |
+          set -uo pipefail
+          python3 - "${RUNNER_TEMP}/oracle" <<'PY'
+          import collections, pathlib, re, subprocess, sys
+          out_dir = pathlib.Path(sys.argv[1])
+          W = "__ZTWN2qb2io5async8listener7currentE"
+          row = re.compile(r"^\s*(?:[0-9a-fA-F]+\s+)?\(([^)]*)\)\s+(.*?)\s+" + re.escape(W) + r"$")
+          head = re.compile(r"^(.*\((.+\.o)\)):$")
+
+          def carriers(path):
+              text = subprocess.run(["nm", "-m", str(path)], capture_output=True, text=True).stdout
+              member, found = str(path), collections.defaultdict(set)
+              for line in text.splitlines():
+                  h = head.match(line)
+                  if h:
+                      member = h.group(1)
+                      continue
+                  m = row.match(line)
+                  if m and m.group(1) != "undefined":
+                      found[member].add(m.group(2))
+              return found
+
+          tally, strong, lines = collections.Counter(), [], []
+          objects = sorted(pathlib.Path("build").rglob("*.o"))
+          archives = sorted(p for p in pathlib.Path("build").rglob("*.a") if p.is_file())
+          for path in objects + archives:
+              for member, kinds in sorted(carriers(path).items()):
+                  for kind in sorted(kinds):
+                      where = "archive" if path.suffix == ".a" else "object"
+                      tally[(where, kind)] += 1
+                      lines.append(f"{where:7s} {kind:24s} {member}")
+                      if "weak" not in kind.split() and kind != "non-external":  # external, private external
+                          strong.append(f"{where} {kind} {member}")
+          report = [f"scanned: {len(objects)} objects, {len(archives)} archives"]
+          report += [f"  {w:7s} {k:24s} x{n}" for (w, k), n in sorted(tally.items())]
+          report += ["STRONG (defined, not weak, not non-external):"] + [f"  {s}" for s in strong]
+          carrying = sum(n for (w, _), n in tally.items() if w == "object")
+          report.append(f"census: carriers={carrying} strong={len(strong)}")
+          if carrying == 0:
+              report.append("census: VACUOUS -- no object defines the wrapper; the census proves nothing")
+          (out_dir / "census.txt").write_text("\n".join(report + ["", "every carrier:"] + lines) + "\n")
+          with open(out_dir / "verdicts.txt", "a") as v:
+              v.write(f"census: carriers={carrying} strong={len(strong)}\n")
+          print("\n".join(report))
+          PY
+
       - name: The IR of the named sources, for listener::current's TLS wrapper
         if: inputs.ir != ''
         run: |
@@ -140,6 +192,24 @@ jobs:
             b="$(find build -type f -perm -u+x -name "$t" | head -1)"
             if [ -n "$b" ]; then (cd "$(dirname "$b")" && TSAN_OPTIONS=halt_on_error=1 perl -e 'alarm shift; exec @ARGV' 300 "./$t" --gtest_brief=1) > "$o/run-$t.log" 2>&1; echo "$t: run exit $?" | tee -a "$o/verdicts.txt"; tail -5 "$o/run-$t.log"; else echo "$t: no binary" | tee -a "$o/verdicts.txt"; fi
           done
+
+      - name: Verdict -- red on a duplicate symbol, a strong wrapper, a target that did not link or did not run clean
+        run: |
+          set -uo pipefail
+          o="${RUNNER_TEMP}/oracle"
+          red=0
+          dup="$(cat "$o"/build-*.log 2>/dev/null | grep -c "duplicate symbol" || true)"
+          echo "duplicate-symbol lines in the link logs: ${dup:-0}"
+          [ "${dup:-0}" -eq 0 ] || red=1
+          grep -E "census: carriers=" "$o/verdicts.txt" || { echo "no census line"; red=1; }
+          if grep -qE "census: carriers=0 " "$o/verdicts.txt"; then echo "census vacuous"; red=1; fi
+          if grep -E "census: .* strong=[1-9]" "$o/verdicts.txt"; then red=1; fi
+          for t in ${{ inputs.targets }}; do
+            grep -qxF "$t: ninja exit 0" "$o/verdicts.txt" || { echo "$t: did not link"; red=1; }
+            grep -qxF "$t: run exit 0" "$o/verdicts.txt" || { echo "$t: did not run to exit 0"; red=1; }
+          done
+          if [ "$red" -eq 0 ]; then echo "VERDICT: GREEN" | tee -a "$o/verdicts.txt"; else echo "VERDICT: RED" | tee -a "$o/verdicts.txt"; fi
+          exit "$red"
 
       - name: Logs
         if: always()
