@@ -68,7 +68,7 @@ jobs:
 
       - name: The machine
         run: |
-          set -uo pipefail
+          set +e
           mkdir -p "${RUNNER_TEMP}/oracle"
           {
             sw_vers; uname -a; sysctl -n machdep.cpu.brand_string hw.logicalcpu hw.memsize
@@ -80,6 +80,7 @@ jobs:
             for v in 3 4; do "$(brew --prefix openssl@$v)/bin/openssl" version; done
             git -C qb rev-parse HEAD; git -C module rev-parse HEAD
           } 2>&1 | tee "${RUNNER_TEMP}/oracle/host.txt"
+          true
 
       - name: Configure and build against openssl@${{ matrix.major }}
         run: |
