@@ -19,6 +19,10 @@ on:
         description: "CMAKE_BUILD_TYPE"
         required: false
         default: RelWithDebInfo
+      targets:
+        description: "the targets to link, then run (space-separated)"
+        required: false
+        default: "qbm-http-test-system-http2-client-coro qbm-http-test-system-http2-client qb-io-test-unit-listener-after-loop"
 
 permissions:
   contents: read
@@ -59,7 +63,7 @@ jobs:
         run: |
           set -uo pipefail
           o="${RUNNER_TEMP}/oracle"
-          for t in qbm-http-test-system-http2-client-coro qbm-http-test-system-http2-client qb-io-test-unit-listener-after-loop; do
+          for t in ${{ inputs.targets }}; do
             ninja -C build -v "$t" > "$o/build-$t.log" 2>&1; rc=$?
             echo "$t: ninja exit $rc" | tee -a "$o/verdicts.txt"
             grep -nE "duplicate symbol|ld: |error:|warning: .*thread|Undefined" "$o/build-$t.log" | head -40 || true
@@ -70,7 +74,7 @@ jobs:
           set -uo pipefail
           o="${RUNNER_TEMP}/oracle"
           {
-            for f in $(find build -name '*.o' \( -path '*http2-client-coro*' -o -path '*qbm*http*2*client.cpp.o' -o -path '*http2-client.cpp.o' -o -path '*listener-after-loop*' -o -name 'listener.cpp.o' \) | sort); do
+            for f in $(find build -name '*.o' \( -path '*http2-client-coro*' -o -path '*qbm*http*2*client.cpp.o' -o -path '*http2-client.cpp.o' -o -path '*listener-after-loop*' -o -path '*close-after-peer-alloc*' -o -name 'listener.cpp.o' \) | sort); do
               echo "== $f"; nm -m "$f" 2>/dev/null | grep -E 'listener7current|_ZTW|_ZTH' | head -30
             done
             for a in $(find build -name 'libqbm-http*.a' -o -name 'libqb-io*.a' | sort); do
@@ -82,7 +86,7 @@ jobs:
         run: |
           set -uo pipefail
           o="${RUNNER_TEMP}/oracle"
-          for t in qbm-http-test-system-http2-client-coro qb-io-test-unit-listener-after-loop; do
+          for t in ${{ inputs.targets }}; do
             b="$(find build -type f -perm -u+x -name "$t" | head -1)"
             if [ -n "$b" ]; then (cd "$(dirname "$b")" && TSAN_OPTIONS=halt_on_error=1 perl -e 'alarm shift; exec @ARGV' 300 "./$t" --gtest_brief=1) > "$o/run-$t.log" 2>&1; echo "$t: run exit $?" | tee -a "$o/verdicts.txt"; tail -5 "$o/run-$t.log"; else echo "$t: no binary" | tee -a "$o/verdicts.txt"; fi
           done
