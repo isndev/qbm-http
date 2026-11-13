@@ -3575,11 +3575,11 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsLeavesFreshStreamsAlone) {
 }
 
 // ---------------------------------------------------------------------------
-// The idle sweep measures a dispatched stream's idleness from its last real
-// progress -- response HEADERS or DATA sent, a stream WINDOW_UPDATE received --
-// not from its creation; an incomplete request is bounded (max_incomplete) from
-// its last frame (Huly QB-1248). It used to compare every stream's AGE with the idle budget,
-// so a response still progressing was cancelled like a dead one (Huly QB-531).
+// The idle sweep measures a response's idleness from its last real progress --
+// response HEADERS or DATA sent -- not from its stream's creation; an incomplete
+// request is bounded (max_incomplete) from its last frame, and a stream its handler
+// has not answered is held to max_waiting, the session's timeout (Huly QB-1248). It used to compare every stream's AGE with the
+// idle budget, so a response still progressing was cancelled like a dead one (Huly QB-531).
 // The sleeps only guarantee a minimum elapsed time (steady clock): the stream
 // that progressed is measured from the sweep that saw the progress, whatever the
 // host load.
@@ -3601,10 +3601,10 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsMeasuresIdleSinceTheLastProgress) {
     ASSERT_TRUE(protocol.send_response(1, response)); // HEADERS + 10 octets: progress
     ASSERT_EQ(sum_data_bytes(io.output, 1), 10u);
 
-    // A 1 ms idle budget: stream 1 progressed since the last sweep, stream 3 never did.
-    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1ms, /*max_incomplete=*/1h), 1u);
+    // A 1 ms idle budget: stream 1 progressed since the last sweep; stream 3 waits on its handler, which the sweep leaves.
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1ms, /*max_incomplete=*/1h), 0u);
     EXPECT_FALSE(protocol.is_stream_closed(1)) << "a progressing response is not idle";
-    EXPECT_TRUE(protocol.is_stream_closed(3));
+    EXPECT_FALSE(protocol.is_stream_closed(3)) << "a stream its handler has not answered was reset as idle";
 
     // More progress: the client grants credit, 10 more octets leave.
     std::this_thread::sleep_for(5ms);
@@ -3614,10 +3614,365 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsMeasuresIdleSinceTheLastProgress) {
     EXPECT_EQ(protocol.cleanup_idle_streams(1ms, 1h), 0u);
     EXPECT_FALSE(protocol.is_stream_closed(1));
 
-    // No progress since that sweep: the stream is idle now, and reclaimed.
+    // No progress since that sweep: the response waits on its peer, and is reclaimed; the stream its handler holds is left.
     std::this_thread::sleep_for(5ms);
     EXPECT_EQ(protocol.cleanup_idle_streams(1ms, 1h), 1u);
     EXPECT_TRUE(protocol.is_stream_closed(1));
+    EXPECT_FALSE(protocol.is_stream_closed(3));
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/-1h, /*max_incomplete=*/-1h), 0u) << "whatever the bound";
+    EXPECT_FALSE(protocol.is_stream_closed(3));
+}
+
+// The clock of a response starts where its output is queued, never before the peer could take it. A streamed response's
+// head leaves, its producer writes nothing for a while -- the stream waits on its handler -- and then a piece the
+// window does not take: the sweep that first finds it queued does not reset it, however old the head; the bound runs
+// from there.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAResponsesClockStartsWhereItsOutputIsQueued) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 0); // nothing of a body leaves
+    open_get_stream_end_stream(protocol, io, 1, "/events");
+    qb::http::Response head;
+    head.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.begin_streamed_response(1, head, /*head_only=*/false));
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/3ms, /*max_incomplete=*/1h), 0u) << "the sweep that sees the head leave";
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 0u) << "a stream that waits on its producer was reset as idle";
+    std::this_thread::sleep_for(5ms);
+    const std::string piece(10, 'p');
+    static_cast<void>(protocol.write_streamed_body(1, piece));
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 0u) << "the window let octets out: the case proves nothing";
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 0u) << "reset at the sweep that first found its output queued";
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 1u) << "a response its peer does not take was kept";
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+    EXPECT_EQ(io.last_stream_error, ErrorCode::CANCEL);
+}
+
+// Progress is octets leaving: a stream WINDOW_UPDATE that lets nothing out moves no clock. Two responses wait on the
+// connection's window, which the client never opens -- the first took its 65535 octets, the second none; a stream
+// WINDOW_UPDATE on each, between the sweeps, holds neither. It marked its stream as progressing, whatever left.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAStreamWindowUpdateThatLetsNothingOutHoldsNoResponse) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/large");
+    open_get_stream_end_stream(protocol, io, 3, "/large");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(100000, 'l');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.send_response(3, response));
+    ASSERT_EQ(sum_data_bytes(io.output, 1) + sum_data_bytes(io.output, 3), 65535u) << "the connection's window was not filled";
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/3ms, /*max_incomplete=*/1h), 0u) << "the sweep that sees the octets leave";
+    for (int i = 0; i < 2; ++i) {
+        std::this_thread::sleep_for(3ms);
+        make_window_update_frame(io, 1, 8);
+        make_window_update_frame(io, 3, 8);
+        drive(protocol, io);
+    }
+    ASSERT_TRUE(protocol.ok());
+    ASSERT_EQ(sum_data_bytes(io.output, 1) + sum_data_bytes(io.output, 3), 65535u) << "a stream WINDOW_UPDATE let octets out";
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 2u) << "a stream WINDOW_UPDATE that let nothing out held a response";
+}
+
+// A dispatched stream with nothing queued waits on its handler, and is bounded by the session's timeout from ITS OWN
+// progress (Huly QB-1248): on HTTP/2 that timeout is restarted by any stream, so it bounded no stream of its own -- a
+// request its handler never answered lived as long as another stream moved. Beside a body that keeps arriving, the
+// stream its handler holds is reset once its own bound has passed since its dispatch, and not before: the sweeps that
+// find it waiting no longer move its clock.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAStreamItsHandlerHoldsMeetsItsOwnBoundWhateverTheOthersDo) {
+    using namespace std::chrono_literals;
+    constexpr auto bound = 200ms;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/stuck"); // dispatched, never answered
+    open_post_stream_open(protocol, io, 3, "/upload");     // a body that keeps arriving
+    ASSERT_EQ(io.request_count, 1);
+    const auto begun = std::chrono::steady_clock::now();
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h, /*max_waiting=*/bound), 0u) << "the sweep of its dispatch";
+    int within = 0;
+    for (int i = 0; i < 4; ++i) { // sweeps that find it waiting, and another stream's progress before each
+        std::this_thread::sleep_for(20ms);
+        push_frame(io, FrameType::DATA, 0, 3, std::vector<uint8_t>(1, 'a'));
+        drive(protocol, io);
+        const auto cleaned = protocol.cleanup_idle_streams(1h, 1h, bound);
+        if (std::chrono::steady_clock::now() - begun < bound) { // a lower bound only: a sleep can overshoot, never undershoot
+            ++within;
+            EXPECT_EQ(cleaned, 0u) << "a stream its handler holds was reset before its own bound";
+        }
+    }
+    ASSERT_GT(within, 0) << "every sweep fell past the bound: the host is too loaded for the case to prove anything";
+    std::this_thread::sleep_for(bound + 20ms);
+    push_frame(io, FrameType::DATA, 0, 3, std::vector<uint8_t>(1, 'a'));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, bound), 1u) << "a stream its handler holds outlived its bound beside a stream that moves";
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+    EXPECT_EQ(io.last_stream_error, ErrorCode::CANCEL);
+    EXPECT_FALSE(protocol.is_stream_closed(3)) << "the upload that kept arriving was reset";
+}
+
+// A bound of zero or less is none: a session with no timeout cuts no stream its handler holds. The control, a bound of
+// a millisecond, cuts it.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAStreamItsHandlerHoldsHasNoBoundWithoutATimeout) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/stuck");
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h, /*max_waiting=*/qb::duration::zero()), 0u);
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, qb::duration::zero()), 0u) << "a bound of zero cut it";
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, -1h), 0u) << "a negative bound cut it";
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, 1ms), 0u) << "a bound counts from the sweep that first saw it";
+    std::this_thread::sleep_for(2ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, 1ms), 1u) << "a bound of a millisecond kept it";
+}
+
+// The dispatch is progress: a handler's clock starts there, never at the request's earlier pieces. A body's first piece,
+// a sweep that stamps it, a pause past the bound, then the piece that completes the request: the session's timeout
+// restarted at the dispatch, and the stream's own bound does too -- it is not cut sooner than the session would cut it.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAHandlersClockStartsAtTheDispatch) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/upload");
+    push_frame(io, FrameType::DATA, 0, 1, std::vector<uint8_t>(1, 'a'));
+    drive(protocol, io);
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h, /*max_waiting=*/5ms), 0u) << "the piece, stamped";
+    std::this_thread::sleep_for(10ms);
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 1, std::vector<uint8_t>(1, 'b')); // dispatched
+    drive(protocol, io);
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, 5ms), 0u) << "a handler's clock started before its dispatch";
+    EXPECT_FALSE(protocol.is_stream_closed(1));
+}
+
+// The clock of a response restarts each time its output is queued again, and stops while nothing is: a piece its
+// window holds back, then let out; its producer silent a while; then a piece held back again. The sweep that first
+// finds it queued again does not reset it, however long ago it was first queued; the bound runs from there.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAResponsesClockRestartsEachTimeItsOutputIsQueuedAgain) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 10);
+    open_get_stream_end_stream(protocol, io, 1, "/events");
+    qb::http::Response head;
+    head.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.begin_streamed_response(1, head, /*head_only=*/false));
+    static_cast<void>(protocol.write_streamed_body(1, std::string(20, 'p'))); // 10 octets leave, 10 are held back
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 10u);
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/3ms, /*max_incomplete=*/1h), 0u) << "first found queued";
+    std::this_thread::sleep_for(2ms);
+    make_window_update_frame(io, 1, 10); // the rest leaves: nothing queued
+    drive(protocol, io);
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 20u);
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 0u);
+    std::this_thread::sleep_for(5ms); // the producer is silent
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 0u) << "a stream that waits on its producer was reset as idle";
+    static_cast<void>(protocol.write_streamed_body(1, std::string(10, 'q'))); // held back again
+    ASSERT_EQ(sum_data_bytes(io.output, 1), 20u) << "the window let octets out: the case proves nothing";
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 0u) << "reset at the sweep that first found its output queued again";
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(3ms, 1h), 1u) << "a response its peer does not take was kept";
+}
+
+// The connection's window goes to the responses that wait on it in turn, a frame's worth each, from the stream after the
+// last one served (Huly QB-1248). Taken greedily, it went to the same response every time: two responses, each with its
+// own window open, and four increments of the connection's -- one took the four, and the other, waiting on nothing its peer
+// did, was kept from its bound only by the connection's octets counting for it. Each takes two now, every sweep finds both
+// within their bound, an increment of three frames' worth is split frame by frame, and once nothing leaves both are reset.
+TEST(HTTP2ServerProtocol, TheConnectionsWindowGoesToTheResponsesThatWaitOnItInTurn) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/a");
+    open_get_stream_end_stream(protocol, io, 3, "/b");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(200000, 'l');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.send_response(3, response));
+    make_window_update_frame(io, 1, 1000000); // stream 1's own window opened again: only the connection's holds each
+    drive(protocol, io);
+    const std::size_t before[2] = {sum_data_bytes(io.output, 1), sum_data_bytes(io.output, 3)};
+    ASSERT_EQ(before[0] + before[1], 65535u) << "the connection's window was not filled";
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/15ms, /*max_incomplete=*/1h), 0u);
+    for (int i = 0; i < 4; ++i) { // an increment of the connection's every 3 ms, each one frame's worth
+        std::this_thread::sleep_for(3ms);
+        make_window_update_frame(io, 0, 1000);
+        drive(protocol, io);
+        EXPECT_EQ(protocol.cleanup_idle_streams(15ms, 1h), 0u) << "a response that waits its turn was reset";
+    }
+    const std::size_t got[2] = {sum_data_bytes(io.output, 1) - before[0], sum_data_bytes(io.output, 3) - before[1]};
+    EXPECT_EQ(got[0], 2000u) << "the connection's window was not taken in turn (" << got[0] << ", " << got[1] << ")";
+    EXPECT_EQ(got[1], 2000u) << "the connection's window was not taken in turn (" << got[0] << ", " << got[1] << ")";
+    make_window_update_frame(io, 0, 3 * 16384 + 1000); // three frames' worth and more: a frame each, in turn
+    drive(protocol, io);
+    const std::size_t split[2] = {sum_data_bytes(io.output, 1) - before[0] - got[0], sum_data_bytes(io.output, 3) - before[1] - got[1]};
+    EXPECT_EQ(split[0] + split[1], 3u * 16384 + 1000);
+    EXPECT_GE(split[0], 16384u) << "an increment past a frame went to one response";
+    EXPECT_GE(split[1], 16384u) << "an increment past a frame went to one response";
+    EXPECT_EQ(protocol.cleanup_idle_streams(15ms, 1h), 0u); // the split, stamped
+    std::this_thread::sleep_for(20ms);                      // and nothing leaves
+    EXPECT_EQ(protocol.cleanup_idle_streams(15ms, 1h), 2u) << "a response that left nothing was kept";
+}
+
+// A streamed response takes its turn of the connection's window as a whole one does (Huly QB-1248): a whole response and
+// a streamed one wait on it, their own windows open, and two increments of the connection's go one to each, whichever
+// stream is the streamed one. A stream's progress is its own octets: those of the other never counted for it.
+TEST(HTTP2ServerProtocol, AStreamedResponseTakesItsTurnOfTheConnectionsWindowAsAWholeOneDoes) {
+    for (const bool streamed_first : {false, true}) {
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        open_get_stream_end_stream(protocol, io, 1, "/a");
+        open_get_stream_end_stream(protocol, io, 3, "/b");
+        qb::http::Response whole;
+        whole.status() = qb::http::status::OK;
+        whole.body()   = std::string(100000, 'w');
+        qb::http::Response head;
+        head.status()     = qb::http::status::OK;
+        const auto answer = [&](uint32_t id, bool streamed) {
+            if (!streamed)
+                return protocol.send_response(id, whole);
+            return protocol.begin_streamed_response(id, head, /*head_only=*/false)
+                   && protocol.write_streamed_body(id, std::string(100000, 's'));
+        };
+        ASSERT_TRUE(answer(1, streamed_first)); // the connection's window, taken whole by stream 1
+        static_cast<void>(answer(3, !streamed_first));
+        make_window_update_frame(io, 1, 1000000); // stream 1's own window opened: only the connection's holds each
+        drive(protocol, io);
+        const std::size_t before[2] = {sum_data_bytes(io.output, 1), sum_data_bytes(io.output, 3)};
+        ASSERT_EQ(before[0] + before[1], 65535u) << (streamed_first ? "streamed first" : "whole first");
+        for (int i = 0; i < 2; ++i) {
+            make_window_update_frame(io, 0, 1000);
+            drive(protocol, io);
+        }
+        EXPECT_EQ(sum_data_bytes(io.output, 1) - before[0], 1000u) << (streamed_first ? "the streamed response" : "the whole one");
+        EXPECT_EQ(sum_data_bytes(io.output, 3) - before[1], 1000u) << (streamed_first ? "the whole response" : "the streamed one");
+    }
+}
+
+// An octet of the connection's window let out now and then keeps the stream it goes to, not every stream that waits
+// (Huly QB-1248). Fifty responses, their own windows open, behind a connection window the client opens an octet at a time:
+// each takes its turn, an octet every fifty increments, and is reset at its bound but the few the rotation serves within
+// it. The connection's octets counted for every stream that waited: none was ever reset.
+TEST(HTTP2ServerProtocol, AnOctetOfTheConnectionsWindowAtATimeKeepsOnlyTheStreamsItServes) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/spend");
+    qb::http::Response spend;
+    spend.status() = qb::http::status::OK;
+    spend.body()   = std::string(65535, 's');
+    ASSERT_TRUE(protocol.send_response(1, spend)); // the connection's window, spent whole
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(1000, 'w');
+    for (uint32_t i = 0; i < 50; ++i) {
+        open_get_stream_end_stream(protocol, io, 3 + 2 * i, "/wait");
+        ASSERT_TRUE(protocol.send_response(3 + 2 * i, response)) << "stream " << 3 + 2 * i;
+    }
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/5ms, /*max_incomplete=*/1h), 0u);
+    std::size_t reset = 0;
+    for (const auto end = std::chrono::steady_clock::now() + 300ms; std::chrono::steady_clock::now() < end;) {
+        std::this_thread::sleep_for(1ms);
+        make_window_update_frame(io, 0, 1);
+        drive(protocol, io);
+        reset += protocol.cleanup_idle_streams(5ms, 1h);
+    }
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_GE(reset, 40u) << "an octet of the connection's at a time kept the streams that wait on it";
+}
+
+// A header block in progress is never reset (Huly QB-1248): the connection carries nothing else until it ends, and the
+// session's timeout bounds it from its first HEADERS. Reset past the incomplete bound and erased, its stream was gone when
+// the block's CONTINUATION came, which ended the connection -- a PROTOCOL_ERROR GOAWAY, every other stream with it.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsNeverResetsAHeaderBlockInProgress) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    const auto        encoded = encode_hpack_headers(default_request_headers("/split"));
+    const std::size_t half    = encoded.size() / 2;
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_STREAM, 1, std::vector<uint8_t>(encoded.begin(), encoded.begin() + half));
+    drive(protocol, io);
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/5ms, /*max_incomplete=*/5ms), 0u);
+    std::this_thread::sleep_for(7ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(5ms, 5ms), 0u) << "a header block in progress was reset";
+    push_frame(io, FrameType::CONTINUATION, qb::protocol::http2::FLAG_END_HEADERS, 1,
+               std::vector<uint8_t>(encoded.begin() + half, encoded.end()));
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.ok()) << "the end of the block ended the connection";
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_EQ(std::string(io.last_request->uri().path()), "/split");
+}
+
+// A request not yet complete is held to the incomplete bound alone (Huly QB-1248): one wider than the idle bound is its
+// bound. It fell through to the idle rule and was reset at the narrower one. The control: past its own bound, it is reset.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsHoldsAnIncompleteRequestToItsOwnBoundWhenItIsTheWider) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_post_stream_open(protocol, io, 1, "/up");
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/5ms, /*max_incomplete=*/1h), 0u);
+    std::this_thread::sleep_for(7ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(5ms, 1h), 0u) << "an incomplete request was reset at the idle bound";
+    EXPECT_EQ(protocol.cleanup_idle_streams(5ms, 1ms), 1u) << "an incomplete request outlived its own bound";
+}
+
+// A handler's bound changed at run time counts from the sweep that first saw it (Huly QB-1248): qb-io restarts the
+// session's countdown at setTimeout(), and a stream its handler holds is cut no sooner than a quiet connection would end.
+// Lowered under the time the stream had waited, the bound cut it at once.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsCountsAChangedHandlerBoundFromTheSweepThatFirstSawIt) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 1, "/held");
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h, /*max_waiting=*/1h), 0u); // the bound first seen
+    std::this_thread::sleep_for(7ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, 5ms), 0u) << "a bound lowered under the time the stream waited cut it at once";
+    std::this_thread::sleep_for(7ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1h, 1h, 5ms), 1u) << "the lowered bound, counted from the sweep that saw it, kept it";
+}
+
+// The control: a response its OWN window holds waits on its peer, whatever the connection's other octets. Two
+// responses, a window of 10 octets each: the client opens stream 1's again and again, stream 3's never. Stream 3 is reset
+// at the idle bound while stream 1's octets leave.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAResponseItsOwnWindowHoldsWaitsOnItsPeerWhateverTheConnectionMoves) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 10);
+    open_get_stream_end_stream(protocol, io, 1, "/a");
+    open_get_stream_end_stream(protocol, io, 3, "/b");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(1000, 'l');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.send_response(3, response));
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/5ms, /*max_incomplete=*/1h), 0u);
+    for (int i = 0; i < 4; ++i) {
+        std::this_thread::sleep_for(3ms);
+        make_window_update_frame(io, 1, 10);
+        drive(protocol, io);
+        static_cast<void>(protocol.cleanup_idle_streams(5ms, 1h));
+    }
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 50u);
+    EXPECT_EQ(sum_data_bytes(io.output, 3), 10u);
+    EXPECT_TRUE(protocol.is_stream_closed(3)) << "a response its own window held was kept by the connection's other octets";
+    EXPECT_FALSE(protocol.is_stream_closed(1));
 }
 
 TEST(HTTP2ServerProtocol, CleanupIdleStreamsKeepsAnAgeBoundForIncompleteRequests) {
@@ -3660,9 +4015,9 @@ TEST(HTTP2ServerProtocol, CleanupIdleStreamsSparesAnIncompleteRequestWhoseBodySt
     EXPECT_EQ(io.last_stream_error, ErrorCode::CANCEL);
 }
 
-// A stream WINDOW_UPDATE moves the clock of a stream whose request is dispatched -- the client reads its response -- and
-// not of one whose request is not complete (Huly QB-1248): it acknowledges nothing of the request, and a peer must not
-// keep an incomplete request alive by acknowledging the server's window.
+// A stream WINDOW_UPDATE moves no clock (Huly QB-1248). On a request not yet complete it acknowledges nothing of the
+// request: a peer must not keep an incomplete request alive by acknowledging the server's window. (On a response, see
+// CleanupIdleStreamsAStreamWindowUpdateThatLetsNothingOutHoldsNoResponse.)
 TEST(HTTP2ServerProtocol, CleanupIdleStreamsAStreamWindowUpdateDoesNotSaveAnIncompleteRequest) {
     using namespace std::chrono_literals;
     Http2FakeIO    io;
@@ -3738,6 +4093,73 @@ TEST(HTTP2ServerProtocol, TheInactivityTimeoutRestartsAtARequestsFirstHeadersAnd
     drive(protocol, io);
     EXPECT_EQ(io.request_progress, 4) << "a request in one HEADERS that ends it: its first HEADERS";
     EXPECT_EQ(io.request_count, 2);
+}
+
+namespace {
+/// The session's hook for a read pass that leaves a stream open, counted; a request it is given may be answered at once.
+struct OpenStreamsHttp2FakeIO : Http2FakeIO {
+    qb::protocol::http2::ServerHttp2Protocol<OpenStreamsHttp2FakeIO> *answers = nullptr; ///< set: every request is answered in its dispatch
+    int                                                               told    = 0;
+
+    void
+    http2_streams_open() noexcept {
+        ++told;
+    }
+    void
+    on(qb::http::Request &&request, uint32_t stream_id) {
+        Http2FakeIO::on(std::move(request), stream_id);
+        if (answers) {
+            qb::http::Response response;
+            response.status() = qb::http::status::NO_CONTENT;
+            static_cast<void>(answers->send_response(stream_id, response));
+        }
+    }
+    using Http2FakeIO::on;
+};
+using OpenStreamsServerProtocol = qb::protocol::http2::ServerHttp2Protocol<OpenStreamsHttp2FakeIO>;
+} // namespace
+
+// The session is told at the end of a read pass that leaves a stream open, and only then (Huly QB-1248): it arms the
+// timer of its stream sweep there. A pass that brought no stream, or answered every request it brought, leaves none
+// and tells nothing -- an idle connection, or one whose requests are answered as they come, has no sweep.
+TEST(HTTP2ServerProtocol, TheSessionIsToldWhenAReadPassLeavesAStreamOpen) {
+    OpenStreamsHttp2FakeIO    io;
+    OpenStreamsServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    EXPECT_EQ(io.told, 0) << "the handshake leaves no stream";
+    EXPECT_FALSE(protocol.has_streams());
+
+    io.answers = &protocol; // a request answered in its dispatch: its stream is closed before the pass ends
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, 1,
+               encode_hpack_headers(default_request_headers("/answered")));
+    drive(protocol, io);
+    ASSERT_EQ(io.request_count, 1);
+    EXPECT_FALSE(protocol.has_streams());
+    EXPECT_EQ(io.told, 0) << "a pass that answered what it brought";
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 3,
+               encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/up"}}));
+    push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, 3, std::vector<uint8_t>(1, 'a'));
+    drive(protocol, io);
+    ASSERT_EQ(io.request_count, 2);
+    EXPECT_EQ(io.told, 0) << "told between two frames of a pass: the stream was open then, and closed before the pass ended";
+
+    io.answers = nullptr; // an upload not yet complete: its stream is open when the pass ends
+    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, 5,
+               encode_hpack_headers({{":method", "POST"}, {":scheme", "https"}, {":authority", "example.test"}, {":path", "/up"}}));
+    drive(protocol, io);
+    EXPECT_TRUE(protocol.has_streams());
+    EXPECT_EQ(io.told, 1) << "a pass that leaves a stream open";
+
+    make_window_update_frame(io, 0, 10); // any pass, while the stream is open: the session knows whether its sweep is armed
+    drive(protocol, io);
+    EXPECT_EQ(io.told, 2);
+
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/std::chrono::hours(-1), /*max_incomplete=*/std::chrono::hours(-1)), 1u);
+    EXPECT_FALSE(protocol.has_streams()) << "the sweep reset the last stream";
+    make_window_update_frame(io, 0, 10);
+    drive(protocol, io);
+    EXPECT_EQ(io.told, 2) << "no stream is left";
+    EXPECT_TRUE(protocol.ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -5889,8 +6311,8 @@ handshake_one_push_no_window(ServerProtocol &protocol, Http2FakeIO &io, std::vec
 // The idle sweep resets a pushed stream, and the room it leaves sends a response that waited (Huly QB-1202): a 204, its
 // stream ended and erased at once -- the stream the sweep held an iterator to, past the reset, and read next: a
 // use-after-free (ASan's heap-use-after-free; the map walks 1, 4, 2 with libc++ and libstdc++). The sweep finds each
-// stream again. Stream 2's window update between the sweeps keeps it from being idle itself, so whatever order the map
-// walks, the sweep resets stream 4 and the room sends stream 2.
+// stream again. The request on stream 1 waits on its handler, which the sweep leaves (Huly QB-1248); stream 2 is as
+// idle as stream 4, and the case needs the walk that finds stream 4 first, as libc++ and libstdc++ both do.
 // ===========================================================================
 TEST(HTTP2ServerProtocol, TheIdleSweepSurvivesTheResponseItsResetLetsOut) {
     Http2FakeIO    io;
@@ -5909,14 +6331,31 @@ TEST(HTTP2ServerProtocol, TheIdleSweepSurvivesTheResponseItsResetLetsOut) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
     make_window_update_frame(io, 2, 100); // stream 2 progresses: not idle at the next sweep
     drive(protocol, io);
-    EXPECT_EQ(protocol.cleanup_idle_streams(qb::duration{0}, std::chrono::hours(1)), 2u) << "stream 4 and the request reset";
+    EXPECT_EQ(protocol.cleanup_idle_streams(qb::duration{0}, std::chrono::hours(1)), 1u) << "stream 4 reset";
     EXPECT_EQ(last_rst_stream_error(io.output, 4), ErrorCode::CANCEL);
     EXPECT_TRUE(headers_sent_on(io.output, 2)) << "the room stream 4 left sends the response that waited";
     EXPECT_FALSE(last_rst_stream_error(io.output, 2).has_value());
-    for (const uint32_t id : {1u, 2u, 4u}) {
+    for (const uint32_t id : {2u, 4u}) {
         EXPECT_TRUE(protocol.is_stream_closed(id)) << id;
     }
+    EXPECT_FALSE(protocol.is_stream_closed(1)) << "the request its handler has not answered was reset as idle";
     EXPECT_TRUE(protocol.ok());
+}
+
+// A promised stream keeps its rule (Huly QB-1248): reserved and never answered, it is reset at the idle bound -- it waits
+// on no handler of a request, and holds a slot the client granted. The request beside it, which its handler has not
+// answered, is left.
+TEST(HTTP2ServerProtocol, CleanupIdleStreamsAPromisedStreamNeverAnsweredKeepsItsIdleBound) {
+    using namespace std::chrono_literals;
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_one_push_no_window(protocol, io);
+    ASSERT_FALSE(protocol.send_push_promise(1, 2, make_promised_request("https://example.test/2")).has_value());
+    EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/1h, /*max_incomplete=*/1h), 0u);
+    std::this_thread::sleep_for(3ms);
+    EXPECT_EQ(protocol.cleanup_idle_streams(1ms, 1h), 1u) << "a promised stream never answered was left";
+    EXPECT_TRUE(protocol.is_stream_closed(2));
+    EXPECT_FALSE(protocol.is_stream_closed(1)) << "the request its handler has not answered was reset as idle";
 }
 
 // ===========================================================================

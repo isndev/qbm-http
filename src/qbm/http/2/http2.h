@@ -34,14 +34,14 @@
  */
 #pragma once
 
-// HTTP/2 here is TLS-only -- see the note in ./client.h, which this header pulls in. Guarding
-// both, rather than only the one that names qb::io::transport::stcp, so that a direct
-// #include of EITHER spelling self-diagnoses instead of failing inside a base-clause.
+// HTTP/2 here is TLS-only -- see the note in ./client.h, which this header pulls in. Guarding both, rather than only the one that
+// names qb::io::transport::stcp, so that a direct #include of EITHER spelling self-diagnoses instead of failing inside a base-clause.
 #ifndef QB_HAS_SSL
 #error "HTTP/2 requires OpenSSL crypto library (qb::io::transport::stcp)"
 #endif
 
 #include <array>
+#include <cassert>
 #include <filesystem>
 #include <limits>
 #include <qb/io/protocol/handshake.h>
@@ -145,8 +145,8 @@ private:
     Http2Protocol *_http2_protocol;     ///< HTTP/2 protocol handler
     std::uint64_t  _appended_total = 0; ///< the bytes the output ever took (operator<<): the socket's drain mark (Huly QB-1212)
 
-    std::chrono::steady_clock::time_point _last_stream_cleanup; ///< Last time we cleaned up idle streams
-    bool                                  _reclaiming_completed_contexts{false};
+    qb::http::detail::loop_timer _sweep_timer; ///< The stream sweep's own timer, armed while a stream is open (sweep_streams())
+    bool                         _reclaiming_completed_contexts{false};
     /// The TLS handshake the session starts in: with HTTP/2 and the HTTP/1.1 fallback, the protocols an HTTP drain
     /// knows (http2_speaks_http()).
     qb::io::async::IProtocol const *_handshake_protocol{nullptr};
@@ -316,7 +316,7 @@ public:
         : qb::io::async::tcp::client<session<Derived, Handler>, qb::io::transport::stcp, Handler>(server_handler)
         , _http1_protocol(nullptr)
         , _http2_protocol(nullptr)
-        , _last_stream_cleanup(std::chrono::steady_clock::now()) {
+        , _sweep_timer(qb::duration::zero(), [this] { sweep_streams(); }) {
         LOG_HTTP_DEBUG_PA(this->id(), "HTTP/2 internal::session (server-side) created.");
         _handshake_protocol = this->template switch_protocol<qb::io::protocol::handshake<session<Derived, Handler>>>(*this);
         this->setTimeout(constants::DEFAULT_SESSION_TIMEOUT);
@@ -664,10 +664,10 @@ public:
         LOG_HTTP_INFO_PA(this->id(), "Handshake complete. ALPN selected: " << (alpn_proto.empty() ? "none/http1.1" : alpn_proto));
         if (alpn_proto == "h2") {
             LOG_HTTP_DEBUG_PA(this->id(), "Switching to HTTP/2 protocol.");
-            // The protocol counts the replies its peer solicited that are still queued in this session's output -- PONGs,
-            // SETTINGS ACKs, resets -- on what its socket took, `bytes_written()`: without it they would be forgiven only
-            // once the output is empty (Huly QB-1270).
+            // The protocol counts the replies its peer solicited that are still queued in this session's output -- PONGs, SETTINGS
+            // ACKs, resets -- on what its socket took, `bytes_written()`: else they would be forgiven only once it is empty (QB-1270).
             static_assert(qb::protocol::http2::counts_bytes_written<session>, "the HTTP/2 session counts the bytes its socket took");
+            static_assert(requires(session &io) { io.http2_streams_open(); }, "the HTTP/2 session is told of a stream left open");
             _http2_protocol = this->template switch_protocol<Http2Protocol>(*this);
             // The server drains: the connection serves nothing. Its final GOAWAY names stream 0, so the client
             // knows none of its streams was processed (Huly QB-91).
@@ -750,23 +750,24 @@ public:
         LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
         this->updateTimeout();
         notify_streams(event.bytes); // a producer parked on drain() may resume (Huly QB-86)
-        // Periodic cleanup of idle streams for DDoS protection
-        if (_http2_protocol) {
+        if (_http2_protocol)
             reclaim_completed_stream_contexts();
-            if (this->protocol() != _http2_protocol || !this->is_connected())
-                return;
-            auto now = std::chrono::steady_clock::now();
-            if (now - _last_stream_cleanup >= constants::CLEANUP_INTERVAL) {
-                _http2_protocol->cleanup_idle_streams(constants::STREAM_IDLE_TIMEOUT, constants::STREAM_INCOMPLETE_TIMEOUT);
-                _last_stream_cleanup = now;
-            }
-        }
     }
 
-    /**
-     * @brief Handle end of stream event
-     * @param event EOS event
-     */
+    /// The sweep of the stalled streams (DDoS protection), on a timer of its own (Huly QB-1248): armed at the end of a read pass
+    /// that leaves a stream open (http2_streams_open()), it runs every period and arms itself again while one remains.
+    void
+    sweep_streams() noexcept {
+        auto owner = this->weak_from_this().lock(); // a reset's observer may release the session: not under this call,
+        if (auto *const protocol = this->is_connected() ? live_http2_protocol() : nullptr)
+            protocol->cleanup_idle_streams(_stream_idle_timeout, _stream_incomplete_timeout, this->getTimeout());
+        if (auto *const protocol = this->is_connected() ? live_http2_protocol() : nullptr; protocol && protocol->has_streams())
+            http2_streams_open(); // asked again: a reset's observer may have ended the connection, cleared its protocols or extracted it
+        qb::io::async::defer([owner = std::move(owner)] {}); // nor under its timer's action, which never releases its timer: a turn later
+    }
+
+    /// End of stream: the socket took everything the output held.
+    /// @param event EOS event
     void
     on([[maybe_unused]] qb::io::async::event::eos &&event) {
         LOG_HTTP_DEBUG_PA(this->id(), "End of stream (eos) event.");
@@ -789,6 +790,7 @@ public:
         // Stop the libev watcher immediately so this event loop stops monitoring
         // the socket before it is moved to another io_handler.
         this->stop();
+        _sweep_timer.stop();  // and the sweep's timer: nothing of this session's stays armed on this loop (Huly QB-1248)
         cancel_all_streams(); // the producers are told first: the cancellation of a context then resets nothing (Huly QB-86)
         for (auto &[stream_id, context] : _contexts) {
             context->cancel("Session extracted");
@@ -796,12 +798,10 @@ public:
         _contexts.clear();
     }
 
-    /**
-     * @brief Server hook (Huly QB-1182): the session is being extracted -- what its `on(event::extracted)` does: the
-     *        watcher stops, every stream's context is cancelled and released. The server's extractSession() calls it
-     *        when io_handler's probe cannot see that handler: a session class that declares an `on()` of its own
-     *        hides the base's overloads from a probe on its type, public ones included (name hiding ignores access).
-     */
+    /// Server hook (Huly QB-1182): the session is being extracted -- what its `on(event::extracted)` does: the watchers stop, every
+    /// stream's context is cancelled and released. The server's extractSession() calls it when io_handler's probe cannot see that
+    /// handler: a session class that declares an `on()` of its own hides the base's overloads from a probe on its type, public
+    /// ones included (name hiding ignores access).
     void
     http2_extracted() {
         on(qb::io::async::event::extracted{});
@@ -818,6 +818,7 @@ public:
         } else {
             LOG_HTTP_INFO_PA(this->id(), "Disconnected. Reason code: " << e.reason);
         }
+        _sweep_timer.stop();  // the connection ended: its sweep with it (Huly QB-1248)
         cancel_all_streams(); // the producers are told first (Huly QB-86)
         for (auto &context : _contexts) {
             context.second->cancel("Session disconnected");
@@ -902,6 +903,33 @@ public:
     http2_request_progress() noexcept {
         this->updateTimeout();
     }
+    void
+    http2_streams_open() noexcept { // a read pass, or a sweep, leaves a stream open: the sweep's timer is armed -- not on a transport gone
+        if (!_sweep_timer.armed() && this->transport().is_open())
+            _sweep_timer.restart(_stream_sweep_period);
+    }
+
+protected:
+    /// The stream sweep's bounds and period (Huly QB-1248), the constants by default: a session class may set its own in its constructor, as it
+    /// may setTimeout(). @p idle bounds a response its peer does not take, @p incomplete a request that stops arriving; the session's timeout,
+    /// read at each sweep, bounds a stream its handler holds. A value of zero or less is refused -- asserted -- and the one in place kept: it
+    /// would reset every stream at once, or stop the sweep.
+    void
+    set_stream_sweep(qb::duration idle, qb::duration incomplete, qb::duration period = constants::CLEANUP_INTERVAL) noexcept {
+        assert(idle > qb::duration::zero() && incomplete > qb::duration::zero() && period > qb::duration::zero());
+        _stream_idle_timeout       = idle > qb::duration::zero() ? idle : _stream_idle_timeout;
+        _stream_incomplete_timeout = incomplete > qb::duration::zero() ? incomplete : _stream_incomplete_timeout;
+        _stream_sweep_period       = period > qb::duration::zero() ? period : _stream_sweep_period;
+    }
+    [[nodiscard]] bool
+    stream_sweep_armed() const noexcept { // its timer armed: from a read pass leaving a stream open to the first fire that finds none
+        return _sweep_timer.armed();
+    }
+
+private:
+    qb::duration _stream_idle_timeout{constants::STREAM_IDLE_TIMEOUT};             ///< The sweep's bound on a response its peer does not take
+    qb::duration _stream_incomplete_timeout{constants::STREAM_INCOMPLETE_TIMEOUT}; ///< Its bound on a request that stops arriving
+    qb::duration _stream_sweep_period{constants::CLEANUP_INTERVAL};                ///< Its period: greater than zero (set_stream_sweep())
 };
 
 /// HTTP/2 I/O handler with routing (Derived: the CRTP derived type; Session: the session type).
@@ -923,64 +951,48 @@ public:
         return _router;
     }
 
-    /**
-     * @brief Set the limits this server applies to every request it reads, over both protocols it speaks (Huly QB-94); 0 in any
-     *        of them means no limit of that kind.
-     *
-     * Same call on the HTTP/1.1, HTTP/3 and dual-stack servers. Read live: a request that begins after the call is judged under
-     * the new limits. An HTTP/2 request over a limit is answered on its stream -- `414 URI Too Long` for its `:path`, `431
-     * Request Header Fields Too Large` for a field name, a field value or the number of fields of its header or trailer section,
-     * `413 Content Too Large` for a declared `content-length` (before a byte of the body is read) or for DATA that passes the
-     * body limit -- then RST_STREAM(NO_ERROR) asks the client to stop sending the rest (RFC 9113 §8.1); the connection and its
-     * other streams go on. Until 3.3 the body was reset with ENHANCE_YOUR_CALM against the HTTP/1.1 constant and the fields had
-     * no limit but the 1 MiB HPACK header list, which stays. The HTTP/1.1 requests of this server's ALPN fallback get the
-     * HTTP/1.1 answers. The defaults are `qb::http::protocol_limits`' constants.
-     * @param limits The limits.
-     */
+    /// @brief Set the limits this server applies to every request it reads, over both protocols it speaks (Huly QB-94); 0 in any
+    ///        of them means no limit of that kind.
+    ///
+    /// Same call on the HTTP/1.1, HTTP/3 and dual-stack servers. Read live: a request that begins after the call is judged under the new
+    /// limits. An HTTP/2 request over a limit is answered on its stream -- `414 URI Too Long` for its `:path`, `431 Request Header Fields Too
+    /// Large` for a field name, a field value or the number of fields of its header or trailer section, `413 Content Too Large` for a declared
+    /// `content-length` (before a byte of the body is read) or for DATA that passes the body limit -- then RST_STREAM(NO_ERROR) asks the client
+    /// to stop sending the rest (RFC 9113 §8.1); the connection and its other streams go on. Until 3.3 the body was reset with
+    /// ENHANCE_YOUR_CALM against the HTTP/1.1 constant and the fields had no limit but the 1 MiB HPACK header list, which stays. The HTTP/1.1
+    /// requests of this server's ALPN fallback get the HTTP/1.1 answers. The defaults are `qb::http::protocol_limits`' constants.
+    /// @param limits The limits.
     void
     set_request_limits(qb::http::request_limits const &limits) noexcept {
         _request_limits = limits;
     }
 
-    /**
-     * @brief The limits set_request_limits() set, as given (0 = none).
-     */
+    /// The limits set_request_limits() set, as given (0 = none).
     [[nodiscard]] qb::http::request_limits const &
     request_limits() const noexcept {
         return _request_limits;
     }
 
-    /**
-     * @brief Set the request body limit alone, in bytes; 0 means none (set_request_limits() for the rest).
-     *
-     * Same name and contract as the HTTP/1.1 and HTTP/3 servers' (Huly QB-168): a request over it is answered
-     * `413 Content Too Large`, as set_request_limits() says. The default is
-     * `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB).
-     * @param value The limit in bytes.
-     */
+    /// Set the request body limit alone, @p value in bytes; 0 means none (set_request_limits() for the rest). Same name and contract
+    /// as the HTTP/1.1 and HTTP/3 servers' (Huly QB-168): a request over it is answered `413 Content Too Large`, as
+    /// set_request_limits() says. The default is `qb::http::protocol_limits::MAX_BODY_SIZE` (100 MiB).
+    /// @param value The limit in bytes.
     void
     set_max_body_size(std::size_t value) noexcept {
         _request_limits.max_body_size = value;
     }
 
-    /**
-     * @brief The request body limit; 0 when there is none.
-     */
+    /// The request body limit; 0 when there is none.
     [[nodiscard]] std::size_t
     max_body_size() const noexcept {
         return _request_limits.max_body_size;
     }
 };
 
-/**
- * @brief HTTP/2 server acceptor
- *
- * Listens for incoming SSL/TLS connections and creates sessions
- * with HTTP/2 or HTTP/1.1 protocol support via ALPN.
- *
- * @tparam Derived CRTP derived type
- * @tparam Session Session type
- */
+/// HTTP/2 server acceptor: listens for incoming SSL/TLS connections and creates sessions with HTTP/2 or HTTP/1.1 protocol support
+/// via ALPN.
+/// @tparam Derived CRTP derived type
+/// @tparam Session Session type
 template <typename Derived, typename Session>
 class server
     : public qb::io::async::tcp::acceptor<server<Derived, Session>, qb::io::transport::saccept>
@@ -992,23 +1004,16 @@ class server
     friend struct has_method_on<server, void, qb::io::async::event::disconnected>;
     using acceptor_type = qb::io::async::tcp::acceptor<server<Derived, Session>, qb::io::transport::saccept>;
 
-    /**
-     * @brief Handle accepted connection
-     * @param new_io New SSL socket
-     */
+    /// An accepted connection: a session.
+    /// @param new_io New SSL socket
     void
     on(typename acceptor_type::accepted_socket_type &&new_io) {
         this->registerSession(std::move(new_io));
     }
 
-    /**
-     * @brief Handle acceptor disconnection
-     * @param event Disconnection event
-     *
-     * The listening socket is gone: no further connection will be accepted. Forwarded to the
-     * derived server as `qb::http::event::disconnected` when it handles one -- as the HTTP/1.1
-     * server does -- and always logged.
-     */
+    /// The acceptor's disconnection: the listening socket is gone, no further connection will be accepted. Forwarded to
+    /// the derived server as `qb::http::event::disconnected` when it handles one -- as the HTTP/1.1 server does -- and always logged.
+    /// @param event Disconnection event
     void
     on(qb::io::async::event::disconnected &&event) {
         if constexpr (qb::has_on<Derived, qb::http::event::disconnected>) {

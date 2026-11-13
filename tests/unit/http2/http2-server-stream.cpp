@@ -304,10 +304,12 @@ TEST(Http2ServerStream, TrailersWaitForTheSocketsRoomUnencodedAndLeaveWholeOnThe
     EXPECT_FALSE(h.protocol.streams_wait_for_socket());
 }
 
-TEST(Http2ServerStream, TheIdleSweepResetsAStreamThatSentNothingAndSparesOneThatDid) {
-    // The connection's idle sweep (cleanup_idle_streams, 30 s in the session) counts a stream's frames, not its window:
-    // a streamed response that writes nothing is reset CANCEL like any idle stream -- the heartbeat's reason.
-    Harness    h;
+TEST(Http2ServerStream, TheSweepLeavesAStreamThatWaitsOnItsProducerAndResetsOneItsPeerDoesNotTake) {
+    // The connection's sweep (cleanup_idle_streams, 30 s in the session) resets at the idle bound what waits on the peer
+    // (Huly QB-1248): a streamed response that writes nothing has nothing queued and waits on its producer -- the sweep
+    // holds it to the session's timeout instead, and that is the heartbeat's reason. One whose piece the window does not
+    // take is reset CANCEL once it has not left for the idle bound.
+    Harness    h({{SETTINGS_INITIAL_WINDOW_SIZE, 4}});
     const auto id = h.open("/stream");
     ASSERT_TRUE(h.protocol.begin_streamed_response(id, ok_response(), false));
     h.clear();
@@ -315,9 +317,15 @@ TEST(Http2ServerStream, TheIdleSweepResetsAStreamThatSentNothingAndSparesOneThat
     ASSERT_TRUE(h.protocol.write_streamed_body(id, "beat"));
     EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "a frame left since the last sweep: spared";
     EXPECT_TRUE(h.protocol.is_streaming_response(id));
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "a stream that waits on its producer was reset as idle";
+    EXPECT_TRUE(h.protocol.is_streaming_response(id));
+    ASSERT_TRUE(h.protocol.write_streamed_body(id, "held")); // the window is spent: the piece waits on the peer
+    ASSERT_EQ(h.protocol.streamed_body_pending(id), 4u);
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 0u) << "reset at the sweep that first found its output queued";
     h.clear();
     std::this_thread::sleep_for(5ms);
-    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 1u) << "nothing left for longer than the idle bound: reset";
+    EXPECT_EQ(h.protocol.cleanup_idle_streams(1ms, 1s), 1u) << "a piece its peer did not take for longer than the idle bound: reset";
     const auto frames = h.frames();
     ASSERT_EQ(frames.size(), 1u);
     EXPECT_EQ(frames[0].type, FrameType::RST_STREAM);
