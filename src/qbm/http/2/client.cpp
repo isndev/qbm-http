@@ -29,10 +29,30 @@
 #include <random>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
+#include "../detail/client_callback.h"
 #include "../origin.h"
 
 namespace qb::http2 {
+
+using qb::http::detail::notify; // a user callback's call: contained while the client is being destroyed (Huly QB-1246)
+
+namespace {
+/// Counts a close or a failure while it runs the callbacks of what it ends, however it is left.
+struct closing_scope {
+    int &depth;
+    explicit closing_scope(int &value) noexcept
+        : depth(value) {
+        ++depth;
+    }
+    closing_scope(closing_scope const &)            = delete;
+    closing_scope &operator=(closing_scope const &) = delete;
+    ~closing_scope() noexcept {
+        --depth;
+    }
+};
+} // namespace
 
 Client::Client(const std::string &base_uri)
     : BaseTcpClient()
@@ -50,18 +70,19 @@ Client::Client(const qb::io::uri &uri)
 
 Client::~Client() {
     LOG_HTTP_DEBUG_PA(_client_id, "HTTP/2 Client destructor called");
-    // A destructor arms nothing and connects nothing: in static storage the client is destroyed after its thread's event loop, where a
-    // timer started writes into the freed loop (Huly QB-1246). No deadline, no reconnection, and connect() refused from here on.
-    _reconnect_scheduled = false;
-    _reconnect_attempts  = 0;
-    _connect_timeout     = qb::duration::zero();
-    _request_timeout     = qb::duration::zero();
-    _destroying          = true;
-    fail_all_requests("Client destroyed");
-    if (_is_connected || _is_connecting) {
-        disconnect();
+    // The destruction contract of the three HTTP clients (Huly QB-1246): every request in flight or queued hears once, every
+    // connect() still waiting hears `false` once, and from `_destroying` on nothing is accepted, armed or connected -- a request
+    // pushed from one of those callbacks is answered inside its push, a connect() refused by its return value alone. In static
+    // storage the client is destroyed after its thread's event loop, where a timer started writes into the freed loop.
+    _destroying = true;
+    try {
+        fail_all_requests("Client destroyed"); // what a callback throws, or fails to allocate, is contained where it is called
+        if (_is_connected || _is_connecting) {
+            disconnect();
+        }
+    } catch (...) {
+        // An allocation these passes make for themselves failed: nothing leaves a destructor.
     }
-    fail_all_requests("Client destroyed"); // what those callbacks pushed again fails too: nothing is left to carry it
     LOG_HTTP_INFO_PA(_client_id, "HTTP/2 Client destroyed");
 }
 
@@ -89,11 +110,8 @@ Client::initialize_from_uri(const qb::io::uri &uri) {
 
 bool
 Client::connect(ConnectionCallback callback) {
-    if (_destroying) { // called by a callback the destructor runs, or for a request one pushed again: refused (Huly QB-1246)
-        if (callback) {
-            callback(false, "Client destroyed");
-        }
-        return false;
+    if (_destroying) {
+        return false; // refused, by the return value alone: the callback of a connect() that starts nothing is never called (QB-1246)
     }
     if (_is_connected) {
         LOG_HTTP_DEBUG_PA(_client_id, "Already connected");
@@ -156,10 +174,12 @@ Client::close_connection(const std::string &error_message) {
     const bool was_connecting = _is_connecting;
     // An explicit disconnect() of a live connection announces the close (RFC 9113 §6.8): the
     // protocol queues GOAWAY(NO_ERROR) and stops, and the io delivers it -- after what it still
-    // held -- before it closes. It used to close at once, with no GOAWAY (Huly QB-1059). Not from
-    // the destructor (no owner left): the io goes with the object, nothing could deliver it.
+    // held -- before it closes. It used to close at once, with no GOAWAY (Huly QB-1059). Not with no
+    // owner: the io goes with the object, nothing could deliver it. That is the destructor, and a client
+    // built without make_client(), which has none at any time: the test reads the owner, not `_destroying`.
     const bool announce =
         _intentional_disconnect && _is_connected && _h2_protocol && !weak_from_this().expired() && _h2_protocol->send_shutdown_goaway();
+    const bool ends_transport = _transport_started; // a connector in flight has none to end: its epoch gave it up (Huly QB-1246)
     _transport_closing        = _transport_closing || _transport_started; // the disconnected the close raises is this transport's
     _transport_started        = false;
     _is_connected             = false;
@@ -167,6 +187,17 @@ Client::close_connection(const std::string &error_message) {
     _handshake_completed      = false;
     _received_graceful_goaway = false;
     _h2_protocol              = nullptr;
+    const closing_scope closing{_closing_callbacks}; // every close ends the io below, a transport or not (Huly QB-1246)
+    // Set before the callbacks, with the epoch of the limit: a loop pass one of them runs can deliver the GOAWAY and end the
+    // transport, and the `disconnected` that raises clears both flags; a limit an earlier close armed no longer matches. Set
+    // after the callbacks, they outlived it: the limit cut the next connection, and the queue's flag kept the requests of the
+    // next transport from hearing its end. With no transport to end, neither the flag nor the io's close: qb-io raises a
+    // `disconnected` for an io not yet disposed alone -- a first connection's, which failed a request pushed in the same
+    // turn and the connect() waiting on the next attempt --, and the flag, left set by a later one, kept a request from
+    // the end of its own connection (Huly QB-1246).
+    const auto graceful_epoch            = announce ? ++_graceful_close_epoch : _graceful_close_epoch;
+    _graceful_close_pending              = _graceful_close_pending || announce;
+    _preserve_pending_on_next_disconnect = _preserve_pending_on_next_disconnect || ends_transport;
 
     // A connect() still waiting for its verdict gets this one: the completion it waited for is
     // dropped (an explicit disconnect) or will never come (the transport is being closed).
@@ -175,7 +206,7 @@ Client::close_connection(const std::string &error_message) {
         _connection_callbacks.clear();
         for (auto &callback : callbacks) {
             if (callback) {
-                callback(false, error_message);
+                notify(_destroying, "HTTP/2", [&] { callback(false, error_message); });
             }
         }
     }
@@ -191,27 +222,29 @@ Client::close_connection(const std::string &error_message) {
     } else {
         run_failure_pass(error_message);
     }
-    _preserve_pending_on_next_disconnect = true;
 
     if (announce) {
         // The io ends the connection once the GOAWAY is out (dispose() shuts the sending side
         // down, Huly QB-1060). A server that stopped reading never lets it out: the limit ends it
-        // anyway, so the close is bounded.
-        _graceful_close_pending = true;
-        qb::io::async::callback(
-            [weak_self = weak_from_this(), epoch = ++_graceful_close_epoch] {
-                auto self = weak_self.lock();
-                if (self && self->_graceful_close_pending && self->_graceful_close_epoch == epoch) {
-                    LOG_HTTP_WARN_PA(self->_client_id, "GOAWAY not delivered within the flush limit: closing the connection anyway");
-                    self->BaseTcpClient::disconnect();
-                }
-            },
-            GOAWAY_FLUSH_LIMIT);
+        // anyway, so the close is bounded -- unless a pass a callback ran has already delivered the
+        // GOAWAY and ended the transport: a limit armed then cut the next connection (Huly QB-1246).
+        if (_graceful_close_pending) {
+            qb::io::async::callback(
+                [weak_self = weak_from_this(), epoch = graceful_epoch] {
+                    auto self = weak_self.lock();
+                    if (self && self->_graceful_close_pending && self->_graceful_close_epoch == epoch) {
+                        LOG_HTTP_WARN_PA(self->_client_id, "GOAWAY not delivered within the flush limit: closing the connection anyway");
+                        self->BaseTcpClient::disconnect();
+                    }
+                },
+                GOAWAY_FLUSH_LIMIT);
+        }
         return;
     }
 
-    // Close transport
-    BaseTcpClient::disconnect();
+    if (ends_transport) {
+        BaseTcpClient::disconnect(); // the `disconnected` it raises decides on the reconnection
+    }
 }
 
 void
@@ -269,6 +302,11 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     }
 
     _total_requests++;
+    if (_destroying) { // pushed from a callback the destructor runs: answered here, never queued, nothing armed (Huly QB-1246)
+        ++_failed_requests;
+        notify(_destroying, "HTTP/2", [&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Client destroyed")); });
+        return true;
+    }
 
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
@@ -313,7 +351,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     if (requests.empty()) {
         LOG_HTTP_WARN_PA(_client_id, "Empty request batch");
         if (callback) {
-            callback({});
+            notify(_destroying, "HTTP/2", [&] { callback({}); });
         }
         return true;
     }
@@ -324,6 +362,18 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     }
 
     _total_requests += requests.size();
+    if (_destroying) { // as push_request(): every member answered here, the batch's callback called once (Huly QB-1246)
+        _failed_requests += requests.size();
+        notify(_destroying, "HTTP/2", [&] {
+            std::vector<qb::http::Response> refused;
+            refused.reserve(requests.size());
+            for (std::size_t i = 0; i < requests.size(); ++i) {
+                refused.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Client destroyed"));
+            }
+            callback(std::move(refused));
+        });
+        return true;
+    }
 
     // Create batch context
     auto batch_context        = std::make_unique<BatchRequestContext>();
@@ -376,7 +426,9 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         context->callback = [this, batch_id, i](qb::http::Response response) {
             auto batch_it = _active_batches.find(batch_id);
             if (batch_it == _active_batches.end()) {
-                LOG_HTTP_WARN_PA(_client_id, "Received response for unknown batch " << batch_id);
+                if (!_failing_all) { // fail_all_requests() detached the registry: expected there, and it answers the batch itself
+                    LOG_HTTP_WARN_PA(_client_id, "Received response for unknown batch " << batch_id);
+                }
                 return;
             }
 
@@ -570,13 +622,17 @@ Client::handle_connection_failure(const std::string &error_message) {
     const bool close_transport = _transport_started;
     _transport_started         = false;
     _transport_closing         = _transport_closing || close_transport; // set BEFORE the callbacks: a connect() made from one defers
+    const closing_scope closing{_closing_callbacks};                    // a transport or not: see the coroutine connect()
 
-    _is_connected                        = false;
-    _is_connecting                       = false;
-    _handshake_completed                 = false;
-    _received_graceful_goaway            = false;
-    _preserve_pending_on_next_disconnect = false;
-    _h2_protocol                         = nullptr;
+    _is_connected             = false;
+    _is_connecting            = false;
+    _handshake_completed      = false;
+    _received_graceful_goaway = false;
+    _h2_protocol              = nullptr;
+    // The queue's flag too, for the transport closed below: a loop pass a callback runs can read its end, whose
+    // `disconnected` clears both flags. Set after the callbacks, they outlived it: the next connect() waited for an end
+    // that never came, and the queue of the next transport did not hear its own (Huly QB-1246).
+    _preserve_pending_on_next_disconnect = close_transport;
 
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
@@ -595,8 +651,6 @@ Client::handle_connection_failure(const std::string &error_message) {
     }
 
     if (close_transport) {
-        _transport_closing                   = true;
-        _preserve_pending_on_next_disconnect = true;
         BaseTcpClient::disconnect();
     }
 }
@@ -691,9 +745,13 @@ Client::finish_graceful_goaway_if_drained() {
     _h2_protocol                    = nullptr;
     _transport_closing = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
     _transport_started = false;
+    const closing_scope closing{_closing_callbacks};
+    // Before the failure callbacks below, as close_connection() sets it: a loop pass one of them runs can read the end of
+    // the transport, whose `disconnected` clears it; set after them, it kept the next transport's queue from hearing its
+    // end (Huly QB-1246).
+    _preserve_pending_on_next_disconnect = true;
 
     if (!_pending_requests.empty() && _auto_reconnect) {
-        _preserve_pending_on_next_disconnect = true;
         BaseTcpClient::disconnect();
         return;
     }
@@ -703,13 +761,14 @@ Client::finish_graceful_goaway_if_drained() {
                                                : "Server sent GOAWAY and automatic reconnection is disabled");
     }
 
-    _preserve_pending_on_next_disconnect = true;
     BaseTcpClient::disconnect();
 }
 
 void
 Client::fail_all_requests(const std::string &error_message) {
-    LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
+    if (!_active_requests.empty() || !_pending_requests.empty() || !_active_batches.empty()) { // said once, and only when there is some
+        LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
+    }
 
     // Reentrancy-safe draining: user callbacks may enqueue new requests/batches.
     // We move current work out before invoking any callback so newly queued work
@@ -720,14 +779,23 @@ Client::fail_all_requests(const std::string &error_message) {
     active_requests_to_fail.swap(_active_requests);
     pending_requests_to_fail.swap(_pending_requests);
     active_batches_to_fail.swap(_active_batches);
+    // The registry of batches is detached: a member failed below finds no batch, which is expected here and not logged once
+    // per member. Each answer is made inside the call of its callback, so what it fails to allocate is contained with it.
+    struct failing_scope {
+        bool      &flag;
+        const bool was;
+        explicit failing_scope(bool &value) noexcept
+            : flag(value)
+            , was(std::exchange(value, true)) {}
+        ~failing_scope() noexcept {
+            flag = was;
+        }
+    } const failing{_failing_all};
 
     // Fail active requests
     for (auto &[stream_id, context] : active_requests_to_fail) {
         _failed_requests++;
-
-        auto error_response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
-
-        context->callback(std::move(error_response));
+        notify(_destroying, "HTTP/2", [&] { context->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message)); });
     }
 
     // Fail pending requests
@@ -736,26 +804,22 @@ Client::fail_all_requests(const std::string &error_message) {
         pending_requests_to_fail.pop_front();
 
         _failed_requests++;
-
-        auto error_response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
-
-        context->callback(std::move(error_response));
+        notify(_destroying, "HTTP/2", [&] { context->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message)); });
     }
 
     // Fail incomplete batches
     for (auto &[batch_id, batch_context] : active_batches_to_fail) {
         if (!batch_context->all_completed) {
-            LOG_HTTP_WARN_PA(_client_id, "Failing incomplete batch " << batch_id);
-
-            // Answer the members still unanswered (status 0, see push_requests): their own failures
-            // above found no batch -- this pass detached the registry -- and recorded nothing.
-            for (size_t i = 0; i < batch_context->responses.size(); ++i) {
-                if (batch_context->responses[i].status().code() == 0) {
-                    batch_context->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
+            notify(_destroying, "HTTP/2", [&] {
+                // Answer the members still unanswered (status 0, see push_requests): their own failures
+                // above found no batch -- this pass detached the registry -- and recorded nothing.
+                for (size_t i = 0; i < batch_context->responses.size(); ++i) {
+                    if (batch_context->responses[i].status().code() == 0) {
+                        batch_context->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
+                    }
                 }
-            }
-
-            batch_context->callback(std::move(batch_context->responses));
+                batch_context->callback(std::move(batch_context->responses));
+            });
         }
     }
     arm_request_timeout();
@@ -814,6 +878,9 @@ Client::has_pending_or_active_work() const noexcept {
 
 void
 Client::arm_request_timeout() {
+    if (_destroying) {
+        return; // nothing is armed for a client being destroyed: after its thread's loop a timer writes into it (Huly QB-1246)
+    }
     const auto   now          = std::chrono::steady_clock::now();
     bool         has_deadline = false;
     qb::duration delay        = qb::duration::max();
@@ -1052,7 +1119,8 @@ Client::on(qb::io::async::event::timeout const &) {
 void
 Client::on(qb::io::async::event::disconnected const &event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
-    _graceful_close_pending = false; // the transport is closing: the GOAWAY limit has nothing left to bound
+    _graceful_close_pending = false;                 // the transport is closing: the GOAWAY limit has nothing left to bound
+    const closing_scope closing{_closing_callbacks}; // dispose() ends this io once this handler returns (Huly QB-1246)
 
     std::string error_msg = "Connection lost";
     if (event.reason != 0) {
@@ -1074,8 +1142,17 @@ Client::on(qb::io::async::event::disconnected const &event) {
         return;
     }
 
-    if (_is_connecting && !_connect_after_close && !_connection_callbacks.empty()) {
-        // (the connecting state of a connect() waiting for this close is not this transport's)
+    // (the connecting state of a connect() waiting for this close is not this transport's)
+    const bool waiting        = _is_connecting && !_connect_after_close && !_connection_callbacks.empty();
+    _is_connected             = false;
+    _is_connecting            = false;
+    _handshake_completed      = false;
+    _received_graceful_goaway = false;
+    _transport_started        = false;
+    _h2_protocol              = nullptr;
+    if (waiting) {
+        // Heard with the state settled, as close_connection() does: a connect() a callback asks starts an attempt of its
+        // own. It joined the one that had just ended, and nothing started for it (Huly QB-1246).
         auto callbacks = std::move(_connection_callbacks);
         _connection_callbacks.clear();
         for (auto &callback : callbacks) {
@@ -1084,13 +1161,6 @@ Client::on(qb::io::async::event::disconnected const &event) {
             }
         }
     }
-
-    _is_connected             = false;
-    _is_connecting            = false;
-    _handshake_completed      = false;
-    _received_graceful_goaway = false;
-    _transport_started        = false;
-    _h2_protocol              = nullptr;
 
     if (_preserve_pending_on_next_disconnect) {
         _preserve_pending_on_next_disconnect = false;
@@ -1173,20 +1243,20 @@ Client::connect() {
             complete(ConnectResult{false, "HTTP/2 client no longer available"});
             return;
         }
-        // `complete` was MOVED into the connect callback above. On this path connect()
-        // declined to start (already connected, already connecting, or unable to start) and
-        // never took ownership — but the std::function here is already empty, so calling it
-        // throws std::bad_function_call and the awaiter never receives its ConnectResult.
-        // Hand the lambda a COPY so the fallback below still has a live callable. The copy
-        // costs one std::function allocation on a connection attempt: a cold path.
+        if (self->_closing_callbacks > 0) {
+            // Awaited from a callback of a close or of a failure, it answers at once: the io is ended after the callback
+            // returns, and a connector's failure known at once comes through the loop's deferred queue, which runs no nested
+            // drain. A coroutine blocked there -- run_sync() pumps the loop until it completes -- waited for that end or that
+            // failure, for the connect timeout or for ever, or got an attempt that connected in the pump and that the close,
+            // resumed, ended (Huly QB-1246).
+            complete(ConnectResult{false, "HTTP/2 connection is closing"});
+            return;
+        }
+        // connect() answers through its callback -- at once when connected, at the attempt's end otherwise -- and returns false only
+        // for a client being destroyed, whose callback it never calls: the awaiter then completes here. `complete` is COPIED into
+        // the callback so this end still holds one (one std::function allocation on a connection attempt: a cold path).
         if (!self->connect([complete](bool ok, const std::string &err) mutable { complete(ConnectResult{ok, err}); })) {
-            if (self->is_connected()) {
-                complete(ConnectResult{true, ""});
-            } else if (self->is_connecting()) {
-                complete(ConnectResult{false, "Connection already in progress"});
-            } else {
-                complete(ConnectResult{false, "Unable to start connection"});
-            }
+            complete(ConnectResult{false, "Client destroyed"});
         }
     });
 }

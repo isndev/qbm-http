@@ -82,6 +82,8 @@ public:
         /// A GOAWAY(NO_ERROR) naming 2^31-1, then 100 more, each lowering the last-stream-id by one -- all above the request
         /// on stream 1 -- and a PING in one write; once the PONG is back, the 200 of stream 1 with END_STREAM.
         goaways_lowered,
+        /// A GOAWAY(NO_ERROR) naming stream 1, no answer to stream 1, and 500 ms later the connection ended, read or not.
+        goaway_then_close,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -436,6 +438,13 @@ private:
                     play_empty_data_flood();
                 } else if (_plan == Plan::goaways_lowered) {
                     play_goaways_lowered();
+                } else if (_plan == Plan::goaway_then_close) {
+                    append_frame(frame, 0x7, 0, 0, {0, 0, 0, 1, 0, 0, 0, 0}); // GOAWAY: last stream 1, NO_ERROR
+                    static_cast<void>(send(frame));
+                    frame.clear();
+                    for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                         !_release && std::chrono::steady_clock::now() < until;)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 } else {
                     append_frame(frame, 0x1, 0x4, 1, {0x88});
                     for (int chunk = 0; chunk < 200; ++chunk) {
@@ -451,7 +460,7 @@ private:
                 }
             }
         }
-        while (read_some()) {
+        while (_plan != Plan::goaway_then_close && read_some()) {
         }
         _sock.disconnect();
         _sock.close();

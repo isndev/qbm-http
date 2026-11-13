@@ -113,6 +113,7 @@ class Client : public std::enable_shared_from_this<Client> {
     std::string _host;
     bool        _is_connected           = false;
     bool        _is_connecting          = false;
+    bool        _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
     bool        _intentional_disconnect = false;
     // No `std::shared_ptr<Client> _callback_self_guard` member: the self-hold that keeps this
     // client alive through the current loop turn is owned by the deferred closure that releases
@@ -158,12 +159,12 @@ public:
     explicit Client(qb::io::uri const &uri);
     /**
      * @brief Disconnect and fail any outstanding requests.
-     * @details Every request in flight or queued hears once, with a 503 ("Connection closed"); the callbacks of a
-     *          `connect()` still waiting are abandoned. A request one of those callbacks pushes again fails at once,
-     *          with a 503: the client has no owner left to connect for it, and no deadline is armed
-     *          for it. A client with static storage is destroyed after its thread's event loop
-     *          (`listener::current`, which `exit()` destroys first): the callbacks then run there, where nothing
-     *          can be asked of the loop any more -- no timer, no connection, no coroutine (Huly QB-1246). The
+     * @details Every request in flight or queued hears once, with a 503 ("Connection closed"), and every `connect()`
+     *          still waiting hears `false` once. From one of those callbacks a request pushed, alone or in a batch,
+     *          is answered inside the push (503), and a `connect()` is refused: it returns false and its callback is
+     *          never called. Nothing is queued, armed or connected. A client with static storage is destroyed after
+     *          its thread's event loop (`listener::current`, which `exit()` destroys first): the callbacks then run
+     *          there, where nothing can be asked of the loop any more -- no timer, no connection (Huly QB-1246). The
      *          coroutine forms need nothing: the coroutines parked on them were destroyed with the loop.
      */
     ~Client();
@@ -178,13 +179,16 @@ public:
      *                 in progress, it is queued. May be empty.
      *                 During retirement, the accepted next attempt starts after
      *                 the old callbacks and protocol/I/O dispatch have unwound.
-     * @return `true` if connected or the attempt was started/queued; `false` if no
-     *         attempt could be started and no callback was provided.
+     * @return `true` when the callback will hear the outcome -- at once when already connected, with the attempt
+     *         under way or the one this call starts otherwise. `false` when the client refuses -- it is being destroyed,
+     *         or has no shared owner (`make_client`) -- and nothing starts: the callback is then never called. Also
+     *         `false` for an empty callback while an attempt is under way: nothing was queued.
      */
     bool connect(ConnectionCallback callback);
     /**
      * @brief Coroutine connect.
-     * @return An awaiter that resolves to a `ConnectResult` describing the outcome.
+     * @return An awaiter that resolves to a `ConnectResult` describing the outcome -- `false` at once, "HTTP/1.1
+     *         connection is closing", when awaited from a callback the client runs for a close or a failure.
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
     /**
