@@ -37,6 +37,10 @@ on:
         description: "extra arguments to the test binary"
         required: false
         default: ""
+      restore_ref:
+        description: "a qbm-http commit whose src/ and tests/ are built instead of this branch's (empty: this branch's)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -59,6 +63,15 @@ jobs:
           repository: isndev/qb
           ref: ${{ inputs.qb_ref }}
           path: qb
+
+      - name: The module's src/ and tests/ at another commit
+        if: inputs.restore_ref != ''
+        run: |
+          set -euo pipefail
+          git -C module fetch --depth=1 origin "${{ inputs.restore_ref }}"
+          git -C module checkout "${{ inputs.restore_ref }}" -- src tests
+          git -C module status --short | head -20
+          echo "src/ and tests/ are qbm-http ${{ inputs.restore_ref }}'s"
 
       - name: Install dependencies as qb's macOS lane does, and openssl@3 beside openssl@4
         run: |
@@ -116,24 +129,7 @@ jobs:
           echo "run exit $?" | tee "$o/verdict.txt"
           grep -c '^\[       OK \]' "$o/run.log" | sed 's/^/OK cases: /'
           grep -c '^\[  FAILED  \] [A-Za-z]' "$o/run.log" | sed 's/^/FAILED cases (with the summary lines): /'
-          python3 - "$o/run.log" <<'PY' | tee -a "$o/verdict.txt"
-          import collections, re, sys
-          text = open(sys.argv[1], errors="replace").read().splitlines()
-          per = collections.Counter(); late = collections.Counter(); shapes = collections.Counter()
-          for line in text:
-              m = re.match(r"\[H2MAC\] RESULT flood=(.*?) verdict=(\w+) (.*)", line)
-              if not m:
-                  continue
-              flood, verdict, rest = m.groups()
-              per[(flood, verdict)] += 1
-              kv = dict(re.findall(r"(\w+)=(\{[^}]*\}|\S+)", rest))
-              shapes[(flood, verdict, kv.get("held10"), kv.get("late"), kv.get("write_fail_errno"), kv.get("read_fail_errno"), kv.get("server_ok"))] += 1
-          for (flood, verdict), n in sorted(per.items()):
-              print(f"flood {flood!r}: {verdict} x{n}")
-          print("shapes (flood, verdict, held10, late, client write errno, client read errno, server_ok):")
-          for k, n in sorted(shapes.items(), key=lambda kv: (-kv[1], kv[0])):
-              print(f"  {n:3d} {k}")
-          PY
+          python3 module/diag/summarize.py "$o/run.log" | tee -a "$o/verdict.txt"
           grep -E '^\[H2MAC\] RESULT' "$o/run.log" | head -80
           echo "--- the first failing flood, whole"
           awk '/^\[H2MAC\] =====/{buf=""} /^\[H2MAC\]/{buf=buf $0 "\n"} /^\[H2MAC\] RESULT .*verdict=FAIL/{print buf; exit}' "$o/run.log" | cut -c1-600
