@@ -29,7 +29,7 @@ on:
         required: false
         default: "qbm-http-test-system-http2-client-coro qbm-http-test-system-http2-client qb-io-test-unit-listener-after-loop"
       sanitize:
-        description: "QB_SANITIZE (empty: none)"
+        description: "QB_SANITIZE; none for no sanitizer (an EMPTY value is replaced by the default, thread)"
         required: false
         default: thread
       ir:
@@ -62,16 +62,19 @@ jobs:
       - name: Install dependencies as qb's macOS lane does
         run: ./qb/scripts/ci-install-macos-dependencies.sh --profile build
 
-      - name: Configure (TSan)
+      - name: Configure
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/oracle"
-          { sw_vers; clang++ --version; xcrun --find ld; ld -v 2>&1 || true; git -C qb rev-parse HEAD; git -C module rev-parse HEAD; } \
+          san="${{ inputs.sanitize }}"
+          [ "$san" != none ] || san=""
+          { sw_vers; clang++ --version; xcrun --find ld; ld -v 2>&1 || true; git -C qb rev-parse HEAD; git -C module rev-parse HEAD
+            echo "QB_SANITIZE=${san:-<none>} CMAKE_BUILD_TYPE=${{ inputs.build_type || 'RelWithDebInfo' }}"; } \
             | tee "${RUNNER_TEMP}/oracle/host.txt"
           cmake -S module/.github/ci/superbuild -B build -G Ninja \
                 -DCMAKE_BUILD_TYPE="${{ inputs.build_type || 'RelWithDebInfo' }}" -DQB_CXX_STANDARD=20 \
                 -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-                -DQB_SANITIZE="${{ inputs.sanitize }}" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DQB_WITH_SSL=ON -DQB_USE_SYSTEM_GTEST=ON -DQB_ENABLE_NATIVE_ARCH=OFF \
+                -DQB_SANITIZE="$san" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DQB_WITH_SSL=ON -DQB_USE_SYSTEM_GTEST=ON -DQB_ENABLE_NATIVE_ARCH=OFF \
                 -DOPENSSL_EXECUTABLE="${OPENSSL_EXECUTABLE}" \
                 -DQBM_CI_QB_DIR="${GITHUB_WORKSPACE}/qb" -DQBM_CI_MODULE_DIR="${GITHUB_WORKSPACE}/module" \
                 2>&1 | tee "${RUNNER_TEMP}/oracle/configure.log"
