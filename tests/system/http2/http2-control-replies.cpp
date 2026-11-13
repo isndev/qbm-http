@@ -55,18 +55,114 @@
 #include <qbm/http/2/client.h>
 #include <qbm/http/http.h>
 
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+
+#include <openssl/crypto.h>
+#include <openssl/ssl.h>
+#include <sys/socket.h>
+
 using namespace std::chrono_literals;
 using qb::http::test::Http2RawClient;
 using qb::http::test::ServerThread;
 
 namespace http2_control_replies_test {
 
+/// SCRATCH (lot T7-H2MAC): what the server's session and the client met, per flood, with times (ms since the flood began).
+namespace h2mac {
+using clock = std::chrono::steady_clock;
+inline std::mutex               mutex;
+inline std::atomic<clock::rep>  t0_ticks{clock::now().time_since_epoch().count()};
+inline std::vector<std::string> events;
+inline std::string              reply;     // the reply the current flood draws
+inline std::atomic<int>         flood{-1}; // the flood under way
+inline std::atomic<std::size_t> pending_writes{0};
+inline std::atomic<std::size_t> max_pending{0};
+inline std::atomic<long long>   last_pending_us{-1};
+inline double
+ms(clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(t - clock::time_point(clock::duration(t0_ticks.load()))).count();
+}
+inline void
+record(std::string const &what) {
+    std::ostringstream line;
+    line.setf(std::ios::fixed);
+    line.precision(1);
+    line << "t=" << ms(clock::now()) << "ms flood#" << flood.load() << " " << what;
+    std::lock_guard lock(mutex);
+    events.push_back(line.str());
+}
+inline std::size_t
+count(std::string_view output, std::string_view frame) {
+    std::size_t n = 0;
+    if (frame.empty())
+        return 0;
+    for (std::size_t at = output.find(frame); at != std::string_view::npos; at = output.find(frame, at + frame.size()))
+        ++n;
+    return n;
+}
+inline int
+sockopt(int fd, int name) {
+    int       value = -1;
+    socklen_t len   = sizeof value;
+    if (::getsockopt(fd, SOL_SOCKET, name, &value, &len) != 0)
+        return -errno;
+    return value;
+}
+} // namespace h2mac
+
 class GuardServer;
+
+[[nodiscard]] std::optional<std::pair<std::uint32_t, std::string>> last_goaway(std::string_view output);
 
 class GuardSession : public qb::http2::use<GuardSession>::session<GuardServer> {
 public:
     explicit GuardSession(GuardServer &server)
         : session(server) {}
+
+    std::string
+    h2mac_state() {
+        std::ostringstream s;
+        std::string_view   out(this->out().cbegin(), this->out().size());
+        std::string        reply;
+        {
+            std::lock_guard lock(h2mac::mutex);
+            reply = h2mac::reply;
+        }
+        const auto goaway = last_goaway(out);
+        s << "out=" << out.size() << " replies_queued=" << h2mac::count(out, reply)
+          << " goaway_at_end=" << (goaway ? "code" + std::to_string(goaway->first) + "/'" + goaway->second + "'" : std::string("none"))
+          << " bytes_written=" << this->bytes_written() << " bytes_read=" << this->bytes_read() << " in=" << this->in().size();
+        const int fd = static_cast<int>(this->transport().native_handle());
+        s << " fd=" << fd;
+        if (fd >= 0)
+            s << " sndbuf=" << h2mac::sockopt(fd, SO_SNDBUF) << " rcvbuf=" << h2mac::sockopt(fd, SO_RCVBUF);
+        if (SSL *ssl = this->transport().ssl_handle()) {
+            const char *st = SSL_state_string_long(ssl);
+            s << " ssl_state='" << (st ? st : "?") << "' ssl_shutdown=" << SSL_get_shutdown(ssl);
+        }
+        s << " pending_write_events=" << h2mac::pending_writes.load() << " max_pending=" << h2mac::max_pending.load();
+        return s.str();
+    }
+    void
+    h2mac_disconnected(const qb::io::async::event::disconnected &e) {
+        h2mac::record("SERVER session on(disconnected): reason=" + std::to_string(e.reason) + " error=" + std::to_string(e.error_code.value())
+                      + " ('" + (e.error_code ? e.error_code.message() : std::string()) + "') " + h2mac_state());
+    }
+    void
+    h2mac_goaway(const qb::protocol::http2::Http2GoAwayEvent &event) {
+        h2mac::record("SERVER GOAWAY event: sent=" + std::to_string(event.sent) + " code=" + std::to_string(static_cast<int>(event.error_code))
+                      + " debug='" + event.debug_data + "' " + h2mac_state());
+    }
+    void
+    h2mac_pending_write(std::size_t bytes) {
+        ++h2mac::pending_writes;
+        if (bytes > h2mac::max_pending.load())
+            h2mac::max_pending = bytes;
+        h2mac::last_pending_us = static_cast<long long>(h2mac::ms(h2mac::clock::now()) * 1000.0);
+    }
 };
 
 /// What the output of a session held when the session was closed with bytes still queued, for the test's thread.
@@ -104,6 +200,11 @@ public:
     /// Session hook: a session is gone. One that left bytes in its output is kept for the test, as it was.
     void
     disconnected(qb::uuid ident) {
+        {
+            const auto it = this->sessions().find(ident);
+            h2mac::record(std::string("SERVER disconnected(uuid): found=")
+                          + (it != this->sessions().end() && it->second ? "yes " + it->second->h2mac_state() : std::string("no")));
+        }
         if (const auto it = this->sessions().find(ident); it != this->sessions().end() && it->second) {
             auto const &out = it->second->out();
             if (out.size() > 0) {
@@ -117,7 +218,7 @@ public:
 };
 
 /// The error code and the debug data of the GOAWAY frame @p output ends on, if it ends on one.
-[[nodiscard]] std::optional<std::pair<std::uint32_t, std::string>>
+std::optional<std::pair<std::uint32_t, std::string>>
 last_goaway(std::string_view output) {
     const auto byte = [&](std::size_t i) {
         return static_cast<std::uint32_t>(static_cast<unsigned char>(output[i]));
@@ -247,9 +348,19 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         const soliciting       what  = each.what;
         const std::string_view reply = each.reply;
         g_closed.reset();
-        Http2RawClient client;
-        client.keep_frames  = false;
-        client.write_budget = 120s; // a write of the flood stops when the connection is broken, not when the host is slow
+        {
+            std::lock_guard lock(h2mac::mutex);
+            h2mac::events.clear();
+            h2mac::reply.assign(reply.data(), reply.size());
+            h2mac::t0_ticks = h2mac::clock::now().time_since_epoch().count();
+        }
+        h2mac::flood           = static_cast<int>(&each - floods);
+        h2mac::pending_writes  = 0;
+        h2mac::max_pending     = 0;
+        auto            owned  = std::make_unique<Http2RawClient>();
+        Http2RawClient &client = *owned;
+        client.keep_frames     = false;
+        client.write_budget    = 120s; // a write of the flood stops when the connection is broken, not when the host is slow
         ASSERT_TRUE(client.connect(port));
         ASSERT_TRUE(client.read_until([&] { return client.settings_acked; }));
         const std::uint32_t closed = client.request("/served"); // stream 1: answered, so closed for the server
@@ -258,6 +369,8 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         const auto read = [&] {
             return what == soliciting::pings ? client.pongs : what == soliciting::settings ? client.settings_acks : client.resets;
         };
+        h2mac::record("CLIENT connected: sndbuf=" + std::to_string(client.h2mac_sockopt(SO_SNDBUF))
+                      + " rcvbuf=" + std::to_string(client.h2mac_sockopt(SO_RCVBUF)));
         const std::size_t before    = read();
         std::size_t       solicited = 0;
         bool              taking    = true; // the server still takes what the client writes
@@ -265,10 +378,61 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
             taking = client.solicit(999, what, closed) && client.request("/served") != 0;
             solicited += 999;
         }
+        const auto failure_line = [&](const char *which, Http2RawClient::h2mac_failure const &f) {
+            if (!f.seen)
+                return std::string(which) + "=none";
+            std::ostringstream l;
+            l.setf(std::ios::fixed);
+            l.precision(1);
+            l << which << "={t=" << h2mac::ms(f.at) << "ms ret=" << f.ret << " timed_out=" << f.timed_out << " qb_errno=" << f.qb_errno << " ('"
+              << std::strerror(f.qb_errno) << "') errno=" << f.raw_errno << " ssl_state='" << f.ssl_state << "' ssl_shutdown=" << f.ssl_shutdown
+              << " ssl_error='" << f.ssl_error << "' bytes_before=" << f.bytes << "}";
+            return l.str();
+        };
+        h2mac::record("CLIENT flood ended: taking=" + std::to_string(taking) + " solicited=" + std::to_string(solicited) + " written="
+                      + std::to_string(client.h2mac_bytes_written) + " zero_writes=" + std::to_string(client.h2mac_zero_writes) + " "
+                      + failure_line("write_failure", client.h2mac_write_failure) + " sndbuf=" + std::to_string(client.h2mac_sockopt(SO_SNDBUF))
+                      + " rcvbuf=" + std::to_string(client.h2mac_sockopt(SO_RCVBUF)));
         // Now the client reads. A server that still serves answers one last request, after everything else it wrote.
         const std::uint32_t last = taking ? client.request("/served") : 0;
         (void) client.read_until([&] { return client.eof || (last != 0 && client.stream(last).end_stream); }, 120s);
         const std::size_t replies = read() - before;
+        {
+            std::string types;
+            for (auto t : client.h2mac_last_types)
+                types += std::to_string(t) + ",";
+            h2mac::record("CLIENT read ended: eof=" + std::to_string(client.eof) + " replies=" + std::to_string(replies)
+                          + " goaway_seen=" + std::to_string(client.goaway_seen) + " goaway_code=" + std::to_string(client.goaway_code)
+                          + " goaway_debug='" + client.goaway_debug + "' bytes_read=" + std::to_string(client.h2mac_bytes_read)
+                          + " frames_read=" + std::to_string(client.h2mac_frames_read) + " last_types=[" + types + "] "
+                          + failure_line("read_failure", client.h2mac_read_failure));
+        }
+        const bool client_eof  = client.eof;
+        const bool client_ok   = client.eof && replies < solicited && (!client.goaway_seen || client.goaway_code == kEnhanceYourCalm);
+        const int  write_errno = client.h2mac_write_failure.seen ? client.h2mac_write_failure.qb_errno : -1;
+        const int  read_errno  = client.h2mac_read_failure.seen ? client.h2mac_read_failure.qb_errno : -1;
+        const auto print       = [&](bool held10, std::string const &late, std::optional<std::string> const &held) {
+            bool        server_ok = false;
+            std::string held_desc = "none";
+            if (held) {
+                const auto g      = last_goaway(*held);
+                const auto queued = occurrences(*held, reply);
+                server_ok         = g && g->first == kEnhanceYourCalm && g->second == each.goaway && queued <= 1000 && queued > 0;
+                held_desc         = "out=" + std::to_string(held->size()) + " replies=" + std::to_string(queued)
+                                    + " goaway=" + (g ? std::to_string(g->first) + "/'" + g->second + "'" : std::string("none"));
+            }
+            std::lock_guard lock(h2mac::mutex);
+            std::cout << "[H2MAC] ===== flood=" << each.name << " openssl='" << OpenSSL_version(OPENSSL_VERSION) << "'\n";
+            for (auto const &e : h2mac::events)
+                std::cout << "[H2MAC]   " << e << "\n";
+            std::cout << "[H2MAC] RESULT flood=" << each.name << " verdict=" << (client_ok && held10 && server_ok ? "PASS" : "FAIL")
+                      << " client_eof=" << client_eof << " client_ok=" << client_ok << " held10=" << (held10 ? "yes" : "no") << " late=" << late
+                      << " held={" << held_desc << "} server_ok=" << server_ok << " write_fail_errno=" << write_errno
+                      << " read_fail_errno=" << read_errno << " solicited=" << solicited << " replies=" << replies << std::endl;
+        };
+        if (!client.eof) {
+            print(false, "client-not-eof", std::nullopt);
+        }
         ASSERT_TRUE(client.eof) << "a client that never read drew " << replies << " replies of " << solicited
                                 << " solicited and the connection still serves: they queued in the server's output";
         EXPECT_LT(replies, solicited) << "the server answered everything the client sent";
@@ -276,11 +440,32 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
             EXPECT_EQ(client.goaway_code, kEnhanceYourCalm);
         }
         client.close();
+        h2mac::record("CLIENT close() called");
 
         std::optional<std::string> held;
         const auto                 deadline = std::chrono::steady_clock::now() + 10s;
         while (!(held = g_closed.read()) && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(1ms);
+        h2mac::record(std::string("TEST 10 s wait ended: held=") + (held ? "yes" : "no"));
+        std::string                late = "-";
+        std::optional<std::string> later;
+        if (!held) {
+            // SCRATCH: does the session close later -- with the client still open, then once its descriptor is closed?
+            const auto more = std::chrono::steady_clock::now() + 3s;
+            while (!(later = g_closed.read()) && std::chrono::steady_clock::now() < more)
+                std::this_thread::sleep_for(1ms);
+            late = later ? "within+3s" : "not-within+3s";
+            if (!later) {
+                owned.reset(); // the client's descriptor is closed now
+                h2mac::record("CLIENT destroyed (descriptor closed)");
+                const auto after = std::chrono::steady_clock::now() + 3s;
+                while (!(later = g_closed.read()) && std::chrono::steady_clock::now() < after)
+                    std::this_thread::sleep_for(1ms);
+                late = later ? "after-client-destroyed" : "never-within-16s";
+            }
+            std::this_thread::sleep_for(200ms); // the session's records after the close
+        }
+        print(held.has_value(), late, held ? held : later);
         ASSERT_TRUE(held.has_value()) << "the session did not close with bytes queued";
         const auto goaway = last_goaway(*held);
         ASSERT_TRUE(goaway.has_value()) << "the output the session closed with does not end on a GOAWAY";

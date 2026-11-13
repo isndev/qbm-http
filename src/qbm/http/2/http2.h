@@ -747,6 +747,8 @@ public:
      */
     void
     on(qb::io::async::event::pending_write &&event) {
+        if constexpr (requires(Derived &d) { d.h2mac_pending_write(event.bytes); })
+            static_cast<Derived &>(*this).h2mac_pending_write(event.bytes); // SCRATCH (lot T7-H2MAC): the test's probe
         LOG_HTTP_TRACE_PA(this->id(), "Pending write event, updating timeout.");
         this->updateTimeout();
         notify_streams(event.bytes); // a producer parked on drain() may resume (Huly QB-86)
@@ -813,6 +815,8 @@ public:
      */
     void
     on(qb::io::async::event::disconnected &&e) {
+        if constexpr (requires(Derived &d) { d.h2mac_disconnected(e); })
+            static_cast<Derived &>(*this).h2mac_disconnected(e); // SCRATCH (lot T7-H2MAC): the test's probe
         if (!e.reason) {
             LOG_HTTP_WARN_PA(this->id(), "Disconnected by peer.");
         } else {
@@ -861,6 +865,8 @@ public:
      */
     void
     on(const qb::protocol::http2::Http2GoAwayEvent &event) {
+        if constexpr (requires(Derived &d) { d.h2mac_goaway(event); })
+            static_cast<Derived &>(*this).h2mac_goaway(event); // SCRATCH (lot T7-H2MAC): the test's probe
         // The server's own GOAWAY was logged as received from the client. A client's NO_ERROR GOAWAY after the first -- one it
         // lowers each time -- is logged by the protocol at each power of two of their count, not here each time (Huly
         // QB-1270).

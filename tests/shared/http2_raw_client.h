@@ -32,6 +32,12 @@
 #include <utility>
 #include <vector>
 
+#include <cerrno>
+
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#include <sys/socket.h>
+
 #include <qb/io/tcp/ssl/context.h>
 #include <qb/io/tcp/ssl/socket.h>
 
@@ -110,6 +116,54 @@ public:
     /// host can stall for: its writes then stop only when the connection is broken.
     std::chrono::milliseconds write_budget = std::chrono::seconds(2);
 
+    /// SCRATCH (lot T7-H2MAC): what the first failing write and the read that ended the connection met.
+    struct h2mac_failure {
+        bool                                  seen      = false;
+        bool                                  timed_out = false; ///< the write's budget ran out (no error)
+        int                                   ret       = 0;
+        int                                   qb_errno  = 0;    ///< qb::io::socket::get_last_errno() right after the call
+        int                                   raw_errno = 0;    ///< errno right after the call
+        std::string                           ssl_state;        ///< SSL_state_string_long()
+        int                                   ssl_shutdown = 0; ///< SSL_get_shutdown()
+        std::string                           ssl_error;        ///< ERR_error_string_n(ERR_peek_last_error())
+        std::size_t                           bytes = 0;        ///< the bytes written (or read) before it
+        std::chrono::steady_clock::time_point at{};
+    };
+    h2mac_failure             h2mac_write_failure, h2mac_read_failure;
+    std::size_t               h2mac_bytes_written = 0, h2mac_bytes_read = 0, h2mac_frames_read = 0, h2mac_zero_writes = 0;
+    std::vector<std::uint8_t> h2mac_last_types; ///< the types of the last frames read, oldest first (16 at most)
+    [[nodiscard]] int
+    h2mac_sockopt(int name) const {
+        int       value = -1;
+        socklen_t len   = sizeof value;
+        if (::getsockopt(static_cast<int>(_sock.native_handle()), SOL_SOCKET, name, &value, &len) != 0)
+            return -errno;
+        return value;
+    }
+
+private:
+    void
+    h2mac_fill(h2mac_failure &f, int ret, std::size_t bytes) {
+        const int raw = errno;
+        f.seen        = true;
+        f.ret         = ret;
+        f.qb_errno    = qb::io::socket::get_last_errno();
+        f.raw_errno   = raw;
+        if (SSL *ssl = _sock.ssl_handle()) {
+            if (const char *s = SSL_state_string_long(ssl))
+                f.ssl_state = s;
+            f.ssl_shutdown = SSL_get_shutdown(ssl);
+        }
+        char buf[256] = {0};
+        if (const unsigned long e = ERR_peek_last_error(); e != 0) {
+            ERR_error_string_n(e, buf, sizeof buf);
+            f.ssl_error = buf;
+        }
+        f.bytes = bytes;
+        f.at    = std::chrono::steady_clock::now();
+    }
+
+public:
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
     bool
@@ -299,10 +353,20 @@ private:
         const auto  deadline = std::chrono::steady_clock::now() + write_budget;
         std::size_t sent     = 0;
         while (sent < bytes.size()) {
+            errno       = 0;
             const int n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
             if (n > 0) {
                 sent += static_cast<std::size_t>(n);
+                h2mac_bytes_written += static_cast<std::size_t>(n);
                 continue;
+            }
+            if (n < 0 && !h2mac_write_failure.seen)
+                h2mac_fill(h2mac_write_failure, n, h2mac_bytes_written);
+            if (n == 0)
+                ++h2mac_zero_writes;
+            if (n == 0 && std::chrono::steady_clock::now() >= deadline && !h2mac_write_failure.seen) {
+                h2mac_fill(h2mac_write_failure, n, h2mac_bytes_written);
+                h2mac_write_failure.timed_out = true;
             }
             if (n < 0 || std::chrono::steady_clock::now() >= deadline)
                 return false;
@@ -314,14 +378,18 @@ private:
     /// One read; the frames it completes are dispatched. `true` when bytes came.
     bool
     read_some() {
-        char      tmp[64 * 1024];
+        char tmp[64 * 1024];
+        errno       = 0;
         const int n = _sock.read(tmp, sizeof tmp);
         if (n < 0) {
+            if (!h2mac_read_failure.seen)
+                h2mac_fill(h2mac_read_failure, n, h2mac_bytes_read);
             eof = true; // the TLS socket reports the end of the connection as -1, and "nothing yet" as 0
             return false;
         }
         if (n == 0)
             return false;
+        h2mac_bytes_read += static_cast<std::size_t>(n);
         _in.insert(_in.end(), tmp, tmp + n);
         std::size_t at = 0; // one erase a read, not one a frame: a read of a flood's replies holds thousands of frames
         while (_in.size() - at >= 9) {
@@ -336,6 +404,10 @@ private:
                 ((std::uint32_t{head[5]} << 24) | (std::uint32_t{head[6]} << 16) | (std::uint32_t{head[7]} << 8) | head[8]) & 0x7FFFFFFFu;
             f.payload.assign(head + 9, head + 9 + length);
             at += 9 + length;
+            ++h2mac_frames_read;
+            if (h2mac_last_types.size() == 16)
+                h2mac_last_types.erase(h2mac_last_types.begin());
+            h2mac_last_types.push_back(f.type);
             dispatch(f);
             if (keep_frames)
                 frames.push_back(std::move(f));
