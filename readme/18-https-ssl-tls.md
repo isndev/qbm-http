@@ -33,7 +33,7 @@ Gate your own SSL-dependent code on `QB_HAS_SSL`, never on `QBM_HTTP_HAS_SSL` �
 
 A TLS server needs a certificate chain and the matching private key, both PEM-encoded. `qb::io::ssl::Context::server(cert, key)` loads them from files by path (a `std::filesystem::path` — the same type `listen(uri, cert, key)` forwards), delegating to `Context::identity`, which also checks that the key matches the certificate. Each path is resolved through `qb::io::sys::resolve_resource()` before OpenSSL opens it: an absolute path is used unchanged, while a relative path is looked up against the current working directory first, then against the running executable's own directory. A server shipped next to its `cert.pem` / `key.pem` therefore loads them regardless of the cwd it was launched from — the same resolution applies to `Context::trust`, to the legacy raw `create_server_context`, and to the CA, client-certificate, and DH-parameter helpers below.
 
-<!-- src: qb/src/qb/io/tcp/ssl/context.cpp:373-381,456-470,432-446; qb/src/qb/io/tcp/ssl/socket.cpp:193-212; qb/src/qb/io/system/file.h:377-387 -->
+<!-- src: qb/src/qb/io/tcp/ssl/context.cpp:373-381,456-470,432-446; qb/src/qb/io/tcp/ssl/socket.cpp:194-213; qb/src/qb/io/system/file.h:377-387 -->
 
 - **Production** — obtain a certificate from a trusted CA (Let's Encrypt, your internal PKI, a commercial CA). Deploy the leaf certificate (concatenated with any intermediates) and the private key as PEM files.
 - **Development** — a self-signed certificate is fine for local testing. Browsers and verifying clients reject it unless you add it to a trust store or disable verification (see [Peer verification](#peer-verification-and-trust)).
@@ -314,7 +314,7 @@ Client-side certificate verification is **secure by default** across every clien
 - Disable verification (`verify_peer=false` / `set_verify_peer(false)`) **only** for endpoints you trust and control, typically self-signed development servers. It turns off both chain and hostname checks and exposes the connection to interception.
 - For private PKI, prefer adding your CA to the trust store over disabling verification. At the qb-io level you can load CAs into a client `SSL_CTX` with `qb::io::ssl::load_ca_certificates(ctx, path)` or `load_ca_directory(ctx, dir)`, set SNI/ALPN on the socket (`set_sni_hostname`, `set_alpn_protocols`), and present a client certificate (`configure_client_certificate`) for mTLS.
 
-<!-- src: qb/src/qb/io/tcp/ssl/socket.h:105,115,165,991,1003 -->
+<!-- src: qb/src/qb/io/tcp/ssl/socket.h:105,115,165,1006,1018 -->
 
 ## How a TLS connection ends
 
