@@ -107,6 +107,7 @@ jobs:
       - name: Run the flood case
         run: |
           set -uo pipefail
+          set +e  # the step shell is `bash -e`: a red test must not stop the counting
           o="${RUNNER_TEMP}/oracle"
           b="$(find build -type f -perm -u+x -name qbm-http-test-system-http2-control-replies | head -1)"
           (cd "$(dirname "$b")" && TSAN_OPTIONS=halt_on_error=1 perl -e 'alarm shift; exec @ARGV' 1200 \
