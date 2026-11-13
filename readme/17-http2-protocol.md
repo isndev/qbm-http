@@ -257,7 +257,7 @@ The sweep is **opportunistic**: it runs only when there is write activity. A pur
 ## Using the HTTP/2 client
 
 The persistent client is `qb::http2::Client`, created through `qb::http2::make_client(base_uri)`, which returns a `std::shared_ptr<Client>`. The client is **non-copyable and non-movable** and uses `enable_shared_from_this` internally, so always own it through the shared pointer the factory hands you. It multiplexes many requests over one connection, manages stream IDs, and offers both callback and coroutine APIs. For the full client narrative — one-shot vs. persistent, batching, reconnection — see [Asynchronous HTTP client](./14-async-http-client.md); this section covers the HTTP/2-specific surface.
-<!-- src: qbm/http/src/qbm/http/2/client.h:164,264-267,269-272,671 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:164,264-268,269-272,671 -->
 
 ### Callback API
 
