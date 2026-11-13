@@ -229,9 +229,9 @@ private:
     bool        _reconnect_firing       = false;
     bool        _in_failure_pass        = false;
     bool        _intentional_disconnect = false; ///< disconnect() was asked: the disconnected that follows starts no run (as http1)
-    // An explicit disconnect() of a live connection delivers GOAWAY(NO_ERROR) before the socket
-    // closes (Huly QB-1059): `_graceful_close_pending` while that delivery runs, bounded by
-    // GOAWAY_FLUSH_LIMIT; the epoch ties the limit's timer to the close that armed it.
+    bool        _destroying             = false; ///< The destructor runs: connect() is refused (Huly QB-1246)
+    // An explicit disconnect() of a live connection delivers GOAWAY(NO_ERROR) before the socket closes (Huly QB-1059):
+    // `_graceful_close_pending` while that delivery runs, bounded by GOAWAY_FLUSH_LIMIT; the epoch ties the limit's timer to its close.
     bool                                  _graceful_close_pending = false;
     std::uint64_t                         _graceful_close_epoch   = 0;
     std::chrono::steady_clock::time_point _reconnect_started_at{};
@@ -263,8 +263,8 @@ public:
      */
     explicit Client(const qb::io::uri &uri);
 
-    /// Every request in flight or queued hears once (503, "Client destroyed"), a pending connect() hears false, and a request pushed
-    /// again from one of those callbacks fails too, nothing armed or connected for it: safe in static storage at exit (Huly QB-1246).
+    /// Every request in flight or queued hears once (503, "Client destroyed"), a pending connect() hears false; from one of those callbacks
+    /// a request pushed again fails too and a connect() is refused (its callback hears false, it returns false): safe in static storage.
     ~Client();
     Client(const Client &)            = delete; // non-copyable and non-movable: the base class supports neither
     Client &operator=(const Client &) = delete;

@@ -114,17 +114,18 @@ stop_h2_server() {
 
 enum class h2 {
     never_connected,
-    connecting,           ///< connect() asked, no pass of the loop since
-    handshake,            ///< the transport is up, the TLS handshake unanswered
-    idle,                 ///< connected, nothing asked
-    request,              ///< a request written, its callback pending
-    retried,              ///< a request written, whose callback pushes it again when it fails: the retry pattern
-    coroutine,            ///< a coroutine parked on a request
-    own_callback,         ///< `exit()` called by the callback of a response
-    disconnected,         ///< disconnect() -- its GOAWAY queued -- and `exit()` at once
-    disconnected_run,     ///< disconnect(), the loop run until the peer read the end
-    reconnecting,         ///< the peer gone, a request waiting, the next attempt of the run scheduled
-    reconnecting_retried, ///< the same, the request pushed again from the destructor's failure too: the retry pattern after the loop
+    connecting,            ///< connect() asked, no pass of the loop since
+    handshake,             ///< the transport is up, the TLS handshake unanswered
+    idle,                  ///< connected, nothing asked
+    request,               ///< a request written, its callback pending
+    retried,               ///< a request written, whose callback pushes it again when it fails: the retry pattern
+    coroutine,             ///< a coroutine parked on a request
+    own_callback,          ///< `exit()` called by the callback of a response
+    disconnected,          ///< disconnect() -- its GOAWAY queued -- and `exit()` at once
+    disconnected_run,      ///< disconnect(), the loop run until the peer read the end
+    reconnecting,          ///< the peer gone, a request waiting, the next attempt of the run scheduled
+    reconnecting_retried,  ///< the same, the request pushed again from the destructor's failure too: the retry pattern after the loop
+    reconnecting_connects, ///< the same, and the destructor's failure of the request calls connect()
 };
 
 qb::http2::Client *g_h2_client = nullptr;
@@ -178,6 +179,20 @@ h2_retry_through_the_exit(qb::http::Response response) {
         g_h2_client->push_request(get(g_h2_target), h2_retry_through_the_exit);
     } else if (loop_gone() && !std::exchange(g_h2_pushed_after_the_loop, true)) {
         g_h2_client->push_request(get(g_h2_target), h2_retry_through_the_exit);
+    }
+}
+
+/// The same, and after the loop the destructor's failure of the request calls connect() -- with neither a connection nor a
+/// connect in flight, it would start one: it is refused, its callback hears `false` (status 2) and it returns `false`.
+void
+h2_connect_through_the_exit(qb::http::Response response) {
+    in_flight(std::move(response));
+    if (!loop_gone() && g_h2_pushes < 8) {
+        ++g_h2_pushes;
+        g_h2_client->push_request(get(g_h2_target), h2_connect_through_the_exit);
+    } else if (loop_gone() && !std::exchange(g_h2_pushed_after_the_loop, true)) {
+        if (g_h2_client->connect([](bool ok, std::string const &) { called_with(ok ? 1 : 2); }))
+            called_with(3); // a connection was started from the destructor
     }
 }
 
@@ -263,7 +278,8 @@ run_h2(h2 const state, site const where) {
             g.want_peer = 0;
             break;
         case h2::reconnecting:
-        case h2::reconnecting_retried: {
+        case h2::reconnecting_retried:
+        case h2::reconnecting_connects: {
             qb::http2::RetryPolicy policy;
             policy.with_initial_delay(1h).with_jitter(false).with_max_attempts(5);
             client.enable_auto_reconnect(std::move(policy));
@@ -273,7 +289,9 @@ run_h2(h2 const state, site const where) {
             g_h2_target = url + "/served";
             peer.go_silent();
             ++g_h2_pushes;
-            if (!client.push_request(get(g_h2_target), state == h2::reconnecting ? h2_retry : h2_retry_through_the_exit))
+            if (!client.push_request(get(g_h2_target), state == h2::reconnecting           ? h2_retry
+                                                       : state == h2::reconnecting_retried ? h2_retry_through_the_exit
+                                                                                           : h2_connect_through_the_exit))
                 setup_failed("the request was refused");
             pump_for(nullptr, 20ms);
             peer.go_away(); // the connection drops and the port refuses the next: attempt 1 fails, attempt 2 waits an hour
@@ -331,6 +349,12 @@ TEST_P(Http2ClientStaticExitDeathTest, InAReconnectionRun) {
 // no connection asked for it (Huly QB-1246).
 TEST_P(Http2ClientStaticExitDeathTest, InAReconnectionRunWhoseRequestIsPushedAgainAfterTheLoop) {
     EXPECT_EXIT(run_h2(h2::reconnecting_retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 2, 503, 0, 0, 0)));
+}
+
+// connect() called by a callback the destructor runs, in a reconnection run -- neither connected nor connecting: refused,
+// its callback hears `false` and nothing connects after the loop (Huly QB-1246).
+TEST_P(Http2ClientStaticExitDeathTest, InAReconnectionRunWhoseFailureCallbackConnectsAfterTheLoop) {
+    EXPECT_EXIT(run_h2(h2::reconnecting_connects, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 2, 2, 0, 0, 0)));
 }
 
 INSTANTIATE_TEST_SUITE_P(Exit, Http2ClientStaticExitDeathTest, ::testing::Values(site::main, site::callback), site_name);

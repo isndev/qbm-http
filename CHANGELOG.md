@@ -663,18 +663,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   or a request whose failure callback pushed it again, a deadline was left: a client in static storage, destroyed
   after its thread's event loop, started a timer in the freed loop. Measured on Linux with g++ 14, the process ended
   on an abort or a segmentation fault; under AddressSanitizer, on a heap-use-after-free in each of the four states;
-  under MSVC, it did not end, or ended on 0xC0000374, a heap corruption; on macOS, two of the cases failed in a Release
-  build and every one under AddressSanitizer. The destructor now arms nothing and connects nothing: before it fails
-  anything it clears the reconnection run, zeroes the connect and request timeouts and marks a failure pass, so a
-  request pushed again from one of its callbacks queues with no deadline and starts no connection; it fails every
-  request once, disconnects, and fails what those callbacks pushed again. Every request in flight or queued hears once,
-  with `503` and "Client destroyed", and a `connect()` still waiting hears `false`. Witness:
-  `qbm-http-test-system-http2-client-static-exit`, the client in twelve states to the end of a child process, each
-  ended from `main` and from a callback of the loop where both apply -- 23 cases; on the code as it was, 9 fail under
-  AddressSanitizer and 2 in a Release build. One of them, a reconnection run whose request the destructor's own
-  failure pushes again, is the one where only the second pass fails that request and where a request pushed again
-  would otherwise connect after the loop. Mutants, each caught under AddressSanitizer: the timeouts not zeroed, the
-  reconnection not cleared, the second failure pass dropped, the failure pass not marked.
+  under MSVC, it did not end, or ended on 0xC0000374, a heap corruption. The destructor now arms nothing and connects
+  nothing: before it fails anything it clears the reconnection run, zeroes the connect and request timeouts and marks
+  itself, and `connect()` is refused from there on -- called by one of the destructor's callbacks, its own callback
+  hears `false` and it returns `false`; asked for a request such a callback pushed again, it leaves the request queued
+  with no deadline. The destructor fails every request once, disconnects, and fails what those callbacks pushed again.
+  Every request in flight or queued hears once, with `503` and "Client destroyed", and a `connect()` still waiting
+  hears `false`. Witness: `qbm-http-test-system-http2-client-static-exit`, the client in thirteen states to the end of
+  a child process, each ended from `main` and from a callback of the loop where both apply -- 25 cases; on the code as
+  it was, 11 fail under AddressSanitizer on macOS, and 7 did in a Release build, where a write into freed memory does
+  not always stop the process. Two of the states are a reconnection run whose request the destructor's own failure
+  pushes again -- only the second pass fails that request -- and one whose failure callback calls `connect()`, with
+  neither a connection nor a connect in flight to stop it. Mutants, each caught under AddressSanitizer: the timeouts
+  not zeroed, the reconnection not cleared, the second failure pass dropped, the destructor not marked, `connect()`
+  not refused while it runs.
 
 - **A response to HEAD that declares a `Content-Length` past the client's body limit is delivered (Huly QB-1248).** A
   response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2). The HTTP/1.1 client's

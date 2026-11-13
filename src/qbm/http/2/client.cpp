@@ -51,12 +51,12 @@ Client::Client(const qb::io::uri &uri)
 Client::~Client() {
     LOG_HTTP_DEBUG_PA(_client_id, "HTTP/2 Client destructor called");
     // A destructor arms nothing and connects nothing: in static storage the client is destroyed after its thread's event loop, where a
-    // timer started writes into the freed loop (Huly QB-1246). No deadline, no reconnection, and no connect for a request pushed again.
+    // timer started writes into the freed loop (Huly QB-1246). No deadline, no reconnection, and connect() refused from here on.
     _reconnect_scheduled = false;
     _reconnect_attempts  = 0;
     _connect_timeout     = qb::duration::zero();
     _request_timeout     = qb::duration::zero();
-    _in_failure_pass     = true;
+    _destroying          = true;
     fail_all_requests("Client destroyed");
     if (_is_connected || _is_connecting) {
         disconnect();
@@ -89,6 +89,12 @@ Client::initialize_from_uri(const qb::io::uri &uri) {
 
 bool
 Client::connect(ConnectionCallback callback) {
+    if (_destroying) { // called by a callback the destructor runs, or for a request one pushed again: refused (Huly QB-1246)
+        if (callback) {
+            callback(false, "Client destroyed");
+        }
+        return false;
+    }
     if (_is_connected) {
         LOG_HTTP_DEBUG_PA(_client_id, "Already connected");
         if (callback) {
@@ -96,7 +102,6 @@ Client::connect(ConnectionCallback callback) {
         }
         return true;
     }
-
     if (_is_connecting) {
         LOG_HTTP_DEBUG_PA(_client_id, "Connection already in progress");
         if (callback) {
@@ -104,7 +109,6 @@ Client::connect(ConnectionCallback callback) {
         }
         return true;
     }
-
     if (callback) {
         _connection_callbacks.push_back(std::move(callback));
     }
@@ -116,15 +120,11 @@ Client::connect(ConnectionCallback callback) {
         _reconnect_attempts  = 0;
         _reconnect_scheduled = false;
     }
-
     LOG_HTTP_INFO_PA(_client_id, "Starting connection to " << _host << ":" << _port);
-
     if (_transport_closing) {
-        // The previous transport's dispose is still pending: start once its `disconnected` has run
-        // (see _connect_after_close). The state already says "connecting", so pushes queue -- and
-        // the connect deadline is stamped NOW, not carried over from the connection that just
-        // closed -- defensive: no pass reads it before start_connection() re-stamps it in the
-        // cases measured, but a deferred attempt owning a stale start time is simply wrong.
+        // The previous transport's dispose is still pending: start once its `disconnected` has run (see _connect_after_close). The
+        // state already says "connecting", so pushes queue -- and the connect deadline is stamped NOW, not carried over from the one
+        // that just closed: no pass reads it before start_connection() re-stamps it, but a deferred attempt owns no stale start time.
         _connect_after_close = true;
         _connect_started_at  = std::chrono::steady_clock::now();
         return true;

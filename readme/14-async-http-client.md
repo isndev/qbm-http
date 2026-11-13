@@ -561,7 +561,8 @@ without asking for it (Huly QB-1246):
   is closed with the client.
 - **`qb::http2::Client`.** Every request in flight or queued hears once, with `503` and "Client destroyed", and a
   `connect()` still waiting hears `false`. A request one of those callbacks pushes again fails too, with nothing armed
-  and nothing connected for it. The connection is closed with the client.
+  and nothing connected for it, and a `connect()` one of them calls is refused: its callback hears `false` and it
+  returns `false`. The connection is closed with the client.
 - **`qb::http3::Client`.** Every request hears once, with `503` and "HTTP/3 client destroyed", and a `connect()` still
   waiting hears `false`. The close of the connection leaves in the call.
 - **The one-shot verbs.** The session of a request in flight is the loop's, and goes with it -- when the process exits
