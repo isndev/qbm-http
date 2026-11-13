@@ -245,6 +245,10 @@ Client::~Client() {
     // Destruction abandons pending connect observers; an explicit disconnect
     // reports their cancelled attempt while the client still has a live owner.
     _connection_callbacks.clear();
+    // A request a failure callback pushes below -- the retry pattern -- finds no owner to connect for it and fails
+    // at once: no deadline is armed for it. A client with static storage is destroyed after its thread's event loop,
+    // where a timer asked of the loop stops the process (Huly QB-1246).
+    _request_timeout = qb::duration::zero();
     disconnect();
 }
 

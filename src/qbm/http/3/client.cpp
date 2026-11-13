@@ -46,11 +46,18 @@ Client::Client(qb::io::uri const &uri)
 }
 
 Client::~Client() {
+    // Nothing is accepted from here on, as during disconnect(): a request a failure callback pushes below -- the
+    // retry pattern -- is answered at once, and a connect() refused. It was queued, a deadline armed for it and a
+    // connection started for it, from the destructor; a client with static storage is destroyed after its thread's
+    // event loop, where the first of those stops the process (Huly QB-1246).
+    _remote_shutdown = true;
+    _deferred_close.emplace();
     try {
         (void) fail_all_requests("HTTP/3 client destroyed");
     } catch (...) {
         // A destructor cannot propagate an application callback's exception.
     }
+    _deferred_close.reset(); // disconnect() below is the close itself
     try {
         disconnect();
     } catch (...) {

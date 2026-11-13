@@ -156,7 +156,16 @@ public:
      * @throws std::invalid_argument if the scheme is unsupported or the host is missing.
      */
     explicit Client(qb::io::uri const &uri);
-    /** @brief Disconnect and fail any outstanding requests. */
+    /**
+     * @brief Disconnect and fail any outstanding requests.
+     * @details Every request in flight or queued hears once, with a 503 ("Connection closed"); the callbacks of a
+     *          `connect()` still waiting are abandoned. A request one of those callbacks pushes again fails at once,
+     *          with a 503: the client has no owner left to connect for it, and no deadline is armed
+     *          for it. A client with static storage is destroyed after its thread's event loop
+     *          (`listener::current`, which `exit()` destroys first): the callbacks then run there, where nothing
+     *          can be asked of the loop any more -- no timer, no connection, no coroutine (Huly QB-1246). The
+     *          coroutine forms need nothing: the coroutines parked on them were destroyed with the loop.
+     */
     ~Client();
 
     Client(Client const &)            = delete;

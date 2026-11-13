@@ -1334,6 +1334,10 @@ struct Reply {
  * complete response, a protocol error, a read limit. A response delimited by the connection
  * close (no Content-Length, no Transfer-Encoding, RFC 9112 §6.3) is complete at EOF and is
  * delivered then (Huly QB-507).
+ *
+ * One request never hears: the one in flight when the loop it waits on is torn down -- its thread ends, the process
+ * exits. The session is the loop's: it is destroyed with it, its connection closed, its callback released without
+ * being run (Huly QB-1246).
  */
 template <typename Func, typename Transport>
 class session
@@ -1348,6 +1352,7 @@ private:
     http_protocol *_http_protocol = nullptr; ///< Typed handle, for the EOF delivery of a close-delimited response
     bool           _answered      = false;   ///< The callback ran; it never runs twice
     bool           _flushing_eof  = false;   ///< Inside the EOF delivery, which a disposal is already tearing down
+    bool           _in_callback   = false;   ///< The callback is running: a loop torn down from it leaves the session alone
 
     /// Run the callback, at most once.
     void
@@ -1355,7 +1360,34 @@ private:
         if (_answered)
             return;
         _answered = true;
+        struct running {
+            bool &flag;
+            explicit running(bool &inside) noexcept
+                : flag(inside) {
+                flag = true;
+            }
+            ~running() {
+                flag = false;
+            }
+        } const scope{_in_callback};
         _func(Reply{std::move(_request), std::move(response)});
+    }
+
+    /**
+     * @brief The loop this session waits on is torn down -- its thread ends, the process exits -- before the request
+     *        ended: the session goes with it (Huly QB-1246).
+     * @details A session deletes itself when its request ends, so nothing else would: it stayed for the life of the
+     *          process with its buffers and its connection, open until the process was gone. Its callback is not
+     *          run -- the loop drops what it owns, as it drops an `async::callback` -- and the connection is
+     *          closed with the session. A session that answered and waits for its disposal goes the same way. One
+     *          whose callback is RUNNING is left alone: the callback called `listener::clear()`, or `exit()`, and
+     *          the path that called it, on the stack, ends the session itself.
+     */
+    static void
+    on_loop_teardown(void *self) noexcept {
+        auto *const request = static_cast<session *>(self);
+        if (!request->_in_callback)
+            delete request;
     }
 
 public:
@@ -1376,6 +1408,8 @@ public:
         _http_protocol = this->template switch_protocol<http_protocol>(*this);
         this->setTimeout(qb::duration::zero());
         this->set_max_message_size(std::numeric_limits<std::size_t>::max()); // the parser bounds a response (Huly QB-1248)
+        // Loop-owned, through the registration of its timer: `listener::clear()` destroys the session it finds there.
+        this->qb::io::async::with_timeout<session>::_async_event._interface->set_owner(this, &session::on_loop_teardown);
     }
 
     ~session() = default;

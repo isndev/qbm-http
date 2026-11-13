@@ -200,7 +200,7 @@ These are the levers that matter, grounded in how the types are built rather tha
 - **One thread per connection, no locks on the hot path.** A session and its context are confined to the `VirtualCore` (thread) that owns the connection. Handlers for one connection are serialized; the framework takes no locks to dispatch them. This is what makes the body and context safe to touch without synchronization — and what makes blocking inside a handler a correctness problem, not just a latency one (see below).
 
 - **One declared encoding, one transformation.** With `QB_HAS_COMPRESSION`, HTTP/1.1 one-shot and persistent clients compress an *uncompressed* request body when `Content-Encoding` is set, and decompress encoded responses. Do not precompress an HTTP/1.1 request before passing it to those clients. The response serializer emits the body's bytes unchanged: if you compress manually, set `Content-Encoding` after `body().compress(...)`; if you leave the body plain, use the compression middleware, which negotiates `Accept-Encoding`, compresses when worthwhile, and sets the header itself. An existing `Content-Encoding` makes that middleware skip response compression. See [Asynchronous HTTP client](./14-async-http-client.md) and [Standard middleware](./08-standard-middleware.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1415-1460; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-168; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:421-463 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1449-1494; qbm/http/src/qbm/http/1.1/client.cpp:122-135,149-168; qbm/http/src/qbm/http/response.cpp:308-331; qbm/http/src/qbm/http/middleware/compression.h:421-463 -->
 
 ### Never block the event loop
 

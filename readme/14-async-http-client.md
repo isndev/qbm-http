@@ -118,19 +118,19 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1367-1373,1450-1460; qbm/http/src/qbm/http/1.1/client.cpp:149-168,381-399; qbm/http/src/qbm/http/headers.cpp:320-325 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1399-1405,1484-1494; qbm/http/src/qbm/http/1.1/client.cpp:149-168,385-403; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:249-262,605-620; qbm/http/src/qbm/http/3/client.cpp:191-203,760-769; qbm/http/src/qbm/http/body.h:307-328 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:249-262,605-620; qbm/http/src/qbm/http/3/client.cpp:198-210,767-776; qbm/http/src/qbm/http/body.h:307-328 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1415-1422; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1449-1456; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
 
 ## One-shot callback client (HTTP/1.1)
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1441-1461,1546-1561,1596-1601 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1475-1495,1580-1595,1630-1635 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -174,7 +174,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1732-1737 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1766-1771 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -227,7 +227,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1732-1737 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1766-1771 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -318,7 +318,7 @@ When you make many requests to the *same origin*, the one-shot helpers reconnect
 
 The client must be owned by a `std::shared_ptr` — use `qb::http1::make_client`. Late transport completions cannot access a destroyed client. Destruction abandons pending connect observers; an explicit `disconnect()` instead reports their cancelled attempt once while the client still has a live owner.
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:96-158,212-213 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:96-158,221-222 -->
 ```cpp
 namespace qb::http1 {
     std::shared_ptr<Client> make_client(std::string const& base_uri);
@@ -382,7 +382,7 @@ Notes specific to the persistent HTTP/1.1 client:
 A closing response marks the client disconnected **before** its callback runs. The active response is delivered once, while queued remainder follows the normal reconnect policy. On disconnect, connect failure, or timeout, the old request and connect-callback cohort is detached before its notifications. A request submitted by one of those callbacks belongs to the next cycle and cannot be consumed by the old failure loop. Batch order, callback counts, and existing pending-request deadlines are preserved.
 
 If a callback requests `connect()`, the new attempt is accepted but starts only after the old callbacks and protocol/I/O dispatch have unwound. `is_connecting()` can therefore be true while `is_connected()` remains false. Work queued behind this explicit intent is admitted even with `set_auto_reconnect(false)`; without such an intent, a disconnected client with automatic reconnect disabled still rejects work with 503. A direct `disconnect()` outside callback dispatch releases the retired connection before returning. Callback exceptions remain contained, so one throwing old callback does not prevent the remaining old notifications.
-<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:244-248,284-319,350-361,506-522,577-605,609-642,702-761 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp:244-252,288-323,354-365,510-526,581-609,613-646,706-765 -->
 
 ## Persistent HTTP/2 client (`qb::http2::Client`)
 
@@ -477,7 +477,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:110-114,184-191,214-256,258-293,406 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:110-114,193-200,223-265,267-302,415 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {
@@ -543,6 +543,50 @@ The HTTP/3 client adds two capabilities the others lack:
 Request callbacks always run exactly once: on success with the server `Response`, or with a synthesized error (`SERVICE_UNAVAILABLE` on shutdown/disconnect, `REQUEST_TIMEOUT` on timeout, `BAD_GATEWAY` on stream close, `CLIENT_CLOSED_REQUEST` on cancel). A null callback is rejected — `push_request` returns `false` and `push_request_with_id` returns `0`. A request the pending-request cap refuses gets its `503` through the callback and `push_request` returns `false`; `push_requests` returns `false` when the cap refused at least one member — the HTTP/1.1 and HTTP/2 clients answer the same.
 
 For the QUIC transport and the dual-stack (h2 + h3) server, see [HTTP/3 protocol](./19-http3-protocol.md).
+
+## A client kept in static storage, at process exit
+
+`exit()` -- and the return from `main` -- destroys the main thread's thread-locals before the objects with static
+storage, and the event loop of qb-io (`listener::current`) is a thread-local. A client held by a `static`
+`std::shared_ptr`, or a WebSocket client declared `static`, is therefore destroyed after the loop it ran on, where
+nothing can be registered, armed or resumed any more: a request for the loop there stops the process on a line that
+names it (qb's [coroutines](https://github.com/isndev/qb/blob/main/readme/3_qb_io/coroutines.md) page, "What outlives
+a thread's listener"). The HTTP/1.1 client, the HTTP/3 client, the one-shot verbs and the WebSocket clients end
+without asking for it (Huly QB-1246):
+
+- **`qb::http1::Client`.** Every request in flight or queued hears once, with `503` and "Connection closed", as
+  `disconnect()` fails it. The callbacks of a `connect()` still waiting are abandoned, never called. The connection
+  is closed with the client.
+- **`qb::http3::Client`.** Every request hears once, with `503` and "HTTP/3 client destroyed", and a `connect()` still
+  waiting hears `false`. The close of the connection leaves in the call.
+- **The one-shot verbs.** The session of a request in flight is the loop's, and goes with it -- when the process exits
+  and when the thread that sent the request ends: its connection is closed and its callback is released WITHOUT being
+  run. It is the one case where a one-shot callback never hears.
+- **The WebSocket clients** (`ws::Client`, a class of your own over `ws::WebSocket`, `ws::coro_client`). The transport
+  is closed with the client, with no Close frame, and a destructor says nothing: no `disconnected`, no `closed`, no
+  `error`. A `disconnect()` before the exit ends the same way; its `disconnected` event comes from the loop, so it is
+  heard when a pass of the loop follows the call and never when the process ends first.
+- **A coroutine parked on a client** -- on `push_request()`, on a one-shot `GET`, on `ws.receive()` -- is destroyed
+  with the loop, before the client: it is not resumed, and the client's destructor finds nobody to complete.
+
+The peer of each connection reads a clean end of stream when the client had read everything the peer sent; closed
+with bytes of its peer still unread, a TCP connection is reset, here as anywhere.
+
+**`qb::http2::Client` is not in that list yet.** Destroyed after the loop with a `connect()` or a TLS handshake in
+flight, with a reconnection waiting for its next attempt, or with a request whose failure callback pushes it again,
+its destructor arms its own timer on the loop that is gone: the process can crash at exit, or not end. In its other
+states -- never connected, connected and idle or with requests in flight, disconnected by the program -- it ends as
+the HTTP/1.1 client does, a request in flight hearing `503` and "Client destroyed".
+
+The callbacks a destructor runs are your code running after the loop: they must ask nothing of it -- no
+`qb::io::async::callback`, no coroutine, no new client. Pushing the request again from there, the retry pattern, is
+answered at once with a `503` (the client has no owner left, or accepts nothing any more) and arms nothing. Two ends
+are qb-io's rule, not this module's. `exit()` called from the callback of a response leaves an HTTP client alive:
+the dispatch that called the callback holds the client and never unwinds, so only the static pointer is destroyed and
+the connection is closed by the end of the process. A WebSocket client, which nothing shares, is destroyed even
+then. And `exit()` called from a coroutine makes the thread's scheduler abandon the coroutines it owns and say so on
+one line of stderr.
+<!-- src: qbm/http/src/qbm/http/1.1/client.cpp (Client::~Client, Client::disconnect); qbm/http/src/qbm/http/3/client.cpp (Client::~Client); qbm/http/src/qbm/http/1.1/http.h (async::session, on_loop_teardown) -->
 
 ## Pitfalls
 

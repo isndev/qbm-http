@@ -243,7 +243,7 @@ The protocol the session ends up speaking is decided after the handshake by insp
 
 The callback and coroutine free functions (`qb::http::GET`, `POST`, `REQUEST`, …) pick the transport from the request URI scheme automatically, ignoring ASCII case. A mixed-case HTTPS URI routes through the secure `async::HTTPS` session (`stcp` transport); HTTP routes through plaintext. Qb-io supplies the default port when a mixed-case URI omits one. Unsupported schemes are rejected before connecting, and a build without SSL support rejects HTTPS with 503 instead of using TCP. No SSL setup is required on the client for the common case — the system's default CA store verifies the server certificate.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1593-1620,1564-1567,1523-1524 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1627-1654,1598-1601,1557-1558 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -258,7 +258,7 @@ qb::http::GET(
 
 Every one-shot verb and the generic `REQUEST` take an optional trailing `bool verify_peer = true`. Leaving it at the default performs full certificate-chain and hostname verification; passing `false` disables both and **must only be used for trusted or self-signed endpoints you control**:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1600 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1634 -->
 ```cpp
 // Dev only: accept a self-signed server certificate.
 qb::http::GET(std::move(req), on_reply,
@@ -272,7 +272,7 @@ The coroutine overloads carry the same `verify_peer` parameter and `co_await` th
 
 `qb::http1::Client` reuses one connection across requests. It defaults `verify_peer` to `true`; toggle it with `set_verify_peer(bool)` **before** connecting, since it is applied when the secure connection opens. The connect timeout is a `qb::duration` (default 30 seconds).
 
-<!-- src: qbm/http/src/qbm/http/1.1/client.h:133, 137, 233, 258 -->
+<!-- src: qbm/http/src/qbm/http/1.1/client.h:133, 137, 242, 267 -->
 ```cpp
 #include <qbm/http/http.h>
 

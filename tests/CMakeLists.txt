@@ -207,6 +207,12 @@ qhttp_test(unit ws-key-crypto             unit/ws/ws-key-crypto.cpp             
 # SYSTEM — in-process loopback client+server (REQUIRES live). Local TLS = +ssl.
 # =============================================================================
 qhttp_test(system http1-client         system/http1/http1-client.cpp         REQUIRES live EXTRA_LABELS http1)
+# Huly QB-1246: a client with static storage -- destroyed after the main thread's event loop -- ends cleanly at process
+# exit, one child per case (qb's static_exit_support.h). No `ws` / `http3` label: CI counts the http3-labelled tests.
+qhttp_test(system client-static-exit system/client/client-static-exit.cpp REQUIRES live EXTRA_LABELS http1)
+if (TARGET qbm-http-test-system-client-static-exit)
+    target_include_directories(qbm-http-test-system-client-static-exit PRIVATE "${QB_ROOT_DIR}/tests/io/shared")
+endif ()
 qhttp_test(system http1-loopback-basic system/http1/http1-loopback-basic.cpp REQUIRES live EXTRA_LABELS http1)
 qhttp_test(system http1-loopback system/http1/http1-loopback.cpp REQUIRES ssl live EXTRA_LABELS http1)
 qhttp_test(system http1-extraction system/http1/http1-extraction.cpp REQUIRES live EXTRA_LABELS http1) # Huly QB-1182

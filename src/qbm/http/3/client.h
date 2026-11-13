@@ -169,7 +169,16 @@ public:
      * @throws std::invalid_argument if the scheme is not @c https.
      */
     explicit Client(qb::io::uri const &uri);
-    /// Destructor: fails all outstanding requests and tears down the connection.
+    /**
+     * @brief Destructor: fails all outstanding requests and tears down the connection.
+     * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and a
+     *          `connect()` still waiting hears `false`. From the first of those callbacks on the client accepts
+     *          nothing, as during `disconnect()`: a request pushed again is answered at once ("HTTP/3 client
+     *          disconnect") and a `connect()` refused -- nothing is queued, armed or connected from a destructor.
+     *          A client with static storage is destroyed after its thread's event loop (`listener::current`,
+     *          which `exit()` destroys first): the callbacks then run there, where nothing can be asked of the
+     *          loop any more (Huly QB-1246). The coroutines parked on the awaiter forms were destroyed with it.
+     */
     ~Client();
 
     Client(Client const &)            = delete;

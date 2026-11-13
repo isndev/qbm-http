@@ -521,6 +521,54 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **An HTTP/3 client kept in static storage ends cleanly at process exit, and its destructor accepts nothing from the
+  callbacks it runs (Huly QB-1246).** `exit()` destroys the main thread's event loop, a thread-local, before the
+  objects with static storage: a `static` `std::shared_ptr<qb::http3::Client>` is destroyed after the loop it ran on.
+  Connected, such a client ended the process on `free(): corrupted unsorted chunks`, `corrupted double-linked list`
+  or a segmentation fault in a g++ 14 Release build, and on a heap-use-after-free under AddressSanitizer: the QUIC
+  endpoint it is built on armed its timer on the freed loop while closing. That is fixed in qb-io (`close()` no longer
+  arms its timer). The client's own destructor also failed its requests BEFORE it stopped accepting: a callback that pushed the
+  request again, the retry pattern, had it queued, a deadline armed for it and a connection started for it from the
+  destructor -- after the loop, the first of those stops the process on qb-io's named line. The destructor now accepts
+  nothing from its first callback on, as `disconnect()` does: a request pushed again is answered at once with `503`
+  and "HTTP/3 client disconnect", a `connect()` is refused. Every request in flight or queued still hears once, with
+  `503` and "HTTP/3 client destroyed", and a `connect()` still waiting hears `false`.
+
+- **A one-shot request in flight when its event loop ends is destroyed with it (Huly QB-1246).** The session of
+  `qb::http::GET(request, callback)` and of the other one-shot verbs deletes itself when its request ends, and nothing
+  else did: a request still in flight when the loop it waits on was torn down -- the thread that sent it ending, a
+  core stopping, the process exiting -- stayed for the life of the process, with its buffers and its connection, open
+  until the process was gone. LeakSanitizer reports 14 312 bytes in 17 allocations for one such request, and its
+  server reads no end of stream while the process lives. The session is now the loop's, as an `async::callback` is:
+  `listener::clear()` destroys it, its connection is closed and its server reads a clean end of stream. Its callback
+  is released WITHOUT being run -- the one case where a one-shot callback never hears, which the session's contract
+  now states. A session that answered and waits for its disposal goes the same way; one whose callback is running
+  when the loop is cleared (the callback cleared it, or called `exit()`) is left to the path that called it.
+
+- **A request pushed again from the destructor of an HTTP/1.1 client arms no deadline (Huly QB-1246).**
+  `qb::http1::Client`'s destructor disconnects, which fails every request in flight or queued once, with `503`. A
+  callback that pushed the request again from there had a pending-timeout armed for it, though the client, with no
+  owner left, could only fail it at once. With the client in static storage -- destroyed after its thread's event
+  loop -- that timer was a request the loop stops the process for: `qb: listener::current.registerEvent() ... was
+  requested after that thread's event loop (listener::current) was destroyed`, then `std::terminate()`. The destructor
+  now clears the request timeout before it disconnects: the request pushed again fails at once, with `503`, and
+  nothing is armed. The request path is untouched.
+
+- **The HTTP/1.1 client, the one-shot verbs, the WebSocket clients and the HTTP/3 client are witnessed through
+  process exit, in every state (Huly QB-1246).**
+  `qbm-http-test-system-client-static-exit` runs each of them with static storage to the end of a child process:
+  never connected, a connect in flight, a handshake in flight, connected and idle, a request in flight with its
+  callback pending or a coroutine parked on it, the retry pattern, disconnected by the program -- ended from `main`,
+  from a callback of the loop, from a callback of the client and from a coroutine. Each child must end with the code
+  its judge chose and print the judge's line and nothing else; the judge, an `atexit` handler registered before the
+  client, asserts that the client was destroyed after the loop -- the client itself, not only a pointer to it; where
+  `exit()` is called inside its own dispatch, that it was left alive --, reads the end of the peer's stream (a clean
+  EOF, never a reset) and asks LeakSanitizer. On the code as it was, 19 of its 65 cases fail under AddressSanitizer
+  and 17 failed in a g++ 14 Release build, where a write into freed memory does not always stop the process; the
+  HTTP/1.1 client and the WebSocket clients passed every state but the retry pattern. What a client in static storage does at exit is written in
+  `readme/14-async-http-client.md` and in the `llm/` reference. The HTTP/2 client is not among them: its destructor
+  arms its timer after the loop in four states; its fix, under `2/`, and its witness are a change of their own.
+
 - **A response to HEAD that declares a `Content-Length` past the client's body limit is delivered (Huly QB-1248).** A
   response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2). The HTTP/1.1 client's
   parser checked that length against `max_body_size` (100 MB by default) at the end of the header section and refused

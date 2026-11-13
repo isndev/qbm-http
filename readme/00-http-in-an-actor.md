@@ -296,7 +296,7 @@ default is `qb::duration::zero()`, which means *no timeout at all*:
 auto reply = co_await qb::http::GET(qb::http::Request{{"http://upstream/health"}},
                                     std::chrono::seconds(2));
 ```
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1726-1730 (REQUEST: qb::duration timeout = zero), :1733-1736 (GET) -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1760-1764 (REQUEST: qb::duration timeout = zero), :1767-1770 (GET) -->
 
 Pass one. A route handler that `co_await`s an upstream with the default zero holds its `Context` — and the connection
 behind it — open for as long as the upstream is willing to be slow.
