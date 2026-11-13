@@ -871,6 +871,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   compiled eight ways with its own command line: only the place of the class matters, not the lambda's return type, the
   `shared_ptr`, a generic lambda beside it or the class template behind `Response` -- and the release preset built to
   the end reports no other site.
+- **The flood case of `qbm-http-test-system-http2-control-replies` holds on macOS (Huly QB-1270).**
+  `AClientThatNeverReadsIsCutOnceAThousandRepliesAreQueued` read the server's verdict -- a thousand replies, then its
+  `GOAWAY(ENHANCE_YOUR_CALM)` -- from what the session's output still held when it closed, and took a loopback socket
+  that the replies had filled, its client reading nothing, to take nothing more. macOS does not keep it full: a socket
+  that refused part of a write takes more a millisecond later, its reader's receive buffer growing whatever `SO_RCVBUF`
+  that reader set (measured on GitHub's macOS 26 image, isndev/qbm-http run 43489561448). The write that followed the
+  verdict could take the thousand replies and the `GOAWAY`: the session then closed at once with nothing queued, the
+  bound kept, and the case read nothing -- red with OpenSSL 4.1.0 and 3.5.9 alike, under ThreadSanitizer in 17 runs of
+  30 with each (the PING and SETTINGS floods; runs 43490785398, 43499030693), in Release in 6 floods of 330, every red
+  one of that shape (instrumented, runs 43499003035, 43499016623). The client now first asks for a response of 32 MiB
+  its connection's buffers never take whole, and reads only its head: every reply waits behind that body on every
+  system, and the case reads the rest of it, exactly a thousand replies and the `GOAWAY`. The flood must also end on a
+  write the closed connection refuses, within half the session's inactivity timeout, and the client must read no reply.
+  Green on that image with both majors: 20 runs of 20 in Release and under ThreadSanitizer. The server is unchanged.
 
 - **A streamed response's trailer section is held to the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, as a buffered
   response's is (Huly QB-86 with Huly QB-1240, a composition fix of the 3.4.0 train 6).** QB-1240 holds the trailer
