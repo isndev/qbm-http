@@ -15,12 +15,13 @@
  *   - the server, a client that reads (the raw HTTP/2 client of `shared/http2_raw_client.h`): 3000 PINGs, then 3000
  *     SETTINGS, in batches whose replies it reads before it asks again -- every one answered, no GOAWAY, and a request
  *     is still served. Between two units of progress the 1001st closed the connection;
- *   - the server, a client that never reads: rounds of 999 PINGs (then SETTINGS, then DATA on a closed stream,
- *     each of which draws a reset) and a request the server answers, which forgave the budget -- the replies queued for
- *     as long as the client sent, up to qb-io's write cap. Once the socket's buffers are full a thousand replies queue
- *     and the connection is closed: what the session's output held at that moment is read on the server -- no more
- *     than a thousand replies and, behind them, the guard's GOAWAY, which a client whose buffers are full cannot be
- *     handed;
+ *   - the server, a client that never reads: behind a response its connection's buffers never take whole, which it
+ *     asked for and reads only the head of, rounds of 999 PINGs (then SETTINGS, then DATA on a closed stream, each of
+ *     which draws a reset) and a request the server answers. A thousand replies queue and the connection is closed at
+ *     once: what the session's output held at that moment is read on the server -- the rest of the response, a thousand
+ *     replies and, behind them, the guard's GOAWAY, which a client whose buffers are full cannot be handed. (Before the
+ *     guard counted the replies queued, each request forgave it, and the replies queued for as long as the client
+ *     sent, up to qb-io's write cap.);
  *   - the client (`qb::http2::Client`), a server that pings it 3000 times and reads each batch of PONGs: never closed.
  *     With no response in progress the client closed the connection at the 1001st;
  *   - the client, a server whose HEADERS fall on a stream that has closed, 3000 of them, and that reads each batch of
@@ -55,114 +56,18 @@
 #include <qbm/http/2/client.h>
 #include <qbm/http/http.h>
 
-#include <cstdio>
-#include <cstring>
-#include <iostream>
-#include <sstream>
-
-#include <openssl/crypto.h>
-#include <openssl/ssl.h>
-#include <sys/socket.h>
-
 using namespace std::chrono_literals;
 using qb::http::test::Http2RawClient;
 using qb::http::test::ServerThread;
 
 namespace http2_control_replies_test {
 
-/// SCRATCH (lot T7-H2MAC): what the server's session and the client met, per flood, with times (ms since the flood began).
-namespace h2mac {
-using clock = std::chrono::steady_clock;
-inline std::mutex               mutex;
-inline std::atomic<clock::rep>  t0_ticks{clock::now().time_since_epoch().count()};
-inline std::vector<std::string> events;
-inline std::string              reply;     // the reply the current flood draws
-inline std::atomic<int>         flood{-1}; // the flood under way
-inline std::atomic<std::size_t> pending_writes{0};
-inline std::atomic<std::size_t> max_pending{0};
-inline std::atomic<long long>   last_pending_us{-1};
-inline double
-ms(clock::time_point t) {
-    return std::chrono::duration<double, std::milli>(t - clock::time_point(clock::duration(t0_ticks.load()))).count();
-}
-inline void
-record(std::string const &what) {
-    std::ostringstream line;
-    line.setf(std::ios::fixed);
-    line.precision(1);
-    line << "t=" << ms(clock::now()) << "ms flood#" << flood.load() << " " << what;
-    std::lock_guard lock(mutex);
-    events.push_back(line.str());
-}
-inline std::size_t
-count(std::string_view output, std::string_view frame) {
-    std::size_t n = 0;
-    if (frame.empty())
-        return 0;
-    for (std::size_t at = output.find(frame); at != std::string_view::npos; at = output.find(frame, at + frame.size()))
-        ++n;
-    return n;
-}
-inline int
-sockopt(int fd, int name) {
-    int       value = -1;
-    socklen_t len   = sizeof value;
-    if (::getsockopt(fd, SOL_SOCKET, name, &value, &len) != 0)
-        return -errno;
-    return value;
-}
-} // namespace h2mac
-
 class GuardServer;
-
-[[nodiscard]] std::optional<std::pair<std::uint32_t, std::string>> last_goaway(std::string_view output);
 
 class GuardSession : public qb::http2::use<GuardSession>::session<GuardServer> {
 public:
     explicit GuardSession(GuardServer &server)
         : session(server) {}
-
-    std::string
-    h2mac_state() {
-        std::ostringstream s;
-        std::string_view   out(this->out().cbegin(), this->out().size());
-        std::string        reply;
-        {
-            std::lock_guard lock(h2mac::mutex);
-            reply = h2mac::reply;
-        }
-        const auto goaway = last_goaway(out);
-        s << "out=" << out.size() << " replies_queued=" << h2mac::count(out, reply)
-          << " goaway_at_end=" << (goaway ? "code" + std::to_string(goaway->first) + "/'" + goaway->second + "'" : std::string("none"))
-          << " bytes_written=" << this->bytes_written() << " bytes_read=" << this->bytes_read() << " in=" << this->in().size();
-        const int fd = static_cast<int>(this->transport().native_handle());
-        s << " fd=" << fd;
-        if (fd >= 0)
-            s << " sndbuf=" << h2mac::sockopt(fd, SO_SNDBUF) << " rcvbuf=" << h2mac::sockopt(fd, SO_RCVBUF);
-        if (SSL *ssl = this->transport().ssl_handle()) {
-            const char *st = SSL_state_string_long(ssl);
-            s << " ssl_state='" << (st ? st : "?") << "' ssl_shutdown=" << SSL_get_shutdown(ssl);
-        }
-        s << " pending_write_events=" << h2mac::pending_writes.load() << " max_pending=" << h2mac::max_pending.load();
-        return s.str();
-    }
-    void
-    h2mac_disconnected(const qb::io::async::event::disconnected &e) {
-        h2mac::record("SERVER session on(disconnected): reason=" + std::to_string(e.reason) + " error=" + std::to_string(e.error_code.value())
-                      + " ('" + (e.error_code ? e.error_code.message() : std::string()) + "') " + h2mac_state());
-    }
-    void
-    h2mac_goaway(const qb::protocol::http2::Http2GoAwayEvent &event) {
-        h2mac::record("SERVER GOAWAY event: sent=" + std::to_string(event.sent) + " code=" + std::to_string(static_cast<int>(event.error_code))
-                      + " debug='" + event.debug_data + "' " + h2mac_state());
-    }
-    void
-    h2mac_pending_write(std::size_t bytes) {
-        ++h2mac::pending_writes;
-        if (bytes > h2mac::max_pending.load())
-            h2mac::max_pending = bytes;
-        h2mac::last_pending_us = static_cast<long long>(h2mac::ms(h2mac::clock::now()) * 1000.0);
-    }
 };
 
 /// What the output of a session held when the session was closed with bytes still queued, for the test's thread.
@@ -177,21 +82,39 @@ struct Closed {
         seen = false;
         output.clear();
     }
+    /// The output kept, once: moved out, not copied (it holds most of a large body).
     [[nodiscard]] std::optional<std::string>
-    read() {
+    take() {
         std::lock_guard lock(mutex);
-        return seen ? std::optional<std::string>(output) : std::nullopt;
+        if (!seen)
+            return std::nullopt;
+        seen = false;
+        return std::optional<std::string>(std::move(output));
     }
 };
 Closed g_closed;
 
-/// One route, answered at once and without a body: nothing of its response waits on a flow-control window, so a client
-/// that never reads still has every request served -- each one a stream it opened.
+/// The body of `/large`: far more than a connection whose client reads nothing takes -- 4.2 MB on Linux and 180 KB on
+/// Windows once full (measured, `http2-close-after-peer.cpp`), and on macOS no more than the 4 MiB each way its
+/// autotuning may grow the two buffers to (`net.inet.tcp.autosndbufmax`, `autorcvbufmax` on the runner) -- so that the
+/// body never leaves the session's output whole, and what the session writes after it waits there (Huly QB-1270). It
+/// relies on the server writing a buffered response into the output whole, as far as the windows allow, whatever the
+/// socket takes (`send_response_body()`, `protocol/server.h`).
+constexpr std::size_t kLargeBody = std::size_t{32} << 20;
+
+/// Two routes, answered at once: `/served` without a body -- nothing of its response waits on a flow-control window, so
+/// a client that never reads still has every request served, each one a stream it opened -- and `/large`, kLargeBody
+/// octets, for a client that opened its windows to it.
 class GuardServer : public qb::http2::use<GuardServer>::server<GuardSession> {
 public:
     GuardServer() {
         router().get("/served", [](auto ctx) {
             ctx->response().status() = qb::http::status::NO_CONTENT;
+            ctx->complete();
+        });
+        router().get("/large", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(kLargeBody, 'x');
             ctx->complete();
         });
         router().compile();
@@ -200,11 +123,6 @@ public:
     /// Session hook: a session is gone. One that left bytes in its output is kept for the test, as it was.
     void
     disconnected(qb::uuid ident) {
-        {
-            const auto it = this->sessions().find(ident);
-            h2mac::record(std::string("SERVER disconnected(uuid): found=")
-                          + (it != this->sessions().end() && it->second ? "yes " + it->second->h2mac_state() : std::string("no")));
-        }
         if (const auto it = this->sessions().find(ident); it != this->sessions().end() && it->second) {
             auto const &out = it->second->out();
             if (out.size() > 0) {
@@ -218,7 +136,7 @@ public:
 };
 
 /// The error code and the debug data of the GOAWAY frame @p output ends on, if it ends on one.
-std::optional<std::pair<std::uint32_t, std::string>>
+[[nodiscard]] std::optional<std::pair<std::uint32_t, std::string>>
 last_goaway(std::string_view output) {
     const auto byte = [&](std::size_t i) {
         return static_cast<std::uint32_t>(static_cast<unsigned char>(output[i]));
@@ -313,32 +231,52 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatReadsMaySolicitRepliesPastTheThou
     reads(true);
 }
 
-// A client that never reads: rounds of 999 PINGs and one request, each round in the two writes of a client that reads
+// A client that never reads. It asks first for a response its connection's buffers never take whole (kLargeBody), its
+// windows opened to it, and reads only the head of it: what the session writes from then on waits in its output behind
+// the rest of that body. Then rounds of 999 PINGs and one request, each round in the two writes of a client that reads
 // nothing back -- then the same with SETTINGS, and with DATA frames of one octet on a closed stream, each of which draws
-// a reset (empty ones would meet the bucket of the frames that make no progress first, at its 10001st). The request is served -- a stream the
-// client opened, which forgave every budget -- so the server answered for as long as the client sent: 64 MiB of replies solicited, every one of
-// them written to an output nobody drained, and the connection still serving. The socket's buffers take what they can hold; past them the
-// replies queue in the session's output, and the thousandth queued is the last: the protocol writes its GOAWAY behind them and the session
-// closes the connection -- without waiting for a client that takes nothing, so the GOAWAY stays in the output it closed
-// with. That output is read on the server: no more than a thousand replies, then GOAWAY(ENHANCE_YOUR_CALM) naming the
-// flood. (How many of the thousand are still there is the socket's business: it may take a few more between the
-// protocol's verdict and the close.) The client, when it reads at last, finds the end of the connection and far fewer
-// replies than it solicited.
+// a reset (one octet each, so that they take no token of the bucket of the frames that make no progress). The request
+// is served, a stream the client opened; before the guard counted the replies queued, it forgave them, and the server
+// answered for as long as the client sent -- 64 MiB of replies solicited, every one written to an output nobody
+// drained, and the connection still serving. Now each reply counts from the moment it is written, and none leaves:
+// the thousandth queued is the last, the protocol writes its GOAWAY behind it and the session closes the connection at
+// once -- without waiting for a client that takes nothing, so the GOAWAY stays in the output it closed with. That
+// output is read on the server: the rest of the large body, a thousand replies exactly, then GOAWAY(ENHANCE_YOUR_CALM)
+// naming the flood. The client's next write fails on the closed connection, and when it reads at last it finds the
+// end of it and none of the replies, still behind the body.
+//
+// Without the body ahead, the replies filled the socket themselves, and the case took a socket so filled to take
+// nothing more. macOS does not keep it so: a socket that refused part of a write takes more a millisecond later, its
+// reader's receive buffer growing whatever SO_RCVBUF that reader set (measured on the runner, isndev/qbm-http run
+// 43489561448). The write that followed the verdict took the thousand replies AND the GOAWAY, with OpenSSL 4.1.0 and
+// 3.5.9 alike, and the session closed at once with nothing queued -- the bound kept, the connection ended, and nothing
+// left here to read (Huly QB-1270). The path a session takes then, closed at once with nothing queued, is
+// http2-close-after-peer's (AFloodingConnectionIsClosedAtOnceAndNeverReachesTheLoop); the replies a socket takes being
+// forgiven is AClientThatReadsMaySolicitRepliesPastTheThousandth's, above.
 TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepliesAreQueued) {
     constexpr std::size_t kFlood = 64u << 20; // of replies solicited: more than any loopback socket buffers hold
-    using soliciting             = Http2RawClient::soliciting;
+    // The windows the client opens, the stream's and the connection's: the large body and room to spare.
+    constexpr std::uint32_t kWindow = static_cast<std::uint32_t>(kLargeBody + (std::size_t{1} << 20));
+    // A write the server does not take: a broken connection fails it at once, and a host that stalls does not hold it
+    // this long. Half the session's inactivity timeout, so that a server that stopped reading and kept the connection
+    // until then leaves the client's write waiting out its budget instead of failing it.
+    constexpr auto kBudget = 30s;
+    static_assert(kBudget * 2 <= qb::http2::constants::DEFAULT_SESSION_TIMEOUT);
+    static_assert(kLargeBody % 16384 == 0, "the body ends on a DATA frame of the default SETTINGS_MAX_FRAME_SIZE");
+    using soliciting = Http2RawClient::soliciting;
     struct flood {
         const char      *name;
+        const char      *key; // of its RecordProperty
         soliciting       what;
         std::string_view reply;  // the reply each frame draws, as the server writes it
         const char      *goaway; // the debug data of the GOAWAY that closes it
     };
     const flood floods[] = {
-        {"PING", soliciting::pings, std::string_view("\x00\x00\x08\x06\x01\x00\x00\x00\x00\x51\x42\x31\x32\x37\x30\x00\x00", 17),
+        {"PING", "ping", soliciting::pings, std::string_view("\x00\x00\x08\x06\x01\x00\x00\x00\x00\x51\x42\x31\x32\x37\x30\x00\x00", 17),
          "Excessive PING control frames (flood)"},
-        {"SETTINGS", soliciting::settings, std::string_view("\x00\x00\x00\x04\x01\x00\x00\x00\x00", 9),
+        {"SETTINGS", "settings", soliciting::settings, std::string_view("\x00\x00\x00\x04\x01\x00\x00\x00\x00", 9),
          "Excessive SETTINGS control frames (flood)"},
-        {"DATA on a closed stream", soliciting::data_on_a_closed_stream,
+        {"DATA on a closed stream", "reset", soliciting::data_on_a_closed_stream,
          std::string_view("\x00\x00\x04\x03\x00\x00\x00\x00\x01\x00\x00\x00\x05", 13), // RST_STREAM(STREAM_CLOSED) on stream 1
          "Excessive frames on closed streams (HTTP/2 reset flood)"},
     };
@@ -348,29 +286,23 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         const soliciting       what  = each.what;
         const std::string_view reply = each.reply;
         g_closed.reset();
-        {
-            std::lock_guard lock(h2mac::mutex);
-            h2mac::events.clear();
-            h2mac::reply.assign(reply.data(), reply.size());
-            h2mac::t0_ticks = h2mac::clock::now().time_since_epoch().count();
-        }
-        h2mac::flood           = static_cast<int>(&each - floods);
-        h2mac::pending_writes  = 0;
-        h2mac::max_pending     = 0;
-        auto            owned  = std::make_unique<Http2RawClient>();
-        Http2RawClient &client = *owned;
-        client.keep_frames     = false;
-        client.write_budget    = 120s; // a write of the flood stops when the connection is broken, not when the host is slow
-        ASSERT_TRUE(client.connect(port));
+        Http2RawClient client;
+        client.keep_frames  = false;
+        client.write_budget = kBudget;
+        ASSERT_TRUE(client.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, kWindow}}));
+        ASSERT_TRUE(client.window_update(0, kWindow - 65535));
         ASSERT_TRUE(client.read_until([&] { return client.settings_acked; }));
         const std::uint32_t closed = client.request("/served"); // stream 1: answered, so closed for the server
         ASSERT_EQ(closed, 1u);
         ASSERT_TRUE(client.read_until([&] { return client.stream(closed).end_stream; }));
+        const std::uint32_t large = client.request("/large");
+        ASSERT_NE(large, 0u);
+        // The head of the large response, and whatever came with it in one read: the server wrote the body whole.
+        ASSERT_TRUE(client.read_until([&] { return client.stream(large).status() == 200; }, kBudget)) << "the large response did not begin";
         const auto read = [&] {
             return what == soliciting::pings ? client.pongs : what == soliciting::settings ? client.settings_acks : client.resets;
         };
-        h2mac::record("CLIENT connected: sndbuf=" + std::to_string(client.h2mac_sockopt(SO_SNDBUF))
-                      + " rcvbuf=" + std::to_string(client.h2mac_sockopt(SO_RCVBUF)));
+        ASSERT_FALSE(client.write_failed);
         const std::size_t before    = read();
         std::size_t       solicited = 0;
         bool              taking    = true; // the server still takes what the client writes
@@ -378,102 +310,44 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
             taking = client.solicit(999, what, closed) && client.request("/served") != 0;
             solicited += 999;
         }
-        const auto failure_line = [&](const char *which, Http2RawClient::h2mac_failure const &f) {
-            if (!f.seen)
-                return std::string(which) + "=none";
-            std::ostringstream l;
-            l.setf(std::ios::fixed);
-            l.precision(1);
-            l << which << "={t=" << h2mac::ms(f.at) << "ms ret=" << f.ret << " timed_out=" << f.timed_out << " qb_errno=" << f.qb_errno << " ('"
-              << std::strerror(f.qb_errno) << "') errno=" << f.raw_errno << " ssl_state='" << f.ssl_state << "' ssl_shutdown=" << f.ssl_shutdown
-              << " ssl_error='" << f.ssl_error << "' bytes_before=" << f.bytes << "}";
-            return l.str();
-        };
-        h2mac::record("CLIENT flood ended: taking=" + std::to_string(taking) + " solicited=" + std::to_string(solicited) + " written="
-                      + std::to_string(client.h2mac_bytes_written) + " zero_writes=" + std::to_string(client.h2mac_zero_writes) + " "
-                      + failure_line("write_failure", client.h2mac_write_failure) + " sndbuf=" + std::to_string(client.h2mac_sockopt(SO_SNDBUF))
-                      + " rcvbuf=" + std::to_string(client.h2mac_sockopt(SO_RCVBUF)));
+        // The flood ends on a write the closed connection refuses: the session closed it at the verdict.
+        EXPECT_TRUE(client.write_failed) << "the flood stopped after " << solicited << " solicited without the connection breaking";
         // Now the client reads. A server that still serves answers one last request, after everything else it wrote.
         const std::uint32_t last = taking ? client.request("/served") : 0;
-        (void) client.read_until([&] { return client.eof || (last != 0 && client.stream(last).end_stream); }, 120s);
+        (void) client.read_until([&] { return client.eof || (last != 0 && client.stream(last).end_stream); }, kBudget);
         const std::size_t replies = read() - before;
-        {
-            std::string types;
-            for (auto t : client.h2mac_last_types)
-                types += std::to_string(t) + ",";
-            h2mac::record("CLIENT read ended: eof=" + std::to_string(client.eof) + " replies=" + std::to_string(replies)
-                          + " goaway_seen=" + std::to_string(client.goaway_seen) + " goaway_code=" + std::to_string(client.goaway_code)
-                          + " goaway_debug='" + client.goaway_debug + "' bytes_read=" + std::to_string(client.h2mac_bytes_read)
-                          + " frames_read=" + std::to_string(client.h2mac_frames_read) + " last_types=[" + types + "] "
-                          + failure_line("read_failure", client.h2mac_read_failure));
-        }
-        const bool client_eof  = client.eof;
-        const bool client_ok   = client.eof && replies < solicited && (!client.goaway_seen || client.goaway_code == kEnhanceYourCalm);
-        const int  write_errno = client.h2mac_write_failure.seen ? client.h2mac_write_failure.qb_errno : -1;
-        const int  read_errno  = client.h2mac_read_failure.seen ? client.h2mac_read_failure.qb_errno : -1;
-        const auto print       = [&](bool held10, std::string const &late, std::optional<std::string> const &held) {
-            bool        server_ok = false;
-            std::string held_desc = "none";
-            if (held) {
-                const auto g      = last_goaway(*held);
-                const auto queued = occurrences(*held, reply);
-                server_ok         = g && g->first == kEnhanceYourCalm && g->second == each.goaway && queued <= 1000 && queued > 0;
-                held_desc         = "out=" + std::to_string(held->size()) + " replies=" + std::to_string(queued)
-                                    + " goaway=" + (g ? std::to_string(g->first) + "/'" + g->second + "'" : std::string("none"));
-            }
-            std::lock_guard lock(h2mac::mutex);
-            std::cout << "[H2MAC] ===== flood=" << each.name << " openssl='" << OpenSSL_version(OPENSSL_VERSION) << "'\n";
-            for (auto const &e : h2mac::events)
-                std::cout << "[H2MAC]   " << e << "\n";
-            std::cout << "[H2MAC] RESULT flood=" << each.name << " verdict=" << (client_ok && held10 && server_ok ? "PASS" : "FAIL")
-                      << " client_eof=" << client_eof << " client_ok=" << client_ok << " held10=" << (held10 ? "yes" : "no") << " late=" << late
-                      << " held={" << held_desc << "} server_ok=" << server_ok << " write_fail_errno=" << write_errno
-                      << " read_fail_errno=" << read_errno << " solicited=" << solicited << " replies=" << replies << std::endl;
-        };
-        if (!client.eof) {
-            print(false, "client-not-eof", std::nullopt);
-        }
         ASSERT_TRUE(client.eof) << "a client that never read drew " << replies << " replies of " << solicited
                                 << " solicited and the connection still serves: they queued in the server's output";
-        EXPECT_LT(replies, solicited) << "the server answered everything the client sent";
-        if (client.goaway_seen) {
-            EXPECT_EQ(client.goaway_code, kEnhanceYourCalm);
-        }
+        EXPECT_EQ(replies, 0u) << "a reply reached the client ahead of the large body it never read";
+        EXPECT_FALSE(client.goaway_seen) << "a GOAWAY reached the client ahead of the large body it never read";
         client.close();
-        h2mac::record("CLIENT close() called");
 
         std::optional<std::string> held;
         const auto                 deadline = std::chrono::steady_clock::now() + 10s;
-        while (!(held = g_closed.read()) && std::chrono::steady_clock::now() < deadline)
+        while (!(held = g_closed.take()) && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(1ms);
-        h2mac::record(std::string("TEST 10 s wait ended: held=") + (held ? "yes" : "no"));
-        std::string                late = "-";
-        std::optional<std::string> later;
-        if (!held) {
-            // SCRATCH: does the session close later -- with the client still open, then once its descriptor is closed?
-            const auto more = std::chrono::steady_clock::now() + 3s;
-            while (!(later = g_closed.read()) && std::chrono::steady_clock::now() < more)
-                std::this_thread::sleep_for(1ms);
-            late = later ? "within+3s" : "not-within+3s";
-            if (!later) {
-                owned.reset(); // the client's descriptor is closed now
-                h2mac::record("CLIENT destroyed (descriptor closed)");
-                const auto after = std::chrono::steady_clock::now() + 3s;
-                while (!(later = g_closed.read()) && std::chrono::steady_clock::now() < after)
-                    std::this_thread::sleep_for(1ms);
-                late = later ? "after-client-destroyed" : "never-within-16s";
-            }
-            std::this_thread::sleep_for(200ms); // the session's records after the close
-        }
-        print(held.has_value(), late, held ? held : later);
         ASSERT_TRUE(held.has_value()) << "the session did not close with bytes queued";
+        RecordProperty(std::string("held_octets_") + each.key, std::to_string(held->size()));
+        // The premise: nothing written after the large body left -- its last DATA frame, END_STREAM, is still there.
+        const char end_of_large[] = {
+            '\x00',
+            '\x40',
+            '\x00',
+            '\x00',
+            '\x01',
+            static_cast<char>(large >> 24),
+            static_cast<char>(large >> 16),
+            static_cast<char>(large >> 8),
+            static_cast<char>(large)
+        };
+        const std::size_t end_at = held->find(std::string_view(end_of_large, sizeof end_of_large));
+        ASSERT_NE(end_at, std::string::npos) << "the large body left the session's output whole: " << held->size() << " octets held";
+        ASSERT_LT(end_at, held->find(reply)) << "a reply was queued ahead of the end of the large body";
         const auto goaway = last_goaway(*held);
         ASSERT_TRUE(goaway.has_value()) << "the output the session closed with does not end on a GOAWAY";
         EXPECT_EQ(goaway->first, kEnhanceYourCalm);
         EXPECT_EQ(goaway->second, each.goaway);
-        const std::size_t queued = occurrences(*held, reply);
-        EXPECT_LE(queued, 1000u) << "more than a thousand replies were queued when the connection was closed";
-        EXPECT_GT(queued, 0u) << "no reply was queued when the connection was closed";
+        EXPECT_EQ(occurrences(*held, reply), 1000u) << "the connection was not closed at the 1001st reply queued";
     };
     for (const flood &each : floods) {
         never_reads(each);
