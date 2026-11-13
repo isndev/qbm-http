@@ -109,22 +109,13 @@ public:
     /// How long one write may take before it gives up. A client that floods a server sets it far past what a loaded
     /// host can stall for: its writes then stop only when the connection is broken.
     std::chrono::milliseconds write_budget = std::chrono::seconds(2);
-    /// Not 0: the socket's receive buffer (`SO_RCVBUF`), set before connect() connects, so that the window is negotiated
-    /// with it and the system does not resize it -- a client that reads nothing then holds no more than that (Huly
-    /// QB-1270: macOS grows the receive buffer of a peer that reads nothing, and a socket the server filled took more a
-    /// moment later).
-    int receive_buffer = 0;
 
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
-    /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed, or
-    /// `receive_buffer` was refused.
+    /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
     bool
     connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {}) {
         _sock = qb::io::tcp::ssl::socket{qb::io::ssl::Context::client().alpn({"h2"})};
         _sock.set_insecure();
-        if (receive_buffer != 0
-            && (static_cast<qb::io::tcp::socket &>(_sock).init(AF_INET) != 0 || _sock.set_optval(SOL_SOCKET, SO_RCVBUF, receive_buffer) != 0))
-            return false;
         if (_sock.connect_v4("127.0.0.1", port) != 0)
             return false;
         if (_sock.get_alpn_selected_protocol() != "h2")
@@ -279,16 +270,6 @@ public:
     [[nodiscard]] RawStream const &
     stream(std::uint32_t stream_id) {
         return streams[stream_id];
-    }
-
-    /// The socket's receive buffer as the system reports it (`SO_RCVBUF`; Linux reports twice what was set), -1 when it
-    /// cannot be read.
-    [[nodiscard]] int
-    receive_buffer_size() const {
-        int value = -1;
-        if (_sock.get_optval(SOL_SOCKET, SO_RCVBUF, value) != 0)
-            return -1;
-        return value;
     }
 
     void

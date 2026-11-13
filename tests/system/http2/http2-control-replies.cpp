@@ -15,13 +15,12 @@
  *   - the server, a client that reads (the raw HTTP/2 client of `shared/http2_raw_client.h`): 3000 PINGs, then 3000
  *     SETTINGS, in batches whose replies it reads before it asks again -- every one answered, no GOAWAY, and a request
  *     is still served. Between two units of progress the 1001st closed the connection;
- *   - the server, a client that never reads: rounds of 999 PINGs (then SETTINGS, then DATA on a closed stream,
- *     each of which draws a reset) and a request the server answers, which forgave the budget -- the replies queued for
- *     as long as the client sent, up to qb-io's write cap. Once the socket's buffers are full a thousand replies queue
- *     and the connection is closed: what the session's output held at that moment is read on the server -- no more
- *     than a thousand replies and, behind them, the guard's GOAWAY, which a client whose buffers are full cannot be
- *     handed. The client's receive buffer is fixed, and small: macOS grows it for a peer that reads nothing, and a
- *     socket the server filled then took the thousand replies and the GOAWAY right after the verdict;
+ *   - the server, a client that never reads: behind a response larger than the loopback buffers hold, which it asked
+ *     for and does not read, rounds of 999 PINGs (then SETTINGS, then DATA on a closed stream, each of which draws a
+ *     reset) and a request the server answers, which forgave the budget -- the replies queued for as long as the client
+ *     sent, up to qb-io's write cap. A thousand replies queue and the connection is closed: what the session's output
+ *     held at that moment is read on the server -- the rest of the response, a thousand replies and, behind them, the
+ *     guard's GOAWAY, which a client whose buffers are full cannot be handed;
  *   - the client (`qb::http2::Client`), a server that pings it 3000 times and reads each batch of PONGs: never closed.
  *     With no response in progress the client closed the connection at the 1001st;
  *   - the client, a server whose HEADERS fall on a stream that has closed, 3000 of them, and that reads each batch of
@@ -90,13 +89,25 @@ struct Closed {
 };
 Closed g_closed;
 
-/// One route, answered at once and without a body: nothing of its response waits on a flow-control window, so a client
-/// that never reads still has every request served -- each one a stream it opened.
+/// The body of `/large`: more than the two loopback buffers of a connection whose client reads nothing are allowed to
+/// grow to -- 4 MiB sent and 6 MiB received on Linux (`tcp_wmem`, `tcp_rmem`), 4 MiB each way on macOS
+/// (`net.inet.tcp.autosndbufmax`, `autorcvbufmax`) -- so that it never leaves the session's output whole, and what the
+/// session writes after it waits there (Huly QB-1270).
+constexpr std::size_t kLargeBody = std::size_t{32} << 20;
+
+/// Two routes, answered at once: `/served` without a body -- nothing of its response waits on a flow-control window, so
+/// a client that never reads still has every request served, each one a stream it opened -- and `/large`, kLargeBody
+/// octets, for a client that opened its windows to it.
 class GuardServer : public qb::http2::use<GuardServer>::server<GuardSession> {
 public:
     GuardServer() {
         router().get("/served", [](auto ctx) {
             ctx->response().status() = qb::http::status::NO_CONTENT;
+            ctx->complete();
+        });
+        router().get("/large", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(kLargeBody, 'x');
             ctx->complete();
         });
         router().compile();
@@ -213,29 +224,30 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatReadsMaySolicitRepliesPastTheThou
     reads(true);
 }
 
-// A client that never reads: rounds of 999 PINGs and one request, each round in the two writes of a client that reads
-// nothing back -- then the same with SETTINGS, and with DATA frames of one octet on a closed stream, each of which draws
-// a reset (empty ones would meet the bucket of the frames that make no progress first, at its 10001st). The request is served -- a stream the
-// client opened, which forgave every budget -- so the server answered for as long as the client sent: 64 MiB of replies solicited, every one of
-// them written to an output nobody drained, and the connection still serving. The socket's buffers take what they can hold; past them the
-// replies queue in the session's output, and the thousandth queued is the last: the protocol writes its GOAWAY behind them and the session
-// closes the connection -- without waiting for a client that takes nothing, so the GOAWAY stays in the output it closed
-// with. That output is read on the server: no more than a thousand replies, then GOAWAY(ENHANCE_YOUR_CALM) naming the
-// flood. (How many of the thousand are still there is the socket's business: it may take a few more between the
-// protocol's verdict and the close.) The client, when it reads at last, finds the end of the connection and far fewer
-// replies than it solicited -- none at all with OpenSSL 4, which ends the TLS session on the write that met the closed
-// connection, so that the read after it reports the end at once; OpenSSL 3 reads what its kernel kept up to the reset.
+// A client that never reads. It asks first for a response larger than the two loopback buffers of its connection may
+// grow to (kLargeBody), its windows opened to it, and reads the head of it and nothing more: the socket is full for
+// good, and what the session writes from then on waits in its output behind the rest of that body. Then rounds of 999
+// PINGs and one request, each round in the two writes of a client that reads nothing back -- then the same with
+// SETTINGS, and with DATA frames of one octet on a closed stream, each of which draws a reset (empty ones would meet the
+// bucket of the frames that make no progress first, at its 10001st). The request is served -- a stream the client
+// opened, which forgave every budget -- so the server answered for as long as the client sent: 64 MiB of replies
+// solicited, every one of them written to an output nobody drained, and the connection still serving. Now every reply
+// is queued from the moment it is written, and the thousandth is the last: the protocol writes its GOAWAY behind them
+// and the session closes the connection -- without waiting for a client that takes nothing, so the GOAWAY stays in the
+// output it closed with. That output is read on the server: the rest of the large body, a thousand replies exactly,
+// then GOAWAY(ENHANCE_YOUR_CALM) naming the flood. The client, when it reads at last, finds the end of the connection
+// and none of the replies it solicited.
 //
-// The buffers are full only if the client's receive buffer stays the size it was. macOS grows it for a peer that reads
-// nothing, and acknowledges loopback data a moment after it was sent: a socket that refused part of the server's output
-// took more on the next pass -- on the runner, with OpenSSL 4.1.0 and 3.5.9 alike, the write that followed the verdict
-// took the thousand replies AND the GOAWAY (in 1 to 9 floods of 10), and the session closed at once with nothing queued,
-// the bound kept, and no record here (Huly QB-1270). So the client fixes it, small, before it connects: after the
-// verdict the kernels can take no more than it holds, a few kilobytes, where a thousand replies are 9000 octets at least.
+// Without the large body the replies filled the socket themselves, and the case took a filled socket to take nothing
+// more. macOS does not keep it so: it grows the receive buffer of a peer that reads nothing -- whatever that peer set
+// with SO_RCVBUF -- and acknowledges loopback data a moment after it was sent, so a socket that refused part of the
+// server's output takes more on the next pass. On the runner the write that followed the verdict took the thousand
+// replies AND the GOAWAY, with OpenSSL 4.1.0 and 3.5.9 alike, and the session closed at once with nothing queued -- the
+// bound kept, the connection ended, and nothing left here to read it (Huly QB-1270).
 TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepliesAreQueued) {
-    constexpr std::size_t kFlood         = 64u << 20; // of replies solicited: more than any loopback socket buffers hold
-    constexpr int         kReceiveBuffer = 4096;      // the client's, fixed: far under a thousand of the smallest reply
-    using soliciting                     = Http2RawClient::soliciting;
+    constexpr std::size_t   kFlood     = 64u << 20;   // of replies solicited: more than any loopback socket buffers hold
+    constexpr std::uint32_t kMaxWindow = 0x7fffffffu; // RFC 9113 6.9.1
+    using soliciting                   = Http2RawClient::soliciting;
     struct flood {
         const char      *name;
         soliciting       what;
@@ -258,17 +270,18 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         const std::string_view reply = each.reply;
         g_closed.reset();
         Http2RawClient client;
-        client.keep_frames    = false;
-        client.write_budget   = 120s; // a write of the flood stops when the connection is broken, not when the host is slow
-        client.receive_buffer = kReceiveBuffer;
-        ASSERT_TRUE(client.connect(port));
-        // The receive buffer is the one set (Linux reports it doubled): what the kernels take after the verdict is bounded.
-        ASSERT_GT(client.receive_buffer_size(), 0);
-        ASSERT_LE(client.receive_buffer_size(), 2 * kReceiveBuffer) << "the client's receive buffer is not the one it set";
+        client.keep_frames  = false;
+        client.write_budget = 120s; // a write of the flood stops when the connection is broken, not when the host is slow
+        // The windows, the stream's and the connection's, open to the large body: the server writes it whole at once.
+        ASSERT_TRUE(client.connect(port, {{Http2RawClient::SETTINGS_INITIAL_WINDOW_SIZE, kMaxWindow}}));
+        ASSERT_TRUE(client.window_update(0, kMaxWindow - 65535));
         ASSERT_TRUE(client.read_until([&] { return client.settings_acked; }));
         const std::uint32_t closed = client.request("/served"); // stream 1: answered, so closed for the server
         ASSERT_EQ(closed, 1u);
         ASSERT_TRUE(client.read_until([&] { return client.stream(closed).end_stream; }));
+        const std::uint32_t large = client.request("/large");
+        ASSERT_NE(large, 0u);
+        ASSERT_TRUE(client.read_until([&] { return client.stream(large).status() == 200; })) << "the large response did not begin";
         const auto read = [&] {
             return what == soliciting::pings ? client.pongs : what == soliciting::settings ? client.settings_acks : client.resets;
         };
@@ -296,13 +309,13 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         while (!(held = g_closed.read()) && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(1ms);
         ASSERT_TRUE(held.has_value()) << "the session did not close with bytes queued";
+        // What no loopback holds: the large body was still there, ahead of everything written after it.
+        ASSERT_GT(held->size(), kLargeBody / 2) << "the session's output no longer held the large body";
         const auto goaway = last_goaway(*held);
         ASSERT_TRUE(goaway.has_value()) << "the output the session closed with does not end on a GOAWAY";
         EXPECT_EQ(goaway->first, kEnhanceYourCalm);
         EXPECT_EQ(goaway->second, each.goaway);
-        const std::size_t queued = occurrences(*held, reply);
-        EXPECT_LE(queued, 1000u) << "more than a thousand replies were queued when the connection was closed";
-        EXPECT_GT(queued, 0u) << "no reply was queued when the connection was closed";
+        EXPECT_EQ(occurrences(*held, reply), 1000u) << "the connection was not closed at the 1001st reply queued";
     };
     for (const flood &each : floods) {
         never_reads(each);
