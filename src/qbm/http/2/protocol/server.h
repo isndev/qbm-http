@@ -1159,7 +1159,7 @@ public:
             }
 
             stream.peer_window_size += window_increment;
-            stream.progressed_since_idle_sweep = stream.progressed_since_idle_sweep || stream.request_dispatched; // reads its response
+            // No progress by itself, whatever the stream: the octets it lets out are, where they leave (Huly QB-1248; the sends below).
 
             if (stream.has_pending_data_to_send) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
@@ -1792,20 +1792,25 @@ public:
      * Removes streams that have been idle for too long or incomplete for too long.
      * This prevents resource exhaustion from malicious clients opening many streams.
      *
-     * A stream's idle time runs from its opening, then from its last real progress -- a DATA of its request received, response
-     * HEADERS or DATA sent, a stream WINDOW_UPDATE received once its request is dispatched -- as seen by the sweep that observed
-     * it (the frame path only marks the stream, the sweep stamps the time): a response still progressing is not idle (Huly
-     * QB-531). A request not yet complete is bounded by the same clock at max_incomplete, which only its own frames move: a
-     * stalled upload cannot hold a stream, a flowing one is never cut (Huly QB-1248).
+     * A stream's idle time runs from its opening, then from its last real progress -- octets of its request received, its
+     * dispatch, octets of its response sent -- as seen by the sweep that observed it (the frame path only marks the stream, the
+     * sweep stamps the time; Huly QB-531). A request not yet complete is bounded at max_incomplete: a stalled upload cannot hold a
+     * stream, a flowing one is never cut. A dispatched stream whose response is queued waits on the peer: bounded at max_idle from
+     * the later of its progress and the sweep that first found it queued. One with nothing queued waits on its handler: bounded
+     * at max_waiting from its progress -- the session's timeout, which another stream's activity restarts, so that it bounds no
+     * stream of its own on a multiplexed connection (QB-1248). A promised stream never answered is bounded at max_idle.
      *
      * @param max_idle Maximum idle time before cleanup (default: 30s)
      * @param max_incomplete Maximum time without progress of a stream whose request is not complete (default: 10s)
+     * @param max_waiting Maximum time without progress of a dispatched stream with nothing queued; zero or less: none (default: 60s)
      * @return Number of streams cleaned up
      */
     uint32_t
-    cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
+    cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10),
+                         qb::duration max_waiting = std::chrono::seconds(60)) noexcept {
         uint32_t   cleaned_count = 0;
         const auto now           = std::chrono::steady_clock::now();
+        const bool moved         = std::exchange(_data_sent_since_sweep, false); // the connection's DATA octets left since the last sweep
 
         // The ids first, each found again: a stream reset below closes, and its close can send a promised response that
         // waits (send_waiting_push_responses), whose stream may end and be erased at once -- the stream an iterator held
@@ -1821,26 +1826,21 @@ public:
                 continue;
             auto &stream = it->second;
 
-            if (stream.progressed_since_idle_sweep) {
+            // Progress is the frame path's mark. A response only the connection's window holds -- its own is open -- progresses
+            // while the connection's octets leave: the server drains the streams that wait in turn, and one may starve behind
+            // another its peer reads (Huly QB-1248).
+            const bool queued = stream.has_pending_data_to_send;
+            if (stream.progressed_since_idle_sweep || (queued && stream.peer_window_size > 0 && moved)) {
                 stream.progressed_since_idle_sweep = false;
                 stream.last_activity               = now;
             }
+            // The clock of the peer's bound starts at the sweep that first finds the response queued, and stops when nothing is; the
+            // stream's own clock, its progress, runs on whatever is queued: nothing erases its history (Huly QB-1248).
+            if (!queued || stream.queued_since == std::chrono::steady_clock::time_point{})
+                stream.queued_since = queued ? now : std::chrono::steady_clock::time_point{};
             const auto idle_time         = now - stream.last_activity;
             const auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
-
-            // Check for incomplete streams (not dispatched yet)
-            bool is_incomplete = !stream.request_dispatched
-                                 && (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::OPEN);
-
-            // Check for idle timeout
-            bool should_cleanup = false;
-            if (is_incomplete && idle_time > max_incomplete) {
-                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
-                should_cleanup = true;
-            } else if (idle_time > max_idle) {
-                LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up idle stream (idle for " << idle_time_seconds << "s)");
-                should_cleanup = true;
-            }
+            const bool should_cleanup    = past_its_bound(stream_id, stream, now, max_idle, max_incomplete, max_waiting);
 
             if (should_cleanup) {
                 // send_rst_stream() (close_context defaults to true) closes and ERASES this
@@ -2470,7 +2470,7 @@ private:
                 return false;                            // Indicate send failure
             }
 
-            stream.progressed_since_idle_sweep = true;
+            stream.progressed_since_idle_sweep = _data_sent_since_sweep = true;
             if (header_to_send.flags & FLAG_END_STREAM) {
                 stream.end_stream_sent = true;
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
@@ -2561,7 +2561,7 @@ private:
             }
 
             // CRITICAL: dispatched BEFORE _io.on(), which may answer and close the stream, the reference dying with it.
-            stream.request_dispatched = true;
+            stream.request_dispatched = stream.progressed_since_idle_sweep = true; // the dispatch is progress: its handler's clock
             ++_client_streams_opened; // a request the application serves, which the Rapid Reset guard weighs (Huly QB-1244)
 
             // _io.on() runs the application layer (router, middleware, sync
@@ -2958,7 +2958,7 @@ private:
                 // Decrement flow control windows by actual data chunk size
                 stream.peer_window_size -= current_chunk_size;
                 this->_connection_send_window -= current_chunk_size;
-                stream.progressed_since_idle_sweep = true;
+                stream.progressed_since_idle_sweep = _data_sent_since_sweep = true;
                 // REVERTED PADDING LOGIC (flow control decrement)
 
                 if (data_frame_event.header.flags & FLAG_END_STREAM) {
@@ -3146,7 +3146,7 @@ private:
             buffer.free_front(chunk);
             stream.peer_window_size -= chunk;
             _connection_send_window -= chunk;
-            stream.progressed_since_idle_sweep = true;
+            stream.progressed_since_idle_sweep = _data_sent_since_sweep = true;
             if (last) {
                 buffer.reset();
                 stream.has_pending_data_to_send = false;
@@ -3614,6 +3614,53 @@ private:
             return;
         stream.progressed_since_idle_sweep = true;
         request_progress();
+    }
+
+public:
+    /// Whether a stream is open: a request not yet complete, a response not finished, a stream promised.
+    [[nodiscard]] bool
+    has_streams() const noexcept {
+        return !_server_streams.empty();
+    }
+
+    /// The frame layer's answer; and at the end of a read pass -- no whole frame is left to dispatch -- that leaves a stream open,
+    /// the io is told (`http2_streams_open()`, found by a requires-expression): the session arms the timer of its stream sweep
+    /// there. A stream comes to exist in a read pass or beside one that is open, so this covers every way; a pass that answers
+    /// what it brought leaves none and tells nothing. One load and compare a read pass, no clock read (Huly QB-1248).
+    [[nodiscard]] std::size_t
+    getMessageSize() noexcept override {
+        const auto size = Http2Protocol<IO_Handler, ServerHttp2Protocol<IO_Handler>>::getMessageSize();
+        if (size == 0 && !_server_streams.empty()) {
+            if constexpr (requires(IO_Handler &io) { io.http2_streams_open(); })
+                this->_io.http2_streams_open();
+        }
+        return size;
+    }
+
+private:
+    bool _data_sent_since_sweep = false; ///< A DATA frame with octets left since the last sweep (cleanup_idle_streams(), Huly QB-1248)
+
+    /// Whether @p stream, its progress stamped at @p now (cleanup_idle_streams()), is past its bound -- each reset logged. A request
+    /// not yet complete: @p max_incomplete from its progress. A dispatched stream with nothing queued, which waits on its handler:
+    /// @p max_waiting from its progress, when it is positive. A response queued, which waits on the peer: @p max_idle from the later
+    /// of its progress and the sweep that first found it queued. A promised stream never answered: @p max_idle from its progress.
+    [[nodiscard]] bool
+    past_its_bound(uint32_t stream_id, Http2ServerStream const &stream, std::chrono::steady_clock::time_point now, qb::duration max_idle,
+                   qb::duration max_incomplete, qb::duration max_waiting) const noexcept {
+        const auto idle_time = now - stream.last_activity;
+        const auto seconds   = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
+        const bool open      = stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::OPEN;
+        if (!stream.request_dispatched && open && idle_time > max_incomplete) {
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << seconds << "s)");
+            return true;
+        }
+        const bool own    = stream.request_dispatched && !stream.has_pending_data_to_send;
+        const auto waited = stream.request_dispatched && !own ? now - std::max(stream.last_activity, stream.queued_since) : idle_time;
+        if (own ? max_waiting <= qb::duration::zero() || idle_time <= max_waiting : waited <= max_idle)
+            return false;
+        LOG_HTTP_WARN_PA(stream_id,
+                         "ServerHttp2Protocol: Cleaning up " << (own ? "unanswered" : "idle") << " stream (idle for " << seconds << "s)");
+        return true;
     }
 }; // class ServerHttp2Protocol
 
