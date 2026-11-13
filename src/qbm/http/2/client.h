@@ -263,10 +263,10 @@ public:
      */
     explicit Client(const qb::io::uri &uri);
 
+    /// Every request in flight or queued hears once (503, "Client destroyed"), a pending connect() hears false, and a request pushed
+    /// again from one of those callbacks fails too, nothing armed or connected for it: safe in static storage at exit (Huly QB-1246).
     ~Client();
-
-    // Disable copy and move (base class doesn't support them)
-    Client(const Client &)            = delete;
+    Client(const Client &)            = delete; // non-copyable and non-movable: the base class supports neither
     Client &operator=(const Client &) = delete;
     Client(Client &&)                 = delete;
     Client &operator=(Client &&)      = delete;
