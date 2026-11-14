@@ -84,6 +84,44 @@ goaway_sent_by_this_endpoint(const Event &event) {
     }
 }
 
+/**
+ * @brief The log no lower than WARN for a scope: for a case that drives frames by the ten thousand.
+ *
+ * A build without NDEBUG logs from DEBUG up by default (qb's `LogInitializer`), and the protocols log two or three
+ * DEBUG lines a frame. The log is no part of what such a case asserts, and writing it was most of its cost: the
+ * server's unit binary wrote 282 MiB of log, eight cases 251 MiB of it, and the logger was still writing it 26 s
+ * after the last case under MSVC Debug -- past the unit tier's timeout once the suite loads the host (Huly QB-1270).
+ * The level found is put back: the cases around keep logging, which is what runs the operands of every other log
+ * statement, under the sanitizers too. A build that logs to stdout cannot be filtered and is left as it is.
+ */
+class quiet_log {
+#ifdef QB_WITH_LOGGING
+    qb::io::log::Level _found = qb::io::log::Level::CRIT;
+
+public:
+    quiet_log() noexcept {
+        for (const auto level : {qb::io::log::Level::DEBUG, qb::io::log::Level::VERBOSE, qb::io::log::Level::INFO, qb::io::log::Level::WARN}) {
+            if (nanolog::is_logged(level)) {
+                _found = level;
+                break;
+            }
+        }
+        if (_found < qb::io::log::Level::WARN) {
+            qb::io::log::setLevel(qb::io::log::Level::WARN);
+        }
+    }
+    ~quiet_log() {
+        qb::io::log::setLevel(_found);
+    }
+#else
+
+public:
+    quiet_log() noexcept {} // user-provided, so that a guard declared and never named is no unused variable
+#endif
+    quiet_log(const quiet_log &)            = delete;
+    quiet_log &operator=(const quiet_log &) = delete;
+};
+
 // ===========================================================================
 // FakeIO harnesses
 // ===========================================================================

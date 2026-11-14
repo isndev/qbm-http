@@ -54,6 +54,7 @@ using qb::http::test::peek_frame_header;
 using qb::http::test::pump;
 using qb::http::test::push_bytes;
 using qb::http::test::push_frame;
+using qb::http::test::quiet_log;
 
 namespace h2 = qb::protocol::http2;
 
@@ -4822,6 +4823,7 @@ expect_replies_forgiven_as_their_last_byte_leaves(solicited_reply what, std::siz
 // count. Read at each edge of the first reply, of the second, around the request queued between the 400th and the
 // 401st, and at the end of the output; and again on an io whose count of bytes written wraps in the middle of the queue.
 TEST(HTTP2ClientProtocol, AReplySplitAcrossAPartialWriteIsForgivenWhenItsLastByteHasLeft) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     namespace fake = qb::http::test;
     using qb1270_queue_test::ends_t;
 
@@ -5039,6 +5041,7 @@ TEST(HTTP2ClientProtocol, PongsSettingsAcksAndTheResetsAServerSolicitsShareTheQu
 // 3000 times. Every reset is written, none is refused, no GOAWAY. The trailers on the stream the client reset are
 // discarded (RFC 9113 §5.1): they drew a reset each, counted, until Huly QB-1270's part 5.
 TEST(HTTP2ClientProtocol, ABusyServerWhoseFramesFallOnClosedStreamsIsNeverCut) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_reset_test;
     {
         SCOPED_TRACE("each reset read before the next HEADERS");
@@ -6195,6 +6198,7 @@ flood_until_cut(two_requests &c, Send &&send, std::size_t cap) {
 // WINDOW_UPDATE of 0, a PRIORITY of 4 octets). The client took them for ever. It ends the connection at the frame past
 // the bucket's burst -- one frame later for the SETTINGS ACKs, whose first acknowledges the client's own SETTINGS.
 TEST(HTTP2ClientProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnhanceYourCalm) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_empty_frame_test;
     using qb1270_goaway_test::headers;
     using qb1270_goaway_test::last_goaway_code;

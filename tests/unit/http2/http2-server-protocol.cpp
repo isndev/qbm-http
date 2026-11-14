@@ -7470,6 +7470,7 @@ answer_in_the_dispatch(qb1244_test::AnsweringIO &io, qb1244_test::AnsweringProto
 // resets and no GOAWAY. They share the closed-stream budget now -- 1000 between two streams the client opens, then
 // GOAWAY(ENHANCE_YOUR_CALM) (Huly QB-1270) -- which a client that reads each reset does not escape.
 TEST(HTTP2ServerProtocol, ResetsBeforeDispatchPastTheBudgetCloseTheConnection) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     for (const auto how : qb1270_test::all_before_dispatch) {
         SCOPED_TRACE(static_cast<int>(how));
         Http2FakeIO    io;
@@ -7518,6 +7519,7 @@ TEST(HTTP2ServerProtocol, ResetsBeforeDispatchAndOnClosedStreamsShareOneBudget) 
 // requests, three times over: every one answered, the connection kept (Huly QB-1270). The client reads its answers and
 // its resets as they come.
 TEST(HTTP2ServerProtocol, ResetsBeforeDispatchBesideRequestsServedAreAnswered) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     for (const auto how : qb1270_test::all_before_dispatch) {
         SCOPED_TRACE(static_cast<int>(how));
         {
@@ -7804,6 +7806,7 @@ expect_replies_forgiven_as_their_last_byte_leaves(solicited_reply what, std::siz
 // queued between the 400th and the 401st, and at the end of the output; and again on an io whose count of bytes written
 // wraps in the middle of the queue, as a 32-bit one does every 4 GiB.
 TEST(HTTP2ServerProtocol, AReplySplitAcrossAPartialWriteIsForgivenWhenItsLastByteHasLeft) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using qb1270_queue_test::ends_t;
     const std::vector<std::pair<const char *, std::function<std::size_t(ends_t)>>> takes = {
         {"nothing", [](ends_t) -> std::size_t { return 0; }},
@@ -7877,6 +7880,7 @@ TEST(HTTP2ServerProtocol, AnIoThatDoesNotCountWhatItsSocketTookIsForgivenWhenIts
 // keeps its own account, from the bytes: a reply is queued until the socket has taken its last byte. At the end the
 // server must queue exactly as many more replies as that account leaves under the bound, then close the connection.
 TEST(HTTP2ServerProtocol, TheCountFollowsAnyInterleavingOfRepliesSolicitedAndBytesTaken) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     for (const auto what : all_solicited_replies) {
         for (const std::uint32_t seed : {1u, 20261111u, 0x9E3779B9u}) {
             SCOPED_TRACE(std::string(what == solicited_reply::pong ? "PING" : "SETTINGS") + ", seed " + std::to_string(seed));
@@ -8086,6 +8090,7 @@ TEST(HTTP2ServerProtocol, ASolicitedResetIsForgivenWhenItsLastByteHasLeft) {
 // forgives the budget of a client that reads too, and is itself counted by the Rapid Reset guard: the 101st
 // cancellation closes the connection, a hundred rounds at most.
 TEST(HTTP2ServerProtocol, TheResetsAClientSolicitsCountWhileQueuedAndBetweenTwoStreamsItOpens) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     {
         SCOPED_TRACE("a client that never reads, a request served after every 999 resets");
         qb1244_test::AnsweringIO       io;
@@ -8539,6 +8544,7 @@ expect_cut(const Http2FakeIO &io, std::size_t cut, std::size_t at = burst + 1) {
 // the frame past the bucket's burst -- one frame later for the SETTINGS ACKs, whose first acknowledges the server's own
 // SETTINGS.
 TEST(HTTP2ServerProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnhanceYourCalm) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_empty_frame_test;
     struct kind {
         const char          *name;
@@ -8570,6 +8576,7 @@ TEST(HTTP2ServerProtocol, AFloodOfFramesMakingNoProgressEndsTheConnectionWithEnh
 // whole. And an empty DATA that ends its stream ends something: 12000 requests, each ended by an empty DATA with
 // END_STREAM -- more than the bucket holds -- take no token.
 TEST(HTTP2ServerProtocol, EmptyDataFramesOfALegitimateClientAreNeverCut) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_empty_frame_test;
     {
         SCOPED_TRACE("a streamed upload with empty DATA frames between its chunks");
@@ -8615,6 +8622,7 @@ TEST(HTTP2ServerProtocol, EmptyDataFramesOfALegitimateClientAreNeverCut) {
 // the cut falls on one frame, where the test slept 1.1 s and accepted any cut up to the burst again -- a bucket that
 // refilled the whole burst each second passed it (Huly QB-1270).
 TEST(HTTP2ServerProtocol, TheBucketOfFramesMakingNoProgressRegainsItsRateEachSecondAndNoMore) {
+    const quiet_log quiet; // frames by the ten thousand, two or three DEBUG lines each: see quiet_log
     using namespace qb1270_empty_frame_test;
     struct step {
         const char  *name;
