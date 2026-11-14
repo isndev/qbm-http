@@ -560,6 +560,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A request target the HTTP/1.1 parser cannot store is answered `503`, not `400` (Huly QB-1248).**
+  `origin::request_target_uri()` reads the target into the request's uri with qb::io::uri's in-place readers, which
+  report an allocation failure -- the copy of the target, its query map -- as a failed read whose `source()` is empty,
+  where they terminated the process before (qb CHANGELOG, Huly QB-1248). A failed read was a target that names no
+  resource, so such a request would have been refused `400`; `request_target_uri()` now throws `std::bad_alloc` for
+  it, and the parser answers `503` ("HTTP parser could not allocate"), as for every allocation that fails in one of
+  its callbacks. A malformed target keeps its text in `source()` and is still `400`.
+  `qbm-http-test-unit-http1-parse-alloc-failure` now sweeps the piece that ends the target too: each allocation of the
+  read fails in turn, each a `503`.
+
 - **An HTTP/3 client kept in static storage ends cleanly at process exit, and its destructor accepts nothing from the
   callbacks it runs (Huly QB-1246).** `exit()` destroys the main thread's event loop, a thread-local, before the
   objects with static storage: a `static` `std::shared_ptr<qb::http3::Client>` is destroyed after the loop it ran on.

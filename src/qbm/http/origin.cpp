@@ -13,6 +13,7 @@
 #include <charconv>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <string>
 #include <system_error>
 
@@ -200,14 +201,28 @@ request_uri(std::string_view scheme, std::string_view authority, std::string_vie
     return uri;
 }
 
+namespace {
+
+/// What a read of a target that is not empty returned, except a read that could not allocate: qb::io::uri's in-place
+/// readers report that failure as a failed read whose source() is empty, where a malformed target keeps its text (Huly
+/// QB-1248). It is thrown, and the HTTP/1.1 parser answers 503 for it, as for every allocation that fails there.
+bool
+read_or_throw(bool const read, qb::io::uri const &uri) {
+    if (!read && uri.source().empty()) [[unlikely]]
+        throw std::bad_alloc();
+    return read;
+}
+
+} // namespace
+
 bool
 request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_request, bool options_request) {
     if (target.empty() || target.find('#') != std::string_view::npos)
         return false; // no target form holds a fragment (RFC 9112 §3.2)
     if (connect_request)
-        return is_request_authority(target) && uri.read_authority_form(target);
+        return is_request_authority(target) && read_or_throw(uri.read_authority_form(target), uri);
     if (target.front() == '/')
-        return uri.read_origin_form(target);
+        return read_or_throw(uri.read_origin_form(target), uri);
     if (target == "*") {
         if (!options_request)
             return false;
@@ -218,8 +233,8 @@ request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_reque
         auto const rest      = target.substr(separator + 3);
         auto const authority = rest.substr(0, rest.find_first_of("/?"));
         if (!qb::io::uri::is_valid_scheme(target.substr(0, separator)) || !is_request_authority(authority))
-            return false;                      // is_request_authority() holds a host: `http:///x` has none
-        return uri.read_absolute_form(target); // the path may hold `[`, `]` and `|` (Huly QB-1187)
+            return false;                                          // is_request_authority() holds a host: `http:///x` has none
+        return read_or_throw(uri.read_absolute_form(target), uri); // the path may hold `[`, `]` and `|` (Huly QB-1187)
     }
     return false;
 }

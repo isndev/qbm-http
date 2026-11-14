@@ -326,7 +326,7 @@ private:
     /**
      * @brief Builds the request's URI once its target has ended
      * @param parser Parser instance
-     * @return 0, or the refusal of the request: 400
+     * @return 0, or the refusal of the request: 400, or 503 for a target that cannot be stored (Huly QB-1248)
      *
      * The target's form decides what is an authority (RFC 9112 §3.2), and origin::request_target_uri()
      * reads it: an origin-form target (`/path?query`) by qb::io::uri::origin_form(), so `//a/b` is the

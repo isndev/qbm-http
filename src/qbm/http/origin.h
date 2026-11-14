@@ -244,9 +244,9 @@ is_request_authority(std::string_view const text) noexcept {
  * @param target          The request target as it was received.
  * @param connect_request Whether the request's method is CONNECT.
  * @param options_request Whether the request's method is OPTIONS.
- * @return Whether the target names a resource; false for a target that is none of those forms -- a fragment,
- *         a `*` for another method, a path byte a request path may not hold (`/a^b`, `/a\b`): the server
- *         answers 400 (RFC 9112 §3.2).
+ * @return Whether the target names a resource; false for one of none of those forms -- a fragment, a `*` for
+ *         another method, a path byte a request path may not hold (`/a^b`, `/a\b`): 400 (RFC 9112 §3.2). Throws
+ *         std::bad_alloc for a read that could not allocate (a failed read, source() empty; Huly QB-1248): 503.
  */
 [[nodiscard]] bool request_target_uri(qb::io::uri &uri, std::string_view target, bool connect_request, bool options_request);
 

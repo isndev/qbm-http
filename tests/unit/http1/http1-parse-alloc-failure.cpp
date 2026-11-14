@@ -13,9 +13,10 @@
  * in turn, on a fresh parser fed the pieces before it normally: the parse must end with an error and the 503 refusal,
  * never with an exception, and every swept piece must allocate at least once, or the sweep proves nothing there.
  *
- * One piece is fed unarmed: the one that ends the request target, which qb::io::uri's in-place readers read. They are
- * noexcept, as every parsing entry point of qb::io::uri is: an allocation failure inside them terminates, by qb's
- * convention (qb/src/qb/io/uri.h), before any exception reaches llhttp.
+ * The piece that ends the request target is swept too: qb::io::uri's in-place readers, noexcept, report an allocation
+ * failure -- the copy of the target, its query map -- as a failed read whose source() is empty, which
+ * origin::request_target_uri() throws as std::bad_alloc: 503 (Huly QB-1248). They terminated the process before, and
+ * the target was read as one that names no resource, 400.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -139,8 +140,10 @@ std::string const kChunkedBody = "1400\r\n" + kChunk + "\r\n";
 // Names and values past the small-string buffer, and each trailer longer than every field before it: the parser's
 // key and value buffers keep their capacity from one field to the next, and only a longer one allocates.
 std::vector<Piece> const kRequest = {
-    {"GET http://an-authority-longer-than-the-sso.example.test/a/path/longer/than/the/sso", true, HPE_OK}, // on_url
-    {" HTTP/1.1\r\n", false, HPE_OK}, // on_url_complete: qb::io::uri's noexcept reader (see the file comment)
+    {"GET http://an-authority-longer-than-the-sso.example.test/a/path/longer/than/the/sso"
+     "?a-query-key-longer-than-the-sso=a-query-value-longer-than-the-sso&k=v",
+     true, HPE_OK},                  // on_url
+    {" HTTP/1.1\r\n", true, HPE_OK}, // on_url_complete: the target read into the request's uri, its copy and query map
     {"Host: h\r\nTransfer-Encoding: chunked\r\nX-A-Field-Name-Longer-Than-The-Sso: a field value longer than the sso\r\n", true,
      HPE_OK},                     // on_header_field, which stores the field before it, and on_header_value
     {"\r\n", true, HPE_PAUSED},   // on_headers_complete: the last field stored, Transfer-Encoding read, Host rewritten
