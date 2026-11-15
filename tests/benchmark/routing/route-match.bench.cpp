@@ -68,9 +68,18 @@ namespace {
 // Minimal capturing session: the router writes the finalized Response through
 // `session << response`. We keep only what dispatch needs (an id() + a status we
 // can assert on) so the bench measures route(), not session bookkeeping.
+//
+// The response is read, not copied. A copy of it was session bookkeeping, and most
+// of what the 404 cell lost against 3.3.0: a response WITH a body copied into one
+// without creates the body's buffer inside the timed region since a message's body
+// is created at its first write (Huly QB-1216), where 3.3.0's session held one
+// from the untimed reset(). BM_Route_Miss404/routes:256 read +11.5 % on g++ 14
+// with that copy (775 -> 864 ns) and reads +3.8 % without it (682 -> 707 ns: 182
+// instructions of 9 300 an iteration, 48 of them the path-octet scan of
+// allowed_methods(), Huly QB-1187), where both hits read 4.5 % faster. A real
+// session serializes the response; it never copies it.
 // ---------------------------------------------------------------------------
 struct BenchSession {
-    qb::http::Response         _response;
     qb::http::status           _last_status     = qb::http::status::OK;
     std::size_t                _response_writes = 0;
     std::size_t                _handler_calls   = 0;
@@ -81,7 +90,6 @@ struct BenchSession {
 
     BenchSession &
     operator<<(const qb::http::Response &response) {
-        _response    = response;
         _last_status = response.status();
         ++_response_writes;
         return *this;
@@ -94,7 +102,6 @@ struct BenchSession {
 
     void
     reset() {
-        _response          = qb::http::Response();
         _last_status       = qb::http::status::OK;
         _response_writes   = 0;
         _handler_calls     = 0;
