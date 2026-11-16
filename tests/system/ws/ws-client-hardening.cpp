@@ -35,6 +35,7 @@
  * @ingroup Http
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -45,6 +46,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -474,6 +476,7 @@ public:
     bool               send_message_after_upgrade        = false;
     bool               send_second_message_after_upgrade = false;
     bool               disconnect_on_message             = false; ///< hang up, no Close frame: the client reads EOF
+    bool               close_after_upgrade               = false; ///< hang up once the upgrade and its frames are written
     std::atomic<int>  *requests                          = nullptr;
     std::atomic<int>  *closed                            = nullptr;
     std::atomic<bool> *client_offered_extension          = nullptr;
@@ -507,6 +510,8 @@ ExtensionResponseSession::on(Protocol::request &&request) {
             *this << second;
         }
     }
+    if (probe.close_after_upgrade)
+        this->close_after_deliver(); // the client reads the 101, the frame and then EOF
     if (probe.requests) {
         probe.requests->fetch_add(1);
     }
@@ -706,6 +711,46 @@ TEST(WebSocketClientHardening, ReconnectDropsFramePipelinedWithFirstUpgrade) {
     ASSERT_TRUE(pump_until([&] { return connected == 2; }, 4000ms));
     EXPECT_EQ(messages, 0);
     client.disconnect();
+}
+
+// A frame that arrives with the 101 waits behind on(connected). A connected callback that pumps the loop -- its own
+// run_until(), a library's await() -- runs, since qb-io's drains nest (Huly QB-1246), the deferred callbacks queued
+// behind it, on(disconnected) among them when the peer hangs up at once: the frame must not be delivered after it.
+TEST(WebSocketClientHardening, AFrameQueuedBehindConnectedIsNotDeliveredAfterThePumpDeliversTheDisconnect) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true;
+        s.close_after_upgrade        = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> order;
+    bool                     pumping  = true;
+    bool                     watchdog = false;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        order.push_back("connected");
+        auto const guard = qb::io::async::scoped_callback(
+            [&] {
+                watchdog = true;
+                pumping  = false;
+            },
+            2s);
+        qb::io::async::run_until(pumping); // user code pumping the loop inside its callback
+    });
+    client.on_message([&](auto &) { order.push_back("message"); });
+    client.on_disconnected([&](auto &) {
+        order.push_back("disconnected");
+        pumping = false;
+    });
+    client.connect(qb::io::uri("ws://localhost:" + std::to_string(port) + "/path"), 1000ms);
+    ASSERT_TRUE(pump_until([&] { return std::count(order.begin(), order.end(), std::string{"disconnected"}) == 1; }, 4000ms));
+    for (int i = 0; i < 20; ++i)
+        qb::io::async::run(EVRUN_NOWAIT); // what is still deferred
+    EXPECT_FALSE(watchdog) << "the pump in on(connected) never delivered the disconnect";
+    EXPECT_EQ(order.back(), "disconnected") << "a callback of the session ran after its on(disconnected)";
+    EXPECT_EQ(std::count(order.begin(), order.end(), std::string{"disconnected"}), 1);
 }
 
 TEST(WebSocketClientHardening, RequestHookReconnectSkipsRetiredUpgrade) {

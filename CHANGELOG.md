@@ -560,6 +560,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A WebSocket client delivers no frame of a session after that session's `on(disconnected)` (Huly QB-1246).** A frame
+  that arrives with the 101 is queued behind `on(connected)` and delivered after it, from the same deferred callback.
+  Since qb-io's drains nest (qb CHANGELOG, Huly QB-1246), a `connected` handler that pumps the loop -- its own
+  `run_until()`, a library's `await()` -- runs the deferred callbacks queued behind it, `on(disconnected)` among them
+  when the peer hangs up at once; the queued frames were then delivered after `on(disconnected)`. The client records
+  that its session's disconnect has been delivered, and the frames still queued behind `on(connected)` are dropped
+  from then on. Without such a pump nothing changes: the frames come between `on(connected)` and `on(disconnected)`.
+  `qbm-http-test-system-ws-client-hardening` pins it: red against qb's nested drains without the record, green with it.
+
 - **A request target the HTTP/1.1 parser cannot store is answered `503`, not `400` (Huly QB-1248).**
   `origin::request_target_uri()` reads the target into the request's uri with qb::io::uri's in-place readers, which
   report an allocation failure -- the copy of the target, its query map -- as a failed read whose `source()` is empty,

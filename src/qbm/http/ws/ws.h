@@ -1187,6 +1187,9 @@ class WebSocket
     bool _disconnect_notified{false};
     bool _error_queued{false};
     bool _connected_callback_pending{false};
+    // This session's on(disconnected) has been delivered. A pump in on(connected) can deliver it (qb-io's drains nest,
+    // Huly QB-1246); the frames queued behind on(connected) then never follow it.
+    bool _disconnect_delivered{false};
 
 private:
     void
@@ -1475,6 +1478,7 @@ public:
         ++_session_epoch;
         _error_queued               = false;
         _connected_callback_pending = false;
+        _disconnect_delivered       = false;
         _early_events.clear();
         start_transport_close();
         this->setTimeout(qb::duration::zero());
@@ -1637,13 +1641,13 @@ public:
                 derived().on(connected{});
                 if (weak.expired())
                     return;
-                if (epoch != _connection_epoch)
+                if (epoch != _connection_epoch || _disconnect_delivered)
                     return;
                 for (auto &deliver : early) {
                     deliver();
                     if (weak.expired())
                         return;
-                    if (epoch != _connection_epoch)
+                    if (epoch != _connection_epoch || _disconnect_delivered)
                         return;
                 }
             });
@@ -1783,6 +1787,7 @@ public:
                 return;
             if (session != _session_epoch)
                 return;
+            _disconnect_delivered = true;
             // qb-io's dispose() still uses this object after on(disconnected).
             derived().on(std::move(event));
         });

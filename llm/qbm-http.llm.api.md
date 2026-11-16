@@ -837,7 +837,7 @@ Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect
 
 The `http_awaiter` returned by `receive()` / `next_frame()` / `close_async()` now has a lifetime-aware concrete deduced operation type. Keep `auto`/`co_await` at call sites and rebuild consumers sharing these template definitions consistently. Public ordinary HTTP `async::awaiter<T>` / `make_awaiter` keep their existing callback path; actor cancellation is unchanged. (`src/qbm/http/coro.h:182-218,232-259`; `src/qbm/http/ws/coro.h:431-484,895-915,925-953`.)
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:2046`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:2051`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---
