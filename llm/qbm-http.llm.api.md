@@ -614,7 +614,7 @@ Followed targets require strict absolute HTTP(S) resolution. Userinfo, malformed
 
 The chain owns each flight during startup, then preserves the existing session disposal contract. The terminal reply and history move into final delivery after dispatch; abandonment prevents subsequent flights. These are the startup, processing and helper entry points. _(src/qbm/http/redirect.h:92-162,174-200,215-340)_
 
-Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:682-739,1025-1049,1431-1445)_
+Deferred delivery and queue teardown follow the existing listener contract. _(qb/src/qb/io/async/listener.h:802-867,1155-1178,1588-1602)_
 
 ### Persistent client — `qb::http1::Client` (alias `client`) — `src/qbm/http/1.1/client.h`
 - Non-upgrade 1xx responses do not complete or advance the active request, enter statistics, or disable its timeout. Only final fields reach the callback/awaiter. Status 101 ends HTTP/1.1 on its connection, which is retired (the next request goes to a new one with auto-reconnect, the default), a 101 with no request in flight included: the answer of a request whose `Upgrade` offered the protocol it names; any other fails the request with 502 (QB-1248). No wait-for-100 upload handshake.
@@ -813,7 +813,7 @@ Drives TCP connect + HTTP upgrade + protocol switch; forwards `ping/pong/message
 - `template<typename T> using WebSocketSecure = WebSocket<T, qb::io::transport::stcp>` — wss flavor.
 
 ### Callback client — `src/qbm/http/ws/ws.h`
-`template<typename Transport=qb::io::transport::tcp> class Client : public WebSocket<Client<Transport>,Transport>` — chainable setters (each returns `Client&`): `on_connected/on_message/on_ping/on_pong/on_closed/on_error/on_disconnected/on_sending_http_request`.
+`template<typename Transport=qb::io::transport::tcp> class Client : public WebSocket<Client<Transport>,Transport>` — chainable setters (each returns `Client&`): `on_connected/on_message/on_ping/on_pong/on_closed/on_error/on_disconnected/on_sending_http_request`. Delivery order is the order things happened: `connected` first, then the frames the server sent with its `101` (they wait for it), then what arrives later, the end of the connection included -- also when the `connected` callback pumps the loop (`run_sync`, `run_until`): what the pump brings is delivered behind the frames that were waiting, never ahead of them (3.4, Huly QB-1246). Frames that waited are always delivered from the loop's deferred queue, never from under the read of another frame, so their handler may destroy the client; the client's own `disconnect()` drops the ones still waiting.
 Aliases: `using ClientSecure = Client<stcp>; using client = Client<tcp>; using client_secure = Client<stcp>`.
 Usage: `qb::http::ws::client c; c.on_message([](auto&&){...}).on_connected([](auto&&){...}); c.connect(qb::io::uri{"ws://h/path"});`
 
@@ -837,7 +837,7 @@ Usage (coro client): `qb::http::ws::coro_client ws; auto r = co_await ws.connect
 
 The `http_awaiter` returned by `receive()` / `next_frame()` / `close_async()` now has a lifetime-aware concrete deduced operation type. Keep `auto`/`co_await` at call sites and rebuild consumers sharing these template definitions consistently. Public ordinary HTTP `async::awaiter<T>` / `make_awaiter` keep their existing callback path; actor cancellation is unchanged. (`src/qbm/http/coro.h:182-218,232-259`; `src/qbm/http/ws/coro.h:431-484,895-915,925-953`.)
 
-### WS pipe serialization — `src/qbm/http/ws/ws.h:2046`
+### WS pipe serialization — `src/qbm/http/ws/ws.h:2154`
 `template<> pipe<char>& pipe<char>::put<Message>(const Message&);` (and `MessagePing/MessagePong/MessageText/MessageBinary/MessageClose/WebSocketRequest`) — frame onto the outbound pipe (masks when `msg.masked`); invoked indirectly via `operator<<`.
 
 ---

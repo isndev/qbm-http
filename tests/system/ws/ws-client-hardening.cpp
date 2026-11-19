@@ -35,6 +35,7 @@
  * @ingroup Http
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -45,6 +46,8 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -474,9 +477,12 @@ public:
     bool               send_message_after_upgrade        = false;
     bool               send_second_message_after_upgrade = false;
     bool               disconnect_on_message             = false; ///< hang up, no Close frame: the client reads EOF
-    std::atomic<int>  *requests                          = nullptr;
-    std::atomic<int>  *closed                            = nullptr;
-    std::atomic<bool> *client_offered_extension          = nullptr;
+    bool               reply_to_message                  = false; ///< answer a client message with the text "reply"
+    bool               answer_with_a_reserved_opcode     = false; ///< answer a client message with a frame no client accepts
+    std::string        select_subprotocol;                        ///< the subprotocol the 101 names, when not empty
+    std::atomic<int>  *requests                 = nullptr;
+    std::atomic<int>  *closed                   = nullptr;
+    std::atomic<bool> *client_offered_extension = nullptr;
 
     void
     on(IOSession &) {}
@@ -496,6 +502,10 @@ ExtensionResponseSession::on(Protocol::request &&request) {
     if (probe.select_unoffered_extension) {
         response.headers()["Sec-WebSocket-Extensions"].emplace_back(std::string("permessage-deflate"));
     }
+    if (!probe.select_subprotocol.empty()) {
+        response.headers()["Sec-WebSocket-Protocol"].clear();
+        response.headers()["Sec-WebSocket-Protocol"].emplace_back(probe.select_subprotocol);
+    }
     *this << response;
     if (probe.send_message_after_upgrade) {
         qb::http::ws::MessageText message;
@@ -514,6 +524,18 @@ ExtensionResponseSession::on(Protocol::request &&request) {
 
 void
 ExtensionResponseSession::on(WS_Protocol::message &&) {
+    if (this->server().answer_with_a_reserved_opcode) {
+        // FIN + opcode 0xB, no payload: a control opcode RFC 6455 reserves -- a protocol error for whoever reads it.
+        const std::string frame{static_cast<char>(0x8Bu), static_cast<char>(0x00)};
+        std::memcpy(this->out().allocate_back(frame.size()), frame.data(), frame.size());
+        this->ready_to_write();
+        return;
+    }
+    if (this->server().reply_to_message) {
+        qb::http::ws::MessageText reply;
+        reply << "reply";
+        *this << reply;
+    }
     if (this->server().disconnect_on_message)
         this->disconnect();
 }
@@ -845,6 +867,630 @@ TEST(WebSocketClientHardening, ReconnectAfterPeerEofStartsInTheSamePass) {
     EXPECT_EQ(disconnected, 1);
     EXPECT_GT(after, before) << "the reconnect requested after the peer's EOF did not start in the callback's pass";
     client.disconnect();
+}
+
+// What reaches a client is delivered in the order it happened, whatever its "connected" callback does. A frame the
+// server sends with its 101 arrives before the client has been told it is connected: it waits for that. When the
+// callback then PUMPS the loop -- it sends, and waits for the answer -- what the pump brings must come after the frame
+// that was waiting, never before it:
+//  - a second message was delivered at once, ahead of the first, which was held until the callback returned;
+//  - the end of the connection was notified inside the pump, ahead of that first message -- since qb's loop drains
+//    deferred callbacks under a nested turn (Huly QB-1246); before, the notification could not run there at all.
+// Both pumps are bounded: against the client as it was these cases fail, they do not hang.
+namespace ws_connected_pumps_test {
+
+/// Loop turns until `done()`, or two seconds on a host too busy to answer: a callback's own wait.
+template <typename Done>
+void
+pump_inside_the_callback(Done done) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+}
+
+} // namespace ws_connected_pumps_test
+
+TEST(WebSocketClientHardening, AMessageThatArrivesWhileConnectedPumpsComesAfterTheOneThatWasWaiting) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.reply_to_message           = true; // "reply", once the client has spoken
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return std::count(events.begin(), events.end(), "reply") != 0; });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) { events.emplace_back(event.data, event.size); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return events.size() >= 4; }));
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "reply", "connected returns"}))
+        << "the message that arrived during the callback's pump was not delivered behind the one that was waiting";
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, TheEndOfTheConnectionWhileConnectedPumpsComesAfterTheMessageThatWasWaiting) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.disconnect_on_message      = true; // hangs up once the client has spoken
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return std::count(events.begin(), events.end(), "disconnected") != 0; });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) { events.emplace_back(event.data, event.size); });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return events.size() >= 4; }));
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "disconnected", "connected returns"}))
+        << "the end of the connection was notified ahead of a message received before it";
+    client.disconnect();
+}
+
+// The handler of an event that waited is the user's: it may destroy the client, or begin another connection. Either
+// ends the delivery there -- nothing of the client is read again, and the connection it left is not said ended.
+TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClient) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade        = true; // two frames with the 101: both wait for "connected"
+        s.send_second_message_after_upgrade = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    int  connected = 0;
+    int  messages  = 0;
+    auto client    = std::make_unique<qb::http::ws::client>();
+    client->on_connected([&](auto &) { ++connected; });
+    client->on_message([&](auto &) {
+        ++messages;
+        client.reset(); // under the first of the two
+    });
+    client->connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return messages >= 1; }));
+    for (int turn = 0; turn < 50; ++turn) { // the second frame has nobody to reach
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(connected, 1);
+    EXPECT_EQ(messages, 1) << "a frame that waited was delivered to a client its own handler had destroyed";
+    EXPECT_FALSE(client);
+}
+
+TEST(WebSocketClientHardening, AConnectionReplacedByAHandlerOfAMessageThatWaitedIsNotSaidEnded) {
+    // "connected" pumps; the first server hangs up; its end, before it is said, delivers the frame that waited -- and
+    // that frame's handler connects elsewhere. The connection it replaced is the past: no "disconnected" for it.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true;
+        s.disconnect_on_message      = true;
+    });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0);
+    const qb::io::uri                                       first("ws://127.0.0.1:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://127.0.0.1:" + std::to_string(bound_port(second_server)) + "/path");
+
+    std::vector<std::string> events;
+    int                      connected = 0;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        if (++connected == 1) {
+            qb::http::ws::MessageText hello;
+            hello << "hello";
+            client << hello;
+            ws_connected_pumps_test::pump_inside_the_callback([&] { return connected == 2; });
+            events.emplace_back("connected returns");
+        }
+    });
+    client.on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        client.connect(second, 2s);
+    });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(first, 2s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2; }, 5000ms));
+    EXPECT_EQ(std::count(events.begin(), events.end(), "disconnected"), 0) << "the connection a handler had just replaced was said ended";
+    ASSERT_GE(events.size(), 2u);
+    EXPECT_EQ(events[0], "connected");
+    EXPECT_EQ(events[1], "switch");
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, AConnectionBegunByAHandlerOfAMessageThatWaitedIsSaidConnectedBeforeItsOwnFrames) {
+    // The delivery of what waited for "connected" is ONE connection's. The handler of the message it delivers begins
+    // another connection and waits, inside the handler, until that one's 101 has been read -- its first frame with it,
+    // which waits for a "connected" of its own. The end of that wait runs the loop's watchers and no deferred callback
+    // (`loop().run()`, the loop's own call): when the handler returns, the second "connected" is still queued. Back in
+    // the delivery it was called from, the frame now in the queue is not the next one to deliver: it is the other
+    // connection's, and it goes behind that connection's "connected".
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(
+        0, [](ExtensionResponseServer &s) { s.send_message_after_upgrade = true; });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true;
+        s.select_subprotocol         = "chat.v1"; // what tells the handler below that the second 101 has been read
+    });
+    const qb::io::uri                                       first("ws://127.0.0.1:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://127.0.0.1:" + std::to_string(bound_port(second_server)) + "/path");
+
+    std::vector<std::string> events;
+    int                      connected     = 0;
+    int                      upgrades      = 0;
+    bool                     replaced      = false;
+    bool                     second_101_in = false;
+    qb::http::ws::client     client;
+    client.add_subprotocol("chat.v1");
+    client.on_sending_http_request([&](auto &) { ++upgrades; });
+    client.on_connected([&](auto &) { events.emplace_back("connected " + std::to_string(++connected)); });
+    client.on_message([&](auto &event) {
+        events.emplace_back(std::string(event.data, event.size) + " after connected " + std::to_string(connected));
+        if (std::exchange(replaced, true))
+            return;
+        client.connect(second, 2s);
+        // Until the second upgrade request leaves: loop turns, deferred callbacks included -- the connection needs them.
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return upgrades == 2; });
+        // Then the loop alone until the 101 is in: its watchers run, no deferred callback does.
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (client.negotiated_subprotocol().empty() && std::chrono::steady_clock::now() < deadline) {
+            qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(1ms);
+        }
+        second_101_in = !client.negotiated_subprotocol().empty() && connected == 1;
+    });
+    client.connect(first, 2s);
+    ASSERT_TRUE(pump_until([&] { return events.size() >= 4; }, 5000ms));
+    EXPECT_TRUE(second_101_in) << "the handler did not come back with the second 101 read and its \"connected\" still to run";
+    EXPECT_EQ(events, (std::vector<std::string>{"connected 1", "switch after connected 1", "connected 2", "switch after connected 2"}))
+        << "the first frame of a connection begun by a handler of a message that waited was delivered before its \"connected\"";
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, ADeliveryItsHandlerEndedLeavesTheNextConnectionsEventsWaiting) {
+    // The same, with the other connection's 101 ALONE: its first frame arrives after the handler has returned. The
+    // delivery that handler was called from finds nothing left in the queue, and must still leave the other
+    // connection's events waiting for its "connected" -- a test of the connection made before each delivery only
+    // would end the loop here and let events through. (The first server hangs up on what "connected" sends: the end
+    // of that connection delivers the frame that waited, and a connection begun there, the old transport gone,
+    // starts at once -- the loop alone can bring its 101.)
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> first_server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true;
+        s.disconnect_on_message      = true;
+    });
+    qb::http::test::WsServerThread<ExtensionResponseServer> second_server(0, [](ExtensionResponseServer &s) {
+        s.select_subprotocol = "chat.v1"; // the 101 alone; it tells the handler below that the 101 has been read
+        s.reply_to_message   = true;      // "reply", once the client has spoken
+    });
+    const qb::io::uri                                       first("ws://127.0.0.1:" + std::to_string(bound_port(first_server)) + "/path");
+    const qb::io::uri                                       second("ws://127.0.0.1:" + std::to_string(bound_port(second_server)) + "/path");
+
+    std::vector<std::string> events;
+    int                      connected = 0;
+    bool                     replaced  = false;
+    qb::http::ws::client     client;
+    client.add_subprotocol("chat.v1");
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected " + std::to_string(++connected));
+        if (connected == 1) {
+            qb::http::ws::MessageText hello;
+            hello << "hello";
+            client << hello;
+            ws_connected_pumps_test::pump_inside_the_callback([&] { return connected == 2; });
+        }
+    });
+    client.on_message([&](auto &event) {
+        events.emplace_back(std::string(event.data, event.size) + " after connected " + std::to_string(connected));
+        if (std::exchange(replaced, true))
+            return;
+        client.connect(second, 2s);
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (client.negotiated_subprotocol().empty() && std::chrono::steady_clock::now() < deadline)
+            qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+        qb::http::ws::MessageText hi;
+        hi << "hi";
+        client << hi;
+        // The write goes out at the pass that finds the socket writable -- the first: a connected socket is. Then
+        // the answer lands in the socket while nothing reads it, and the handler returns.
+        qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+        qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(50ms);
+    });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(first, 2s);
+    ASSERT_TRUE(pump_until([&] { return connected == 2 && events.size() >= 4; }, 5000ms));
+    for (int turn = 0; turn < 20; ++turn) { // nothing else follows
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected 1", "switch after connected 1", "connected 2", "reply after connected 2"}))
+        << "the delivery its handler ended let through an event of the connection that handler began, before its \"connected\"";
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWhileConnectedPumps) {
+    // "connected" pumps; the answer to what it sent arrives, and the frame that was waiting is delivered then. Its
+    // handler destroys the client: it runs from the loop's deferred queue as it always did, never from under the
+    // read of the frame that arrived -- the protocol and qb-io, which go on after that read, would be gone.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.reply_to_message           = true; // "reply", once the client has spoken
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    bool                     destroyed            = false;
+    bool                     pumping              = false;
+    bool                     destroyed_under_pump = false;
+    auto                     client               = std::make_unique<qb::http::ws::client>();
+    client->on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        *client << hello;
+        // What this closure captured goes with the client: only locals from here.
+        bool const *const gone     = &destroyed;
+        bool *const       in_pump  = &pumping;
+        const auto        deadline = std::chrono::steady_clock::now() + 2s;
+        *in_pump                   = true;
+        while (!*gone && std::chrono::steady_clock::now() < deadline) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(1ms);
+        }
+        *in_pump = false;
+    });
+    client->on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        if (events.back() == "switch") {
+            destroyed_under_pump = pumping;
+            destroyed            = true;
+            client.reset();
+        }
+    });
+    client->connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return destroyed; }));
+    for (int turn = 0; turn < 50; ++turn) { // "reply" has nobody to reach
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch"}));
+    EXPECT_TRUE(destroyed_under_pump) << "the frame that waited was not delivered while \"connected\" pumped: the case proved nothing";
+    EXPECT_FALSE(client);
+}
+
+TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientOnceThePeerHasEnded) {
+    // "connected" pumps; the server hangs up; the end, before it is said, delivers the frame that waited, and that
+    // frame's handler destroys the client: the end is said to nobody, and nothing of the client is read again.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.disconnect_on_message      = true; // hangs up once the client has spoken
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    bool                     destroyed            = false;
+    bool                     pumping              = false;
+    bool                     destroyed_under_pump = false;
+    auto                     client               = std::make_unique<qb::http::ws::client>();
+    client->on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        *client << hello;
+        // What this closure captured goes with the client: only locals from here.
+        bool const *const gone     = &destroyed;
+        bool *const       in_pump  = &pumping;
+        const auto        deadline = std::chrono::steady_clock::now() + 2s;
+        *in_pump                   = true;
+        while (!*gone && std::chrono::steady_clock::now() < deadline) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(1ms);
+        }
+        *in_pump = false;
+    });
+    client->on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        destroyed_under_pump = pumping;
+        destroyed            = true;
+        client.reset();
+    });
+    client->on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client->connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return destroyed; }));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch"}));
+    EXPECT_TRUE(destroyed_under_pump) << "the frame that waited was not delivered while \"connected\" pumped: the case proved nothing";
+    EXPECT_FALSE(client);
+}
+
+TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedPumpsForTheNextFrame) {
+    // A delivery inside a delivery: "connected" pumps, and the answer to what it sent has the frame that waited
+    // delivered -- whose handler sends in turn, and pumps for ITS answer. That second answer waits behind the first,
+    // and is delivered inside the handler's pump: each event once, in the order they arrived.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.reply_to_message           = true; // "reply", to every message of the client
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    const auto               count = [&](char const *e) {
+        return std::count(events.begin(), events.end(), e);
+    };
+    bool                 second_seen_inside = false;
+    qb::http::ws::client client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return count("switch") != 0; });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        if (events.back() == "switch") {
+            qb::http::ws::MessageText again;
+            again << "again";
+            client << again;
+            ws_connected_pumps_test::pump_inside_the_callback([&] { return count("reply") == 2; });
+            second_seen_inside = count("reply") == 2;
+            events.emplace_back("switch returns");
+        }
+    });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return count("connected returns") != 0 && count("switch returns") != 0; }, 6000ms));
+    EXPECT_TRUE(second_seen_inside) << "the frame that waited behind another was not delivered inside the pump of a handler";
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "reply", "reply", "switch returns", "connected returns"}));
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, AProtocolErrorWhileConnectedPumpsComesAfterTheMessageThatWasWaiting) {
+    // The server answers what "connected" sent with a frame of a reserved opcode: a protocol error, notified from the
+    // loop's deferred queue -- inside the pump. The message received before it is delivered before it.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade    = true; // "switch", sent with the 101
+        s.answer_with_a_reserved_opcode = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    const auto               has = [&](char const *e) {
+        return std::count(events.begin(), events.end(), e) != 0;
+    };
+    const auto pos = [&](char const *e) {
+        return std::find(events.begin(), events.end(), e) - events.begin();
+    };
+    qb::http::ws::client client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return has("error"); });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) { events.emplace_back(event.data, event.size); });
+    client.on_error([&](auto &) { events.emplace_back("error"); });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return has("connected returns") && has("switch") && has("error"); }, 6000ms));
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front(), "connected");
+    EXPECT_LT(pos("error"), pos("connected returns")) << "the error was not notified inside the pump: the case proved nothing";
+    EXPECT_LT(pos("switch"), pos("error")) << "a protocol error was notified ahead of a message received before it";
+    client.disconnect();
+}
+
+TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWhenAnErrorFollowsIt) {
+    // The protocol error, before it is notified, delivers the frame that waited -- and that frame's handler destroys
+    // the client: the error is notified to nobody, and nothing of the client is read again.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade    = true; // "switch", sent with the 101
+        s.answer_with_a_reserved_opcode = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    bool                     destroyed            = false;
+    bool                     pumping              = false;
+    bool                     destroyed_under_pump = false;
+    auto                     client               = std::make_unique<qb::http::ws::client>();
+    client->on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        *client << hello;
+        // What this closure captured goes with the client: only locals from here.
+        bool const *const gone     = &destroyed;
+        bool *const       in_pump  = &pumping;
+        const auto        deadline = std::chrono::steady_clock::now() + 2s;
+        *in_pump                   = true;
+        while (!*gone && std::chrono::steady_clock::now() < deadline) {
+            qb::io::async::run(EVRUN_NOWAIT);
+            std::this_thread::sleep_for(1ms);
+        }
+        *in_pump = false;
+    });
+    client->on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        destroyed_under_pump = pumping;
+        destroyed            = true;
+        client.reset();
+    });
+    client->on_error([&](auto &) { events.emplace_back("error"); });
+    client->connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return destroyed; }, 6000ms));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch"}));
+    EXPECT_TRUE(destroyed_under_pump) << "the frame that waited was not delivered while \"connected\" pumped: the case proved nothing";
+    EXPECT_FALSE(client);
+}
+
+TEST(WebSocketClientHardening, ADisconnectFromAMessageThatWaitedSilencesTheErrorThatFollowedIt) {
+    // The same error, the same delivery before it -- and the handler disconnects: an error of a connection its user
+    // has ended is not notified, as it was not when the user disconnected before the notification ran.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade    = true; // "switch", sent with the 101
+        s.answer_with_a_reserved_opcode = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    const auto               has = [&](char const *e) {
+        return std::count(events.begin(), events.end(), e) != 0;
+    };
+    qb::http::ws::client client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return has("disconnected"); });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        client.disconnect();
+    });
+    client.on_error([&](auto &) { events.emplace_back("error"); });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return has("connected returns") && has("disconnected"); }, 6000ms));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "disconnected", "connected returns"}));
+}
+
+// The client's own disconnect() ends what was waiting with the connection, as it ends the frames still in the read
+// buffer: nothing is delivered behind it but "disconnected".
+TEST(WebSocketClientHardening, ADisconnectFromConnectedDeliversNoFrameThatWasWaiting) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade        = true; // "switch"
+        s.send_second_message_after_upgrade = true; // "retired"
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        client.disconnect();
+    });
+    client.on_message([&](auto &event) { events.emplace_back(event.data, event.size); });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return std::count(events.begin(), events.end(), "disconnected") != 0; }));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "disconnected"}))
+        << "a frame that was waiting was delivered after the client's own disconnect()";
+}
+
+TEST(WebSocketClientHardening, ADisconnectFromAMessageThatWaitedDeliversNoneOfThoseBehindIt) {
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade        = true;
+        s.send_second_message_after_upgrade = true;
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) { events.emplace_back("connected"); });
+    client.on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        if (events.size() == 2)
+            client.disconnect(); // from the first of the two that waited
+    });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return std::count(events.begin(), events.end(), "disconnected") != 0; }));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "disconnected"}))
+        << "a frame that was waiting was delivered after the client's own disconnect()";
+}
+
+TEST(WebSocketClientHardening, ADisconnectFromAMessageThatWaitedOnAConnectionThePeerEndedIsStillToldItEnded) {
+    // "connected" pumps; the server hangs up; the end, before it is said, delivers the frame that waited -- and that
+    // frame's handler disconnects. The connection had ended already: its user is told so, once.
+    qb::io::async::init();
+    qb::http::test::WsServerThread<ExtensionResponseServer> server(0, [](ExtensionResponseServer &s) {
+        s.send_message_after_upgrade = true; // "switch", sent with the 101
+        s.disconnect_on_message      = true; // hangs up once the client has spoken
+    });
+    const int                                               port = bound_port(server);
+    ASSERT_NE(port, 0) << "the adversarial server is not listening";
+
+    std::vector<std::string> events;
+    qb::http::ws::client     client;
+    client.on_connected([&](auto &) {
+        events.emplace_back("connected");
+        qb::http::ws::MessageText hello;
+        hello << "hello";
+        client << hello;
+        ws_connected_pumps_test::pump_inside_the_callback([&] { return std::count(events.begin(), events.end(), "disconnected") != 0; });
+        events.emplace_back("connected returns");
+    });
+    client.on_message([&](auto &event) {
+        events.emplace_back(event.data, event.size);
+        client.disconnect();
+    });
+    client.on_disconnected([&](auto &) { events.emplace_back("disconnected"); });
+    client.connect(qb::io::uri("ws://127.0.0.1:" + std::to_string(port) + "/path"), 2s);
+    ASSERT_TRUE(pump_until([&] { return events.size() >= 4; }));
+    for (int turn = 0; turn < 50; ++turn) {
+        qb::io::async::run(EVRUN_NOWAIT);
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(events, (std::vector<std::string>{"connected", "switch", "disconnected", "connected returns"}));
 }
 
 // TCP establishment is only the first phase of connect(timeout). Hold the

@@ -560,6 +560,30 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Fixed
 
+- **A WebSocket client delivers what it receives in the order it happened, whatever its "connected" callback does
+  (Huly QB-1246).** A frame the server sends with its `101` reaches the client before it has been told it is
+  connected: it waits for that, and was held aside until the "connected" callback RETURNED. When that callback pumped
+  the loop -- it sends, and waits for the answer with `run_sync()` or `run_until()` -- what the pump brought was
+  delivered ahead of the frame that was waiting: a later message at once, in front of an earlier one; and, since qb's
+  loop runs deferred callbacks under a nested turn (qb, Huly QB-1246), the end of the connection too, so
+  `on(disconnected)` came before a message received before it. The events that wait for "connected" now stay queued
+  until they are delivered, and "connected" is said when its callback is entered. From then on an event that arrives
+  while others wait goes behind them, and the queue is delivered -- oldest first, each once
+  (`WebSocket::flush_early_events()`) -- by the loop's deferred queue: at the tail of the loop pass that brought the
+  event, inside the pump; when the "connected" callback returns; and before the end of the connection is said. Never
+  from under the read of a frame: a handler of an event that waited may destroy the client or begin another
+  connection, as it always could. A protocol error is notified behind them as well: it was notified ahead of a message
+  received before it when "connected" pumped. The client's own `disconnect()` drops what was still waiting, as before:
+  nothing follows it but `on(disconnected)`, which is said once -- also when a handler of an event that waited
+  disconnects a connection the peer had already ended. A client that never pumps from "connected" sees what it saw:
+  "connected", then the frames that waited, then the rest. The path of a frame still pays one test, and the waiting
+  queue allocates nothing for a client no frame ever waited on. Proved by fifteen
+  cases of `tests/system/ws/ws-client-hardening.cpp`, eleven of them failing on the client as it was, and by 22
+  mutants of `ws.h`, one at a time: 19 fail the cases, three survive -- one equivalent (the delivery an event asks
+  for always runs before another connection can receive anything), one that costs time and nothing else
+  (`BM_WS_ClientMessageForward` holds it), one that only keeps delivered events in memory until the connection
+  goes.
+
 - **A request target the HTTP/1.1 parser cannot store is answered `503`, not `400` (Huly QB-1248).**
   `origin::request_target_uri()` reads the target into the request's uri with qb::io::uri's in-place readers, which
   report an allocation failure -- the copy of the target, its query map -- as a failed read whose `source()` is empty,

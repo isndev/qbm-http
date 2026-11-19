@@ -1172,11 +1172,15 @@ class WebSocket
     // A connector may finish after its client has gone away. Its callback holds
     // only a weak reference to this attempt, so stack and unique_ptr clients are
     // safe without requiring shared ownership of the WebSocket object.
-    std::shared_ptr<int>               _connect_lifetime;
-    std::shared_ptr<deadline_timer>    _connect_deadline;
-    std::shared_ptr<int>               _object_lifetime{std::make_shared<int>(0)};
-    std::function<void()>              _launch_after_disconnect;
+    std::shared_ptr<int>            _connect_lifetime;
+    std::shared_ptr<deadline_timer> _connect_deadline;
+    std::shared_ptr<int>            _object_lifetime{std::make_shared<int>(0)};
+    std::function<void()>           _launch_after_disconnect;
+    // What arrived before the user was told it is connected, oldest first: delivered behind "connected", in order,
+    // and ahead of anything that arrives later -- the end of the connection included (`flush_early_events`). A
+    // vector read from `_early_head`: nothing is allocated for a client no frame ever waited on.
     std::vector<std::function<void()>> _early_events;
+    std::size_t                        _early_head{0};
     std::uint64_t                      _connection_epoch{0};
     std::uint64_t                      _session_epoch{0};
     bool                               _connect_pending{false};
@@ -1186,7 +1190,14 @@ class WebSocket
     bool _disconnect_pending{false};
     bool _disconnect_notified{false};
     bool _error_queued{false};
+    // Events WAIT in `_early_events`: from the 101 until the queue has been delivered behind "connected". One test on
+    // the path of every frame, as before.
     bool _connected_callback_pending{false};
+    // "Connected" has been said for this connection -- its callback has been ENTERED, it may still be running: from
+    // here an event that arrives is delivered behind the ones that were waiting, by a delivery it asks the loop for.
+    bool _connected_said{false};
+    // That delivery has been asked for and has not run yet: one is enough for every event that waits meanwhile.
+    bool _early_flush_asked{false};
 
 private:
     void
@@ -1210,10 +1221,101 @@ private:
             if (epoch != _connection_epoch || !_error_queued)
                 return;
             _error_queued = false;
+            // What was received before the error is delivered before it: the events that waited for "connected",
+            // when its callback is still running -- it pumped the loop, and this ran under it.
+            if (_connected_said) {
+                flush_early_events();
+                if (weak.expired())
+                    return;
+                if (epoch != _connection_epoch)
+                    return; // one of their handlers disconnected, or began another connection
+            }
             if constexpr (qb::has_on<T, error>) {
                 // The callback may delete this client. No member access follows.
                 derived().on(error{});
             }
+        });
+    }
+
+    /**
+     * @brief Delivers the events that waited for "connected", oldest first, then lets events through again.
+     *
+     * Each event leaves the queue BEFORE it is delivered: its handler is the user's, and it may pump the loop. What
+     * that pump brings -- another frame, the end of the connection -- comes through here again and delivers what is
+     * left first, so nothing is delivered ahead of an event that arrived before it, and nothing twice.
+     *
+     * Only ever from the loop's deferred queue -- the "connected" notification, the notification of the end, the
+     * delivery an event that waited asks for (`waited_its_turn`) -- never from under the read that brought a frame: a
+     * handler of an event that waited may destroy the client, and the protocol and qb-io go on after that read.
+     *
+     * A handler may destroy the client: nothing of it is touched then, and the caller looks before it goes on. One
+     * that disconnects, or begins another connection, drops what was left (`drop_early_events()`), and the delivery
+     * ends THERE: what the queue holds from then on is another connection's, waiting for a "connected" of its own --
+     * a handler that begins a connection and pumps until its first frames are in must not have them delivered by the
+     * delivery it was called from.
+     */
+    void
+    flush_early_events() {
+        const auto weak  = std::weak_ptr<int>(_object_lifetime);
+        const auto epoch = _connection_epoch;
+        while (_early_head < _early_events.size()) {
+            auto deliver = std::move(_early_events[_early_head++]);
+            deliver();
+            if (weak.expired())
+                return;
+            if (epoch != _connection_epoch)
+                return; // disconnect(), or another connection begun: the queue is not this delivery's any more
+        }
+        _early_events.clear();
+        _early_head                 = 0;
+        _connected_callback_pending = false;
+    }
+
+    /// Drops the events that were waiting and lets events through again: this connection is over for its user --
+    /// `disconnect()` -- or another one begins -- `connect()`.
+    void
+    drop_early_events() noexcept {
+        _early_events.clear();
+        _early_head                 = 0;
+        _connected_callback_pending = false;
+        _connected_said             = false;
+        _early_flush_asked          = false;
+    }
+
+    /**
+     * @brief Whether `event` had to wait its turn; it is then queued, and delivered from the queue.
+     *
+     * An event waits while the user has not been told it is connected, and while events that arrived before that are
+     * still to be delivered -- the "connected" callback is running, and pumping the loop. It goes behind them. Once
+     * "connected" has been said, the queue is delivered by a callback this defers, at the tail of the loop pass that
+     * brought the event -- inside the pump, which is a pass like any other (Huly QB-1246) -- this event last.
+     * Delivered straight from here, the event that waited before this one would have reached its handler from under
+     * the read of this one: a handler that destroyed the client there left the protocol and qb-io, which go on
+     * after that read, with a freed object.
+     */
+    template <typename Event>
+    [[nodiscard]] bool
+    waited_its_turn(Event &event) {
+        if (likely(!_connected_callback_pending))
+            return false;
+        queue_early_event(event);
+        if (_connected_said && !_early_flush_asked)
+            ask_early_flush();
+        return true;
+    }
+
+    QB_NOINLINE QB_COLD void
+    ask_early_flush() {
+        _early_flush_asked = true;
+        const auto weak    = std::weak_ptr<int>(_object_lifetime);
+        const auto epoch   = _connection_epoch;
+        ::qb::io::async::defer([this, weak, epoch] {
+            if (weak.expired())
+                return;
+            if (epoch != _connection_epoch)
+                return; // disconnect() or connect() since: the queue was dropped, and this request with it
+            _early_flush_asked = false;
+            flush_early_events();
         });
     }
 
@@ -1358,6 +1460,9 @@ public:
     void
     disconnect(int reason = 1) {
         ++_connection_epoch;
+        // What was waiting for "connected" ends with the connection its user ends, as the frames still in the read
+        // buffer do: nothing is delivered behind this call but the notification of the end.
+        drop_early_events();
         const bool pending = _connect_pending;
         cancel_connect_attempt();
         _ws_connected = false;
@@ -1473,9 +1578,8 @@ public:
         cancel_connect_attempt();
         ++_connection_epoch;
         ++_session_epoch;
-        _error_queued               = false;
-        _connected_callback_pending = false;
-        _early_events.clear();
+        _error_queued = false;
+        drop_early_events();
         start_transport_close();
         this->setTimeout(qb::duration::zero());
         _remote = remote;
@@ -1623,6 +1727,8 @@ public:
         this->setTimeout(_ping_interval);
         if constexpr (qb::has_on<T, connected>) {
             _connected_callback_pending = true;
+            _connected_said             = false;
+            _early_flush_asked          = false;
             const auto weak             = std::weak_ptr<int>(_object_lifetime);
             const auto epoch            = _connection_epoch;
             ::qb::io::async::defer([this, weak, epoch] {
@@ -1630,8 +1736,12 @@ public:
                     return;
                 if (epoch != _connection_epoch)
                     return;
-                auto early                  = std::move(_early_events);
-                _connected_callback_pending = false;
+                // "Connected" is said from here. The events that waited for it STAY in the queue while the callback
+                // runs: if it pumps the loop, what the pump brings is delivered behind them (`waited_its_turn`). Held
+                // aside in a local until the callback returned, as they were, a frame that arrived during such a
+                // pump was delivered ahead of them -- and so was the end of the connection, since qb's loop runs
+                // deferred callbacks under a nested turn (Huly QB-1246).
+                _connected_said = true;
                 // Run after the HTTP parser and qb-io dispatch have returned.
                 // The user may delete this client in the callback.
                 derived().on(connected{});
@@ -1639,13 +1749,7 @@ public:
                     return;
                 if (epoch != _connection_epoch)
                     return;
-                for (auto &deliver : early) {
-                    deliver();
-                    if (weak.expired())
-                        return;
-                    if (epoch != _connection_epoch)
-                        return;
-                }
+                flush_early_events();
             });
         }
     }
@@ -1659,10 +1763,8 @@ public:
     void
     on(ping &&event) {
         if constexpr (qb::has_on<T, ping>) {
-            if (unlikely(_connected_callback_pending)) {
-                queue_early_event(event);
+            if (unlikely(waited_its_turn(event)))
                 return;
-            }
             derived().on(std::forward<ping>(event));
         }
     }
@@ -1676,10 +1778,8 @@ public:
     void
     on(pong &&event) {
         if constexpr (qb::has_on<T, pong>) {
-            if (unlikely(_connected_callback_pending)) {
-                queue_early_event(event);
+            if (unlikely(waited_its_turn(event)))
                 return;
-            }
             derived().on(std::forward<pong>(event));
         }
     }
@@ -1712,10 +1812,8 @@ public:
      */
     void
     on(message &&event) {
-        if (unlikely(_connected_callback_pending)) {
-            queue_early_event(event);
+        if (unlikely(waited_its_turn(event)))
             return;
-        }
         derived().on(std::forward<message>(event));
     }
 
@@ -1733,10 +1831,8 @@ public:
             *this << echo;
         }
         if constexpr (qb::has_on<T, closed>) {
-            if (unlikely(_connected_callback_pending)) {
-                queue_early_event(event);
+            if (unlikely(waited_its_turn(event)))
                 return;
-            }
             derived().on(std::forward<closed>(event));
         }
     }
@@ -1751,13 +1847,13 @@ public:
     on(disconnected &&event) {
         // A completion callback may already have requested a new attempt.
         // This notification belongs to the retired transport, not to it.
-        const bool replacing         = _disconnect_pending && _connect_pending;
-        const bool connected_pending = _connected_callback_pending;
-        _disconnect_pending          = true;
-        _disconnect_notified         = true;
-        _ws_connected                = false;
-        if (!connected_pending)
-            _early_events.clear();
+        const bool replacing = _disconnect_pending && _connect_pending;
+        _disconnect_pending  = true;
+        _disconnect_notified = true;
+        _ws_connected        = false;
+        // The events still waiting for "connected" are NOT dropped here: they arrived before this, and the
+        // notification below delivers them first. The user's own disconnect() dropped them; the next connect()
+        // drops what was never delivered.
         this->setTimeout(qb::duration::zero());
         _close_sent = false;
         if (replacing) {
@@ -1783,6 +1879,18 @@ public:
                 return;
             if (session != _session_epoch)
                 return;
+            // What was received before the connection ended is delivered before its end is said: the events that
+            // waited for "connected", when its callback is still running -- it pumped the loop, and this ran under
+            // it. When "connected" was never said they stay where they are, never delivered.
+            if (_connected_said) {
+                flush_early_events();
+                // One of their handlers may have destroyed the client, or begun another connection: the one that
+                // ended is then the past. A handler that only disconnected is still told the connection ended.
+                if (weak.expired())
+                    return;
+                if (session != _session_epoch)
+                    return;
+            }
             // qb-io's dispose() still uses this object after on(disconnected).
             derived().on(std::move(event));
         });
