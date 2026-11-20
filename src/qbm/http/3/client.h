@@ -448,6 +448,12 @@ private:
         }
     }
     void hear_owed_now() noexcept;
+    /// The answer of one request -- its response, its failure --, after what was owed before it.
+    void
+    give(RequestContext &ctx, qb::http::Response response) {
+        hear_owed();
+        ctx.callback(std::move(response));
+    }
     /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
     /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.

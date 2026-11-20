@@ -580,8 +580,7 @@ Client::cancel_request(request_id id, std::string const &reason) {
         auto ctx = std::move(*pending);
         _pending_requests.erase(pending);
         ++_failed_requests;
-        hear_owed();
-        ctx->callback(create_error_response(qb::http::status::CLIENT_CLOSED_REQUEST, reason));
+        give(*ctx, create_error_response(qb::http::status::CLIENT_CLOSED_REQUEST, reason));
         return true;
     }
 
@@ -964,8 +963,7 @@ Client::fail_request(std::uint64_t stream_id, std::string const &error, qb::http
     auto ctx = std::move(it->second);
     _active_requests.erase(it);
     ++_failed_requests;
-    hear_owed();
-    ctx->callback(create_error_response(status, error));
+    give(*ctx, create_error_response(status, error));
 }
 
 void
@@ -978,8 +976,7 @@ Client::fail_pending_request(std::uint64_t request_id, std::string const &error,
     auto ctx = std::move(*it);
     _pending_requests.erase(it);
     ++_failed_requests;
-    hear_owed();
-    ctx->callback(create_error_response(status, error));
+    give(*ctx, create_error_response(status, error));
 }
 
 bool
@@ -1118,12 +1115,11 @@ Client::on_http3_stream_closed(std::uint64_t stream_id, std::uint64_t) {
 void
 Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
     _remote_shutdown = true;
-    hear_owed();
     while (!_pending_requests.empty()) {
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
         ++_failed_requests;
-        ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
+        give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
     }
 }
 
@@ -1136,8 +1132,7 @@ Client::on_http3_response(std::uint64_t stream_id, qb::http::Response response) 
     auto ctx = std::move(it->second);
     _active_requests.erase(it);
     ++_successful_requests;
-    hear_owed(); // one test: a refusal kept before this response is heard before it
-    ctx->callback(std::move(response));
+    give(*ctx, std::move(response)); // one test more: a refusal kept before this response is heard before it
     process_pending_requests();
 }
 

@@ -2208,6 +2208,11 @@ struct ClientTestPeer {
         client.disconnect();
         return dialled;
     }
+    /// How many attempts the client has started, over its life.
+    static std::uint64_t
+    attempts(Client const &client) {
+        return client._connect_attempt;
+    }
 };
 
 } // namespace qb::http3
@@ -3132,7 +3137,18 @@ TEST_F(Http3LoopbackTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
         EXPECT_EQ(order, (std::vector<int>{1, 2, 3})) << "the turn that was asked found something left to hear";
     }
     {
-        SCOPED_TRACE("the failures of a disconnect() the same callback calls");
+        SCOPED_TRACE("an empty batch the same callback pushes");
+        auto             client = qb::http3::make_client(https_origin(next_port())); // never connected
+        std::vector<int> order;
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
+            client->push_requests({}, [&](std::vector<qb::http::Response>) { order.push_back(4); });
+        });
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 4}));
+    }
+    {
+        SCOPED_TRACE("the failures of a disconnect() the same callback calls, and the coroutine pushes it completes at once");
         const auto port   = next_port();
         auto       server = qb::http3::make_server();
         server->router().get("/stall", [](auto) {});
@@ -3141,19 +3157,59 @@ TEST_F(Http3LoopbackTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
         auto client = qb::http3::make_client(https_origin(port));
         client->set_verify_peer(false);
         std::vector<int> order;
-        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { order.push_back(9); }); // in flight
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { // in flight: fails with the close
+            order.push_back(9);
+            qb::http::test::watchdog bound("run_sync() of a push from the callback of a close", 10s);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(3); }); // kept: an answer is on the stack
+            static_cast<void>(qb::io::async::run_sync(client->push_request(qb::http::Request{qb::io::uri("/stall")})));
+            order.push_back(10);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(5); }); // kept
+            std::vector<qb::http::Request> two;
+            two.emplace_back(qb::io::uri("/stall"));
+            two.emplace_back(qb::io::uri("/stall"));
+            static_cast<void>(qb::io::async::run_sync(client->push_requests(std::move(two))));
+            order.push_back(11);
+        });
         ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
         client->push_request(elsewhere(), [&](qb::http::Response) {
             order.push_back(1);
             client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
             client->disconnect();                                                               // fails the request in flight
         });
-        EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 9, 3, 10, 5, 11}));
         const auto settle = std::chrono::steady_clock::now() + 50ms;
         while (std::chrono::steady_clock::now() < settle) {
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
         }
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 9, 3, 10, 5, 11}));
+        server->close();
+    }
+    {
+        SCOPED_TRACE("a response that comes while the answer runs the loop");
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        std::vector<int> order;
+        client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) { // its response is on its way
+            EXPECT_EQ(response.status(), qb::http::status::OK);
+            order.push_back(9);
+        });
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
+            const auto until = std::chrono::steady_clock::now() + 5s;
+            while (order.size() < 3 && std::chrono::steady_clock::now() < until) {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // the response comes under this answer
+            }
+        });
         EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
+        client->disconnect();
         server->close();
     }
 }
@@ -3516,6 +3572,34 @@ TEST_F(Http3LoopbackTest, AnAddressQuicGivesUpBeforeItsShareGivesWayToTheNext) {
     EXPECT_EQ(connected, 1) << "QUIC's own timeout on the first address ended the connect(): " << error;
     EXPECT_GE(took, 250ms) << "the first address was given up before QUIC gave it up";
     EXPECT_LT(took, 2s) << "the second address waited for the first one's share";
+    client->disconnect();
+    server->close();
+}
+
+// A refusal is an answer, and final (Huly QB-1246): an address whose server answers and is refused -- here by TLS, its
+// certificate not verified -- ends the connect() there. Only an address that did not answer leaves its place to the
+// next: the second address, the same server, is never dialled.
+TEST_F(Http3LoopbackTest, AnAddressRefusedByTlsEndsTheConnectAndTheNextIsNotDialled) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port)); // verifies its peer: the test certificate is self-signed
+    client->set_connect_timeout(6s);
+    int        calls = 0, connected = -1;
+    const auto before = qb::http3::ClientTestPeer::attempts(*client);
+    const auto began  = std::chrono::steady_clock::now();
+    ASSERT_TRUE(qb::http3::ClientTestPeer::dial(*client, {qb::io::endpoint("127.0.0.1", port), qb::io::endpoint("127.0.0.1", port)},
+                                                [&](bool ok, std::string const &) {
+                                                    ++calls;
+                                                    connected = ok ? 1 : 0;
+                                                }));
+    ASSERT_TRUE(pump([&] { return calls != 0; }, 8s));
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(connected, 0);
+    EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client) - before, 1u) << "a refusal by TLS was taken for an address that did not answer";
+    EXPECT_LT(std::chrono::steady_clock::now() - began, 2s) << "the refusal waited for the address's share";
     client->disconnect();
     server->close();
 }
