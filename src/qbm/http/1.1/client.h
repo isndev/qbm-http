@@ -124,9 +124,10 @@ class Client : public std::enable_shared_from_this<Client> {
     std::size_t _holds_queued   = 0; ///< Holds the loop's deferred queue owns (tick_hold): none left means none keeps this client (QB-1246)
     // A refusal is answered inside the push that earned it -- unless that push is made from one of this client's own
     // callbacks: then it is heard on the loop's next turn, so a callback that pushes its request back at every failure is
-    // never called from inside its own push (Huly QB-1246). What waits for that turn, and the queue's own settling.
+    // never called from inside its own push (Huly QB-1246). What waits for that turn, in the order it came to be owed: it
+    // is heard before any answer the client gives after it (hear_owed()).
     std::deque<std::function<void()>> _late_answers;
-    bool                              _late_process    = false;
+    std::uint64_t                     _late_heard      = 0; ///< How many of them were heard: a pass hears those owed as it starts
     std::size_t                       _destroy_answers = 0; ///< Pushes the destructor's callbacks made, being answered inside themselves
     // While true, _connection still owns the retired dispatch. connect() may
     // record a new intent, but only deferred cleanup can replace that owner.
@@ -329,8 +330,18 @@ private:
     void                                            refuse(std::function<void()> answer); ///< A refusal's answer: now, or on the next turn
     void                                            run_late_answers();                   ///< What refuse() kept for the next turn
     [[nodiscard]] bool                              answers_wait_a_turn() const noexcept; ///< A callback of this client is on the stack
-    void                                            enter_user_callback();
-    void                                            leave_user_callback() noexcept;
+    /// What is owed is heard first: before every callback the client calls, so that no answer overtakes a refusal kept
+    /// before it. One test when nothing is owed.
+    void
+    hear_owed() noexcept {
+        if (!_late_answers.empty()) [[unlikely]] {
+            hear_owed_now();
+        }
+    }
+    void               hear_owed_now() noexcept;
+    [[nodiscard]] bool can_send() const noexcept; ///< Connected, on a connection that is open
+    void               enter_user_callback();
+    void               leave_user_callback() noexcept;
     // Invoke a user-supplied callback under a callback_scope, containing any
     // exception it throws. User callbacks are reached from qb-io's noexcept
     // dispatch (protocol onMessage / timeout / disconnect events), where an
@@ -344,7 +355,7 @@ private:
     void           fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
                                          std::string const &pending_error, qb::http::status pending_status);
     void           process_pending_requests();
-    void           arm_pending_timeout(std::uint64_t request_id);
+    void           arm_pending_timeout(std::uint64_t request_id); ///< For a request still queued; nothing otherwise
     bool fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::REQUEST_TIMEOUT);
     void handle_connection_success();
     void handle_connection_failure(std::string const &error);
