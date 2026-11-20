@@ -324,6 +324,7 @@ Client::dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callba
     _remote_shutdown    = false;
     _connect_deadline   = _connect_timeout > qb::duration::zero() ? began + _connect_timeout : std::chrono::steady_clock::time_point{};
     _connect_next       = 0;
+    _refused_at_start   = 0;
     _connect_candidates = std::move(candidates);
     const char *failure = nullptr;
     if (_connect_candidates.empty()) {
@@ -333,7 +334,7 @@ Client::dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callba
         failure = "HTTP/3 connection timeout"; // the lookup outlasted it: nothing is dialled
     } else if (!start_attempt()) {
         failure = "Unable to start QUIC connection";
-        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: no UDP socket opened and bound");
+        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: " << why_nothing_started());
     }
     if (failure == nullptr) {
         arm_connect_timeout();
@@ -448,11 +449,25 @@ Client::start_attempt() {
             }
             return true;
         }
-        LOG_HTTP_INFO_PA(_client_id,
-                         "HTTP/3 address " << _connect_next << " of " << _connect_candidates.size() << " for " << _host << " could not start");
+        // Two ways not to start: the endpoint opened and bound no socket, or it did and the network refused the first
+        // datagram -- the close it delivered inside its connect(). The log tells them apart, here and in dial().
+        _refused_at_start += started ? 1u : 0u;
+        LOG_HTTP_INFO_PA(_client_id, "HTTP/3 address "
+                                         << _connect_next << " of " << _connect_candidates.size() << " for " << _host << " could not start: "
+                                         << (started ? "the network refused its first datagram" : "no UDP socket opened and bound"));
         close_failed_transport("HTTP/3 attempt could not start"); // what the endpoint opened before it gave up
     }
     return false;
+}
+
+const char *
+Client::why_nothing_started() const noexcept {
+    if (_refused_at_start == 0) {
+        return "no UDP socket opened and bound";
+    }
+    return _refused_at_start == _connect_candidates.size()
+               ? "the network refused the first datagram to every address"
+               : "the network refused the first datagram to some addresses, and no UDP socket opened and bound for the others";
 }
 
 void
