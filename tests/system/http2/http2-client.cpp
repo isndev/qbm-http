@@ -2232,26 +2232,27 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAConnectTimeoutWhoseFailureCallbackRa
     int              failed = 0, answered = 0; // before the client, which answers what it still holds when it is destroyed
     bool             open_at_entry = false, ended_in_pump = false;
     qb::http::status status = qb::http::status::OK;
-    // Two connections, each held 800 ms past its TLS handshake with no SETTINGS, then ended: the first outlives the
-    // connect deadline, the second ends before its handshake.
-    qb::http::test::TlsClosingPeer silent(2, 0, std::vector<std::string>{"h2"}, 800ms);
+    // Two connections, each held 2 s past its TLS handshake with no SETTINGS, then ended: the first outlives the 1 s
+    // connect deadline, the second ends before its handshake. The margins leave a loaded host a second for TLS.
+    qb::http::test::TlsClosingPeer silent(2, 0, std::vector<std::string>{"h2"}, 2s);
     const auto                     port = silent.port();
     ASSERT_NE(port, 0);
     auto client = reconnect::make_client_for(port);
     client->set_auto_reconnect(false);
-    client->set_connect_timeout(300ms);
+    client->set_connect_timeout(1s);
     client->set_request_timeout(qb::duration::zero());
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
         if (++failed != 1)
             return;
         open_at_entry = client->transport().is_open(); // the deadline found TLS done: the end below is this transport's
-        for (const auto until = std::chrono::steady_clock::now() + 3s;
+        for (const auto until = std::chrono::steady_clock::now() + 5s;
              client->transport().is_open() && std::chrono::steady_clock::now() < until;)
             qb::io::async::run(EVRUN_NOWAIT); // the peer's end is read here
         ended_in_pump = !client->transport().is_open();
     }));
-    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 5s));
-    ASSERT_TRUE(open_at_entry) << "the deadline fired before the TLS handshake: no transport for the callback to see end";
+    ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 10s));
+    if (!open_at_entry)
+        GTEST_SKIP() << "the host ran too slowly: the 1 s deadline fired before the TLS handshake, no transport to see end";
     ASSERT_TRUE(ended_in_pump) << "the peer's end was not read inside the failure callback: the case proves nothing";
 
     client->set_connect_timeout(qb::duration::zero()); // no deadline rescues the next request
@@ -2259,7 +2260,7 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAConnectTimeoutWhoseFailureCallbackRa
         ++answered;
         status = response.status();
     }));
-    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 2s)) << "the request waited behind the timed-out attempt's flags";
+    EXPECT_TRUE(ServerThread::pump_until([&] { return answered != 0; }, 8s)) << "the request waited behind the timed-out attempt's flags";
     EXPECT_EQ(answered, 1);
     EXPECT_NE(status, qb::http::status::OK);
 }

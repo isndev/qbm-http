@@ -603,7 +603,7 @@ Client::reset_deferred_connection_if_ready() {
         _is_connecting = false;
         connect(nullptr);
     } else if (!_intentional_disconnect) {
-        process_pending_requests(); // a connection for a queue a close left to automatic reconnection: nothing fails here (QB-1246)
+        process_pending_requests(); // a backstop: every close settles its queue inside itself, so nothing is left here to fail (QB-1246)
     }
 }
 
@@ -768,6 +768,9 @@ Client::handle_timeout() {
     retire_connection();
     fail_retired_requests(cohort, "Request timeout", qb::http::status::GATEWAY_TIMEOUT, "Connection lost",
                           qb::http::status::SERVICE_UNAVAILABLE);
+    if (!_intentional_disconnect) {
+        process_pending_requests(); // the queue kept for reconnection, settled inside the close: a callback may have ended that (QB-1246)
+    }
 }
 
 void
@@ -781,6 +784,9 @@ Client::handle_disconnected(int reason, std::string const &cut) {
     // Retired before any callback, a cut response's included: what one pushes is for the next connection, never this one (QB-1248).
     retire_connection();
     fail_retired_requests(cohort, error, qb::http::status::BAD_GATEWAY, "Connection lost", qb::http::status::SERVICE_UNAVAILABLE);
+    if (!_intentional_disconnect) {
+        process_pending_requests(); // as after a timeout: the queue settled inside the close (QB-1246)
+    }
 }
 
 void
@@ -844,6 +850,9 @@ Client::handle_switched_protocols(qb::http::Response response) {
     auto self_guard = weak_from_this().lock();
     if (!_active_request) {
         retire_connection();
+        if (!_intentional_disconnect) {
+            process_pending_requests(); // inside the close, as every close settles its queue (QB-1246)
+        }
         return;
     }
     if (!qb::http::detail::switch_was_offered(_active_request->request, response)) {
