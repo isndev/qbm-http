@@ -5065,3 +5065,135 @@ TEST_F(Http2ClientBodyLimit, TheClientsBodyLimitIsTheConstantByDefaultAndNoneAtZ
         EXPECT_EQ(response->body().size(), 2048u);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The client's callbacks and its connections (Huly QB-1246): what a callback may do -- push, connect, run the loop --
+// and what the client then owes it. The cases of this section are in a namespace of their own, at the end of the file.
+// ---------------------------------------------------------------------------
+
+namespace http2_client_callbacks_test {
+
+/// A GET the server routes and never answers.
+qb::http::Request
+hang() {
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri("/api/hang");
+    return request;
+}
+
+/// Runs the loop from inside a callback until @p done, bounded by a watchdog that ends the process, saying so.
+template <typename Done>
+void
+run_the_loop_until(Done &&done, char const *const what) {
+    qb::http::test::watchdog bound(what, 10s);
+    while (!done())
+        qb::io::async::run(EVRUN_NOWAIT);
+}
+
+/// What one request was answered with.
+struct Answer {
+    int              count  = 0;
+    qb::http::status status = qb::http::status::OK;
+    std::string      body;
+
+    void
+    operator()(qb::http::Response response) {
+        ++count;
+        status = response.status();
+        body   = response.body().as<std::string>();
+    }
+};
+
+// A request pushed from the callback of a connect() that failed is the next attempt's: it is not answered with the error
+// of the attempt that failed, which it never rode. The connect() callbacks were called before the client took its
+// requests out, so the pass that followed failed the request just pushed -- "Connection failed: TCP/SSL connection
+// failed" -- while the attempt that push had started went on, for nobody (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedFromACallbackOfAFailedConnectIsNotFailedWithThatAttempt) {
+    Answer                        answer; // before the client, which answers what it still holds when it is destroyed
+    bool                          told = false;
+    std::string                   why;
+    std::unique_ptr<ServerThread> server;
+    const auto                    port   = qb::http::test::ephemeral_port(); // bound then closed: refused
+    auto                          client = reconnect::make_client_for(port);
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &error) {
+        if (ok || std::exchange(told, true))
+            return;
+        why    = error;
+        server = reconnect::make_h2_server_on(port); // there for the next attempt
+        if (server->ready())
+            client->push_request(reconnect::get_test(), std::ref(answer));
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return answer.count != 0; }, 10s));
+    ASSERT_TRUE(server && server->ready()) << "no server on the port that refused: the case proves nothing";
+    EXPECT_EQ(why, "TCP/SSL connection failed");
+    EXPECT_EQ(answer.count, 1);
+    EXPECT_EQ(answer.status, qb::http::status::OK) << answer.body;
+}
+
+// The same with the automatic reconnection on: the request queues for the attempt the run schedules, as one pushed from
+// the failure callback of a request does, and that attempt serves it. The connect() callbacks were called outside the
+// failure pass: the push connected on its own, at once, and the pass that followed failed it (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedFromACallbackOfAFailedConnectQueuesForTheReconnectionRun) {
+    Answer                        answer; // before the client, which answers what it still holds when it is destroyed
+    bool                          told = false, connecting_after_push = true, reconnecting_after_callback = false;
+    std::unique_ptr<ServerThread> server;
+    const auto                    port   = qb::http::test::ephemeral_port(); // bound then closed: refused
+    auto                          client = reconnect::make_client_for(port);
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(50ms).with_jitter(false));
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        if (ok || std::exchange(told, true))
+            return;
+        server = reconnect::make_h2_server_on(port); // there for the next attempt
+        if (!server->ready())
+            return;
+        client->push_request(reconnect::get_test(), std::ref(answer));
+        connecting_after_push = client->is_connecting();
+    }));
+    ASSERT_TRUE(ServerThread::pump_until(
+        [&] {
+            reconnecting_after_callback = reconnecting_after_callback || client->is_reconnecting();
+            return answer.count != 0;
+        },
+        10s));
+    ASSERT_TRUE(server && server->ready()) << "no server on the port that refused: the case proves nothing";
+    EXPECT_FALSE(connecting_after_push) << "a push from a callback of a failure must not connect on its own";
+    EXPECT_TRUE(reconnecting_after_callback) << "no attempt was scheduled for the request";
+    EXPECT_EQ(answer.count, 1);
+    EXPECT_EQ(answer.status, qb::http::status::OK) << answer.body;
+}
+
+// A failure pass is open until the failure that opened it has called its last callback, whatever failed meanwhile: a
+// callback of a connect() that failed asks connect() again and runs the loop until that attempt fails too -- a failure
+// inside the failure, with its own callbacks --, then pushes a request, which still queues for the run (Huly QB-1246).
+TEST_F(Http2ClientTest, ARequestPushedAfterAFailureInsideACallbackOfAFailureStillQueuesForTheRun) {
+    Answer                        answer; // before the client, which answers what it still holds when it is destroyed
+    bool                          told = false, asked = false, inner_answered = false, inner_ok = true, connecting_after_push = true;
+    std::unique_ptr<ServerThread> server;
+    const auto                    port   = qb::http::test::ephemeral_port(); // bound then closed: refused
+    auto                          client = reconnect::make_client_for(port);
+    client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(50ms).with_jitter(false));
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        if (ok || std::exchange(told, true))
+            return;
+        asked = client->connect([&](bool ok_again, const std::string &) {
+            inner_answered = true;
+            inner_ok       = ok_again;
+        });
+        run_the_loop_until([&] { return inner_answered; }, "the loop a callback of a failed connect() runs until the next attempt fails");
+        server = reconnect::make_h2_server_on(port); // there for the attempt the run schedules
+        if (!server->ready())
+            return;
+        client->push_request(reconnect::get_test(), std::ref(answer));
+        connecting_after_push = client->is_connecting();
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return answer.count != 0; }, 10s));
+    ASSERT_TRUE(server && server->ready()) << "no server on the port that refused: the case proves nothing";
+    ASSERT_TRUE(asked && inner_answered && !inner_ok) << "no failure inside the failure's callback: the case proves nothing";
+    EXPECT_FALSE(connecting_after_push) << "the failure inside closed the pass of the failure around it";
+    EXPECT_EQ(answer.count, 1);
+    EXPECT_EQ(answer.status, qb::http::status::OK) << answer.body;
+}
+
+} // namespace http2_client_callbacks_test

@@ -52,6 +52,28 @@ struct closing_scope {
         --depth;
     }
 };
+
+/// A failure pass, for the scope of its callbacks: opened when the client reconnects by itself and none is open already,
+/// closed where it was opened -- also when a callback throws. A request pushed inside one queues for the attempt the run
+/// decides on.
+struct failure_pass_scope {
+    bool      &flag;
+    const bool opened;
+    failure_pass_scope(bool &value, bool const wanted) noexcept
+        : flag(value)
+        , opened(wanted && !value) {
+        if (opened) {
+            flag = true;
+        }
+    }
+    failure_pass_scope(failure_pass_scope const &)            = delete;
+    failure_pass_scope &operator=(failure_pass_scope const &) = delete;
+    ~failure_pass_scope() noexcept {
+        if (opened) {
+            flag = false;
+        }
+    }
+};
 } // namespace
 
 Client::Client(const std::string &base_uri)
@@ -249,14 +271,8 @@ Client::close_connection(const std::string &error_message) {
 
 void
 Client::run_failure_pass(const std::string &error_message) {
-    const bool queue_pushes = _auto_reconnect && !_in_failure_pass;
-    if (queue_pushes) {
-        _in_failure_pass = true;
-    }
+    const failure_pass_scope pass{_in_failure_pass, _auto_reconnect};
     fail_all_requests(error_message);
-    if (queue_pushes) {
-        _in_failure_pass = false;
-    }
 }
 
 void
@@ -634,16 +650,23 @@ Client::handle_connection_failure(const std::string &error_message) {
     // that never came, and the queue of the next transport did not hear its own (Huly QB-1246).
     _preserve_pending_on_next_disconnect = close_transport;
 
-    auto callbacks = std::move(_connection_callbacks);
-    _connection_callbacks.clear();
-    for (auto &callback : callbacks) {
-        if (callback) {
-            callback(false, error_message);
+    // The work of the attempt that failed is taken out of the client before any callback is called, those of connect()
+    // included, and all of them are called inside one failure pass: a request one of them pushes is the next attempt's --
+    // it queues for the run when the client reconnects by itself, and connects on its own otherwise. Taken out after the
+    // connect() callbacks, a request one of them had just pushed was failed by the pass that followed, with the error of
+    // an attempt it never rode, while the attempt its push had started went on for nobody (Huly QB-1246).
+    {
+        auto                     failed = detach_requests();
+        const failure_pass_scope pass{_in_failure_pass, _auto_reconnect};
+        auto                     callbacks = std::move(_connection_callbacks);
+        _connection_callbacks.clear();
+        for (auto &callback : callbacks) {
+            if (callback) {
+                callback(false, error_message);
+            }
         }
+        fail_detached(std::move(failed), "Connection failed: " + error_message);
     }
-
-    // Fail all pending requests, as a failure pass: a retry callback's push queues.
-    run_failure_pass("Connection failed: " + error_message);
 
     // Reconnect only if failure callbacks queued fresh work.
     if (_auto_reconnect && has_pending_or_active_work()) {
@@ -766,19 +789,29 @@ Client::finish_graceful_goaway_if_drained() {
 
 void
 Client::fail_all_requests(const std::string &error_message) {
-    if (!_active_requests.empty() || !_pending_requests.empty() || !_active_batches.empty()) { // said once, and only when there is some
-        LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
-    }
+    fail_detached(detach_requests(), error_message);
+}
 
+Client::DetachedRequests
+Client::detach_requests() {
     // Reentrancy-safe draining: user callbacks may enqueue new requests/batches.
     // We move current work out before invoking any callback so newly queued work
     // is not lost or invalidated by this failure pass.
-    qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>>      active_requests_to_fail;
-    std::deque<std::unique_ptr<RequestContext>>                       pending_requests_to_fail;
-    qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> active_batches_to_fail;
-    active_requests_to_fail.swap(_active_requests);
-    pending_requests_to_fail.swap(_pending_requests);
-    active_batches_to_fail.swap(_active_batches);
+    DetachedRequests detached;
+    detached.active.swap(_active_requests);
+    detached.pending.swap(_pending_requests);
+    detached.batches.swap(_active_batches);
+    return detached;
+}
+
+void
+Client::fail_detached(DetachedRequests detached, const std::string &error_message) {
+    if (!detached.active.empty() || !detached.pending.empty() || !detached.batches.empty()) { // said once, and only when there is some
+        LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
+    }
+    auto &active_requests_to_fail  = detached.active;
+    auto &pending_requests_to_fail = detached.pending;
+    auto &active_batches_to_fail   = detached.batches;
     // The registry of batches is detached: a member failed below finds no batch, which is expected here and not logged once
     // per member. Each answer is made inside the call of its callback, so what it fails to allocate is contained with it.
     struct failing_scope {

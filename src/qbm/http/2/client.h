@@ -610,6 +610,17 @@ private:
      * @param error_message Error description
      */
     void fail_all_requests(const std::string &error_message);
+    /// The outstanding work, out of the client: what a failure answers once the registries no longer hold it.
+    struct DetachedRequests {
+        qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>>      active;
+        std::deque<std::unique_ptr<RequestContext>>                       pending;
+        qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> batches;
+    };
+    /// Takes every request and every batch the client holds: from here on a push is new work, which the failure of what
+    /// was taken does not answer.
+    [[nodiscard]] DetachedRequests detach_requests();
+    /// Answers what detach_requests() took, each with @p error_message. fail_all_requests() is the two, one after the other.
+    void fail_detached(DetachedRequests detached, const std::string &error_message);
     /// fail_all_requests() runs: it detached the registries, so a batch member it fails finds no batch. Expected there, and
     /// not logged once per member -- the pass said "Failing all requests" once (Huly QB-1246).
     bool _failing_all = false;
