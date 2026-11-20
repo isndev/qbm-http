@@ -4002,23 +4002,28 @@ TEST_F(Http3LoopbackTest, AnAnsweredRequestLeavesNoTimerArmed) {
 }
 
 // A request is timed wherever it comes to rest (Huly QB-1246): in flight, left in the queue by a pass that could not
-// submit it (the stream limit), queued behind a connection that is not there yet. Its timeout is no longer armed where
-// it is queued, so each of the three places that arm it has its request here: `408`, at the request timeout.
+// submit it (the stream limit), queued behind a connection that is not there yet -- pushed alone, or as the members of
+// a batch. Its timeout is no longer armed where it is queued, so each of the four places that arm it has its request
+// here: `408`, at the request timeout.
 TEST_F(Http3LoopbackTest, ARequestIsTimedWhereverItWaits) {
-    for (const std::string_view where : {"in flight", "left in the queue by the stream limit", "behind a connection that is not there yet"}) {
+    for (const std::string_view where :
+         {"in flight", "left in the queue by the stream limit", "behind a connection that is not there yet",
+          "in a batch behind a connection that is not there yet"}) {
         SCOPED_TRACE(where);
+        const bool               connected = !where.ends_with("behind a connection that is not there yet");
+        const bool               batch     = where.starts_with("in a batch");
         std::vector<std::string> said; // declared before the client: its destructor may still answer
         const auto               port   = next_port();
         auto                     server = qb::http3::make_server();
         server->router().get("/stall", [](auto) {});
         server->router().compile();
-        if (where != "behind a connection that is not there yet") {
+        if (connected) {
             ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
         }
         auto client = qb::http3::make_client(https_origin(port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
-        if (where != "behind a connection that is not there yet") {
+        if (connected) {
             ASSERT_TRUE(client->connect(nullptr));
             ASSERT_TRUE(pump([&] { return client->is_connected(); }));
         }
@@ -4030,13 +4035,26 @@ TEST_F(Http3LoopbackTest, ARequestIsTimedWhereverItWaits) {
         }
         client->set_request_timeout(200ms);
         const auto began = std::chrono::steady_clock::now();
-        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&said](qb::http::Response response) {
-            EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
-            said.push_back(response.body().as<std::string>());
-        });
+        if (batch) {
+            std::vector<qb::http::Request> two;
+            two.emplace_back(qb::io::uri("/stall"));
+            two.emplace_back(qb::io::uri("/stall"));
+            client->push_requests(std::move(two), [&said](std::vector<qb::http::Response> responses) {
+                for (auto const &response : responses) {
+                    EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                    said.push_back(response.body().as<std::string>());
+                }
+            });
+        } else {
+            client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&said](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                said.push_back(response.body().as<std::string>());
+            });
+        }
         EXPECT_TRUE(pump([&] { return !said.empty(); }, 3s)) << "the request waited with no timeout armed";
         EXPECT_GE(std::chrono::steady_clock::now() - began, 150ms);
-        EXPECT_EQ(said, (std::vector<std::string>{where == "in flight" ? "HTTP/3 request timeout" : "HTTP/3 request timeout while pending"}));
+        const std::string text = where == "in flight" ? "HTTP/3 request timeout" : "HTTP/3 request timeout while pending";
+        EXPECT_EQ(said, std::vector<std::string>(batch ? 2u : 1u, text));
         client->disconnect();
         server->close();
     }
@@ -4316,6 +4334,32 @@ TEST_F(Http3LoopbackTest, AnAddressRefusedByTlsEndsTheConnectAndTheNextIsNotDial
 // The share of an address is armed by the TCP connector's test (Huly QB-1246): not when it is all of what is left, nor
 // when nothing is left -- where the timer of a share that fires at the deadline finds the next attempt. A delay of zero
 // runs its callback inline: the address after was dialled from inside the start of this one, and the one after it too.
+TEST_F(Http3LoopbackTest, AnAddressWhoseShareIsAllThatIsLeftOfTheConnectTimeoutArmsNoShare) {
+    // Two addresses and a connect timeout under the two seconds an address is never given less than: the first has all of
+    // it, as a lone address has, and the connect timeout ends it. The loop's count of watchers grows by as much for the
+    // two as for the lone one -- each reading taken with no loop turn since the one before --, and by one more where the
+    // share leaves time for the next address: the timer of that share.
+    const auto armed_by = [&](std::size_t addresses, qb::duration timeout) {
+        auto client = qb::http3::make_client(https_origin(next_port()));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(timeout);
+        std::vector<qb::io::endpoint> silent;
+        for (std::size_t i = 0; i < addresses; ++i) {
+            silent.emplace_back("127.0.0.1", next_port());
+        }
+        const auto before = static_cast<std::ptrdiff_t>(qb::io::async::listener::current.size());
+        EXPECT_TRUE(qb::http3::ClientTestPeer::dial(*client, silent, nullptr));
+        const auto armed = static_cast<std::ptrdiff_t>(qb::io::async::listener::current.size()) - before;
+        EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), 1u);
+        client->disconnect();
+        return armed;
+    };
+    const auto lone = armed_by(1, 1s), all_of_it = armed_by(2, 1s), a_part = armed_by(2, 30s);
+    EXPECT_GT(lone, 0) << "nothing was armed for a lone address: the case shows nothing";
+    EXPECT_EQ(all_of_it, lone) << "a share that is all of what is left of the connect timeout was armed";
+    EXPECT_EQ(a_part, lone + 1) << "a share that leaves time for the next address was not armed: the case shows nothing";
+}
+
 TEST_F(Http3LoopbackTest, AnAttemptStartedWithNothingLeftOfTheConnectTimeoutArmsNoShare) {
     auto client = qb::http3::make_client(https_origin(next_port()));
     client->set_verify_peer(false);
