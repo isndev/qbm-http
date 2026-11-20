@@ -101,7 +101,32 @@ struct RefusalScope {
 
 void
 Client::refuse(std::function<void()> answer) {
+    const auto ask_a_turn = [this] {
+        if (!_late_scheduled && !_late_answers.empty()) {
+            _late_scheduled = true;
+            qb::io::async::defer([weak_self = weak_from_this()] {
+                if (auto self = weak_self.lock()) {
+                    self->run_late_answers();
+                }
+            });
+        }
+    };
     if (_refusal_depth == 0 || _destroying || weak_from_this().expired()) {
+        // The turn a kept refusal waits for is asked again as this answer ends, however it ends: a loop turn the answer
+        // ran may have spent the one asked, with nothing delivered under it (run_late_answers()).
+        struct TurnAskedAtExit {
+            decltype(ask_a_turn) const &ask;
+            Client                     &client;
+            ~TurnAskedAtExit() {
+                if (client._refusal_depth == 0 && !client._destroying) {
+                    try {
+                        ask();
+                    } catch (...) {
+                        // no turn could be asked (an allocation): the next refusal asks, or the destructor delivers
+                    }
+                }
+            }
+        } const asked{ask_a_turn, *this};
         const RefusalScope answering{_refusal_depth};
         answer(); // inside the push, as before: what the callback throws reaches the caller of the push
         return;
@@ -109,20 +134,16 @@ Client::refuse(std::function<void()> answer) {
     // Pushed from inside the answer of a refusal: answered there too, a callback that pushes its request back at every
     // refusal was called from inside its own push, one frame deeper each time, without end. Heard on the loop's next turn.
     _late_answers.push_back(std::move(answer));
-    if (!_late_scheduled) {
-        _late_scheduled = true;
-        qb::io::async::defer([weak_self = weak_from_this()] {
-            if (auto self = weak_self.lock()) {
-                self->run_late_answers();
-            }
-        });
-    }
+    ask_a_turn();
 }
 
 void
 Client::run_late_answers() {
     _late_scheduled = false;
-    auto answers    = std::exchange(_late_answers, {}); // taken first: what one of them pushes is refused, or kept, anew
+    if (_refusal_depth != 0 && !_destroying) {
+        return; // a loop turn the answer of a refusal runs: what was kept is not heard under it, and waits for its end (refuse())
+    }
+    auto answers = std::exchange(_late_answers, {}); // taken first: what one of them pushes is refused, or kept, anew
     for (auto &answer : answers) {
         qb::http::detail::contained("HTTP/3", answer); // no caller is left to hear what it throws
     }
