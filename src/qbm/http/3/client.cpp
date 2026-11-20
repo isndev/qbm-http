@@ -101,6 +101,9 @@ struct RefusalScope {
 
 void
 Client::refuse(std::function<void()> answer) {
+    // The answer below may drop the last reference to this client: it lives to the end of this refusal, whose scopes
+    // still count on it (Huly QB-1246).
+    auto       owner      = weak_from_this().lock();
     const auto ask_a_turn = [this] {
         if (!_late_scheduled && !_late_answers.empty()) {
             _late_scheduled = true;

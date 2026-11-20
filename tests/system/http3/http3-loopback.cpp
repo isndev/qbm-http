@@ -2961,6 +2961,41 @@ TEST_F(Http3LoopbackTest, ARefusalKeptForTheNextTurnIsHeardExactlyOnce) {
     }
 }
 
+// A push the client refuses at once is answered inside the push when the program makes it, and that answer may drop the
+// last reference to the client (Huly QB-1246): the client lives to the end of the refusal. It was destroyed inside the
+// answer, and the refusal then went on counting on it -- a write into freed memory. No connection, no timer, and no weak
+// reference either, which would keep the storage: nothing else holds the client here.
+TEST_F(Http3LoopbackTest, APushRefusedAtOnceWhoseCallbackDropsTheLastReferenceEndsCleanly) {
+    struct Told : qb::http3::Client {
+        int &destroyed;
+        Told(std::string const &origin, int &count)
+            : qb::http3::Client(origin)
+            , destroyed(count) {}
+        ~Told() {
+            ++destroyed;
+        }
+    };
+    for (const std::string_view refusal : {"another origin", "the pending bound"}) {
+        SCOPED_TRACE(refusal);
+        int         destroyed = 0;
+        auto        client    = std::make_shared<Told>(https_origin(next_port()), destroyed);
+        auto *const raw       = client.get();
+        if (refusal == "the pending bound") {
+            client->set_max_pending_requests(0);
+        }
+        int        answers  = 0;
+        const bool accepted = raw->push_request(qb::http::Request{qb::io::uri(refusal == "another origin" ? "https://other.invalid/" : "/")},
+                                                [&](qb::http::Response response) {
+                                                    ++answers;
+                                                    EXPECT_NE(response.status(), qb::http::status::OK);
+                                                    client.reset(); // the last reference
+                                                });
+        EXPECT_EQ(answers, 1);
+        EXPECT_EQ(accepted, refusal == "another origin") << "the bound refuses by its return value too";
+        EXPECT_EQ(destroyed, 1) << "something else held the client";
+    }
+}
+
 // The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
 // destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
 // alone, its callback destroyed unheard. Three pushes, two answers, never deeper than two.
