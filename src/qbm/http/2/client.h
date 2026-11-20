@@ -193,6 +193,13 @@ private:
     bool          _connector_pending = false;
     bool          _transport_started = false;
     bool          _transport_closing = false;
+    // Which connection a close owns (Huly QB-1246): the transports this io has started, counted -- the count is the number
+    // of the last one --, and the number of the last one whose `disconnected` has run. A close writes down the number of
+    // the transport it ends before it calls the callbacks of what it ends, and ends that transport after them only if it
+    // has not ended meanwhile: a callback that runs the loop can see it end and the next connection come up, which is not
+    // this close's to end.
+    std::uint64_t _transports_started = 0;
+    std::uint64_t _transport_ended    = 0;
     // A connect() asked while a transport is closing starts only once that transport's
     // `disconnected` has run: libev invokes pending events LIFO, so a connector started now could
     // complete -- and `start()` the new transport -- BEFORE the old transport's deferred dispose,

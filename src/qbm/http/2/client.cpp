@@ -53,6 +53,21 @@ struct closing_scope {
     }
 };
 
+/// The end of a transport, for the scope of the callbacks its handler calls: a connect() asked there waits for the scope's
+/// end, as one asked while a transport closes does.
+struct teardown_scope {
+    bool &closing;
+    explicit teardown_scope(bool &value) noexcept
+        : closing(value) {
+        closing = true;
+    }
+    teardown_scope(teardown_scope const &)            = delete;
+    teardown_scope &operator=(teardown_scope const &) = delete;
+    ~teardown_scope() noexcept {
+        closing = false;
+    }
+};
+
 /// A failure pass, for the scope of its callbacks: opened when the client reconnects by itself and none is open already,
 /// closed where it was opened -- also when a callback throws. A request pushed inside one queues for the attempt the run
 /// decides on.
@@ -201,7 +216,8 @@ Client::close_connection(const std::string &error_message) {
     // built without make_client(), which has none at any time: the test reads the owner, not `_destroying`.
     const bool announce =
         _intentional_disconnect && _is_connected && _h2_protocol && !weak_from_this().expired() && _h2_protocol->send_shutdown_goaway();
-    const bool ends_transport = _transport_started; // a connector in flight has none to end: its epoch gave it up (Huly QB-1246)
+    const bool ends_transport = _transport_started;  // a connector in flight has none to end: its epoch gave it up (Huly QB-1246)
+    const auto owned          = _transports_started; // the transport this close ends, should it still be there after the callbacks
     _transport_closing        = _transport_closing || _transport_started; // the disconnected the close raises is this transport's
     _transport_started        = false;
     _is_connected             = false;
@@ -221,28 +237,29 @@ Client::close_connection(const std::string &error_message) {
     _graceful_close_pending              = _graceful_close_pending || announce;
     _preserve_pending_on_next_disconnect = _preserve_pending_on_next_disconnect || ends_transport;
 
-    // A connect() still waiting for its verdict gets this one: the completion it waited for is
-    // dropped (an explicit disconnect) or will never come (the transport is being closed).
-    if (was_connecting) {
-        auto callbacks = std::move(_connection_callbacks);
-        _connection_callbacks.clear();
-        for (auto &callback : callbacks) {
-            if (callback) {
-                notify(_destroying, "HTTP/2", [&] { callback(false, error_message); });
+    // The outstanding work is taken out of the client before any callback is called, those of connect() included, as a
+    // failed connect does (handle_connection_failure()): a request pushed from the callback of a connect() this close
+    // refuses is new work, which the pass over the requests, after those callbacks, failed with this close's message
+    // (Huly QB-1246). Failed now, with the message that says why. What the callbacks re-queue is kept for the
+    // `disconnected` event the transport close below raises, which decides on the reconnection -- so the work is failed
+    // once, and the next attempt starts only after the transport that dropped has been disposed. After an EXPLICIT
+    // disconnect no run follows, so a push made from one of these callbacks connects on its own, as it would on the
+    // HTTP/1.1 client: it is not a failure pass then.
+    {
+        auto                     ended = detach_requests();
+        const failure_pass_scope pass{_in_failure_pass, _auto_reconnect && !_intentional_disconnect};
+        // A connect() still waiting for its verdict gets this one: the completion it waited for is
+        // dropped (an explicit disconnect) or will never come (the transport is being closed).
+        if (was_connecting) {
+            auto callbacks = std::move(_connection_callbacks);
+            _connection_callbacks.clear();
+            for (auto &callback : callbacks) {
+                if (callback) {
+                    notify(_destroying, "HTTP/2", [&] { callback(false, error_message); });
+                }
             }
         }
-    }
-
-    // Fail the outstanding work now, with the message that says why. What the callbacks re-queue
-    // is kept for the `disconnected` event the transport close below raises, which decides on the
-    // reconnection -- so the work is failed once, and the next attempt starts only after the
-    // transport that dropped has been disposed. After an EXPLICIT disconnect no run follows, so
-    // a push made from one of these callbacks connects on its own, as it would on the HTTP/1.1
-    // client: it is not a failure pass then.
-    if (_intentional_disconnect) {
-        fail_all_requests(error_message);
-    } else {
-        run_failure_pass(error_message);
+        fail_detached(std::move(ended), error_message);
     }
 
     if (announce) {
@@ -264,7 +281,10 @@ Client::close_connection(const std::string &error_message) {
         return;
     }
 
-    if (ends_transport) {
+    // The transport this close owns, if it has not ended while the callbacks above ran: one of them can run the loop until
+    // it has, and until the connect() it asked is up -- ended here, that next connection was closed by the close of the one
+    // before it (Huly QB-1246).
+    if (ends_transport && _transport_ended != owned) {
         BaseTcpClient::disconnect(); // the `disconnected` it raises decides on the reconnection
     }
 }
@@ -540,7 +560,8 @@ Client::start_connection() {
             LOG_HTTP_DEBUG_PA(self->_client_id, "TCP/SSL connection established, starting handshake");
             self->transport()        = std::move(transport_socket);
             self->_transport_started = true;
-            self->start(); // Start handshake protocol
+            ++self->_transports_started; // the transport a close will own, by this number
+            self->start();               // Start handshake protocol
         },
         _connect_timeout, _verify_peer);
 }
@@ -636,6 +657,7 @@ Client::handle_connection_failure(const std::string &error_message) {
     // registered: the `disconnected` it raises then finds the state already settled and the
     // pending work preserved, and the decision below is idempotent under it.
     const bool close_transport = _transport_started;
+    const auto owned           = _transports_started; // as close_connection(): the transport this failure ends
     _transport_started         = false;
     _transport_closing         = _transport_closing || close_transport; // set BEFORE the callbacks: a connect() made from one defers
     const closing_scope closing{_closing_callbacks};                    // a transport or not: see the coroutine connect()
@@ -673,7 +695,7 @@ Client::handle_connection_failure(const std::string &error_message) {
         attempt_reconnection();
     }
 
-    if (close_transport) {
+    if (close_transport && _transport_ended != owned) { // not the next connection's, come up while a callback ran the loop
         BaseTcpClient::disconnect();
     }
 }
@@ -766,8 +788,9 @@ Client::finish_graceful_goaway_if_drained() {
     _is_connecting                  = false;
     _handshake_completed            = false;
     _h2_protocol                    = nullptr;
-    _transport_closing = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
-    _transport_started = false;
+    _transport_closing        = _transport_closing || _transport_started; // the close below is deferred: a connect() meanwhile waits for it
+    _transport_started        = false;
+    const auto          owned = _transports_started; // as close_connection(): the transport this drain ends
     const closing_scope closing{_closing_callbacks};
     // Before the failure callbacks below, as close_connection() sets it: a loop pass one of them runs can read the end of
     // the transport, whose `disconnected` clears it; set after them, it kept the next transport's queue from hearing its
@@ -784,7 +807,9 @@ Client::finish_graceful_goaway_if_drained() {
                                                : "Server sent GOAWAY and automatic reconnection is disabled");
     }
 
-    BaseTcpClient::disconnect();
+    if (_transport_ended != owned) { // not the next connection's, come up while a callback above ran the loop
+        BaseTcpClient::disconnect();
+    }
 }
 
 void
@@ -1152,7 +1177,9 @@ Client::on(qb::io::async::event::timeout const &) {
 void
 Client::on(qb::io::async::event::disconnected const &event) {
     LOG_HTTP_INFO_PA(_client_id, "Disconnected (reason: " << event.reason << ")");
-    _graceful_close_pending = false;                 // the transport is closing: the GOAWAY limit has nothing left to bound
+    _graceful_close_pending = false; // the transport is closing: the GOAWAY limit has nothing left to bound
+    // The transport that ends is the last one started: the next starts only once this handler has run (_connect_after_close).
+    _transport_ended = _transports_started;
     const closing_scope closing{_closing_callbacks}; // dispose() ends this io once this handler returns (Huly QB-1246)
 
     std::string error_msg = "Connection lost";
@@ -1183,30 +1210,38 @@ Client::on(qb::io::async::event::disconnected const &event) {
     _received_graceful_goaway = false;
     _transport_started        = false;
     _h2_protocol              = nullptr;
-    if (waiting) {
-        // Heard with the state settled, as close_connection() does: a connect() a callback asks starts an attempt of its
-        // own. It joined the one that had just ended, and nothing started for it (Huly QB-1246).
-        auto callbacks = std::move(_connection_callbacks);
-        _connection_callbacks.clear();
-        for (auto &callback : callbacks) {
-            if (callback) {
-                callback(false, error_msg);
+    {
+        // This handler runs under the io's dispose(), which stops the watcher as soon as it returns: no transport starts
+        // before that. A connect() one of the callbacks below asks therefore waits for the end of this scope, as one
+        // asked while the transport closes does. It started its connector at once: a callback that then ran the loop
+        // saw the attempt complete and the next transport start under the teardown of this one, which stopped it on
+        // the way out -- a connection that came up and never read again (Huly QB-1246).
+        const teardown_scope tearing_down{_transport_closing};
+        if (waiting) {
+            // Heard with the state settled, as close_connection() does: a connect() a callback asks is an attempt of
+            // its own. It joined the one that had just ended, and nothing started for it (Huly QB-1246).
+            auto callbacks = std::move(_connection_callbacks);
+            _connection_callbacks.clear();
+            for (auto &callback : callbacks) {
+                if (callback) {
+                    callback(false, error_msg);
+                }
             }
         }
-    }
 
-    if (_preserve_pending_on_next_disconnect) {
-        _preserve_pending_on_next_disconnect = false;
-        if (!_active_requests.empty()) {
+        if (_preserve_pending_on_next_disconnect) {
+            _preserve_pending_on_next_disconnect = false;
+            if (!_active_requests.empty()) {
+                run_failure_pass(error_msg);
+            }
+        } else {
             run_failure_pass(error_msg);
         }
-    } else {
-        run_failure_pass(error_msg);
     }
 
     if (_connect_after_close) {
-        // A connect() (explicit, or a push's own) was asked while this transport was closing: it
-        // starts now that the close has run, on a clean io state, with the run untouched.
+        // A connect() (explicit, or a push's own) was asked while this transport was closing, or by a callback
+        // above: it starts now that the close has run, on a clean io state, with the run untouched.
         _connect_after_close    = false;
         _intentional_disconnect = false;
         _is_connecting          = true;
