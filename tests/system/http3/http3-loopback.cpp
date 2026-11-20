@@ -2861,6 +2861,90 @@ TEST_F(Http3LoopbackTest, AnAttemptThatCannotStartIsHeardThroughTheLoopAndARelau
     EXPECT_EQ(deepest, 1) << "a request pushed back from its failure callback was answered from inside its own push";
 }
 
+// A callback that pushes its request back at every failure -- it never gives up -- is never called more than two deep,
+// and ends by itself (Huly QB-1246). During a disconnect() a push is refused at once: answered inside the push, and, when
+// that push is made from inside such an answer, on the loop's next turn. Answered inside there too, the callback was
+// called from inside its own push without end (the case stops such a run at 64 so that it fails and keeps its stack).
+// Two rounds: the request in flight fails with the close, the push its callback makes is refused inside it, the next is
+// heard a turn later -- the close has run by then, so that push connects and is served.
+TEST_F(Http3LoopbackTest, ARequestPushedBackAtEveryFailureOfADisconnectIsNeverCalledMoreThanTwoDeep) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/stall", [](auto) {});
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    int                                      pushes = 0, failures = 0, served = 0, depth = 0, deepest = 0;
+    std::function<void(std::string const &)> push;
+    push = [&](std::string const &path) {
+        ++pushes;
+        client->push_request(qb::http::Request{qb::io::uri(path)}, [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            if (response.status() == qb::http::status::OK) {
+                ++served;
+            } else {
+                ++failures;
+                if (deepest < 64) {
+                    push("/ok"); // always: nothing here counts the attempts
+                }
+            }
+            --depth;
+        });
+    };
+    for (int round = 1; round <= 2; ++round) {
+        SCOPED_TRACE(round);
+        const int failed_before = failures;
+        push("/stall");
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        client->disconnect();
+        EXPECT_EQ(failures - failed_before, 2) << "the request in flight, and the push its callback made, are heard inside the close";
+        ASSERT_TRUE(pump([&] { return served == round || deepest >= 64; }));
+        EXPECT_EQ(served, round) << "the request pushed once the close had run was not served";
+        EXPECT_EQ(failures - failed_before, 3);
+    }
+    EXPECT_LE(deepest, 2) << "a request pushed back from its failure callback was answered from inside its own push, again and again";
+    client->disconnect();
+    server->close();
+}
+
+// The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
+// destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
+// alone, its callback destroyed unheard. Three pushes, two answers, never deeper than two.
+TEST_F(Http3LoopbackTest, ARequestPushedBackFromTheDestructorsCallbacksEndsAtItsSecondPush) {
+    const auto            silent = next_port();
+    int                   pushes = 0, answers = 0, depth = 0, deepest = 0;
+    std::vector<bool>     accepted;
+    qb::http3::Client    *raw = nullptr;
+    std::function<void()> push;
+    push = [&] {
+        const auto index = static_cast<std::size_t>(pushes++); // a push returns after the ones its callback makes
+        accepted.resize(index + 1);
+        accepted[index] = raw->push_request(qb::http::Request{qb::io::uri("/")}, [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            ++answers;
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            if (deepest < 64) {
+                push();
+            }
+            --depth;
+        });
+    };
+    {
+        auto client = qb::http3::make_client(https_origin(silent));
+        client->set_verify_peer(false);
+        raw = client.get();
+        push(); // queued behind a connection nobody answers
+        ASSERT_TRUE(client->is_connecting());
+    } // destroyed with that request waiting
+    EXPECT_EQ(pushes, 3);
+    EXPECT_EQ(answers, 2);
+    EXPECT_EQ(deepest, 2);
+    EXPECT_EQ(accepted, (std::vector<bool>{true, true, false}));
+}
+
 // A host name connects (Huly QB-1246): the client resolves it -- `localhost`, the loopback address of the family the URI
 // names -- and hands the QUIC endpoint the address, the name staying the one sent as SNI. Until 3.4 the endpoint was
 // handed the name, which it takes for an address: connect() answered that nothing could start.

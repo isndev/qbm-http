@@ -138,6 +138,12 @@ private:
     std::size_t                           _connect_next    = 0;
     std::uint64_t                         _connect_attempt = 0; ///< Counts the attempts: the one a share's timer was armed for
     std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
+    // A refusal is answered inside the push that earned it -- unless that push is made from inside the answer of another:
+    // then it is heard on the loop's next turn, so a callback that pushes its request back at every refusal is never
+    // called more than two deep (Huly QB-1246). What waits for that turn.
+    std::deque<std::function<void()>> _late_answers;
+    bool                              _late_scheduled = false;
+    int                               _refusal_depth  = 0; ///< Refusals being answered inside their push
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -419,6 +425,10 @@ private:
     void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// Fail the pending request with @p request_id with @p status and @p error.
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
+    /// A refusal's answer: inside the push, or on the loop's next turn when that push is made from inside another's answer.
+    void refuse(std::function<void()> answer);
+    /// What refuse() kept for the next turn; the destructor delivers what is still owed.
+    void run_late_answers();
     /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
     /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.
