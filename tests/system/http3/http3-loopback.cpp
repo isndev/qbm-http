@@ -2176,17 +2176,10 @@ TEST_F(Http3LoopbackTest, ExplicitDisconnectStartsTheConnectItsFailureCallbackAs
 
 namespace qb::http3 {
 
-/// What no call of the client's public surface reaches, reached by hand, as the one friend the client declares for it: an
-/// explicit disconnect() deferred and never completed (a read completes the one it deferred however it ends; a submission
-/// that an exception cuts short does not), the addresses of a lookup and the time it took, an attempt started with nothing
-/// left of the connect timeout.
+/// What no call of the client's public surface reaches, reached by hand, as the one friend the client declares for it:
+/// the addresses of a lookup and the time it took, an attempt started with nothing left of the connect timeout, the
+/// count of attempts.
 struct ClientTestPeer {
-    static void
-    disconnect_in_a_read_cut_short(Client &client) {
-        ++client._read_depth;
-        client.disconnect();
-        --client._read_depth;
-    }
     /// connect() past its lookup: the addresses a name resolved to are the test's own (no resolver gives two loopback
     /// addresses of which the first is silent, and none is asked for a name that does not exist), and so is the moment
     /// the lookup began.
@@ -2489,27 +2482,6 @@ TEST_F(Http3LoopbackTest, ADisconnectFromAFailureCallbackGivesUpTheConnectAskedO
     EXPECT_EQ(connect_calls, 1);
     held_context.reset();
     server->close();
-}
-
-// A client destroyed with a close left half done -- a disconnect() deferred during a submission that an exception then cut
-// short, set here through the test seam -- is closed whole by its destructor: a connect() still waiting hears `false` once.
-// The destructor's close stopped at the mark the unfinished one had left: that connect() was destroyed unheard (Huly QB-1246).
-TEST_F(Http3LoopbackTest, AClientDestroyedWithACloseLeftHalfDoneStillAnswersItsWaitingConnect) {
-    int  connect_calls    = 0;
-    bool connect_accepted = false, connect_succeeded = true;
-    {
-        auto client = qb::http3::make_client("https://127.0.0.1:1"); // it never connects: nothing here needs a peer
-        qb::http3::ClientTestPeer::disconnect_in_a_read_cut_short(*client);
-        connect_accepted = client->connect([&](bool ok, std::string const &) {
-            ++connect_calls;
-            connect_succeeded = ok;
-        });
-        EXPECT_TRUE(connect_accepted) << "a connect() asked while a close is under way waits for it";
-        EXPECT_EQ(connect_calls, 0);
-        EXPECT_FALSE(client->is_connecting());
-    }
-    EXPECT_EQ(connect_calls, 1) << "a connect() still waiting when the client is destroyed hears `false`, once";
-    EXPECT_FALSE(connect_succeeded);
 }
 
 namespace http3_client_redial_test {
@@ -3377,6 +3349,99 @@ TEST_F(Http3LoopbackTest, ALoneAddressThatDoesNotAnswerFailsAtTheConnectTimeout)
     EXPECT_EQ(connected, 0);
     EXPECT_EQ(error, "HTTP/3 connection timeout");
     EXPECT_GE(std::chrono::steady_clock::now() - began, 550ms);
+}
+
+namespace http3_client_submit_test {
+
+// A client whose transport hands an exception to a submission. The QUIC endpoint runs two of its virtual hooks inside
+// the send a submission makes -- the end of its drain, and the close it delivers when that send overflows its queue --,
+// and what one of them throws leaves through submit_request(): an allocation does the same from anywhere under it.
+struct CutShort : qb::http3::Client {
+    using qb::http3::Client::Client;
+    enum class at { nowhere, the_end_of_a_send, a_close, a_close_it_then_disconnects };
+    at throws = at::nowhere;
+
+    void
+    dispatch(qb::io::async::quic::event::connection_closed const &ev) override {
+        qb::http3::Client::dispatch(ev); // under a submission: the teardown is deferred to its end
+        if (throws == at::a_close || throws == at::a_close_it_then_disconnects) {
+            const bool disconnects = throws == at::a_close_it_then_disconnects;
+            throws                 = at::nowhere;
+            if (disconnects) {
+                disconnect(); // deferred too, and the last word: an explicit close
+            }
+            throw std::runtime_error("thrown inside a submission");
+        }
+    }
+
+protected:
+    void
+    after_dispatch_events() override {
+        if (throws == at::the_end_of_a_send) {
+            throws = at::nowhere;
+            throw std::runtime_error("thrown inside a submission");
+        }
+    }
+};
+
+} // namespace http3_client_submit_test
+
+// A submission that an exception cuts short answers its request and finishes the close it deferred, as a read does
+// (Huly QB-1246); the exception then goes on to the caller of the push. The request it was writing had left the queue
+// and was in no registry yet: it was destroyed unheard. And a close deferred to the end of that submission -- the
+// transport lost under it, a disconnect() called there -- was never run: the client stayed "connected" to a transport
+// that was gone, every later request queued behind it, or kept every later disconnect() and connect() out.
+TEST_F(Http3LoopbackTest, ASubmissionCutShortByAnExceptionAnswersItsRequestAndFinishesTheCloseItDeferred) {
+    using http3_client_submit_test::CutShort;
+    for (const auto mode : {CutShort::at::the_end_of_a_send, CutShort::at::a_close, CutShort::at::a_close_it_then_disconnects}) {
+        SCOPED_TRACE(mode == CutShort::at::the_end_of_a_send ? "thrown at the end of a send, the connection kept"
+                     : mode == CutShort::at::a_close         ? "thrown once the send lost its connection"
+                                                             : "thrown once the send lost its connection and a disconnect() was called");
+        int                calls = 0; // declared before the client: its destructor may still answer
+        qb::http::Response heard;
+        bool               served = false;
+        const auto         port   = next_port();
+        auto               server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().post("/upload", [](auto ctx) { ctx->text("uploaded"); });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+        auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
+        client->set_verify_peer(false);
+        const bool loses_its_connection = mode != CutShort::at::the_end_of_a_send;
+        if (loses_its_connection) {
+            auto quic                     = client->settings();
+            quic.max_pending_stream_bytes = 16 * 1024; // the upload below overflows it: the send closes the transport
+            client->set_settings(quic);
+        }
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+
+        qb::http::Request upload{qb::http::method::POST, qb::io::uri("/upload")};
+        upload.body()  = std::string(loses_its_connection ? 256 * 1024 : 16, 'x');
+        client->throws = mode;
+        EXPECT_THROW(client->push_request(std::move(upload),
+                                          [&](qb::http::Response response) {
+                                              ++calls;
+                                              heard = std::move(response);
+                                          }),
+                     std::runtime_error);
+        EXPECT_EQ(calls, 1) << "the request the submission was writing was not answered";
+        EXPECT_EQ(heard.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_EQ(client->is_connected(), !loses_its_connection) << "the close the submission deferred was not run";
+        EXPECT_EQ(client->get_active_request_count(), 0u);
+
+        // And the client goes on: a request is served, on a new connection where the old one went.
+        client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+            served = response.status() == qb::http::status::OK;
+            ++calls;
+        });
+        EXPECT_TRUE(pump([&] { return calls == 2; }, 3s)) << "the client was left unable to serve a request";
+        EXPECT_TRUE(served);
+        client->disconnect();
+        server->close();
+    }
 }
 
 // An answered request leaves no timer armed (Huly QB-1246). A request owns the timer of its timeout, and whatever gives
