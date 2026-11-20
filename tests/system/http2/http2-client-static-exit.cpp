@@ -58,8 +58,8 @@ namespace http2_client_static_exit_test {
 
 namespace async = qb::io::async;
 using namespace qb::io::test::static_exit;
-using qb::http::test::static_exit::answered_inside;
 using qb::http::test::static_exit::heard;
+using qb::http::test::static_exit::k_not_as_the_rule;
 
 qb::http::Request
 get(std::string const &target) {
@@ -222,9 +222,10 @@ h2_retry(qb::http::Response response) {
     }
 }
 
-/// The same, and again after the loop, `k_late_pushes` times: each failure the destructor delivers pushes the request again,
-/// with neither a connection nor a connect in flight. Every generation is answered inside its push -- one callback a push --,
-/// nothing is queued and nothing may connect for it. The first of them asks for a deadline too: none is armed.
+/// The same, and again after the loop -- it would be, `k_late_pushes` times: each failure the destructor delivers pushes the
+/// request again, with neither a connection nor a connect in flight. The push its first failure makes is answered inside the
+/// push; the one made from inside THAT answer is refused by the return value alone, its callback unheard, and the run ends
+/// there (Huly QB-1246). Nothing is queued and nothing may connect for it. The first push asks for a deadline too: none is armed.
 void
 h2_retry_through_the_exit(qb::http::Response response) {
     in_flight(std::move(response));
@@ -232,9 +233,14 @@ h2_retry_through_the_exit(qb::http::Response response) {
         ++g_h2_pushes;
         g_h2_client->push_request(get(g_h2_target), h2_retry_through_the_exit);
     } else if (loop_gone() && g_h2_pushes_after_the_loop < k_late_pushes) {
-        if (g_h2_pushes_after_the_loop++ == 0)
+        const int level = g_h2_pushes_after_the_loop++;
+        if (level == 0)
             g_h2_client->set_request_timeout(5s);
-        answered_inside([] { g_h2_client->push_request(get(g_h2_target), h2_retry_through_the_exit); });
+        const int  before   = g.calls;
+        const bool accepted = g_h2_client->push_request(get(g_h2_target), h2_retry_through_the_exit);
+        const bool answered = g.calls != before;
+        if (level == 0 ? !(accepted && answered) : (accepted || answered))
+            heard(k_not_as_the_rule);
     }
 }
 
@@ -299,17 +305,19 @@ h2_two_requests() {
     return batch;
 }
 
-/// The batch form of the retry pattern: each batch that fails pushes the next, three in all, every one after the loop
-/// and answered inside its push.
+/// The batch form of the retry pattern: each batch that fails pushes the next -- it would, three times --, every one after
+/// the loop. The batch the request's failure pushes is answered inside its push; the one pushed from inside THAT answer is
+/// refused by the return value alone.
 void
 h2_next_batch(std::vector<qb::http::Response> responses) {
     heard(h2_batch_outcome(responses));
     if (g_h2_pushes_after_the_loop < 3) {
-        ++g_h2_pushes_after_the_loop;
-        answered_inside([] {
-            if (!g_h2_client->push_requests(h2_two_requests(), h2_next_batch))
-                heard(-3); // a batch pushed while the client is destroyed is answered, not refused by the bound
-        });
+        const int  level    = g_h2_pushes_after_the_loop++;
+        const int  before   = g.calls;
+        const bool accepted = g_h2_client->push_requests(h2_two_requests(), h2_next_batch);
+        const bool answered = g.calls != before;
+        if (level == 0 ? !(accepted && answered) : (accepted || answered))
+            heard(k_not_as_the_rule);
     }
 }
 
@@ -572,28 +580,27 @@ TEST_P(Http2ClientStaticExitDeathTest, InAReconnectionRun) {
     EXPECT_EXIT(run_h2(h2::reconnecting, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 3, 1, 503, 0, 0, 0)));
 }
 
-// The retry pattern through the exit, in a reconnection run: the destructor fails the request, its callback pushes it
-// again with no connection and no connect in flight, and again each time that one fails -- `k_late_pushes` times. Every
-// generation is answered inside its push: one callback a push (two before the loop, the destructor's own, then four),
-// nothing armed -- not the deadline the first of them asks for --, no connection asked (Huly QB-1246). The destructor
-// answered what it found in two passes over its queues: the generation pushed from the second was left queued, and
-// destroyed unanswered.
+// The retry pattern through the exit, in a reconnection run: the destructor fails the request, and its callback pushes it
+// again with no connection and no connect in flight, at every failure. The push the destructor's failure makes is
+// answered inside the push; the one made from inside that answer is refused by the return value alone, its callback
+// unheard -- no later turn exists after the loop, and answered inside each push such a callback never ended. Four
+// callbacks: two before the loop, the destructor's own and that one answer; nothing armed -- not the deadline the first
+// push asks for --, no connection asked (Huly QB-1246). The destructor answered what it found in two passes over its
+// queues: the generation pushed from the second was left queued, and destroyed unanswered.
 TEST_P(Http2ClientStaticExitDeathTest, InAReconnectionRunWhoseRequestIsPushedAgainAfterTheLoop) {
-    EXPECT_EXIT(run_h2(h2::reconnecting_retried, GetParam()), ::testing::ExitedWithCode(0),
-                stderr_is(verdict(-1, 3 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h2(h2::reconnecting_retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 2, 503, 0, 0, 0)));
 }
 
-// The same from a connection that is up: the request the destructor fails is pushed again `k_late_pushes` times, and each
-// push is answered where it is made. The first was written to the connection the destructor was about to close.
+// The same from a connection that is up: two callbacks, the destructor's failure and the answer of the push it makes; the
+// push made from inside that answer is refused. The first was written to the connection the destructor was about to close.
 TEST_P(Http2ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackKeepsPushingAfterTheLoop) {
-    EXPECT_EXIT(run_h2(h2::retried_on, GetParam()), ::testing::ExitedWithCode(0),
-                stderr_is(verdict(0, 1 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h2(h2::retried_on, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
-// The batch form: the request's failure pushes a batch of two, whose callback pushes the next, three batches in all,
-// each answered inside its push -- its two members 503, its callback called once (Huly QB-1246).
+// The batch form: the request's failure pushes a batch of two, answered inside its push -- its two members 503, its
+// callback called once --, and the batch that callback pushes is refused by the return value alone (Huly QB-1246).
 TEST_P(Http2ClientStaticExitDeathTest, ARequestInFlightWhoseFailurePushesBatchAfterBatch) {
-    EXPECT_EXIT(run_h2(h2::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 4, 4, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h2(h2::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
 // Callbacks that throw from the destructor: what one throws is logged and goes no further -- the process does not
