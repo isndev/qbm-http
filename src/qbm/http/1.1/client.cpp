@@ -223,6 +223,42 @@ public:
     }
 };
 
+/// The share that keeps a client alive to the end of the loop turn, as the closure the deferred queue owns (Huly
+/// QB-1246). It is counted while it is queued -- from its construction until it runs, or is destroyed unrun when the
+/// queue is dropped --, so the client knows whether one still stands between it and its destruction: a loop turn run
+/// from a callback drains it while that callback is on the stack (leave_user_callback()). Copies count each for
+/// itself, a moved-from one for nothing: std::function may make either.
+class Client::tick_hold {
+    std::shared_ptr<Client> _self;
+
+public:
+    explicit tick_hold(std::shared_ptr<Client> self) noexcept
+        : _self(std::move(self)) {
+        ++_self->_holds_queued;
+    }
+    tick_hold(tick_hold const &other) noexcept
+        : _self(other._self) {
+        if (_self) {
+            ++_self->_holds_queued;
+        }
+    }
+    tick_hold(tick_hold &&other) noexcept
+        : _self(std::move(other._self)) {}
+    tick_hold &operator=(tick_hold const &) = delete;
+    ~tick_hold() {
+        if (_self) {
+            --_self->_holds_queued; // dropped unrun; the share goes after it, and the client with it when it was the last
+        }
+    }
+
+    void
+    operator()() {
+        auto self = std::move(_self); // run: no longer queued, and released when this returns
+        --self->_holds_queued;
+        self->reset_deferred_connection_if_ready();
+    }
+};
+
 struct Client::failure_cohort {
     std::unique_ptr<RequestContext>                            active;
     std::optional<std::deque<std::unique_ptr<RequestContext>>> pending;
@@ -566,10 +602,7 @@ Client::hold_through_current_tick() {
     // destroyed, or the closure is destroyed unrun when the queue is dropped. It also
     // makes the hold provably sufficient — the Client cannot expire before the callback,
     // so there is no lock()-or-give-up path left to reason about.
-    qb::io::async::defer([self = std::move(self)]() mutable {
-        self->reset_deferred_connection_if_ready();
-        self.reset();
-    });
+    qb::io::async::defer(tick_hold{std::move(self)});
 }
 
 void
@@ -580,9 +613,12 @@ Client::enter_user_callback() {
 
 void
 Client::leave_user_callback() noexcept {
-    if (_callback_depth && --_callback_depth == 0 && _deferred_connection_reset) [[unlikely]] {
-        // A pump the callback ran -- run_sync() of a coroutine -- may have drained the hold its entry queued while the
-        // callback was still on the stack: that hold gave up for good. One more, now that no callback is (Huly QB-1246).
+    if (_callback_depth && --_callback_depth == 0 && _holds_queued == 0) [[unlikely]] {
+        // A pump the callback ran -- run_sync() of a coroutine, a loop turn of its own -- drained the hold its entry queued
+        // while the callback was still on the stack: that hold gave up a retirement it found under a callback, and it no
+        // longer keeps this client. One more, now that no callback is: for the retirement, and for the client itself --
+        // on a connection that is kept, a callback that then dropped the last reference destroyed the client, and its
+        // connection with it, under that connection's own read pass (Huly QB-1246).
         try {
             hold_through_current_tick();
         } catch (...) {

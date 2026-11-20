@@ -777,6 +777,61 @@ TEST(Http1ClientTest, ResponseCallbackMayDropLastClientReference) {
     drain_client_callbacks(); // let the self-guard release fire so the Client is freed
 }
 
+// A response callback that runs the loop, then drops the last reference (Huly QB-1246). What keeps the client alive
+// under its connection's handler is a closure in the loop's deferred queue, queued as the callback is entered; a loop
+// turn the callback runs drains it while the callback is still on the stack. On a connection that is kept nothing
+// queued another: the client was destroyed when the handler returned, and its connection with it, under that
+// connection's own read pass (a heap-use-after-free under AddressSanitizer). Two rounds: the first callback runs the
+// loop and pushes the next request, so the hold it drained must be counted as gone, not as still queued.
+TEST(Http1ClientTest, AResponseCallbackThatRunsTheLoopThenDropsTheLastReferenceLeavesItsConnectionAlive) {
+    LoopbackHttp1Server server;
+
+    auto             client = qb::http1::make_client(server.url("/"));
+    qb::http::status first = qb::http::status::IM_A_TEAPOT, second = qb::http::status::IM_A_TEAPOT;
+    bool             second_done  = false;
+    const auto       run_the_loop = [] {
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // a loop turn of the callback's own: it drains what was deferred
+        }
+    };
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        first = response.status();
+        run_the_loop();
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response next) {
+            second = next.status();
+            run_the_loop();
+            second_done = true;
+            client.reset(); // the last reference, on a connection that is kept: no retirement is under way
+        });
+    });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return second_done; }));
+    EXPECT_EQ(first, qb::http::status::OK);
+    EXPECT_EQ(second, qb::http::status::OK);
+    EXPECT_EQ(client, nullptr);
+    drain_client_callbacks(); // the client is destroyed here, once its connection's handler has returned
+}
+
+// The same from the callback of a connect(): the connector's completion is not the connection's own handler, and
+// the client destroyed there takes nothing from under it. A control: green before and after.
+TEST(Http1ClientTest, AConnectCallbackThatRunsTheLoopThenDropsTheLastReferenceEndsCleanly) {
+    LoopbackHttp1Server server;
+
+    auto client    = qb::http1::make_client(server.url("/"));
+    bool connected = false, called = false;
+    client->connect([&](bool ok, std::string const &) {
+        connected = ok;
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        called = true;
+        client.reset();
+    });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return called; }));
+    EXPECT_TRUE(connected);
+    EXPECT_EQ(client, nullptr);
+    drain_client_callbacks();
+}
+
 TEST(Http1ClientTest, ResponseCallbackMayDisconnectClient) {
     LoopbackHttp1Server server;
 
