@@ -96,11 +96,12 @@ struct RequestContext {
     qb::http::Request                     request;
     ResponseCallback                      callback;
     std::chrono::steady_clock::time_point created_at;
-    qb::http3::request_id                 request_id = 0; ///< Never used twice: what the request's timer looks it up by
-    std::uint64_t                         stream_id  = 0;
-    std::uint64_t                         batch_id   = 0;
-    bool                                  timed      = false; ///< It has come to rest -- queued, or in flight -- and was timed there
-    std::optional<request_timer>          timer;              ///< Armed from there to its answer, when a request timeout is set
+    qb::http3::request_id                 request_id  = 0; ///< Never used twice: what the request's timer looks it up by
+    std::uint64_t                         stream_id   = 0;
+    std::uint64_t                         batch_id    = 0;
+    std::size_t                           batch_index = 0;     ///< Its place in its batch; a member has no callback of its own
+    bool                                  timed       = false; ///< It has come to rest -- queued, or in flight -- and was timed there
+    std::optional<request_timer>          timer;               ///< Armed from there to its answer, when a request timeout is set
 };
 
 /**
@@ -165,15 +166,20 @@ private:
     std::size_t                           _connect_next    = 0;
     std::uint64_t                         _connect_attempt = 0; ///< Counts the attempts: the one a share's timer was armed for
     std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
-    // A refusal is answered inside the push that earned it -- unless that push is made from inside the answer of another:
-    // then it is heard on the loop's next turn, so a callback that pushes its request back at every refusal is never
-    // called more than two deep (Huly QB-1246). What waits for that turn, in the order it came to be owed: it is heard
-    // before any answer the client gives after it (hear_owed()).
-    std::deque<std::function<void()>> _late_answers;
-    std::uint64_t                     _late_heard     = 0;     ///< How many of them were heard: a pass hears those owed as it starts
-    bool                              _late_scheduled = false; ///< A turn of the loop is asked for them
-    int                               _refusal_depth  = 0;     ///< Answers of refusals on the stack: what they push is kept
-    struct AnswerScope;                                        ///< Counts one, and asks the turn when the last has ended
+    // The answers this client owes, in the order it came to owe them (Huly QB-1246). An answer the client gives by itself
+    // -- a refusal, a connect() on a connected client, an empty batch, a cancellation, a coroutine push completed at
+    // once -- is given inside the call only when no callback of this client is on the stack and nothing is owed; an
+    // answer the loop brings -- a response, a timeout, a failure, a close -- is given at once when nothing is owed.
+    // Otherwise it is kept here. What is kept is heard in two places only: the client's turn (a task in the loop's
+    // deferred queue, one a loop turn at most), and its destructor. So the order is total, and what a callback pushes
+    // is never answered inside that push.
+    std::deque<std::function<void()>> _owed;
+    std::uint64_t                     _owed_heard      = 0;     ///< How many of them were heard: a turn hears those owed as it starts
+    bool                              _turn_asked      = false; ///< The client's turn is in the loop's queue
+    int                               _callback_depth  = 0;     ///< Callbacks of this client on the stack
+    int                               _destroy_answers = 0;     ///< Pushes the destructor's callbacks made, being answered inside themselves
+    struct CallbackScope;                                       ///< Counts one callback while it runs
+    enum class from : bool { the_client, the_loop };            ///< Who gives an answer: the client by itself, or the loop that brings it
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -241,8 +247,10 @@ public:
 
     /**
      * @brief Begin connecting (if not already connected/connecting).
-     * @param callback Invoked with the connection outcome; may be null. Never called inside this call unless the
-     *                 client is already connected. Asked while a close is under way -- from a callback of disconnect(),
+     * @param callback Invoked with the connection outcome; may be null. Called inside this call only when the client
+     *                 is already connected, no callback of this client is on the stack and no answer is owed -- on
+     *                 the client's turn of the loop otherwise. Asked while a close is under way -- from a callback of
+     *                 disconnect(),
      *                 of a read that has just disconnected, or of a read that lost its connection -- the attempt starts
      *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
      *                 The host is resolved here, by a blocking lookup as the HTTP/1.1 and HTTP/2 clients' connector makes:
@@ -282,12 +290,12 @@ public:
      * @param request  Request to send (made absolute against the base origin).
      * @param callback Response handler; must be non-null. A request the client refuses at once -- another origin,
      *                 the pending bound, a disconnect() under way, the server's GOAWAY, a submission the connection
-     *                 cannot take -- is answered inside this call, unless the call is made from inside the answer of
-     *                 another refusal: it is then heard on the loop's next turn, so a callback that pushes back at
-     *                 every refusal is never called from inside its own push. Bound such a retry all the same, with a
-     *                 delay: it spins otherwise.
+     *                 cannot take -- is answered inside this call when no callback of this client is on the stack and
+     *                 no answer is owed; otherwise on the client's turn of the loop, in the order the client came to
+     *                 owe its answers. A callback that pushes back at every refusal is never called from inside its
+     *                 own push. Bound such a retry all the same, with a delay: it spins otherwise.
      * @return @c false if @p callback is null; if the request would take the queued + active count past
-     *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on the next turn, as
+     *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on that turn, as
      *         with the HTTP/1.1 and HTTP/2 clients; or if the push is made from inside the answer of a push the
      *         destructor refused, where @p callback is never called. @c true otherwise, an invalid request (400)
      *         or one refused after the server's GOAWAY (503) included: those are answered through @p callback.
@@ -301,7 +309,7 @@ public:
      */
     [[nodiscard]] request_id push_request_with_id(qb::http::Request request, ResponseCallback callback);
     /**
-     * @brief Cancel a queued or in-flight request by id.
+     * @brief Cancel a queued or in-flight request by id; its callback hears so as a refusal is heard (push_request()).
      * @param id     Request id from push_request_with_id().
      * @param reason Reason text used in the synthesized error response.
      * @return @c true if a matching request was found and cancelled.
@@ -321,10 +329,10 @@ public:
      * count past set_max_pending_requests() completes with a 503, both at its index and before
      * any state is allocated for it. @p callback runs once, with every result in request order.
      * When no member was admitted the batch is one refusal, heard as push_request() hears one:
-     * inside this call, or on the loop's next turn when the call is made from inside the answer
-     * of another refusal.
+     * inside this call, or on the client's turn of the loop when a callback of this client is on
+     * the stack or an answer is owed.
      *
-     * @param requests Requests to send; an empty batch completes immediately.
+     * @param requests Requests to send; an empty batch is answered with an empty vector, as a refusal is heard.
      * @param callback Batch handler; must be non-null for a non-empty batch.
      * @return @c false if @p callback is null; if the bound refused at least one member, as
      *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do; or if
@@ -465,32 +473,34 @@ private:
     [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error);
     void complete_disconnect(); ///< The close itself, no read or submission on the stack: starts, at its end, a connect() queued meanwhile
     /// Fail the active request on @p stream_id with @p status and @p error.
-    void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
+    void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY,
+                      from who = from::the_loop);
     /// Fail the pending request with @p request_id with @p status and @p error.
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
-    /// A refusal's answer: inside the push, or on the loop's next turn when that push is made from inside another's answer.
-    void refuse(std::function<void()> answer);
-    /// The turn refuse() asked: what it kept is heard, unless the answer of a refusal runs this turn (it asks another).
-    void run_late_answers();
-    /// Asks one turn of the loop for what refuse() kept, if none is asked.
-    void ask_late_turn() noexcept;
-    /// What is owed is heard first: called before every answer the client gives, so that none overtakes a refusal kept
-    /// before it. One test when nothing is owed.
-    void
-    hear_owed() noexcept {
-        if (!_late_answers.empty()) [[unlikely]] {
-            hear_owed_now();
-        }
-    }
-    void hear_owed_now() noexcept;
-    /// The answer of one request -- its response, its failure --: its timer is stopped first, then what was owed before
-    /// it is heard, then its callback. Every answer a request's own callback hears goes through here.
-    void
-    give(RequestContext &ctx, qb::http::Response response) {
-        ctx.timer.reset();
-        hear_owed();
-        ctx.callback(std::move(response));
-    }
+    /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
+    [[nodiscard]] bool given_now(from who) const noexcept;
+    /// Calls @p fn, a callback of the program, now: counted while it runs. The caller holds the client; what @p fn throws
+    /// goes on to it.
+    template <typename Fn>
+    void call_now(Fn &&fn);
+    /// Keeps @p answer for the client's turn, which is asked.
+    void owe(std::function<void()> answer) noexcept;
+    /// An answer the client gives by itself: now, or kept.
+    void answer_by_itself(std::function<void()> answer);
+    /// The outcome of a connect(), told to @p callback: now, or kept.
+    void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
+    /// The answer of a batch, told to its callback: now, or kept.
+    void tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who);
+    /// The answer of one request -- its response, a failure, a refusal --: its timer is stopped first; a member of a
+    /// batch is recorded in its batch at once (the batch's callback is the answer); a request's own callback is called
+    /// now, or kept behind what is owed. Every answer of a request goes through here.
+    void give(RequestContext &ctx, qb::http::Response response, from who = from::the_loop);
+    /// One member of a batch has its answer: recorded; the batch's callback is told when it was the last.
+    void batch_member_answered(std::uint64_t batch_id, std::size_t index, qb::http::Response response, from who);
+    /// Asks the client's turn of the loop, if it is not asked.
+    void ask_turn() noexcept;
+    /// The client's turn: what was owed as it starts is heard, in order.
+    void run_turn() noexcept;
     /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
     /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.
@@ -507,7 +517,7 @@ private:
     /// Times @p ctx, once: it has come to rest. Its timer is armed when a request timeout is set.
     void time(RequestContext &ctx);
     /// The refusal of a request that was queued: the request ends here, its timer with it, and its callback hears
-    /// @p response as every refusal is heard (refuse()).
+    /// @p response as an answer the client gives by itself (give()).
     void refuse_request(std::unique_ptr<RequestContext> ctx, qb::http::Response response);
     /// The timer of the request @p request_id fired: fails it if its timeout has passed, arms the timer again if not.
     void request_timed_out(std::uint64_t request_id) noexcept;

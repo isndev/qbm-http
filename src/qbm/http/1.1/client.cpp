@@ -256,7 +256,6 @@ public:
         auto self = std::move(_self); // run: no longer queued, and released when this returns
         --self->_holds_queued;
         self->reset_deferred_connection_if_ready();
-        self->run_late_answers(); // the refusals kept for this turn: no callback of the client is on the stack here, or they wait
     }
 };
 
@@ -268,22 +267,28 @@ struct Client::failure_cohort {
 
 template <typename Fn>
 void
-Client::invoke_user_callback(Fn &&fn) noexcept {
+Client::call_now(Fn &&fn) noexcept {
     // The client lives to the end of the call: a callback may run the loop -- which runs the hold its entry queued, the
     // one share this call had on some paths (a connect() on a connected client, a refusal answered inside a push) -- and
-    // then drop the last reference. The end of the scope below ran on a destroyed client, and its destructor, under the
-    // callback, left the refusals it owed unheard (Huly QB-1246).
-    auto owner = weak_from_this().lock();
-    hear_owed(); // the refusals kept before this answer are heard before it
+    // then drop the last reference. The end of the scope below ran on a destroyed client (Huly QB-1246).
+    auto           owner = weak_from_this().lock();
     callback_scope scope(*this);
     qb::http::detail::contained("HTTP/1.1", std::forward<Fn>(fn));
 }
 
 template <typename Make>
 void
-Client::give(RequestContext &ctx, Make &&make) noexcept {
+Client::give(RequestContext &ctx, Make &&make, from who) noexcept {
     ctx.timer.reset(); // first: an answered request leaves nothing armed (Huly QB-1246)
-    invoke_user_callback([&] { ctx.callback(std::forward<Make>(make)()); });
+    if (given_now(who)) [[likely]] {
+        call_now([&] { ctx.callback(std::forward<Make>(make)()); });
+        return;
+    }
+    // Behind what is owed: the request ends here, its callback and its answer wait for the client's turn.
+    qb::http::detail::contained(
+        "HTTP/1.1",
+        [&] { owe([callback = std::move(ctx.callback), response = std::forward<Make>(make)()]() mutable { callback(std::move(response)); }); },
+        "an answer kept for its turn");
 }
 
 Client::Client(std::string const &base_uri)
@@ -300,7 +305,14 @@ Client::~Client() {
     // refused by its return value alone. A client with static storage is destroyed after its thread's event loop, where a
     // timer asked of the loop stops the process.
     _destroying = true;
-    hear_owed(); // a refusal still owed its turn is heard here, once, and first: it was owed before this end
+    // What is still owed its turn is heard here, once, in order and before this end: each entry at the same level, so a
+    // push its callback makes is answered inside that push, as from any callback the destructor runs.
+    while (!_owed.empty()) {
+        auto answer = std::move(_owed.front());
+        _owed.pop_front();
+        ++_owed_heard;
+        call_now(answer);
+    }
     try {
         disconnect();
     } catch (...) {
@@ -346,9 +358,7 @@ Client::connect(ConnectionCallback callback) {
         return false; // refused, by the return value alone: the callback of a connect() that starts nothing is never called (QB-1246)
     }
     if (_is_connected) {
-        if (callback) {
-            invoke_user_callback([&] { callback(true, ""); }); // contained, as every callback of this client (Huly QB-1246)
-        }
+        tell_connect(callback, true, "", from::the_client); // contained, as every callback of this client (Huly QB-1246)
         return true;
     }
     if (weak_from_this().expired()) {
@@ -472,18 +482,18 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
         }
         const auto *const text = _auto_reconnect ? "HTTP/1.1 client no longer available" : "HTTP/1.1 client is not connected";
         ++_destroy_answers;
-        invoke_user_callback([&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, text)); });
+        call_now([&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, text)); });
         --_destroy_answers;
         return true;
     }
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
-        refuse([callback = std::move(callback), response = std::move(*error)]() mutable { callback(std::move(response)); });
+        answer_by_itself([callback = std::move(callback), response = std::move(*error)]() mutable { callback(std::move(response)); });
         return true;
     }
     if (_pending_requests.size() + (_active_request ? 1u : 0u) >= _max_pending_requests) {
         ++_failed_requests;
-        refuse([this, callback = std::move(callback)]() mutable { // run by this client, alive: a hold's turn, or its destructor
+        answer_by_itself([this, callback = std::move(callback)]() mutable { // run by this client, alive: its turn, or its destructor
             callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client pending request limit reached"));
         });
         return false;
@@ -493,7 +503,7 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
         // it failed with the queue -- inside this push, or a turn later -- and left the timer of its wait behind, one for
         // each push of a callback that pushes back at every failure (Huly QB-1246).
         ++_failed_requests;
-        refuse([this, callback = std::move(callback)]() mutable { // run by this client, alive: a hold's turn, or its destructor
+        answer_by_itself([this, callback = std::move(callback)]() mutable { // run by this client, alive: its turn, or its destructor
             callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client is not connected"));
         });
         return true;
@@ -531,7 +541,11 @@ Client::push_request(qb::http::Request request) {
                 // coroutine blocked on it -- run_sync() -- waited for its request timeout (Huly QB-1246).
                 ++self->_total_requests;
                 ++self->_failed_requests;
-                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 connection is closing"));
+                // An answer the client gives by itself, as a refusal: kept for the client's turn, a callback being on the stack.
+                self->answer_by_itself([complete, response = self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                                                         "HTTP/1.1 connection is closing")]() mutable {
+                    complete(std::move(response));
+                });
                 return;
             }
             // The callback answers every outcome. The one push that never calls its callback -- from inside an answer the
@@ -547,7 +561,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         return false;
     }
     if (requests.empty()) {
-        invoke_user_callback([&] { callback({}); });
+        answer_by_itself([callback = std::move(callback)] { callback({}); });
         return true;
     }
     if (_destroying && _destroy_answers != 0) {
@@ -576,7 +590,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
                                           auto cb   = std::move(batch_ref.callback);
                                           _active_batches.erase(it);
                                           if (cb) {
-                                              invoke_user_callback([&] { cb(std::move(done)); });
+                                              call_now([&] { cb(std::move(done)); }); // inside the answer that completes the batch
                                           }
                                       }
                                   })
@@ -603,7 +617,7 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
                 for (std::size_t i = 0; i < reqs.size(); ++i) {
                     closing.push_back(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 connection is closing"));
                 }
-                complete(std::move(closing));
+                self->answer_by_itself([complete, closing = std::move(closing)]() mutable { complete(std::move(closing)); });
                 return;
             }
             static_cast<void>(
@@ -671,48 +685,89 @@ Client::hold_through_current_tick() {
 }
 
 bool
-Client::answers_wait_a_turn() const noexcept {
-    // A turn exists to wait for only while a hold can be queued for it: not for a client being destroyed, nor for one with no
-    // shared owner.
-    return _callback_depth != 0 && !_destroying && !weak_from_this().expired();
-}
-
-bool
 Client::can_send() const noexcept {
     return _is_connected && _connection && _connection->is_open();
 }
 
+bool
+Client::given_now(from who) const noexcept {
+    if (_owed.empty() && (who == from::the_loop || _callback_depth == 0)) [[likely]] {
+        return true;
+    }
+    // Kept only where a turn can come for it: not for a client with no shared owner -- one being destroyed, whose
+    // destructor answers by its own rule, or a plain object.
+    return weak_from_this().expired();
+}
+
 void
-Client::refuse(std::function<void()> answer) {
-    if (!answers_wait_a_turn()) {
-        invoke_user_callback(answer); // after what is already owed (hear_owed())
+Client::owe(std::function<void()> answer) noexcept {
+    try {
+        _owed.push_back(std::move(answer));
+    } catch (...) {
+        call_now(answer); // no room to keep it (an allocation): heard now, never lost
         return;
     }
-    // Heard by the hold that runs once this callback has returned (tick_hold; leave_user_callback() queues one when the
-    // callback's own was drained under it).
-    _late_answers.push_back(std::move(answer));
+    ask_turn();
 }
 
 void
-Client::run_late_answers() {
-    if (_callback_depth != 0) {
-        return; // drained under a callback: the hold queued when it returns delivers
+Client::ask_turn() noexcept {
+    if (_turn_asked) {
+        return;
     }
-    hear_owed();
+    try {
+        // A task of its own, not the hold of a callback: several holds can be queued for one loop turn, and each one
+        // hearing what is owed heard, in one turn, what the callbacks of the one before had pushed.
+        qb::io::async::defer([weak_self = weak_from_this()] {
+            if (auto self = weak_self.lock()) { // held to the end of the turn: an answer may drop the last reference
+                self->run_turn();
+            }
+        });
+        _turn_asked = true; // once it is asked: had defer() thrown, nothing would ask again
+    } catch (...) {
+        // no turn could be asked (an allocation): the next answer kept asks, or the turn under way, or the destructor hears
+    }
 }
 
 void
-Client::hear_owed_now() noexcept {
-    auto owner = weak_from_this().lock(); // an answer may drop the last reference
-    // Those owed as this pass starts, oldest first: one an answer pushes is kept in its turn (a callback of this client
-    // is on the stack while it runs) and waits for another pass. Counted, not taken out: a pass that starts under one of
-    // these answers -- before the answers of a disconnect() it calls -- hears the rest, in order.
-    for (const auto end = _late_heard + _late_answers.size(); _late_heard < end && !_late_answers.empty();) {
-        auto answer = std::move(_late_answers.front());
-        _late_answers.pop_front();
-        ++_late_heard;
-        callback_scope scope(*this);
-        qb::http::detail::contained("HTTP/1.1", answer);
+Client::answer_by_itself(std::function<void()> answer) {
+    if (given_now(from::the_client)) {
+        call_now(answer);
+        return;
+    }
+    // A callback of this client is on the stack, or an answer is owed before this one. Answered inside the call, a
+    // callback that pushes its request back at every refusal was called from inside its own push, and an answer given
+    // here overtook the ones owed: it is heard on the client's turn.
+    owe(std::move(answer));
+}
+
+void
+Client::tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who) noexcept {
+    if (!callback) {
+        return;
+    }
+    if (given_now(who)) {
+        call_now([&] { callback(ok, error); });
+        return;
+    }
+    qb::http::detail::contained("HTTP/1.1", [&] { owe([callback, ok, error] { callback(ok, error); }); }, "an answer kept for its turn");
+}
+
+void
+Client::run_turn() noexcept {
+    _turn_asked = false;
+    // Those owed as this turn starts, oldest first: what their callbacks push is kept for the next turn (a callback of
+    // this client is on the stack while one runs). Counted, not taken out: a turn the loop runs under one of them -- a
+    // loop turn its callback runs -- hears the rest, and this one then finds its count reached. The caller holds the
+    // client: an answer may drop the last reference.
+    for (const auto end = _owed_heard + _owed.size(); _owed_heard < end && !_owed.empty();) {
+        auto answer = std::move(_owed.front());
+        _owed.pop_front();
+        ++_owed_heard;
+        call_now(answer);
+    }
+    if (!_owed.empty()) {
+        ask_turn(); // asked already by the answer that was kept, unless that could not be (an allocation): asked again here
     }
 }
 
@@ -793,7 +848,7 @@ Client::fail_retired_requests(failure_cohort &cohort, std::string const &error, 
                               std::string const &pending_error, qb::http::status pending_status) {
     for (auto &callback : cohort.callbacks) {
         if (callback) {
-            invoke_user_callback([&] { callback(false, error); });
+            tell_connect(callback, false, error, from::the_loop);
         }
     }
     if (cohort.active) {
@@ -882,7 +937,7 @@ Client::handle_connection_success() {
     _connection_callbacks.clear();
     for (auto &cb : callbacks) {
         if (cb) {
-            invoke_user_callback([&] { cb(true, ""); });
+            tell_connect(cb, true, "", from::the_loop);
         }
     }
     if (_intentional_disconnect) {
@@ -973,8 +1028,10 @@ Client::fail_active_request(std::string const &error, qb::http::status status) {
     auto callback = std::move(_active_request->callback);
     _active_request.reset(); // the request has its answer: nothing of it stays while the refusal waits its turn
     ++_failed_requests;
-    // Through refuse(): a request that cannot be sent fails inside the push that sent it, where its callback may push it back.
-    refuse([callback = std::move(callback), response = create_error_response(status, error)]() mutable { callback(std::move(response)); });
+    // An answer the client gives by itself: a request that cannot be sent is refused inside the push that sent it, where
+    // its callback may push it back.
+    answer_by_itself(
+        [callback = std::move(callback), response = create_error_response(status, error)]() mutable { callback(std::move(response)); });
 }
 
 void
