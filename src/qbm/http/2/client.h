@@ -310,8 +310,8 @@ public:
      *
      * @note Asked from a callback of a close, of a failure or of a lost connection, the attempt starts once the
      *       transport that ended is torn down, never under that callback: its outcome comes after the callback has
-     *       returned -- do not run the loop there to wait for it (the coroutine connect() answers false at once for
-     *       that reason).
+     *       returned -- do not run the loop there to wait for it (for that reason the coroutine connect() answers
+     *       false there, on the client's turn of the loop).
      *
      * @note The default argument is intentionally removed (compared to pre-coroutine
      *       versions of this API) so that the coroutine overload `connect()` is
@@ -324,8 +324,8 @@ public:
      * @brief Connect to the server (coroutine-style).
      *
      * Yields a `ConnectResult` once the HTTP/2 handshake is complete (or
-     * failed) -- `false` at once, "HTTP/2 connection is closing", when awaited
-     * from a callback the client runs for a close or a failure. Usage:
+     * failed) -- `false`, "HTTP/2 connection is closing", on the client's turn
+     * when awaited from a callback the client runs for a close or a failure. Usage:
      *
      * @code
      * if (!co_await client->connect()) {
@@ -386,8 +386,8 @@ public:
      *                 refusal is never called from inside its own push. Bound such a retry all the same, with a delay:
      *                 it spins otherwise.
      *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
-     *                 another one of the same client: the nesting is exactly one (disconnect() apart: called from a
-     *                 callback, it gives the failures of the requests it ends inside the call when nothing is owed).
+     *                 another one of the same client: the nesting is exactly one -- what a disconnect() called from
+     *                 a callback ends is heard on the client's turn too.
      *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
      *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
      *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without

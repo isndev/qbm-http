@@ -224,8 +224,8 @@ public:
     bool connect(ConnectionCallback callback);
     /**
      * @brief Coroutine connect.
-     * @return An awaiter that resolves to a `ConnectResult` describing the outcome -- `false` at once, "HTTP/1.1
-     *         connection is closing", when awaited from a callback the client runs for a close or a failure.
+     * @return An awaiter that resolves to a `ConnectResult` describing the outcome. Awaited from a callback the
+     *         client runs for a close or a failure: `false`, "HTTP/1.1 connection is closing", on the client's turn.
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
     /**
@@ -260,8 +260,8 @@ public:
      *                 every failure is never called from inside its own push. Bound such a retry all the same, with
      *                 a delay: it spins otherwise.
      *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
-     *                 another one of the same client: the nesting is exactly one (disconnect() apart: called from a
-     *                 callback, it gives the failures of the requests it ends inside the call when nothing is owed).
+     *                 another one of the same client: the nesting is exactly one -- what a disconnect() called from
+     *                 a callback ends is heard on the client's turn too.
      *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
      *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
      *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without

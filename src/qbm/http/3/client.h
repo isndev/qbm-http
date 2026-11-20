@@ -256,10 +256,10 @@ public:
      *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
      *                 The host is resolved here, by a blocking lookup as the HTTP/1.1 and HTTP/2 clients' connector makes:
      *                 every address of the family the URI names (IPv4 for a host name), in the resolver's order, each
-     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. QUIC's own
-     *                 handshake bound follows that timeout for each attempt: the endpoint's `handshake_timeout`
-     *                 setting applies only with no connect timeout. The name given stays the one sent as SNI and
-     *                 checked against the certificate.
+     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. QUIC's
+     *                 handshake bound follows it (`handshake_timeout` applies only with no connect timeout); QUIC's
+     *                 `idle_timeout` is left as set, and ends an attempt that hears nothing when it is the shorter.
+     *                 The name given stays the one sent as SNI and checked against the certificate.
      * @return @c true when the callback will hear the outcome -- of an attempt that cannot start too (a name that does
      *         not resolve, no UDP socket), on a later turn of the loop, as on the two other clients. @c false when
      *         nothing starts and the callback is never called: the client is being destroyed, or has no shared owner
@@ -268,8 +268,8 @@ public:
     bool connect(ConnectionCallback callback);
     /**
      * @brief Coroutine-awaiter variant of connect().
-     * @return An awaiter resolving to the ConnectResult of the attempt -- `false` at once, "HTTP/3 connection is
-     *         closing", when awaited from a callback the client runs for a close or a failure.
+     * @return An awaiter resolving to the ConnectResult of the attempt. Awaited from a callback the client runs for a
+     *         close or a failure: `false`, "HTTP/3 connection is closing", on the client's turn of the loop.
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
     /// Fail all outstanding requests and close the QUIC connection.
@@ -287,7 +287,7 @@ public:
     }
 
     /**
-     * @brief Queue a request, delivering the response via @p callback.
+     * @brief Queue a request, delivering the response via @p callback -- or throw what its own submission threw.
      * @param request  Request to send (made absolute against the base origin).
      * @param callback Response handler; must be non-null. A request the client refuses at once -- another origin,
      *                 the pending bound, a disconnect() under way, the server's GOAWAY, a submission the connection
@@ -296,8 +296,8 @@ public:
      *                 owe its answers. A callback that pushes back at every refusal is never called from inside its
      *                 own push. Bound such a retry all the same, with a delay: it spins otherwise.
      *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
-     *                 another one of the same client: the nesting is exactly one (disconnect() apart: called from a
-     *                 callback, it gives the failures of the requests it ends inside the call when nothing is owed).
+     *                 another one of the same client: the nesting is exactly one -- what a disconnect() called from
+     *                 a callback ends is heard on the client's turn too.
      *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
      *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
      *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without
@@ -330,7 +330,7 @@ public:
      */
     [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
     /**
-     * @brief Queue a batch of requests, delivering all responses via @p callback.
+     * @brief Queue a batch of requests, delivering all responses via @p callback -- or throw, as push_request() does.
      *
      * The members are admitted in order, each exactly as push_request() would admit it: an
      * invalid member completes with its 400, and a member that would take the queued + active
