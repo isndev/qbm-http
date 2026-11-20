@@ -5282,6 +5282,39 @@ TEST(Http1ClientTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTakesIt
     EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the loop brought was given ahead of one still owed";
 }
 
+// While the client is destroyed, an answer it gives by itself is given inside the call, whatever is still owed: no later
+// turn exists to keep it for (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the
+// first calls disconnect(), which ends a request in flight. That failure (9) is heard inside the disconnect(), before
+// the end of the callback (-1) and before the second refusal (2) -- where an answer the loop brings there waits behind
+// what is owed (the case above).
+TEST(Http1ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresInsideTheCall) {
+    using http1_client_lifetime_test::Told;
+    LoopbackHttp1Server   server;
+    int                   destroyed = 0; // before the client: its callbacks write here
+    bool                  up        = false;
+    std::vector<int>      order;
+    std::shared_ptr<Told> client(new Told(server.url("/"), destroyed));
+    auto *const           raw       = client.get();
+    const auto            elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once: another origin
+    raw->connect([&](bool ok, std::string const &) { up = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return up; }));
+    raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { order.push_back(9); }); // in flight
+    raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                                                // inside the program's push
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                                            // owed first
+            order.push_back(1);
+            raw->disconnect(); // ends the request in flight
+            order.push_back(-1);
+        });
+        raw->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // owed second
+    });
+    client.reset(); // the last reference of the program: the hold of the callback above runs on the next loop turn
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed == 1; }));
+    drain_client_callbacks();
+    EXPECT_EQ(order, (std::vector<int>{1, 9, -1, 2})) << "an answer the client gave by itself while destroyed was kept for a turn";
+}
+
 // An empty batch pushed from a callback the destructor runs follows the destructor's rule, as a request does (Huly
 // QB-1246): it is answered inside the push, and one pushed from inside that answer is refused by the return value alone,
 // its callback unheard. An empty batch pushed back from its own callback had no end there: a hundred calls, a hundred

@@ -6409,6 +6409,36 @@ TEST_F(Http2ClientTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTakes
     settle();
 }
 
+// While the client is destroyed, an answer it gives by itself is given inside the call, whatever is still owed: no later
+// turn exists to keep it for (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the
+// first calls disconnect(), which ends a request in flight. That failure (9) is heard inside the disconnect(), before
+// the end of the callback (-1) and before the second refusal (2) -- where an answer the loop brings there waits behind
+// what is owed (the case above).
+TEST_F(Http2ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresInsideTheCall) {
+    int                   destroyed = 0; // before the client: its callbacks write here
+    bool                  up        = false;
+    std::vector<int>      order;
+    std::shared_ptr<Told> client(new Told(url(), destroyed));
+    auto *const           raw = client.get();
+    raw->set_verify_peer(false);
+    raw->set_connect_timeout(5s);
+    raw->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    raw->push_request(reconnect::get_test(), [&](qb::http::Response) { order.push_back(9); }); // in flight
+    raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                              // inside the program's push
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                          // owed first
+            order.push_back(1);
+            raw->disconnect(); // ends the request in flight
+            order.push_back(-1);
+        });
+        raw->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // owed second
+    });
+    client.reset(); // the last reference: the destructor hears what is owed
+    EXPECT_EQ(destroyed, 1);
+    EXPECT_EQ(order, (std::vector<int>{1, 9, -1, 2})) << "an answer the client gave by itself while destroyed was kept for a turn";
+    settle();
+}
+
 // An empty batch pushed from a callback the destructor runs follows the destructor's rule, as a request does (Huly
 // QB-1246): it is answered inside the push, and one pushed from inside that answer is refused by the return value alone,
 // its callback unheard. An empty batch pushed back from its own callback had no end there: a hundred calls, a hundred
