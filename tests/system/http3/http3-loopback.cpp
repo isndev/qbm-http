@@ -4267,12 +4267,13 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortInsideThePushThatMadeItHasTheExcept
 // ran the pass (Huly QB-1246): the loop submitting a request that waited -- here for a stream, which a timeout frees --,
 // or a call the program made for another request -- here a cancellation, which frees the stream too. The hook throws
 // once, then twice: the second time at the reset of the stream the submission had opened, which shared a `try` with
-// the refusal and left the request unanswered.
+// the refusal and left the request unanswered. And it throws where the send loses its connection, with and without a
+// disconnect() called there: the close is finished, the request answered once, the next one served on a new connection.
 TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnswersItsRequestOnce) {
-    using http3_client_submit_test::CutShort;
-    for (const int times : {1, 2}) {
+    using namespace http3_client_submit_test;
+    for (const auto &hook : k_hooks) {
         for (const std::string_view by : {"a timer", "a cancellation of another request"}) {
-            SCOPED_TRACE(times == 1 ? "the hook throws once" : "the hook throws twice");
+            SCOPED_TRACE(hook.name);
             SCOPED_TRACE(by);
             int                first = 0, waiting = 0, served = 0; // declared before the client: its destructor may still answer
             qb::http::Response heard;
@@ -4280,19 +4281,25 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
             auto               server = qb::http3::make_server();
             server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
             server->router().get("/stall", [](auto) {});
+            server->router().post("/upload", [](auto ctx) { ctx->text("uploaded"); });
             server->router().compile();
             ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
 
             auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
             client->set_verify_peer(false);
+            if (hook.loses_its_connection) {
+                auto quic                     = client->settings();
+                quic.max_pending_stream_bytes = 16 * 1024; // the upload below overflows it: the send closes the transport
+                client->set_settings(quic);
+            }
             ASSERT_TRUE(client->connect(nullptr));
             ASSERT_TRUE(pump([&] { return client->is_connected(); }));
             client->set_max_concurrent_streams(1); // one stream: the second request waits in the queue
             client->set_request_timeout(by == "a timer" ? qb::duration(250ms) : qb::duration::zero());
             const auto arm = [&] {
-                client->throws = CutShort::at::the_end_of_a_send;
-                client->times  = times;
-                client->skip   = 1; // the reset of the stream that is freed: the next send is the submission
+                client->throws = hook.where;
+                client->times  = hook.times;
+                client->skip   = hook.where == CutShort::at::the_end_of_a_send ? 1 : 0; // the reset of the stream that is freed
             };
             const auto first_id = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) {
                 ++first;
@@ -4302,7 +4309,12 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
             });
             ASSERT_NE(first_id, 0u);
             client->set_request_timeout(qb::duration::zero()); // the request that waits has no deadline of its own
-            client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+            qb::http::Request second{qb::io::uri("/ok")};
+            if (hook.loses_its_connection) { // an upload whose send overflows the queue: the transport closes under it
+                second        = qb::http::Request{qb::http::method::POST, qb::io::uri("/upload")};
+                second.body() = std::string(256 * 1024, 'x');
+            }
+            client->push_request(std::move(second), [&](qb::http::Response response) {
                 ++waiting;
                 heard = std::move(response);
             });
@@ -4314,12 +4326,13 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
                 arm();
                 EXPECT_THROW(client->cancel_request(first_id), std::runtime_error) << "the exception did not go on to the caller";
             }
-            EXPECT_EQ(client->thrown, times) << "the hook did not throw inside the submission: the case proves nothing";
+            EXPECT_EQ(client->thrown, hook.times) << "the hook did not throw inside the submission: the case proves nothing";
             EXPECT_EQ(first, 1);
             EXPECT_EQ(waiting, 1) << "the request the pass was writing was not answered";
             EXPECT_EQ(heard.status(), qb::http::status::SERVICE_UNAVAILABLE);
-            EXPECT_EQ(heard.body().as<std::string>(), "Failed to submit HTTP/3 request");
-            EXPECT_TRUE(client->is_connected());
+            EXPECT_EQ(heard.body().as<std::string>(),
+                      hook.loses_its_connection ? "HTTP/3 connection closed during request submission" : "Failed to submit HTTP/3 request");
+            EXPECT_EQ(client->is_connected(), !hook.loses_its_connection) << "the close the submission deferred was not run";
             EXPECT_EQ(client->get_active_request_count(), 0u);
             const auto settle = std::chrono::steady_clock::now() + 100ms;
             while (std::chrono::steady_clock::now() < settle) {

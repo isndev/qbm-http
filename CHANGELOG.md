@@ -1042,20 +1042,22 @@ All notable changes to the qbm-http module are documented here. The format is ba
   -- for a batch the members already submitted too, their streams reset where the connection stays --, no callback is
   called and no awaiter completed, and a coroutine that catches the exception and awaits another request hears that
   request's own answer. Thrown where the loop submits, or under a call the program makes for another request (a
-  `cancel_request()`), the request is answered `503`, once, on the client's turn, and the exception goes on to that
-  caller -- logged where it is the loop. The refusal is given before the stream is reset, and the reset has a guard of
-  its own: a hook that throws a second time under it takes no answer away. The other requests a close run there ends
-  are answered once each, as answers the client gives by itself: inside a push the program makes with no callback of
-  this client on the stack and nothing owed, on the client's turn otherwise -- under a callback's push they came inside
-  it. With no close deferred the stream is abandoned and the connection kept. No close can be left half done any more,
-  so the line of the destructor that cleared one, and its witness, are gone.
+  `cancel_request()`), the request is answered `503`, once, as every refusal the client gives by itself -- inside that
+  call when no callback of this client is on the stack and nothing is owed, on the client's turn otherwise --, and the
+  exception goes on to that caller, logged where it is the loop. The refusal is given before the stream is reset, and
+  the reset has a guard of its own: a hook that throws a second time under it takes no answer away. The other requests a
+  close run there ends are answered once each, as answers the client gives by itself: inside a push the program makes
+  with no callback of this client on the stack and nothing owed, on the client's turn otherwise -- under a callback's
+  push they came inside it. With no close deferred the stream is abandoned and the connection kept. No close can be left
+  half done any more, so the line of the destructor that cleared one, and its witness, are gone.
   Witnesses: a client derived in the test throws from the two hooks the QUIC endpoint runs inside a send -- at the end
   of a send, once and again at the reset of the stream; at the close a send delivers when it loses its connection, with
   and without a `disconnect()` called there -- under a callback push, a batch (thrown at its first member and at its
   second) and a coroutine push whose next `co_await` hears its own answer: no callback called, the exception out of
-  the call, the next request served. Where a timer's pass and where the cancellation of another request submit, the
-  hook throwing once and twice: the request answered once. And a push whose submission loses the connection, made by
-  the program and from a callback: the other request's failure one deep and in order. No request was heard on these
+  the call, the next request served. Where a timer's pass and where the cancellation of another request submit, under
+  each of the same hooks: the request answered once, the close finished where the connection is lost, the next request
+  served. And a push whose submission loses the connection, made by the program and from a callback: the other
+  request's failure one deep and in order. No request was heard on these
   paths before, and the client served nothing more. Mutants, the whole binary each, the unmutated tree first and the
   restored tree last: 16 planted, 13 caught. Of the three that survive, two are the guard each push keeps around its
   own pass -- the pass has taken back what the call pushed before an exception of a submission leaves it, so only an
