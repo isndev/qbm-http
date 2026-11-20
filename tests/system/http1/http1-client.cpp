@@ -930,9 +930,9 @@ TEST(Http1ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
     }; // refused at once: 400
     {
         SCOPED_TRACE("a refusal of the program's next push");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
         LoopbackHttp1Server server;
         auto                client = qb::http1::make_client(server.url("/"));
-        std::vector<int>    order;
         client->push_request(elsewhere(), [&](qb::http::Response) {
             order.push_back(1);
             client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept: pushed from a callback
@@ -945,9 +945,9 @@ TEST(Http1ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
     }
     {
         SCOPED_TRACE("the failures of a disconnect() the same callback calls");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
         LoopbackHttp1Server server;
         auto                client = qb::http1::make_client(server.url("/"));
-        std::vector<int>    order;
         client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { order.push_back(9); }); // in flight
         ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
         client->push_request(elsewhere(), [&](qb::http::Response) {
