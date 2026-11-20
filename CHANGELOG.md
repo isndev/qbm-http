@@ -605,12 +605,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
     there is deferred until those callbacks have unwound, and a `run_sync()` of it never returned (measured from a
     failure callback of `disconnect()` and from the callback of a response that closes its connection). With
     automatic reconnection off, a request queued behind a response that closes its connection, or behind a 101 its
-    request never asked for, fails inside that close, the connection still retired, so the coroutine `connect()`
-    awaited from its callback completes `false` at once: it failed a loop turn later, from the reset of the retired
-    connection, where that `connect()` was not refused and -- its attempt refused through the loop's deferred queue,
-    which a nested pump cannot drain -- never returned. Awaited again
-    once an attempt failed, outside its callbacks, it gets the next attempt's own outcome, as before. A loop pumped from
-    a callback of a close -- a `run_sync()` of any coroutine there, the refused `connect()` included -- no longer leaves
+    request never asked for, fails inside that close, the connection still retired; so does, with it on, a request
+    kept for the next connection behind one whose connection a timeout or the server ended, once the failure callback
+    of that one turns automatic reconnection off (a policy that gives up). The coroutine `connect()` awaited from its
+    callback then completes `false` at once: the request failed at the tail of that loop turn, from the reset of the
+    retired connection, where that `connect()` was not refused, and the refusal of the attempt it started waited in the
+    loop's deferred queue, which a nested pump cannot drain -- a `run_sync()` of it blocked until the connect timeout
+    (30 s by default), for ever when the refusal is known at once. Awaited again once an attempt failed, outside its
+    callbacks, it gets the next attempt's own outcome, as before. A loop pumped from a callback of a close -- a
+    `run_sync()` of any coroutine there, the refused `connect()` included -- no longer leaves
     the connection retired: the reset it waited for ran in that pump, the callback still on the stack, and gave up, and
     the connection stayed retired until the client next ran a callback. A request pushed then, automatic reconnection on
     (the default), waited for its request timeout (408, 60 s by default), whose callback restarted the connection;
@@ -701,29 +704,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `connect()`, a `run_sync()` of `connect()` from a failure callback of `disconnect()`, from the callback of a response
   that closes its connection, from one that disconnected, from one the body limit cut and, automatic reconnection off,
   from the failure of a request queued behind a response that closes its connection or behind a 101 its request never
-  asked for, which never returned, and the
-  next request after a loop pumped from the callback of a close -- a `run_sync()` of a coroutine that completes at once
-  --, never answered, and a throwing callback of a `connect()` made on a connected client, and a request for another
-  origin pushed from a callback of the destructor, answered `400` there; and, passing there, a coroutine that awaits
-  `connect()` again after a failed attempt. In `qbm-http-test-system-http2-client`, a `run_sync()` of `connect()` from a
-  failure callback of an explicit `disconnect()`, of a `disconnect()` of a connector in flight, of a failed handshake,
-  of a connection the server closed and of a graceful GOAWAY's drain, a connection started after a `disconnect()` whose
-  failure callback ran the loop and a request pushed before that pass, a request pushed after it, or after a connect
-  deadline or a graceful GOAWAY's drain whose failure callback ran the loop until the transport ended, whose connection
-  ends before its handshake, a `connect()` asked right after a `disconnect()` of the client's first connector in
-  flight, which heard `false` and the attempt then connected unheard, and a request pushed after such a close of a
-  later connector, whose connection ended before its handshake, which waited for its request timeout, and, for the one
-  rule, a `run_sync()` from the callback of a connect deadline, from the
-  callback of a `connect()` whose connector failed at once and from that of a `connect()` whose transport the peer ended
-  once its TLS handshake was complete, with a redial from that callback; in
-  `qbm-http-test-system-http2-client-static-exit`, that redial with the client in static storage. A `run_sync()` that
-  does not return ends the process under a watchdog, saying so. Passing there too, a witness holds the flush limit of an
-  earlier close away from a later close whose GOAWAY cannot be delivered while a callback of it pumps the loop, and two
-  hold what a close or a failure with no transport leaves behind: a request pushed right after a `disconnect()` of a
-  connector in flight is served by its own connection, and one pushed after a connector failure is answered by the
-  first end of its own.
-  Passing before and after, to hold what the entry says: the coroutine `connect()` for a host that is not an address,
-  which completes `false` once.
+  asked for and, automatic reconnection on, of one kept behind a request whose connection a timeout or the server ended
+  and whose failure callback turned automatic reconnection off, which did not return within the bound of their watchdog,
+  and the next request after a loop pumped from the callback of a close -- a `run_sync()` of a coroutine that completes
+  at once --, never answered, and a throwing callback of a `connect()` made on a connected client, and a request for
+  another origin pushed from a callback of the destructor, answered `400` there; and, passing there, a coroutine that
+  awaits `connect()` again after a failed attempt. In `qbm-http-test-system-http2-client`, a `run_sync()` of `connect()`
+  from a failure callback of an explicit `disconnect()`, of a `disconnect()` of a connector in flight, of a failed
+  handshake, of a connection the server closed and of a graceful GOAWAY's drain, a connection started after a
+  `disconnect()` whose failure callback ran the loop and a request pushed before that pass, a request pushed after it,
+  or after a connect deadline or a graceful GOAWAY's drain whose failure callback ran the loop until the transport
+  ended, whose connection ends before its handshake, a `connect()` asked right after a `disconnect()` of the client's
+  first connector in flight, which heard `false` and the attempt then connected unheard, and a request pushed after such
+  a close of a later connector, whose connection ended before its handshake, which waited for its request timeout, and,
+  for the one rule, a `run_sync()` from the callback of a connect deadline, from the callback of a `connect()` whose
+  connector failed at once and from that of a `connect()` whose transport the peer ended once its TLS handshake was
+  complete, with a redial from that callback; in `qbm-http-test-system-http2-client-static-exit`, that redial with the
+  client in static storage. A `run_sync()` that does not return ends the process under a watchdog, saying so. Passing
+  there too, a witness holds the flush limit of an earlier close away from a later close whose GOAWAY cannot be
+  delivered while a callback of it pumps the loop, and two hold what a close or a failure with no transport leaves
+  behind: a request pushed right after a `disconnect()` of a connector in flight is served by its own connection, and
+  one pushed after a connector failure is answered by the first end of its own. Passing before and after, to hold what
+  the entry says: the coroutine `connect()` for a host that is not an address, which completes `false` once.
 
 ### Fixed
 
@@ -839,25 +841,28 @@ All notable changes to the qbm-http module are documented here. The format is ba
   HTTP/3: the peer has read the first flight and answers nothing); callbacks that throw (a request's, a batch's, a
   `connect()`'s, and that of a request or a batch pushed from one); a callback that disconnects; and, on HTTP/2, a
   waiting `connect()` whose transport the peer ends once its TLS handshake is complete, whose callback connects again.
-  Every outcome a case's callbacks hear is kept: a wrong status between two right ones fails the case. 75 of the 455
+  Every outcome a case's callbacks hear is kept: a wrong status between two right ones fails the case. 77 of the 457
   cases of those four binaries and of `qbm-http-test-system-http2-client` fail on the commit before these two entries
-  (a65bf95; AddressSanitizer, macOS arm64, Apple clang 21): 11 of them under a watchdog that ends the process when a
-  `run_sync()` does not return, 1 on qb-io's `io::start() from inside dispose()` assertion. 111 mutants in eight
-  batteries, each on the code as it then stood: 86 caught where planted. 3 of the 21 that survived the first three are
-  settled by the fourth: two, planted again, are caught by its witnesses; the third, a close counted with no transport,
-  is now the code, and its inverse is caught. The sixth settles 2 more, planted again and caught: the HTTP/1.1 entry
-  answer of `push_request()`, and a race the fifth left. The seventh, on the HTTP/2 flags this entry moves before the
-  callbacks, catches all 6; one catch of the sixth is withdrawn -- the queue's flag set for a close with no transport,
-  caught by a race of its witness. The eighth catches all 8: that flag planted again, now that such a close closes no
-  io, the io closed, both, the HTTP/1.1 queue behind a closing response or an unasked switch left to the retirement's
-  reset, and three HTTP/2 flags set after the callbacks, planted again on the rewritten witnesses. Of the 19 that
-  survive, 2 put back what was removed and show it redundant, 5 take away one of two guards in a row (the pair is
-  caught, or the next line refuses the same), 3 take away a guard no path reaches while the others stand, 5 take away
-  what only a failed allocation reaches -- the `try` in each of the three destructors, the HTTP/3 close's mark cleared
-  on an early exit, the close a throwing read completes --, 3 are equivalent (that mark cleared a second time; the
-  HTTP/1.1 reset hold armed at every return to no callback, a retirement pending or not; the HTTP/2 flush limit armed
-  for a transport already gone, which then finds its flag cleared), and 1 changes only what is logged; each is named
-  in the commit.
+  (a65bf95; AddressSanitizer, macOS arm64, Apple clang 21, the last two added in a Release build): 13 of them under a
+  watchdog that ends the process when a `run_sync()` does not return, 1 on qb-io's `io::start() from inside dispose()`
+  assertion. 119 mutants in nine batteries, each on the code as it then stood: 90 caught where planted. 3 of the 21 that
+  survived the first three are settled by the fourth: two, planted again, are caught by its witnesses; the third, a
+  close counted with no transport, is now the code, and its inverse is caught. The sixth settles 2 more, planted again
+  and caught: the HTTP/1.1 entry answer of `push_request()`, and a race the fifth left. The seventh, on the HTTP/2 flags
+  this entry moves before the callbacks, catches all 6; one catch of the sixth is withdrawn -- the queue's flag set for
+  a close with no transport, caught by a race of its witness. The eighth catches all 8: that flag planted again, now
+  that such a close closes no io, the io closed, both, the HTTP/1.1 queue behind a closing response or an unasked switch
+  left to the retirement's reset, and three HTTP/2 flags set after the callbacks, planted again on the rewritten
+  witnesses. The ninth, on the HTTP/1.1 queue a timeout or a lost connection keeps for automatic reconnection, catches 4
+  of 8: its settle removed, or moved before the failure callbacks, in each of the two. Of the 23 that survive, 2 put
+  back what was removed and show it redundant, 5 take away one of two guards in a row (the pair is caught, or the next
+  line refuses the same), 3 take away a guard no path reaches while the others stand, 5 take away what only a failed
+  allocation reaches -- the `try` in each of the three destructors, the HTTP/3 close's mark cleared on an early exit,
+  the close a throwing read completes --, 7 are equivalent (that mark cleared a second time; the HTTP/1.1 reset hold
+  armed at every return to no callback, a retirement pending or not; the HTTP/2 flush limit armed for a transport
+  already gone, which then finds its flag cleared; and, finding nothing to do, the gate of the two settles the ninth
+  plants in, the settle of a 101 with no request in flight, and the backstop of the reset), and 1 changes only what is
+  logged; each is named in the commit.
 
 - **A response to HEAD that declares a `Content-Length` past the client's body limit is delivered (Huly QB-1248).** A
   response to HEAD declares the length a GET's would have and carries no body (RFC 9110 §9.3.2). The HTTP/1.1 client's

@@ -187,7 +187,7 @@ Client::close_connection(const std::string &error_message) {
     _handshake_completed      = false;
     _received_graceful_goaway = false;
     _h2_protocol              = nullptr;
-    const closing_scope closing{_closing_callbacks}; // every close ends the io below, a transport or not (Huly QB-1246)
+    const closing_scope closing{_closing_callbacks}; // a transport or not: the coroutine connect() refuses every close, one rule (Huly QB-1246)
     // Set before the callbacks, with the epoch of the limit: a loop pass one of them runs can deliver the GOAWAY and end the
     // transport, and the `disconnected` that raises clears both flags; a limit an earlier close armed no longer matches. Set
     // after the callbacks, they outlived it: the limit cut the next connection, and the queue's flag kept the requests of the

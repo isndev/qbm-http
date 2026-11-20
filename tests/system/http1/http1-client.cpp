@@ -1593,6 +1593,51 @@ connect_twice(qb::http1::Client &client, qb::http1::ConnectResult &first, qb::ht
     second = co_await client.connect();
 }
 
+/// Two requests on a connection that is up, automatic reconnection on (the default): the first on `target`, whose
+/// connection its deadline (`timeout`, when not zero) or the server ends; the second queued behind it, which that close
+/// keeps for the next connection. The first's failure callback turns automatic reconnection off -- a policy that gives up
+/// after N failures -- and takes the listener away, so an attempt is refused; the second's runs
+/// run_sync(client->connect()), which returns at once, `false`, and nothing connects for it.
+void
+reconnection_turned_off_by_the_failure_ahead(char const *const target, qb::duration const timeout, qb::http::status const first_status,
+                                             char const *const from) {
+    std::optional<LoopbackHttp1Server> server{std::in_place};
+    Blocked                            blocked;
+    int                                answered = 0, failed = 0;
+    bool                               connected = false;
+    qb::http::status                   first = qb::http::status::OK, status = qb::http::status::OK;
+    std::string                        text;
+    auto                               client = qb::http1::make_client(server->url(""));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    client->set_request_timeout(timeout); // armed for the first as it is sent: at once, the client connected
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, target), [&](qb::http::Response response) {
+        ++answered;
+        first = response.status();
+        client->set_auto_reconnect(false); // gives up
+        server.reset();                    // its listener gone: an attempt is refused
+    }));
+    client->set_request_timeout(qb::duration::zero()); // the second has no deadline: the close alone ends it
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++failed;
+        status = response.status();
+        text   = response.body().as<std::string>();
+        blocked.run(*client, from);
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(first, first_status);
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(text, "HTTP/1.1 client is not connected") << "failed under the policy the callback left: no attempt was made for it";
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+}
+
 } // namespace http1_run_sync_connect_test
 
 // run_sync(client->connect()) from a failure callback of disconnect() returns at once, `false`, "HTTP/1.1 connection is
@@ -1729,9 +1774,11 @@ TEST(Http1ClientTest, AClientWhoseDisconnectFromACallbackRefusedARunSyncOfConnec
 
 // With automatic reconnection off, a request queued behind a response that closes its connection fails inside that close,
 // the connection retired: a run_sync(client->connect()) from its callback returns at once, `false`, and nothing connects
-// for it. The request was failed by the reset of the retired connection, which the loop's deferred queue runs once the
-// close has returned: no close was under way there, the connect() started an attempt, the attempt to a listener gone was
-// refused through that same queue, which the pump run_sync() ran could not drain -- and nothing bounded it (Huly QB-1246).
+// for it. The request was failed by the reset of the retired connection, which the loop's deferred queue runs at the tail
+// of the turn, once the close has returned: no close was under way there, the connect() started an attempt, and its
+// refusal, sent through that same queue, which the pump run_sync() ran could not drain, came only with the connect
+// deadline -- 30 s by default, macOS reporting a loopback refusal through the socket --, for ever where connect()
+// reports it at once (Huly QB-1246).
 TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestQueuedBehindAClosingResponseReturnsFalseAtOnce) {
     qb::io::async::init();
     std::optional<LoopbackHttp1Server>   server{std::in_place};
@@ -1762,6 +1809,26 @@ TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestQueuedBehindAClos
     drain_client_callbacks();
     EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
     EXPECT_FALSE(client->is_connected());
+}
+
+// With automatic reconnection on, a request queued behind one whose deadline ends its connection is kept for the next
+// connection -- until the failure callback of the one ahead turns automatic reconnection off: it then fails inside that
+// close, the connection retired, and a run_sync(client->connect()) from its callback returns at once, `false`. The queue
+// was left to the reset of the retired connection, at the tail of the turn, which failed it there, where that connect()
+// was not refused: its attempt's refusal waited in the deferred queue that reset runs from (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestKeptBehindATimeoutWhoseCallbackEndedReconnectionReturnsFalseAtOnce) {
+    qb::io::async::init();
+    http1_run_sync_connect_test::reconnection_turned_off_by_the_failure_ahead(
+        "/never", 300ms, qb::http::status::GATEWAY_TIMEOUT,
+        "the failure of a request kept behind a timeout, automatic reconnection turned off by the failure ahead");
+}
+
+// The same when the server closes the connection of the request ahead (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestKeptBehindAServerCloseWhoseCallbackEndedReconnectionReturnsFalseAtOnce) {
+    qb::io::async::init();
+    http1_run_sync_connect_test::reconnection_turned_off_by_the_failure_ahead(
+        "/peer-close-without-response", qb::duration::zero(), qb::http::status::BAD_GATEWAY,
+        "the failure of a request kept behind a server close, automatic reconnection turned off by the failure ahead");
 }
 
 // What the callback of a connect() made on a connected client throws is logged and goes no further, as for every other
@@ -3059,8 +3126,8 @@ TEST(Http1ClientTest, AnAskedSwitchIsTheAnswerAndRetiresItsConnection) {
 
 // The same behind a 101 its request never asked for, automatic reconnection off: the switch fails the request it
 // answers, 502, and the request queued behind it fails inside that close too -- a run_sync(client->connect()) from its
-// callback returns at once, `false`. It was failed by the reset of the retired connection, where it never returned
-// (Huly QB-1246).
+// callback returns at once, `false`. It was failed by the reset of the retired connection, where it returned only at
+// the connect deadline, as above (Huly QB-1246).
 TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestQueuedBehindAnUnaskedSwitchReturnsFalseAtOnce) {
     using namespace http1_switched_protocols_test;
     qb::io::async::init();
