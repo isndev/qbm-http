@@ -2208,6 +2208,11 @@ struct ClientTestPeer {
     attempts(Client const &client) {
         return client._connect_attempt;
     }
+    /// What the client's log gives as the reason its last connect() could start no attempt.
+    static const char *
+    why_nothing_started(Client const &client) {
+        return client.why_nothing_started();
+    }
 };
 
 } // namespace qb::http3
@@ -4195,7 +4200,10 @@ TEST_F(Http3LoopbackTest, AnAddressTheNetworkRefusesAtOnceIsHeardOnALaterTurnOrG
         redial.cap    = 6;
         auto client   = qb::http3::make_client("https://255.255.255.255:" + std::to_string(next_port()));
         redial.client = client.get();
+        EXPECT_STREQ(qb::http3::ClientTestPeer::why_nothing_started(*client), "no UDP socket opened and bound") << "before any attempt";
         EXPECT_TRUE(redial.dial());
+        // The log names what happened: a socket was opened and bound, and the network refused the datagram.
+        EXPECT_STREQ(qb::http3::ClientTestPeer::why_nothing_started(*client), "the network refused the first datagram to every address");
         EXPECT_EQ(redial.heard_true + redial.heard_false, 0) << "the callback was called inside connect()";
         ASSERT_TRUE(pump([&] { return redial.heard_false == 6; }));
         EXPECT_EQ(redial.dials, 6);
