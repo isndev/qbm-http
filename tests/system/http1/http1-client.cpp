@@ -832,6 +832,157 @@ TEST(Http1ClientTest, AConnectCallbackThatRunsTheLoopThenDropsTheLastReferenceEn
     drain_client_callbacks();
 }
 
+// A callback that pushes its request back at every failure -- it never gives up -- is never called from inside its own
+// push (Huly QB-1246). With automatic reconnection off and no connection, a push is refused at once: answered inside the
+// push when it is made from the program, on the loop's next turn when it is made from one of the client's own
+// callbacks. Answered inside there too, the callback was called from inside its own push, again and again, each
+// failure one frame deeper (the case stops such a run at 64 so that it fails, and does not overflow its stack). Here
+// it hears one failure a loop turn, and ends by itself: fifty failures in, the program connects, and the request the
+// callback pushes next is served.
+TEST(Http1ClientTest, ARequestPushedBackAtEveryFailureIsNeverAnsweredFromInsideItsOwnPush) {
+    LoopbackHttp1Server server;
+
+    auto client = qb::http1::make_client(server.url("/"));
+    client->set_auto_reconnect(false);
+    int                   pushes = 0, failures = 0, depth = 0, deepest = 0;
+    bool                  served = false, connecting = false;
+    std::function<void()> push;
+    push = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            if (response.status() == qb::http::status::OK) {
+                served = true;
+            } else {
+                ++failures;
+                if (deepest < 64) {
+                    push(); // always: nothing here counts the attempts
+                }
+            }
+            --depth;
+        });
+    };
+    push();
+    EXPECT_EQ(failures, 1) << "a push made from the program is refused inside the push, as before";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] {
+        if (failures >= 50 && !connecting) {
+            connecting = true;
+            client->connect([](bool, std::string const &) {});
+        }
+        return served || deepest >= 64;
+    }));
+    EXPECT_TRUE(served);
+    EXPECT_GE(failures, 50);
+    EXPECT_EQ(deepest, 1) << "a request pushed back from its failure callback was answered from inside its own push";
+    EXPECT_EQ(pushes, failures + 1);
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// Every refusal known at once goes the same way (Huly QB-1246): a request for another origin (400), one past the
+// pending bound (503) and one that cannot be written to the connection (400) are answered inside the push the program
+// makes, and on the loop's next turn when the push is made from the callback of the one before. Each kind is pushed
+// back twenty times: never nested.
+TEST(Http1ClientTest, ARefusalKnownAtOnceOfARequestPushedFromACallbackWaitsATurn) {
+    for (const std::string_view kind : {"another origin", "past the pending bound", "cannot be written"}) {
+        SCOPED_TRACE(kind);
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        if (kind == "cannot be written") { // refused where it is sent: on a connection
+            bool connected = false;
+            client->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+        }
+        if (kind == "past the pending bound") {
+            client->set_max_pending_requests(0);
+        }
+        int                   pushes = 0, failures = 0, depth = 0, deepest = 0;
+        std::function<void()> push;
+        push = [&] {
+            ++pushes;
+            auto refused = request(qb::http::method::POST, kind == "another origin" ? "http://elsewhere.invalid/echo" : "/echo");
+            if (kind == "cannot be written") {
+                refused.body() = "too-long";
+                refused.set_header("Content-Length", "1");
+            }
+            client->push_request(std::move(refused), [&](qb::http::Response response) {
+                deepest = std::max(deepest, ++depth);
+                EXPECT_NE(response.status(), qb::http::status::OK);
+                if (++failures < 20) {
+                    push();
+                }
+                --depth;
+            });
+        };
+        push();
+        EXPECT_EQ(failures, 1) << "a push made from the program is refused inside the push";
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failures == 20; }));
+        EXPECT_EQ(pushes, 20);
+        EXPECT_EQ(deepest, 1) << "a refusal of a request pushed from a callback was answered from inside its push";
+        client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
+// A refusal kept for the next turn waits for the callback that earned it to return, a loop turn that callback runs
+// included (Huly QB-1246): the pump drains the hold that would have delivered it, which gives way under a callback.
+TEST(Http1ClientTest, ARefusalKeptForTheNextTurnIsNotHeardUnderACallbackThatRunsTheLoop) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+    client->set_max_pending_requests(0); // every push is refused at once
+    int  heard = 0, heard_under_the_callback = -1;
+    bool outer = false;
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++heard; });
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        heard_under_the_callback = heard;
+        outer                    = true;
+    });
+    ASSERT_TRUE(outer) << "a push made from the program is refused inside the push";
+    EXPECT_EQ(heard_under_the_callback, 0) << "the refusal was heard while the callback that pushed was still running";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return heard != 0; }));
+    EXPECT_EQ(heard, 1);
+    drain_client_callbacks();
+}
+
+// The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
+// destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
+// alone, its callback destroyed unheard -- as connect() is refused there. A callback that always pushes again then
+// ends: three pushes, two answers, never deeper than two. It was answered inside each push, without end.
+TEST(Http1ClientTest, ARequestPushedBackFromTheDestructorsCallbacksEndsAtItsSecondPush) {
+    LoopbackHttp1Server server;
+
+    int                   pushes = 0, answers = 0, depth = 0, deepest = 0;
+    std::vector<bool>     accepted;
+    qb::http1::Client    *raw = nullptr;
+    std::function<void()> push;
+    push = [&] {
+        const auto index = static_cast<std::size_t>(pushes++); // a push returns after the ones its callback makes
+        accepted.resize(index + 1);
+        accepted[index] = raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            ++answers;
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            if (deepest < 64) {
+                push();
+            }
+            --depth;
+        });
+    };
+    {
+        auto client = qb::http1::make_client(server.url("/"));
+        raw         = client.get();
+        push(); // queued behind the connection it asked for
+        ASSERT_TRUE(client->is_connecting());
+    } // destroyed with that request waiting
+    drain_client_callbacks();
+    EXPECT_EQ(pushes, 3);
+    EXPECT_EQ(answers, 2);
+    EXPECT_EQ(deepest, 2);
+    EXPECT_EQ(accepted, (std::vector<bool>{true, true, false}));
+}
+
 TEST(Http1ClientTest, ResponseCallbackMayDisconnectClient) {
     LoopbackHttp1Server server;
 
@@ -3845,7 +3996,7 @@ TEST(Http1ClientTest, AResponseCutByTheReadBufferCapFailsNamingThatCap) {
 // A response the client's body limit cut (Huly QB-1248): its failure callback runs once the connection is retired, as the
 // callback of a response that closes the connection does (CloseResponseCallbackQueuesItsNextRequestOnANewConnection), so
 // a request the callback pushes is never written to that connection. With automatic reconnection it goes to a new one;
-// without, it is refused at once, as after any other end of a connection. It was written to the dying connection while
+// without, it is refused as that close ends, as after any other end of a connection. It was written to the dying connection while
 // the client still read it as connected, and the disconnect that followed failed it: 502 "Connection closed". A request
 // QUEUED behind the cut one goes the same way: out on the new connection, or failed once, 503 -- it was written to the dying
 // connection first, and failed with it, 502. Its 503 reads "HTTP/1.1 client is not connected" when the callback itself
@@ -3912,7 +4063,9 @@ TEST(Http1ClientTest, ACallbackOfAResponseTheBodyLimitCutQueuesItsNextRequestOnA
             EXPECT_EQ(queued.body().as<std::string>(), "pong");
             EXPECT_EQ(server.connection_count(), 2);
         } else {
-            EXPECT_EQ(answered_in_callback, 1) << "a client that is down and does not reconnect refuses the request at once";
+            // Refused once the callback has returned, inside the same close: never inside the push a callback of the client
+            // makes, where a callback that pushes back at every failure was called from inside its own push (Huly QB-1246).
+            EXPECT_EQ(answered_in_callback, 0) << "a request pushed from a callback of the client was answered inside its push";
             EXPECT_EQ(observed->response.status(), qb::http::status::SERVICE_UNAVAILABLE);
             EXPECT_EQ(observed->response.body().as<std::string>(), "HTTP/1.1 client is not connected");
             EXPECT_EQ(queued.status(), qb::http::status::SERVICE_UNAVAILABLE) << "the request queued behind the cut one";
