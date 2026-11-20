@@ -500,6 +500,15 @@ Client::push_request(qb::http::Request request) {
                 complete(std::move(response));
                 return;
             }
+            if (self->_deferred_connection_reset && self->_callback_depth > 0) {
+                // Awaited from a callback of a close, it is answered at once, as the coroutine connect() is there: the callback
+                // form queues the request for the next connection, which cannot start before that callback returns, and a
+                // coroutine blocked on it -- run_sync() -- waited for its request timeout (Huly QB-1246).
+                ++self->_total_requests;
+                ++self->_failed_requests;
+                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 connection is closing"));
+                return;
+            }
             // Refused by its return value alone -- pushed from inside an answer the destructor's close delivers --, the push
             // never calls its callback: the awaiter completes here.
             auto answered = std::make_shared<bool>(false);
@@ -566,6 +575,17 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
             auto self = weak_self.lock();
             if (!self) {
                 complete({});
+                return;
+            }
+            if (self->_deferred_connection_reset && self->_callback_depth > 0) { // as the single request, above
+                self->_total_requests += reqs.size();
+                self->_failed_requests += reqs.size();
+                std::vector<qb::http::Response> closing;
+                closing.reserve(reqs.size());
+                for (std::size_t i = 0; i < reqs.size(); ++i) {
+                    closing.push_back(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 connection is closing"));
+                }
+                complete(std::move(closing));
                 return;
             }
             const bool unheard = self->_destroying && self->_destroy_answers != 0; // refused by the return value alone: see push_request()

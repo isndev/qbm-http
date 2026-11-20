@@ -2945,6 +2945,45 @@ TEST_F(Http3LoopbackTest, ARequestPushedBackFromTheDestructorsCallbacksEndsAtIts
     EXPECT_EQ(accepted, (std::vector<bool>{true, true, false}));
 }
 
+// The coroutine push_request() and push_requests() take the rule of the coroutine connect() (Huly QB-1246): awaited
+// from a callback of a failure, they complete at once, 503 "HTTP/3 connection is closing". The callback form queues the
+// request behind the next attempt, whose `connected` the endpoint delivers only once its dispatch has returned: a
+// run_sync() of the coroutine form there waited for that attempt's connect timeout -- it answered "HTTP/3 connection
+// timeout" -- or for the request's.
+TEST_F(Http3LoopbackTest, ARunSyncOfAPushFromACallbackOfAnAttemptThatTimedOutIsAnsweredAtOnce) {
+    const auto                      silent = next_port();
+    auto                            client = qb::http3::make_client(https_origin(silent));
+    int                             failed = 0;
+    qb::http::Response              single;
+    std::vector<qb::http::Response> batch;
+    std::chrono::milliseconds       took{0};
+    client->set_verify_peer(false);
+    client->set_connect_timeout(300ms);
+    client->set_request_timeout(2s);
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &) {
+        EXPECT_FALSE(ok);
+        ++failed;
+        const auto               started = std::chrono::steady_clock::now();
+        qb::http::test::watchdog bound("run_sync(push_request()) from the callback of an attempt that timed out", 10s);
+        single = qb::io::async::run_sync(client->push_request(qb::http::Request{qb::io::uri("/")}));
+        std::vector<qb::http::Request> two;
+        two.emplace_back(qb::io::uri("/"));
+        two.emplace_back(qb::io::uri("/"));
+        batch = qb::io::async::run_sync(client->push_requests(std::move(two)));
+        took  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    }));
+    ASSERT_TRUE(pump([&] { return failed != 0; }));
+    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(single.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(single.body().as<std::string>(), "HTTP/3 connection is closing");
+    ASSERT_EQ(batch.size(), 2u);
+    EXPECT_EQ(batch[0].body().as<std::string>(), "HTTP/3 connection is closing");
+    EXPECT_EQ(batch[1].body().as<std::string>(), "HTTP/3 connection is closing");
+    EXPECT_LT(took, 250ms) << "a coroutine push awaited from a callback of a failure waited for the next attempt";
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    client->disconnect();
+}
+
 // A host name connects (Huly QB-1246): the client resolves it -- `localhost`, the loopback address of the family the URI
 // names -- and hands the QUIC endpoint the address, the name staying the one sent as SNI. Until 3.4 the endpoint was
 // handed the name, which it takes for an address: connect() answered that nothing could start.

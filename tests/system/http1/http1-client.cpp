@@ -1873,6 +1873,45 @@ TEST(Http1ClientTest, ARunSyncOfConnectFromAFailureCallbackOfDisconnectReturnsFa
     EXPECT_FALSE(client->is_connected());
 }
 
+// The coroutine push_request() and push_requests() take the same rule (Huly QB-1246): awaited from a callback of a
+// close, they complete at once, 503 "HTTP/1.1 connection is closing". The callback form queues the request for the next
+// connection, which cannot start before that callback returns: a run_sync() of the coroutine form there waited for the
+// request's timeout (the case gives it 2 s, and a watchdog).
+TEST(Http1ClientTest, ARunSyncOfAPushFromAFailureCallbackOfDisconnectIsAnsweredAtOnce) {
+    qb::io::async::init();
+    LoopbackHttp1Server             server;
+    int                             failed    = 0;
+    bool                            connected = false;
+    qb::http::Response              single;
+    std::vector<qb::http::Response> batch;
+    std::chrono::milliseconds       took{0};
+    auto                            client = qb::http1::make_client(server.url(""));
+    client->set_request_timeout(2s);
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        ++failed;
+        const auto               started = std::chrono::steady_clock::now();
+        qb::http::test::watchdog bound("run_sync(push_request()) from a failure callback of disconnect()", 10s);
+        single = qb::io::async::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+        std::vector<qb::http::Request> two;
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        batch = qb::io::async::run_sync(client->push_requests(std::move(two)));
+        took  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    }));
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(single.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(single.body().as<std::string>(), "HTTP/1.1 connection is closing");
+    ASSERT_EQ(batch.size(), 2u);
+    EXPECT_EQ(batch[0].body().as<std::string>(), "HTTP/1.1 connection is closing");
+    EXPECT_EQ(batch[1].body().as<std::string>(), "HTTP/1.1 connection is closing");
+    EXPECT_LT(took, 1s) << "a coroutine push awaited from a callback of a close waited for the request's timeout";
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
 // The same from the callback of a response that closes its connection: retired before the callback runs, the
 // connection's close is under way there too.
 TEST(Http1ClientTest, ARunSyncOfConnectFromTheCallbackOfAClosingResponseReturnsFalseAtOnce) {

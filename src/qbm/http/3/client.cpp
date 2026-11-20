@@ -1199,6 +1199,16 @@ Client::push_request(qb::http::Request request) {
                 complete(std::move(response));
                 return;
             }
+            if (self->_failure_callbacks > 0 || (self->_deferred_close && (self->_read_depth > 0 || self->_deferred_close->empty()))) {
+                // Awaited from a callback of a close or of a failure, it is answered at once, as the coroutine connect() is
+                // there: the callback form queues the request behind an attempt whose `connected` the endpoint delivers only
+                // once its dispatch has returned, and a coroutine blocked on it -- run_sync() -- waited for that attempt's
+                // connect timeout, or for the request's (Huly QB-1246).
+                ++self->_total_requests;
+                ++self->_failed_requests;
+                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 connection is closing"));
+                return;
+            }
             // The callback answers every outcome, a refusal by the pending bound included (push_request returns false then,
             // its 503 delivered or owed its turn) -- but one: pushed from inside an answer the destructor's close delivers, the
             // push is refused by its return value alone and never calls its callback. The awaiter completes here then.
@@ -1222,6 +1232,17 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
             auto self = weak_self.lock();
             if (!self) {
                 complete({});
+                return;
+            }
+            if (self->_failure_callbacks > 0 || (self->_deferred_close && (self->_read_depth > 0 || self->_deferred_close->empty()))) {
+                self->_total_requests += reqs.size(); // as the single request, above
+                self->_failed_requests += reqs.size();
+                std::vector<qb::http::Response> closing;
+                closing.reserve(reqs.size());
+                for (std::size_t i = 0; i < reqs.size(); ++i) {
+                    closing.push_back(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 connection is closing"));
+                }
+                complete(std::move(closing));
                 return;
             }
             const bool unheard = self->_destroying && self->_refusal_depth != 0; // refused by the return value alone: see push_request()
