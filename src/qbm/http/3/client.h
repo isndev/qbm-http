@@ -140,10 +140,13 @@ private:
     std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
     // A refusal is answered inside the push that earned it -- unless that push is made from inside the answer of another:
     // then it is heard on the loop's next turn, so a callback that pushes its request back at every refusal is never
-    // called more than two deep (Huly QB-1246). What waits for that turn.
+    // called more than two deep (Huly QB-1246). What waits for that turn, in the order it came to be owed: it is heard
+    // before any answer the client gives after it (hear_owed()).
     std::deque<std::function<void()>> _late_answers;
-    bool                              _late_scheduled = false;
-    int                               _refusal_depth  = 0; ///< Refusals being answered inside their push
+    std::uint64_t                     _late_heard     = 0;     ///< How many of them were heard: a pass hears those owed as it starts
+    bool                              _late_scheduled = false; ///< A turn of the loop is asked for them
+    int                               _refusal_depth  = 0;     ///< Answers of refusals on the stack: what they push is kept
+    struct AnswerScope;                                        ///< Counts one, and asks the turn when the last has ended
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -427,8 +430,19 @@ private:
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// A refusal's answer: inside the push, or on the loop's next turn when that push is made from inside another's answer.
     void refuse(std::function<void()> answer);
-    /// What refuse() kept for the next turn; the destructor delivers what is still owed.
+    /// The turn refuse() asked: what it kept is heard, unless the answer of a refusal runs this turn (it asks another).
     void run_late_answers();
+    /// Asks one turn of the loop for what refuse() kept, if none is asked.
+    void ask_late_turn() noexcept;
+    /// What is owed is heard first: called before every answer the client gives, so that none overtakes a refusal kept
+    /// before it. One test when nothing is owed.
+    void
+    hear_owed() noexcept {
+        if (!_late_answers.empty()) [[unlikely]] {
+            hear_owed_now();
+        }
+    }
+    void hear_owed_now() noexcept;
     /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
     /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.
