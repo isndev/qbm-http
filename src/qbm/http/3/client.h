@@ -295,6 +295,13 @@ public:
      *                 no answer is owed; otherwise on the client's turn of the loop, in the order the client came to
      *                 owe its answers. A callback that pushes back at every refusal is never called from inside its
      *                 own push. Bound such a retry all the same, with a delay: it spins otherwise.
+     *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
+     *                 another one of the same client: the nesting is exactly one (disconnect() apart: called from a
+     *                 callback, it gives the failures of the requests it ends inside the call when nothing is owed).
+     *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
+     *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
+     *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without
+     *                 nesting, push back and return.
      * @return @c false if @p callback is null; if the request would take the queued + active count past
      *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on that turn, as
      *         with the HTTP/1.1 and HTTP/2 clients; or if the push is made from inside the answer of a push the

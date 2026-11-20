@@ -614,14 +614,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
     failure is then called once a loop turn, never from inside its own push; in 3.3.0 each refusal was answered inside
     the push, one frame deeper each time. The rule is each client's own: a callback of one client that pushes to
     another gets that other's refusal inside the push.
-    What follows from it. Every answer is heard exactly once, in the order the client came to owe it. An answer of a
-    client is not given inside another answer of the same client by a call that callback makes -- `disconnect()` apart,
-    which gives the failures of the requests it ends inside the call, as before, when nothing is owed. A loop turn the
-    program runs inside a callback -- `run_sync()`, a turn of its own -- is a turn of the client like any other: it
-    hears what is owed, so a coroutine awaited there completes. Callbacks of one client are therefore nested as deep as
-    the loop turns the program runs one inside the other, plus one: a callback that pushes back and runs the loop at
-    every failure goes one level down each time. With nothing owed, an answer is given where 3.3.0 gave it, but for
-    the answers the client gives by itself under one of its own callbacks, which 3.3.0 gave inside the call.
+    What follows from it. Every answer is heard exactly once, in the order the client came to owe it. With callbacks
+    that run no loop turn of their own, no callback of a client is called inside another one of the same client: the
+    nesting is exactly one (`disconnect()` apart: called from a callback, it gives the failures of the requests it ends
+    inside the call when nothing is owed, as before). A callback that runs the loop -- `qb::io::async::run()`,
+    `run_once()`, `run_until()`, `run_sync()` -- receives inside that loop whatever the client owes, its own refusals
+    included: one that pushes a refused request back and then runs the loop recurses once per refusal. To relaunch
+    without nesting, push back and return. That is how a coroutine awaited from a callback with `run_sync()` completes.
+    With nothing owed, an answer is given where 3.3.0 gave it, but for the answers the client gives by itself under one
+    of its own callbacks, which 3.3.0 gave inside the call.
     While the client is destroyed no later turn exists. Its destructor hears what is still owed first, in order, each
     as a callback the destructor runs: a request pushed from one is answered inside that push, and one pushed from
     inside THAT answer returns `false` and is never answered (`push_requests()` likewise). The coroutine
@@ -644,17 +645,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
     those answers behind the refusal (two hundred deep inside the program's first push when such an answer heard what
     was owed before it was given); the order of the answers, a coroutine push completed at once and the `false` of a
     `connect()` a close gives up among them; a kept refusal heard once by the loop turn its callback runs, once from the
-    destructor, and two of them heard alike there; a member of a batch refused before a close, which keeps its own
-    answer and is counted once; the loop's count of watchers unchanged after twenty refusals; a request timed in flight,
-    left in the queue and behind a connection, alone or in a batch; at the destruction three pushes get two answers on
-    each client. Mutants of the code these changes leave, the unmutated tree first and the restored tree last: the rule,
-    on HTTP/3 27 planted, 25 caught, on HTTP/1.1 19 planted, 17 caught -- of the four that survive, two are read only by
-    a failed allocation (the turn asked again at the end of a turn, on each client: the answer that was kept has asked
-    already) and two hold the client where the rule leaves nothing to read after the answer (the batch form on HTTP/3;
-    the turn's task on HTTP/1.1, where every answer leaves a hold of its own); the address fallback, 6 planted, 5 caught
-    -- the sixth is equivalent (an address given up after the deadline: the connect timeout has ended the attempt by
-    then); where a request is timed on HTTP/3, 4 planted, 3 caught -- the fourth is equivalent since a request's answer
-    stops its timer first (a request timed where it is queued, and refused where it is submitted).
+    destructor, and two of them heard alike there; a callback the destructor hears that runs the loop, the turn that was
+    asked finding no client to hear for; a callback that pushes back while ten queued requests time out -- sixty-nine
+    calls, each exactly one deep, when it returns, and when it runs the loop every call under the loop turns it runs
+    itself and no other (an invariant the code before held too: ten and seven deep there, one here, sixty -- the case's
+    cap -- where the loop it runs delivers what the client owes); a member of a batch refused before a close, which
+    keeps its own answer and is counted once; the loop's count of watchers unchanged after twenty refusals; a request
+    timed in flight, left in the queue and behind a connection, alone or in a batch; at the destruction three pushes get
+    two answers on each client. Mutants of the code these changes leave, the unmutated tree first and the restored tree
+    last: the rule, on HTTP/3 27 planted, 25 caught, on HTTP/1.1 19 planted, 17 caught -- of the four that survive, two
+    are read only by a failed allocation (the turn asked again at the end of a turn, on each client: the answer that was
+    kept has asked already) and two hold the client where the rule leaves nothing to read after the answer (the batch
+    form on HTTP/3; the turn's task on HTTP/1.1, where every answer leaves a hold of its own); the address fallback, 6
+    planted, 5 caught -- the sixth is equivalent (an address given up after the deadline: the connect timeout has ended
+    the attempt by then); where a request is timed on HTTP/3, 4 planted, 3 caught -- the fourth is equivalent since a
+    request's answer stops its timer first (a request timed where it is queued, and refused where it is submitted).
   - **All three.** `false` from `connect()` now always means that nothing started and that the callback is never called,
     and `true` that the callback will hear the outcome, inside the call only when the client is already connected -- on
     HTTP/1.1 and HTTP/3 with no callback of that client on the stack and nothing owed, by the bullet above; each
