@@ -95,6 +95,7 @@ struct BatchRequestContext {
  */
 class Client : public std::enable_shared_from_this<Client> {
     class callback_scope;
+    class tick_hold;
     struct failure_cohort;
 
     class connection_base {
@@ -120,6 +121,7 @@ class Client : public std::enable_shared_from_this<Client> {
     // it (see `hold_through_current_tick`). Parking it in a member made it a self-referential
     // cycle whenever that closure never got to run.
     std::size_t _callback_depth = 0;
+    std::size_t _holds_queued   = 0; ///< Holds the loop's deferred queue owns (tick_hold): none left means none keeps this client (QB-1246)
     // While true, _connection still owns the retired dispatch. connect() may
     // record a new intent, but only deferred cleanup can replace that owner.
     bool _deferred_connection_reset = false;
