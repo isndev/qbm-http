@@ -420,8 +420,13 @@ Client::disconnect() {
     auto       cohort        = detach_failure_cohort(true);
     _intentional_disconnect  = true;
     retire_connection(defer_cleanup);
+    // What this close ends is answered by the client itself, as a cancellation is: the program asked for it. Inside the
+    // call only with no callback of this client on the stack and nothing owed; on the client's turn otherwise. Given as
+    // the loop's answers, a callback that called disconnect() heard them inside that call: one that also pushed its
+    // request back was called from inside its own disconnect(), a hundred deep, and ten requests that each reset the
+    // connection and retried cost 1023 calls inside one (Huly QB-1246; 3.3.0 did the same).
     fail_retired_requests(cohort, "Connection closed", qb::http::status::SERVICE_UNAVAILABLE, "Connection closed",
-                          qb::http::status::SERVICE_UNAVAILABLE);
+                          qb::http::status::SERVICE_UNAVAILABLE, from::the_client);
     if (!defer_cleanup) {
         reset_deferred_connection_if_ready();
     }
@@ -845,23 +850,23 @@ Client::detach_failure_cohort(bool fail_pending) {
 
 void
 Client::fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
-                              std::string const &pending_error, qb::http::status pending_status) {
+                              std::string const &pending_error, qb::http::status pending_status, from who) {
     for (auto &callback : cohort.callbacks) {
         if (callback) {
-            tell_connect(callback, false, error, from::the_loop);
+            tell_connect(callback, false, error, who);
         }
     }
     if (cohort.active) {
         auto ctx = std::move(cohort.active);
         ++_failed_requests;
-        give(*ctx, [&] { return create_error_response(active_status, error); });
+        give(*ctx, [&] { return create_error_response(active_status, error); }, who);
     }
     if (cohort.pending) {
         while (!cohort.pending->empty()) {
             auto ctx = std::move(cohort.pending->front());
             cohort.pending->pop_front();
             ++_failed_requests;
-            give(*ctx, [&] { return create_error_response(pending_status, pending_error); });
+            give(*ctx, [&] { return create_error_response(pending_status, pending_error); }, who);
         }
     }
 }

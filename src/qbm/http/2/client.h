@@ -670,7 +670,7 @@ private:
     /// was taken does not answer.
     [[nodiscard]] DetachedRequests detach_requests();
     /// Answers what detach_requests() took, each with @p error_message. fail_all_requests() is the two, one after the other.
-    void fail_detached(DetachedRequests detached, const std::string &error_message);
+    void fail_detached(DetachedRequests detached, const std::string &error_message, from who = from::the_loop);
     /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
     [[nodiscard]] bool given_now(from who) const noexcept;
     /// Calls @p fn, a callback of the program, now: counted while it runs. What @p fn throws goes on to the caller.
@@ -733,7 +733,7 @@ private:
      *        reconnection decision the transport's `disconnected` event makes. The body of
      *        `disconnect()`, without the run reset an explicit disconnect implies.
      */
-    void close_connection(const std::string &error_message);
+    void close_connection(const std::string &error_message, from who = from::the_loop);
     /**
      * @brief Fail the outstanding work as a failure pass: a request pushed from one of its
      *        callbacks queues (auto-reconnect on) instead of connecting on its own.

@@ -502,11 +502,14 @@ Client::disconnect() {
         return;
     }
     give_up_deferred_connects(); // and one queued while a lost connection was torn down hears `false` from this close
-    complete_disconnect();
+    // What this close ends is answered by the client itself, as a cancellation is: the program asked for it. Inside the
+    // call only with no callback of this client on the stack and nothing owed; on the client's turn otherwise (Huly
+    // QB-1246). A close completed at the end of a read is the loop's.
+    complete_disconnect(from::the_client);
 }
 
 void
-Client::complete_disconnect() {
+Client::complete_disconnect(from who) {
     // The close itself: disconnect() with no read on the stack, and the end of a disconnect() that was deferred to the end of
     // a read or of a submission. A connect() queued when it starts is NOT given up here: after a deferred disconnect() it was
     // asked after it (disconnect() gave up the ones before), and it starts once this close has run. disconnect() gives up
@@ -548,15 +551,13 @@ Client::complete_disconnect() {
             auto callbacks = std::exchange(_connection_callbacks, {});
             for (auto &callback : callbacks) {
                 if (callback) {
-                    capture([&] {
-                        notify(_destroying, "HTTP/3", [&] { tell_connect(callback, false, "HTTP/3 client disconnect", from::the_loop); });
-                    });
+                    capture([&] { notify(_destroying, "HTTP/3", [&] { tell_connect(callback, false, "HTTP/3 client disconnect", who); }); });
                 }
             }
         }
     };
     fail_connects();
-    if (auto error = fail_all_requests("HTTP/3 client disconnect"); error && !callback_error) {
+    if (auto error = fail_all_requests("HTTP/3 client disconnect", who); error && !callback_error) {
         callback_error = error;
     }
     fail_connects(); // a connect() one of those callbacks asked, then gave up by a disconnect() of its own
@@ -1036,7 +1037,7 @@ Client::close_failed_transport(std::string_view reason) {
 }
 
 std::exception_ptr
-Client::fail_all_requests(std::string const &error) {
+Client::fail_all_requests(std::string const &error, from who) {
     qb::unordered_map<std::uint64_t, std::unique_ptr<RequestContext>>      active;
     std::deque<std::unique_ptr<RequestContext>>                            pending;
     qb::unordered_map<std::uint64_t, std::unique_ptr<BatchRequestContext>> batches;
@@ -1069,7 +1070,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
+        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error), who); });
     }
     while (!pending.empty()) {
         auto ctx = std::move(pending.front());
@@ -1078,7 +1079,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
+        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error), who); });
     }
     for (auto &[id, batch] : batches) {
         (void) id;
@@ -1089,7 +1090,7 @@ Client::fail_all_requests(std::string const &error) {
                     batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error);
                 }
             }
-            tell_batch(std::move(batch->callback), std::move(batch->responses), from::the_loop);
+            tell_batch(std::move(batch->callback), std::move(batch->responses), who);
         });
     }
     return callback_error;

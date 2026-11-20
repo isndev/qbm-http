@@ -1323,21 +1323,133 @@ TEST(Http1ClientTest, AnAnswerTheClientGivesByItselfIsNotGivenUnderACallbackOfTh
     }
 }
 
-// With nothing owed, an answer the loop brings is given where it always was, a callback of this client on the stack or
-// not (Huly QB-1246): the failures of a disconnect() a callback calls are heard inside that call.
-TEST(Http1ClientTest, WithNothingOwedTheFailuresOfADisconnectACallbackCallsAreHeardInsideTheCall) {
-    LoopbackHttp1Server server;
-    int                 failed = 0, failed_inside_the_call = -1; // before the client: its callbacks count here
-    auto                client = qb::http1::make_client(server.url("/"));
-    client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++failed; }); // in flight
-    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
-    client->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) { // answered inside the push
+// The failures of a disconnect() are answers the client gives by itself, as a cancellation's is: the program asked for
+// them (Huly QB-1246). Called from a callback of this client, disconnect() gives them on the client's turn -- the
+// failure of a request, the answer of a batch, the `false` of a connect() still waiting --; called with no callback on
+// the stack and nothing owed, inside the call, as before. They were the loop's answers, given inside the call whoever
+// made it -- 3.3.0 gave them so too --: an answer of the client ran inside another with no loop turn of the program's.
+TEST(Http1ClientTest, TheFailuresOfADisconnectACallbackCallsAreHeardOnTheClientsTurn) {
+    for (const std::string_view what : {"a request in flight", "a batch in flight", "a connect() still waiting"}) {
+        SCOPED_TRACE(what);
+        LoopbackHttp1Server server;
+        int                 heard = 0, heard_inside_the_call = -1; // before the client: its callbacks count here
+        auto                client = qb::http1::make_client(server.url("/"));
+        const auto          start  = [&] {
+            if (what == "a request in flight") {
+                client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++heard; });
+            } else if (what == "a batch in flight") {
+                std::vector<qb::http::Request> two;
+                two.push_back(request(qb::http::method::GET, "/never"));
+                two.push_back(request(qb::http::method::GET, "/never"));
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
+                    EXPECT_EQ(responses.size(), 2u);
+                    ++heard;
+                });
+            } else {
+                EXPECT_TRUE(client->connect([&](bool ok, std::string const &) {
+                    EXPECT_FALSE(ok);
+                    ++heard;
+                }));
+            }
+        };
+        start();
+        if (what != "a connect() still waiting") {
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        }
+        client->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) { // answered inside the push
+            client->disconnect();
+            heard_inside_the_call = heard;
+        });
+        EXPECT_EQ(heard_inside_the_call, 0) << "an answer of a disconnect() was heard under the callback that called it";
+        EXPECT_EQ(heard, 0);
+        drain_client_callbacks();
+        EXPECT_EQ(heard, 1);
+        start(); // and with no callback on the stack and nothing owed: inside the call
+        if (what != "a connect() still waiting") {
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        }
         client->disconnect();
-        failed_inside_the_call = failed;
-    });
-    EXPECT_EQ(failed_inside_the_call, 1) << "an answer the loop brings waited for a turn with nothing owed before it";
+        EXPECT_EQ(heard, 2) << "the program's own disconnect() did not answer inside the call";
+        drain_client_callbacks();
+    }
+}
+
+// A callback that pushes its request back at every failure and then calls disconnect() is never called under itself
+// (Huly QB-1246). The request it has just pushed is accepted, for the next connection, and its disconnect() ends it:
+// that failure is the client's own answer, heard on the client's turn. Given inside the disconnect(), the callback was
+// called from inside the call it had just made, one frame deeper at every failure -- a hundred deep, where the case
+// stops it, all of it inside the one disconnect() the program made, with no loop turn of the program's anywhere.
+TEST(Http1ClientTest, ARequestPushedBackThenADisconnectFromItsCallbackIsNeverCalledUnderItself) {
+    LoopbackHttp1Server   server;
+    int                   calls = 0, pushes = 0, depth = 0, deepest = 0, calls_inside_the_programs_disconnect = -1; // before the client
+    const int             cap = 100;
+    std::function<void()> push; // before the client too: its callbacks call it
+    auto                  client = qb::http1::make_client(server.url("/"));
+    push                         = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response response) {
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            deepest = std::max(deepest, ++depth);
+            if (++calls < cap) {
+                push();               // accepted: queued for the next connection
+                client->disconnect(); // ends it
+            }
+            --depth;
+        });
+    };
+    push();
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+    client->disconnect(); // the program's own: its request in flight fails inside this call
+    calls_inside_the_programs_disconnect = calls;
+    EXPECT_EQ(calls_inside_the_programs_disconnect, 1)
+        << "the failures of the disconnect() its callback called were heard inside the program's";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return calls == cap; }));
     drain_client_callbacks();
-    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(calls, cap);
+    EXPECT_EQ(pushes, cap) << "every push is answered once";
+    EXPECT_EQ(deepest, 1) << "the callback was called from inside a disconnect() it made";
+}
+
+// The other order, with ten requests: every failure callback resets the connection, then pushes its request back --
+// disconnect(), then push. One request is in flight and nine are queued behind it; the program calls disconnect() once.
+// Each of the ten is failed once, one deep. Each disconnect() a callback makes ends the request the callback before it
+// pushed back, and that failure waits for the client's turn, as every answer after it does. Given inside the call, each nested
+// close ran the retries of the ones before it: 1023 calls inside the program's disconnect(), ten deep (Huly QB-1246).
+TEST(Http1ClientTest, TenRequestsThatEachResetTheConnectionAndRetryAreEachFailedOnceAndOneDeep) {
+    LoopbackHttp1Server   server;
+    int                   calls = 0, heard = 0, pushes = 0, depth = 0, deepest = 0; // before the client
+    bool                  stop = false;
+    std::function<void()> push; // before the client too: its callbacks call it
+    auto                  client = qb::http1::make_client(server.url("/"));
+    push                         = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response response) {
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            deepest = std::max(deepest, ++depth);
+            ++heard;
+            if (!stop && ++calls < 20000) {
+                client->disconnect(); // reset the connection
+                push();               // and try again: accepted, queued for the next connection
+            }
+            --depth;
+        });
+    };
+    for (int i = 0; i < 10; ++i) {
+        push(); // the first is written at once, nine wait behind it
+    }
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+    client->disconnect(); // the program's own
+    // Two inside the call, each one deep: the second callback's disconnect() ends the retry of the first, whose failure is
+    // then owed, and the eight other requests' failures take their place behind it.
+    EXPECT_EQ(calls, 2) << "a failure was heard inside the program's disconnect() with another one owed before it";
+    EXPECT_EQ(deepest, 1);
+    stop = true; // what is still owed is heard, and pushes nothing back
+    drain_client_callbacks();
+    client->disconnect(); // ends the last request pushed back
+    drain_client_callbacks();
+    EXPECT_EQ(pushes, 12) << "the ten requests, and the retries of the two heard before the program stopped";
+    EXPECT_EQ(heard, 12) << "every push is answered once";
+    EXPECT_EQ(deepest, 1);
 }
 
 // An answer the client gives by itself is given inside the call while the client is destroyed, where no turn is left to

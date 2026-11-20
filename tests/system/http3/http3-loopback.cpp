@@ -3403,27 +3403,119 @@ TEST_F(Http3LoopbackTest, AnAnswerTheClientGivesByItselfIsNotGivenUnderACallback
     }
 }
 
-// With nothing owed, an answer the loop brings is given where it always was, a callback of this client on the stack or
-// not (Huly QB-1246): the failures of a disconnect() a callback calls are heard inside that call.
-TEST_F(Http3LoopbackTest, WithNothingOwedTheFailuresOfADisconnectACallbackCallsAreHeardInsideTheCall) {
-    const auto port   = next_port();
-    auto       server = qb::http3::make_server();
-    server->router().get("/stall", [](auto) {});
-    server->router().compile();
-    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
-
-    int  failed = 0, failed_inside_the_call = -1; // before the client: its callbacks count here
-    auto client = qb::http3::make_client(https_origin(port));
-    client->set_verify_peer(false);
-    client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++failed; }); // in flight
-    ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
-    client->push_request(qb::http::Request{qb::io::uri("https://other.invalid/")}, [&](qb::http::Response) { // answered inside the push
+// The failures of a disconnect() are answers the client gives by itself, as a cancellation's is: the program asked for
+// them (Huly QB-1246). Called from a callback of this client, disconnect() gives them on the client's turn -- the
+// failure of a request, the answer of a batch, the `false` of a connect() still waiting --; called with no callback on
+// the stack and nothing owed, inside the call, as before. They were the loop's answers, given inside the call whoever
+// made it -- 3.3.0 gave them so too --: an answer of the client ran inside another with no loop turn of the program's.
+TEST_F(Http3LoopbackTest, TheFailuresOfADisconnectACallbackCallsAreHeardOnTheClientsTurn) {
+    for (const std::string_view what : {"a request in flight", "a batch in flight", "a request in the queue", "a connect() still waiting"}) {
+        SCOPED_TRACE(what);
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        const bool nobody_answers = what == "a connect() still waiting" || what == "a request in the queue";
+        if (!nobody_answers) { // else nobody answers at that port: the connect() waits, and the request behind it
+            ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        }
+        int  heard = 0, heard_inside_the_call = -1; // before the client: its callbacks count here
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        const auto start = [&] {
+            if (what == "a request in flight" || what == "a request in the queue") {
+                client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++heard; });
+            } else if (what == "a batch in flight") {
+                std::vector<qb::http::Request> two;
+                two.emplace_back(qb::io::uri("/stall"));
+                two.emplace_back(qb::io::uri("/stall"));
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
+                    EXPECT_EQ(responses.size(), 2u);
+                    ++heard;
+                });
+            } else {
+                EXPECT_TRUE(client->connect([&](bool ok, std::string const &) {
+                    EXPECT_FALSE(ok);
+                    ++heard;
+                }));
+            }
+        };
+        const auto under_way = [&] {
+            return nobody_answers ? client->is_connecting() : client->get_active_request_count() == (what == "a batch in flight" ? 2u : 1u);
+        };
+        start();
+        ASSERT_TRUE(pump(under_way));
+        client->push_request(qb::http::Request{qb::io::uri("https://other.invalid/")}, [&](qb::http::Response) { // answered inside the push
+            client->disconnect();
+            heard_inside_the_call = heard;
+        });
+        EXPECT_EQ(heard_inside_the_call, 0) << "an answer of a disconnect() was heard under the callback that called it";
+        EXPECT_EQ(heard, 0);
+        ASSERT_TRUE(pump([&] { return heard == 1; }));
+        start(); // and with no callback on the stack and nothing owed: inside the call
+        ASSERT_TRUE(pump(under_way));
         client->disconnect();
-        failed_inside_the_call = failed;
-    });
-    EXPECT_EQ(failed_inside_the_call, 1) << "an answer the loop brings waited for a turn with nothing owed before it";
-    EXPECT_EQ(failed, 1);
-    server->close();
+        EXPECT_EQ(heard, 2) << "the program's own disconnect() did not answer inside the call";
+        server->close();
+    }
+}
+
+// Ten requests in flight whose callbacks each push their request back and call disconnect(), in either order, while the
+// program calls disconnect() once (Huly QB-1246): one failure is heard inside that call, one deep, and every other
+// answer -- the nine other failures, and the refusal of each push made during the close -- on the client's turn.
+TEST_F(Http3LoopbackTest, TenRequestsThatPushBackAndDisconnectAreNeverCalledUnderOneAnother) {
+    for (const std::string_view first : {"push back, then disconnect()", "disconnect(), then push back"}) {
+        SCOPED_TRACE(first);
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+        int                   calls = 0, depth = 0, deepest = 0; // before the client
+        bool                  stop = false;
+        std::function<void()> push; // before the client too: its callbacks call it
+        auto                  client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        push = [&] {
+            client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) {
+                EXPECT_NE(response.status(), qb::http::status::OK);
+                deepest = std::max(deepest, ++depth);
+                if (!stop && ++calls < 2000) {
+                    if (first == "push back, then disconnect()") {
+                        push();
+                        client->disconnect();
+                    } else {
+                        client->disconnect();
+                        push();
+                    }
+                }
+                --depth;
+            });
+        };
+        for (int i = 0; i < 10; ++i) {
+            push();
+        }
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 10; }));
+        client->disconnect(); // the program's own
+        EXPECT_EQ(calls, 1) << "one failure inside the program's disconnect(): the others wait behind the refusal its callback earned";
+        EXPECT_EQ(deepest, 1);
+        const auto settle = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        stop = true;
+        EXPECT_GE(calls, 10);
+        EXPECT_EQ(deepest, 1) << "a callback of the client was called under another one";
+        const auto last = std::chrono::steady_clock::now() + 50ms;
+        while (std::chrono::steady_clock::now() < last) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        client->disconnect();
+        server->close();
+    }
 }
 
 // An answer the client gives by itself is given inside the call while the client is destroyed, where no turn is left to

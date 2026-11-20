@@ -373,11 +373,14 @@ Client::disconnect() {
         _connector_pending = false;
         ++_connect_epoch;
     }
-    close_connection("Connection closed");
+    // What this close ends is answered by the client itself, as a cancellation is: the program asked for it. Inside the
+    // call only with no callback of this client on the stack and nothing owed; on the client's turn otherwise (Huly
+    // QB-1246). A close the connection brings -- a GOAWAY, an error, its end -- is the loop's.
+    close_connection("Connection closed", from::the_client);
 }
 
 void
-Client::close_connection(const std::string &error_message) {
+Client::close_connection(const std::string &error_message, from who) {
     const bool was_connecting = _is_connecting;
     // An explicit disconnect() of a live connection announces the close (RFC 9113 §6.8): the
     // protocol queues GOAWAY(NO_ERROR) and stops, and the io delivers it -- after what it still
@@ -425,11 +428,11 @@ Client::close_connection(const std::string &error_message) {
             _connection_callbacks.clear();
             for (auto &callback : callbacks) {
                 if (callback) {
-                    notify(_destroying, "HTTP/2", [&] { tell_connect(callback, false, error_message, from::the_loop); });
+                    notify(_destroying, "HTTP/2", [&] { tell_connect(callback, false, error_message, who); });
                 }
             }
         }
-        fail_detached(std::move(ended), error_message);
+        fail_detached(std::move(ended), error_message, who);
     }
 
     if (announce) {
@@ -985,7 +988,7 @@ Client::detach_requests() {
 }
 
 void
-Client::fail_detached(DetachedRequests detached, const std::string &error_message) {
+Client::fail_detached(DetachedRequests detached, const std::string &error_message, from who) {
     if (!detached.active.empty() || !detached.pending.empty() || !detached.batches.empty()) { // said once, and only when there is some
         LOG_HTTP_WARN_PA(_client_id, "Failing all requests: " << error_message);
     }
@@ -998,7 +1001,8 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
         (void) stream_id;
         _failed_requests++;
         if (context->batch_id == 0) {
-            notify(_destroying, "HTTP/2", [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message)); });
+            notify(_destroying, "HTTP/2",
+                   [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
         }
     }
 
@@ -1009,7 +1013,8 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
 
         _failed_requests++;
         if (context->batch_id == 0) {
-            notify(_destroying, "HTTP/2", [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message)); });
+            notify(_destroying, "HTTP/2",
+                   [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
         }
     }
 
@@ -1025,7 +1030,7 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
                         batch_context->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message);
                     }
                 }
-                tell_batch(std::move(batch_context->callback), std::move(batch_context->responses), from::the_loop);
+                tell_batch(std::move(batch_context->callback), std::move(batch_context->responses), who);
             });
         }
     }

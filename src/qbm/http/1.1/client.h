@@ -393,7 +393,7 @@ private:
     void           retire_connection(bool defer_cleanup = true);
     failure_cohort detach_failure_cohort(bool fail_pending);
     void           fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
-                                         std::string const &pending_error, qb::http::status pending_status);
+                                         std::string const &pending_error, qb::http::status pending_status, from who = from::the_loop);
     void           process_pending_requests();
     void           arm_pending_timeout(std::uint64_t request_id);        ///< For a request still queued; nothing otherwise
     void           pending_timed_out(std::uint64_t request_id) noexcept; ///< The timer of a queued request's wait fired

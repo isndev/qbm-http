@@ -478,8 +478,9 @@ private:
     /// Close an unsuccessful QUIC attempt without delivering its own close event twice.
     void close_failed_transport(std::string_view reason);
     /// Fail every pending/active request and batch with @p error.
-    [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error);
-    void complete_disconnect(); ///< The close itself, no read or submission on the stack: starts, at its end, a connect() queued meanwhile
+    [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error, from who = from::the_loop);
+    void                             complete_disconnect(
+        from who = from::the_loop); ///< The close itself, no read or submission on the stack: starts, at its end, a connect() queued meanwhile
     /// Fail the active request on @p stream_id with @p status and @p error.
     void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY,
                       from who = from::the_loop);
