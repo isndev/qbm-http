@@ -562,9 +562,10 @@ one contract, at process exit as anywhere else:
 - **Every request in flight or queued hears once**, with `503` and the client's own text: "Connection closed"
   (HTTP/1.1), "Client destroyed" (HTTP/2), "HTTP/3 client destroyed" (HTTP/3).
 - **Every `connect()` still waiting hears `false`, once.**
-- **A request pushed from one of those callbacks is answered inside the push**, with `503`, alone or in a batch: one
-  callback for each push, nothing queued, no connection started for it and no deadline armed -- whatever
-  `set_request_timeout()` such a callback calls.
+- **A request pushed from one of those callbacks is answered inside the push**, with `503`, alone or in a batch:
+  nothing queued, no connection started for it and no deadline armed -- whatever `set_request_timeout()` such a
+  callback calls. On HTTP/1.1 and HTTP/3 a request pushed from inside *that* answer is refused by the return value
+  alone (the paragraph below).
 - **A `connect()` called from one of those callbacks is refused by its return value alone**: it returns `false`, and
   its callback is never called.
 - **What one of those callbacks throws is logged, and goes no further**: the callbacks after it still run.
