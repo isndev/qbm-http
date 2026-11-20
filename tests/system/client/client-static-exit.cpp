@@ -72,8 +72,8 @@ namespace client_static_exit_test {
 
 namespace async = qb::io::async;
 using namespace qb::io::test::static_exit;
-using qb::http::test::static_exit::answered_inside;
 using qb::http::test::static_exit::heard;
+using qb::http::test::static_exit::k_not_as_the_rule;
 
 std::string
 origin(char const *const scheme, relay const &peer) {
@@ -104,8 +104,8 @@ connect_throws(bool const ok, std::string const &) {
     throw std::runtime_error("thrown by the callback of a connect() the destructor fails");
 }
 
-/// How many times a request is pushed again after the loop by the cases that keep pushing: more than the passes a
-/// destructor could make over its queues, so a generation left queued and never answered is counted.
+/// How many times a callback that keeps pushing would push its request again after the loop, were every push
+/// answered: more than the two the rule lets it make, so a push answered against the rule is counted.
 constexpr int k_late_pushes = 4;
 int           g_late_pushes = 0;
 
@@ -126,15 +126,22 @@ struct through_the_exit {
     static inline Client     *client = nullptr;
     static inline std::string target;
 
-    /// A request pushed again each time it fails, `k_late_pushes` times: one callback a push, run inside the push.
-    /// The first of them asks for a deadline too: none is armed (a timer asked of the loop after it stops the process).
+    /// A request pushed again each time it fails -- it would be, `k_late_pushes` times. The push its first failure makes
+    /// is answered inside the push; the one made from inside THAT answer is refused by the return value alone, its
+    /// callback unheard, and the run ends there (Huly QB-1246): two callbacks in all. The first push asks for a deadline
+    /// too: none is armed (a timer asked of the loop after it stops the process).
     static void
     retry(qb::http::Response response) {
         in_flight(std::move(response));
         if (g_late_pushes < k_late_pushes) {
-            if (g_late_pushes++ == 0)
+            const int level = g_late_pushes++;
+            if (level == 0)
                 client->set_request_timeout(5s);
-            answered_inside([] { client->push_request(get(target), retry); });
+            const int  before   = qb::io::test::static_exit::g.calls;
+            const bool accepted = client->push_request(get(target), retry);
+            const bool answered = qb::io::test::static_exit::g.calls != before;
+            if (level == 0 ? !(accepted && answered) : (accepted || answered))
+                heard(k_not_as_the_rule);
         }
     }
 
@@ -147,16 +154,18 @@ struct through_the_exit {
         return batch;
     }
 
-    /// The batch form: each batch that fails pushes the next, three in all, each answered inside its push.
+    /// The batch form: each batch that fails pushes the next -- it would, three times. The batch the request's failure
+    /// pushes is answered inside its push; the one pushed from inside THAT answer is refused by the return value alone.
     static void
     next_batch(std::vector<qb::http::Response> responses) {
         heard(batch_outcome(responses));
         if (g_late_pushes < 3) {
-            ++g_late_pushes;
-            answered_inside([] {
-                if (!client->push_requests(two_requests(), next_batch))
-                    heard(-3); // a batch pushed while the client is destroyed is answered, not refused
-            });
+            const int  level    = g_late_pushes++;
+            const int  before   = qb::io::test::static_exit::g.calls;
+            const bool accepted = client->push_requests(two_requests(), next_batch);
+            const bool answered = qb::io::test::static_exit::g.calls != before;
+            if (level == 0 ? !(accepted && answered) : (accepted || answered))
+                heard(k_not_as_the_rule);
         }
     }
 
@@ -239,8 +248,8 @@ enum class h1 {
     request,            ///< a request written, its callback pending
     queued,             ///< one request written, a second queued behind it
     retried,            ///< a request written, whose callback pushes it again when it fails: the retry pattern
-    retried_on,         ///< the same, pushed again each time it fails: every generation is answered
-    batches,            ///< a request written, whose failure pushes a batch, whose callback pushes the next, three in all
+    retried_on,         ///< the same, pushed again each time it fails: the second push is refused, unheard
+    batches,            ///< a request written, whose failure pushes a batch, whose callback pushes the next: refused
     throwing,           ///< one request written and one queued, the callback of each throws, and the first pushes a third
     batch_throwing,     ///< two batches of two, the callback of each throws, and the first pushes a third
     disconnecting,      ///< a request written, whose callback disconnects the client and pushes the request again
@@ -447,18 +456,18 @@ TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackPushesAgain)
     EXPECT_EXIT(run_h1(h1::retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
-// The same, kept up: each failure the destructor delivers pushes the request again, `k_late_pushes` times. Every
-// generation is answered inside its push -- one callback a push --, and the deadline the first of them asks for is
-// not armed (Huly QB-1246).
+// The same, kept up: a callback that pushes the request again at every failure. The push its first failure makes is
+// answered inside the push; the one it makes from inside that answer is refused by the return value alone, its
+// callback unheard -- no later turn exists after the loop, and answered inside each push such a callback never ended.
+// Two callbacks, and the deadline the first push asks for is not armed (Huly QB-1246).
 TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackKeepsPushingAfterTheLoop) {
-    EXPECT_EXIT(run_h1(h1::retried_on, GetParam()), ::testing::ExitedWithCode(0),
-                stderr_is(verdict(0, 1 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h1(h1::retried_on, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
-// The batch form: the request's failure pushes a batch of two, whose callback pushes the next, three batches in all,
-// each answered inside its push -- its two members 503, its callback called once (Huly QB-1246).
+// The batch form: the request's failure pushes a batch of two, answered inside its push -- its two members 503, its
+// callback called once --, and the batch that callback pushes is refused by the return value alone (Huly QB-1246).
 TEST_P(Http1ClientStaticExitDeathTest, ARequestInFlightWhoseFailurePushesBatchAfterBatch) {
-    EXPECT_EXIT(run_h1(h1::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 4, 4, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h1(h1::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(0, 2, 2, 503, 0, 0, 0)));
 }
 
 // Callbacks that throw from the destructor: what one throws goes no further -- the process does not terminate, the
@@ -939,8 +948,8 @@ enum class h3 {
     idle,               ///< connected, nothing asked
     request,            ///< a request the server holds, its callback pending
     retried,            ///< such a request, whose callback pushes it again when it fails: the retry pattern
-    retried_on,         ///< the same, pushed again each time it fails: every generation is answered
-    batches,            ///< such a request, whose failure pushes a batch, whose callback pushes the next, three in all
+    retried_on,         ///< the same, pushed again each time it fails: the second push is refused, unheard
+    batches,            ///< such a request, whose failure pushes a batch, whose callback pushes the next: refused
     throwing,           ///< two such requests, the callback of each throws, and the first pushes a third
     disconnecting,      ///< such a request, whose callback disconnects the client and pushes the request again
     coroutine,          ///< a coroutine parked on such a request
@@ -1127,18 +1136,17 @@ TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackPushesAgain)
     EXPECT_EXIT(run_h3(h3::retried, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 2, 2, 503, 0, 0, 0)));
 }
 
-// The same, kept up: each failure the destructor delivers pushes the request again, `k_late_pushes` times. Every
-// generation is answered inside its push -- one callback a push --, and the deadline the first of them asks for is
-// not armed.
+// The same, kept up: a callback that pushes the request again at every failure. The push its first failure makes is
+// answered inside the push; the one made from inside that answer is refused by the return value alone, its callback
+// unheard. Two callbacks, and the deadline the first push asks for is not armed.
 TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseCallbackKeepsPushingAfterTheLoop) {
-    EXPECT_EXIT(run_h3(h3::retried_on, GetParam()), ::testing::ExitedWithCode(0),
-                stderr_is(verdict(-1, 1 + k_late_pushes, 1 + k_late_pushes, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h3(h3::retried_on, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 2, 2, 503, 0, 0, 0)));
 }
 
-// The batch form: the request's failure pushes a batch of two, whose callback pushes the next, three batches in all,
-// each answered inside its push -- its two members 503, its callback called once.
+// The batch form: the request's failure pushes a batch of two, answered inside its push -- its two members 503, its
+// callback called once --, and the batch that callback pushes is refused by the return value alone.
 TEST_P(Http3ClientStaticExitDeathTest, ARequestInFlightWhoseFailurePushesBatchAfterBatch) {
-    EXPECT_EXIT(run_h3(h3::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 4, 4, 503, 0, 0, 0)));
+    EXPECT_EXIT(run_h3(h3::batches, GetParam()), ::testing::ExitedWithCode(0), stderr_is(verdict(-1, 2, 2, 503, 0, 0, 0)));
 }
 
 // Callbacks that throw from the destructor: what one throws goes no further -- the process does not terminate, the

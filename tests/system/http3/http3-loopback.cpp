@@ -2468,9 +2468,9 @@ TEST_F(Http3LoopbackTest, ADisconnectFromAFailureCallbackGivesUpTheConnectAskedO
     server->close();
 }
 
-// A client destroyed with a close left half done -- a disconnect() a read deferred and never completed -- is closed whole
-// by its destructor all the same: a connect() still waiting hears `false` once. The destructor's close stopped at the
-// mark the unfinished one had left, and that connect() was destroyed unheard (Huly QB-1246).
+// A client destroyed with a close left half done -- a disconnect() deferred during a submission that an exception then cut
+// short, set here through the test seam -- is closed whole by its destructor: a connect() still waiting hears `false` once.
+// The destructor's close stopped at the mark the unfinished one had left: that connect() was destroyed unheard (Huly QB-1246).
 TEST_F(Http3LoopbackTest, AClientDestroyedWithACloseLeftHalfDoneStillAnswersItsWaitingConnect) {
     int  connect_calls    = 0;
     bool connect_accepted = false, connect_succeeded = true;

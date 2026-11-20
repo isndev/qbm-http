@@ -33,6 +33,11 @@ inline constexpr int k_outcomes_differ = -1;
 /// The outcome of the call recorded for a push that returned before its callback ran.
 inline constexpr int k_not_answered_inside = -2;
 
+/// The outcome of the call recorded for a push made while its client is destroyed that did not go by the rule: the first a
+/// callback of the destructor makes is answered inside the push, one made from inside that answer is refused by the
+/// return value alone, its callback unheard (Huly QB-1246).
+inline constexpr int k_not_as_the_rule = -3;
+
 /// The callback of what a case left in flight ran, with `outcome`: `called_with()`, every outcome kept.
 inline void
 heard(int const outcome) noexcept {

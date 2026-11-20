@@ -78,7 +78,7 @@ Client::~Client() {
     } catch (...) {
         // An allocation the pass makes for itself failed: nothing leaves a destructor. The close below still runs.
     }
-    _deferred_close.reset(); // a close a read left half done is not this one: disconnect() below is the full close,
+    _deferred_close.reset(); // a close a submission cut short left half done is not this one: disconnect() below is the full close,
     qb::http::detail::contained("HTTP/3", [&] { disconnect(); }, "destructor's close"); // every connect() still waiting hears it
     qb::http::detail::contained("HTTP/3", [&] { run_late_answers(); }, "refusals still owed their turn"); // heard here, once
 }

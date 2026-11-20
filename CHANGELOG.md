@@ -856,9 +856,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   differed in what a program hears, and none was safe after the event loop in every state. `qb::http1::Client`,
   `qb::http2::Client` and `qb::http3::Client` now end alike, at process exit as anywhere: every request in flight or
   queued hears once, with `503` and the client's own text; every `connect()` still waiting hears `false`, once; a
-  request pushed from one of those callbacks, alone or in a batch, is answered inside the push, with `503` -- one
-  callback a push, nothing queued, nothing armed, nothing connected for it --; a `connect()` called from one is refused
-  by its return value alone; and what such a callback throws is logged and goes no further. What that changes for a
+  request pushed from one of those callbacks, alone or in a batch, is answered inside the push, with `503` -- nothing
+  queued, nothing armed, nothing connected for it; on HTTP/1.1 and HTTP/3 one pushed from inside that answer is refused
+  by its return value alone, its callback never called --; a `connect()` called from one is refused by its return value
+  alone; and what such a callback throws is logged and goes no further. What that changes for a
   program, client by client and against 3.3.0, is the list of the entry on `connect()`, under Changed. What was wrong in
   3.3.0. HTTP/2: a request a callback of the destructor pushed again was queued, a deadline armed for it and a
   connection used or started for it -- in static storage, after the loop, a timer started in freed memory, a
@@ -883,12 +884,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   a waiting `connect()` hears it, as its other closes do. The HTTP/2 destructor logs "Failing all requests" only when
   there is something to fail. The HTTP/1.1 and HTTP/3 destructors gain no line of their own -- logging at the end of a
   process is a risk of its own --: the one line a destruction can add is the helper's, when a callback throws. A request
-  path gains the test of the flag where it pushes and where it arms a deadline, nothing else. One rule for the program:
-  bound every retry (the list, under Changed). Witnesses: `qbm-http-test-system-client-static-exit` (HTTP/1.1 and
-  HTTP/3), `qbm-http-test-system-http2-client-static-exit`, `qbm-http-test-system-http3-loopback` and
-  `qbm-http-test-system-http1-client` -- for each client, a request pushed again four times after the loop with a
-  deadline asked on the way, each push seen answered before it returns; the batch form three batches deep; a waiting
-  `connect()` whose callback connects again, in the connect and in the handshake (TLS for HTTP/1.1 and HTTP/2, QUIC for
+  path gains the test of the flag where it pushes and where it arms a deadline, nothing else. One rule for the program,
+  on HTTP/2: bound every retry (the list, under Changed). Witnesses: `qbm-http-test-system-client-static-exit` (HTTP/1.1
+  and HTTP/3), `qbm-http-test-system-http2-client-static-exit`, `qbm-http-test-system-http3-loopback` and
+  `qbm-http-test-system-http1-client` -- on HTTP/2, a request pushed again four times after the loop with a deadline
+  asked on the way, each push seen answered before it returns, and the batch form three batches deep; on HTTP/1.1 and
+  HTTP/3, a callback that would push four times: the push its first failure makes seen answered before it returns, a
+  deadline asked on the way, the push made from inside that answer seen refused and never answered, alone and as a
+  batch; a waiting `connect()` whose callback connects again, in the connect and in the handshake (TLS for HTTP/1.1 and HTTP/2, QUIC for
   HTTP/3: the peer has read the first flight and answers nothing); callbacks that throw (a request's, a batch's, a
   `connect()`'s, and that of a request or a batch pushed from one); a callback that disconnects; and, on HTTP/2, a
   waiting `connect()` whose transport the peer ends once its TLS handshake is complete, whose callback connects again.
