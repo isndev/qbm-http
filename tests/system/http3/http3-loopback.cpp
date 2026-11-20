@@ -2996,6 +2996,147 @@ TEST_F(Http3LoopbackTest, APushRefusedAtOnceWhoseCallbackDropsTheLastReferenceEn
     }
 }
 
+// A refusal kept for its turn is heard there as the answer of a refusal (Huly QB-1246): what its callback pushes is kept
+// in its turn, and a loop turn that callback runs hears nothing more. Here the callback pushes its request back at every
+// failure AND runs the loop. The callback of the close is no refusal's answer: under the turns it runs the kept refusals
+// are heard, one a turn, each a single call deep under it. Heard there as a plain call, the callback of each pushed
+// again and was answered inside that push -- three deep here, and without end where the loop it runs delivers what it
+// keeps (the case stops such a run at 64). Every push is answered once.
+TEST_F(Http3LoopbackTest, ARequestPushedBackByACallbackThatRunsTheLoopIsNeverCalledMoreThanTwoDeep) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/stall", [](auto) {});
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    int                                      pushes = 0, failures = 0, served = 0, depth = 0, deepest = 0, under_the_close = -1;
+    std::function<void(std::string const &)> push;
+    push = [&](std::string const &path) {
+        ++pushes;
+        client->push_request(qb::http::Request{qb::io::uri(path)}, [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            if (response.status() == qb::http::status::OK) {
+                ++served;
+            } else {
+                const int mine = ++failures;
+                if (deepest < 64) {
+                    push("/ok"); // always: nothing here counts the attempts
+                }
+                for (int pass = 0; pass < 4; ++pass) {
+                    qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // and the callback runs the loop
+                }
+                if (mine == 1) {
+                    under_the_close = failures - 2; // heard under its turns: past itself and the push it made
+                }
+            }
+            --depth;
+        });
+    };
+    push("/stall");
+    ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+    client->disconnect();
+    EXPECT_GE(under_the_close, 1) << "no kept refusal was heard under the turns the callback of the close ran: the case shows nothing";
+    ASSERT_TRUE(pump([&] { return served == 1 || deepest >= 64; }));
+    EXPECT_EQ(served, 1) << "the request pushed once the close had run was not served";
+    EXPECT_EQ(failures + served, pushes) << "a push was not answered once";
+    EXPECT_LE(deepest, 2) << "a kept refusal heard in its turn answered, inside the push, the request its callback pushed back";
+    client->disconnect();
+    server->close();
+}
+
+// The batch form of the rule (Huly QB-1246): a batch whose members are all refused at once -- every one for another
+// origin here -- is one refusal. Answered inside the push the program makes, and on the loop's next turn when that push is
+// made from inside the answer of another. It was answered inside every push: a callback that pushes its batch back at
+// every refusal was called from inside its own push, ten deep here, without end otherwise.
+TEST_F(Http3LoopbackTest, ABatchPushedBackAtEveryRefusalIsNeverAnsweredFromInsideItsOwnPush) {
+    auto                  client = qb::http3::make_client(https_origin(next_port())); // never connected
+    int                   pushes = 0, calls = 0, depth = 0, deepest = 0;
+    std::function<void()> push;
+    push = [&] {
+        ++pushes;
+        std::vector<qb::http::Request> two;
+        two.emplace_back(qb::io::uri("https://other.invalid/a"));
+        two.emplace_back(qb::io::uri("https://other.invalid/b"));
+        EXPECT_TRUE(client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
+            deepest = std::max(deepest, ++depth);
+            ++calls;
+            EXPECT_EQ(responses.size(), 2u);
+            for (auto const &response : responses) {
+                EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+            }
+            if (pushes < 10) {
+                push();
+            }
+            --depth;
+        }));
+    };
+    push();
+    EXPECT_EQ(calls, 1) << "the batch the program pushes is answered inside its push";
+    ASSERT_TRUE(pump([&] { return calls == 10; }));
+    const auto settle = std::chrono::steady_clock::now() + 50ms;
+    while (std::chrono::steady_clock::now() < settle) {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    EXPECT_EQ(calls, 10);
+    EXPECT_EQ(pushes, 10);
+    EXPECT_EQ(deepest, 1) << "a batch pushed back from its own callback was answered from inside that push";
+    EXPECT_FALSE(client->is_connecting());
+}
+
+// The answers come in the order the client came to owe them (Huly QB-1246): a refusal kept for its turn is heard before
+// any answer given after it -- the refusal of a push the program makes next, the failures of a disconnect() the same
+// callback calls. Each of those was answered at once, ahead of the refusal still waiting for its turn.
+TEST_F(Http3LoopbackTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
+    const auto elsewhere = [] {
+        return qb::http::Request{qb::io::uri("https://other.invalid/")};
+    }; // refused at once: 400
+    {
+        SCOPED_TRACE("a refusal of the program's next push");
+        auto             client = qb::http3::make_client(https_origin(next_port())); // never connected
+        std::vector<int> order;
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept: pushed from inside an answer
+        });
+        EXPECT_EQ(order, (std::vector<int>{1}));
+        client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(3); }); // answered inside, after what is owed
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 3}));
+        const auto settle = std::chrono::steady_clock::now() + 50ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 3})) << "the turn that was asked found something left to hear";
+    }
+    {
+        SCOPED_TRACE("the failures of a disconnect() the same callback calls");
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        std::vector<int> order;
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { order.push_back(9); }); // in flight
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
+            client->disconnect();                                                               // fails the request in flight
+        });
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
+        const auto settle = std::chrono::steady_clock::now() + 50ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
+        server->close();
+    }
+}
+
 // The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
 // destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
 // alone, its callback destroyed unheard. Three pushes, two answers, never deeper than two.
