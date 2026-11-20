@@ -129,6 +129,8 @@ private:
     bool          _h3_ready               = false;
     bool          _remote_shutdown        = false;
     bool          _closing_failed_attempt = false;
+    bool          _starting_attempt       = false; ///< The endpoint's connect() is on the stack: a close it delivers is the attempt's
+    bool          _attempt_ended_at_start = false; ///< It delivered one: this address could not start
     bool          _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
     bool          _connect_after_close    = false; ///< A connect() asked while a close is deferred: started when it has completed
     std::uint64_t _connect_epoch          = 0;
@@ -449,8 +451,9 @@ private:
     bool dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callback, std::chrono::steady_clock::time_point began);
     /// Dials the next address that takes an attempt, and arms its share; false when none is left.
     [[nodiscard]] bool start_attempt();
-    /// The address under way did not answer in its share: closed without a word, the next one dialled.
-    void next_attempt();
+    /// The address under way is given up -- its share ended, or QUIC gave it up first: closed without a word, the next
+    /// one dialled; the connect() fails when none is left to start.
+    void next_attempt(std::string_view why);
     /// Starts the connect() asked while a close was deferred, its teardown now complete: each callback joins the one attempt.
     void start_deferred_connect();
     /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.

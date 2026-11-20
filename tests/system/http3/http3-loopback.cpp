@@ -2192,6 +2192,19 @@ struct ClientTestPeer {
     dial(Client &client, std::vector<qb::io::endpoint> candidates, ConnectionCallback callback) {
         return client.dial(std::move(candidates), std::move(callback), std::chrono::steady_clock::now());
     }
+    /// start_attempt() with nothing left of the connect timeout -- where the timer of a share that fired at the deadline
+    /// finds it --: how many of @p candidates it dialled.
+    static std::size_t
+    dialled_with_no_time_left(Client &client, std::vector<qb::io::endpoint> candidates) {
+        client._connect_candidates = std::move(candidates);
+        client._connect_next       = 0;
+        client._is_connecting      = true;
+        client._connect_deadline   = std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
+        static_cast<void>(client.start_attempt());
+        const auto dialled = client._connect_next;
+        client.disconnect();
+        return dialled;
+    }
 };
 
 } // namespace qb::http3
@@ -3299,6 +3312,102 @@ TEST_F(Http3LoopbackTest, ALoneAddressThatDoesNotAnswerFailsAtTheConnectTimeout)
     EXPECT_EQ(connected, 0);
     EXPECT_EQ(error, "HTTP/3 connection timeout");
     EXPECT_GE(std::chrono::steady_clock::now() - began, 550ms);
+}
+
+// An address the network refuses at once -- the first datagram cannot be sent: no route to an address of that family, a
+// host that is unreachable; here the broadcast address, which sendto() refuses on a socket that did not ask for it -- is
+// an attempt that could not start (Huly QB-1246). The QUIC endpoint delivers that close inside its own connect(), and
+// the client took it for the end of the connect(): its callback heard `false` inside the call, a callback that dials
+// again was called from inside its own call, and the address after it was never tried. Alone, it is heard through the
+// callback on a later turn, one failure a turn; before an address that answers, it gives way to it at once.
+TEST_F(Http3LoopbackTest, AnAddressTheNetworkRefusesAtOnceIsHeardOnALaterTurnOrGivesWayToTheNext) {
+    {
+        SCOPED_TRACE("alone");
+        Redial redial;
+        redial.cap    = 6;
+        auto client   = qb::http3::make_client("https://255.255.255.255:" + std::to_string(next_port()));
+        redial.client = client.get();
+        EXPECT_TRUE(redial.dial());
+        EXPECT_EQ(redial.heard_true + redial.heard_false, 0) << "the callback was called inside connect()";
+        ASSERT_TRUE(pump([&] { return redial.heard_false == 6; }));
+        EXPECT_EQ(redial.dials, 6);
+        EXPECT_EQ(redial.heard_true, 0);
+        EXPECT_EQ(redial.deepest, 1) << "a redial was answered from inside its own connect()";
+        EXPECT_FALSE(client->is_connecting());
+    }
+    {
+        SCOPED_TRACE("before an address that answers");
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        int        calls = 0, connected = -1;
+        const auto began = std::chrono::steady_clock::now();
+        ASSERT_TRUE(qb::http3::ClientTestPeer::dial(*client, {qb::io::endpoint("255.255.255.255", port), qb::io::endpoint("127.0.0.1", port)},
+                                                    [&](bool ok, std::string const &) {
+                                                        ++calls;
+                                                        connected = ok ? 1 : 0;
+                                                    }));
+        EXPECT_EQ(calls, 0) << "the callback was called inside the call";
+        ASSERT_TRUE(pump([&] { return calls != 0; }));
+        EXPECT_EQ(calls, 1);
+        EXPECT_EQ(connected, 1) << "the address after the one that could not start was never tried";
+        EXPECT_LT(std::chrono::steady_clock::now() - began, 2s) << "it waited for the share of an address that never started";
+        client->disconnect();
+        server->close();
+    }
+}
+
+// QUIC gives an address up by itself: its handshake timeout, ten seconds by default, shorter than the share an address
+// has of the default connect timeout (Huly QB-1246). That close is no answer of a peer, an address is left and time is
+// left: the next one is dialled. It was taken for the end of the connect(), which failed at QUIC's timeout with the
+// second address never tried. The handshake timeout is shortened here to 300 ms, under a share of three seconds.
+TEST_F(Http3LoopbackTest, AnAddressQuicGivesUpBeforeItsShareGivesWayToTheNext) {
+    const auto port   = next_port();
+    const auto silent = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(6s);
+    auto quic              = client->settings();
+    quic.handshake_timeout = 300ms;
+    client->set_settings(quic);
+    int         calls = 0, connected = -1;
+    std::string error;
+    const auto  began = std::chrono::steady_clock::now();
+    ASSERT_TRUE(qb::http3::ClientTestPeer::dial(*client, {qb::io::endpoint("127.0.0.1", silent), qb::io::endpoint("127.0.0.1", port)},
+                                                [&](bool ok, std::string const &message) {
+                                                    ++calls;
+                                                    connected = ok ? 1 : 0;
+                                                    error     = message;
+                                                }));
+    ASSERT_TRUE(pump([&] { return calls != 0; }, 8s));
+    const auto took = std::chrono::steady_clock::now() - began;
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(connected, 1) << "QUIC's own timeout on the first address ended the connect(): " << error;
+    EXPECT_GE(took, 250ms) << "the first address was given up before QUIC gave it up";
+    EXPECT_LT(took, 2s) << "the second address waited for the first one's share";
+    client->disconnect();
+    server->close();
+}
+
+// The share of an address is armed by the TCP connector's test (Huly QB-1246): not when it is all of what is left, nor
+// when nothing is left -- where the timer of a share that fires at the deadline finds the next attempt. A delay of zero
+// runs its callback inline: the address after was dialled from inside the start of this one, and the one after it too.
+TEST_F(Http3LoopbackTest, AnAttemptStartedWithNothingLeftOfTheConnectTimeoutArmsNoShare) {
+    auto client = qb::http3::make_client(https_origin(next_port()));
+    client->set_verify_peer(false);
+    const std::vector<qb::io::endpoint> silent{
+        qb::io::endpoint("127.0.0.1", next_port()), qb::io::endpoint("127.0.0.1", next_port()), qb::io::endpoint("127.0.0.1", next_port())
+    };
+    EXPECT_EQ(qb::http3::ClientTestPeer::dialled_with_no_time_left(*client, silent), 1u)
+        << "a share of zero ran inline: the next address was dialled from inside the start of this one";
 }
 
 TEST_F(Http3LoopbackTest, ConnectFailureCallbackMaySubmitFreshRequest) {

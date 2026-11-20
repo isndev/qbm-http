@@ -271,8 +271,14 @@ Client::dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callba
         if (!self || self->_connect_epoch != epoch || !self->_is_connecting) {
             return; // a disconnect(), or a connection, since
         }
-        self->close_failed_transport(error);
-        self->handle_connection_failure(error);
+        // No caller is left to hear what a callback of this failure throws: logged, as every failure the loop delivers.
+        qb::http::detail::contained(
+            "HTTP/3",
+            [&] {
+                self->close_failed_transport(error);
+                self->handle_connection_failure(error);
+            },
+            "the failure of an attempt that could not start");
     });
     return true;
 }
@@ -287,33 +293,60 @@ Client::start_attempt() {
         tls.verify_peer = _verify_peer;
         const auto dialed =
             "https://" + (remote.af() == AF_INET6 ? "[" + remote.ip() + "]" : remote.ip()) + ":" + std::to_string(remote.port());
-        if (qb::io::async::quic::endpoint::connect(qb::io::uri(dialed), std::move(tls), {"h3"})) {
+        // The endpoint sends the first datagram inside its connect(), and delivers the close inside it too when the network
+        // refuses that datagram -- no route to an address of that family, a host that is unreachable --, then returns true.
+        // That close is this attempt's: under the flag it is only recorded (dispatch(connection_closed)), and the address
+        // counts as one that could not start. Heard as a failure there, the connect()'s callback was called inside
+        // connect(), a relaunch dialled again from inside its own call, and the next address was never tried (Huly QB-1246).
+        _attempt_ended_at_start = false;
+        bool started            = false;
+        {
+            struct Starting {
+                bool &flag;
+                explicit Starting(bool &value) noexcept
+                    : flag(value) {
+                    flag = true;
+                }
+                ~Starting() noexcept {
+                    flag = false;
+                }
+            } const starting{_starting_attempt};
+            started = qb::io::async::quic::endpoint::connect(qb::io::uri(dialed), std::move(tls), {"h3"});
+        }
+        if (started && !_attempt_ended_at_start) {
             ++_connect_attempt;
-            // Its share of what is left, by the TCP connector's rule (connect_attempt_budget()). The last address has all of
-            // it -- the connect timeout ends it --, and with no timeout no address is given up: QUIC has no refusal to hear.
+            // Its share of what is left, by the TCP connector's rule (connect_attempt_budget(), and the connector's own
+            // test: a share that is all of what is left arms nothing, the connect timeout ends it). The last address has
+            // all of it, and with no timeout no address is given up for its time: QUIC has no refusal to hear, only its own
+            // handshake timeout (dispatch(connection_closed)).
             const std::size_t left = _connect_candidates.size() - _connect_next + 1;
             if (left > 1 && !_destroying && _connect_timeout > qb::duration::zero()) {
                 const auto remaining = std::chrono::duration_cast<qb::duration>(_connect_deadline - std::chrono::steady_clock::now());
-                qb::io::async::callback(
-                    [weak_self = weak_from_this(), epoch = _connect_epoch, attempt = _connect_attempt] {
-                        auto self = weak_self.lock();
-                        if (self && self->_connect_epoch == epoch && self->_connect_attempt == attempt && self->_is_connecting) {
-                            self->next_attempt();
-                        }
-                    },
-                    qb::io::tcp::connect_attempt_budget(remaining, left));
+                const auto budget    = qb::io::tcp::connect_attempt_budget(remaining, left);
+                if (budget < remaining) { // not armed for nothing left either: a delay of zero would run next_attempt() here, inline
+                    qb::io::async::callback(
+                        [weak_self = weak_from_this(), epoch = _connect_epoch, attempt = _connect_attempt] {
+                            auto self = weak_self.lock();
+                            if (self && self->_connect_epoch == epoch && self->_connect_attempt == attempt && self->_is_connecting) {
+                                self->next_attempt("did not answer in its share of the connect timeout");
+                            }
+                        },
+                        budget);
+                }
             }
             return true;
         }
+        LOG_HTTP_INFO_PA(_client_id,
+                         "HTTP/3 address " << _connect_next << " of " << _connect_candidates.size() << " for " << _host << " could not start");
         close_failed_transport("HTTP/3 attempt could not start"); // what the endpoint opened before it gave up
     }
     return false;
 }
 
 void
-Client::next_attempt() {
-    LOG_HTTP_INFO_PA(_client_id, "HTTP/3 address " << _connect_next << " of " << _connect_candidates.size() << " for " << _host
-                                                   << " did not answer in its share of the connect timeout: the next is dialled");
+Client::next_attempt(std::string_view why) {
+    LOG_HTTP_INFO_PA(_client_id, "HTTP/3 address " << _connect_next << " of " << _connect_candidates.size() << " for " << _host << " " << why
+                                                   << ": the next is dialled");
     close_failed_transport("HTTP/3 address did not answer"); // no failure: the connect() goes on
     if (!start_attempt()) {
         close_failed_transport("Unable to start QUIC connection");
@@ -771,6 +804,8 @@ Client::handle_connection_success(std::string const &alpn) {
     _remote_shutdown = false;
     _h3              = std::make_unique<h3_connection>(*this, 0, h3_connection::role::client);
     _h3->bind_local_streams();
+    _connect_candidates.clear(); // the addresses of the connect() that has ended: none is left to fall back to
+    _connect_next  = 0;
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
     std::exception_ptr callback_error;
@@ -801,6 +836,8 @@ Client::handle_connection_failure(std::string const &error) {
     _h3_ready        = false;
     _remote_shutdown = false;
     _h3.reset();
+    _connect_candidates.clear(); // as on a connection: the connect() they were resolved for has ended
+    _connect_next  = 0;
     auto callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
     // Retire old requests before connection callbacks can enqueue a new attempt.
@@ -1090,8 +1127,23 @@ Client::dispatch(qb::io::async::quic::event::connected const &ev) {
 void
 Client::dispatch(qb::io::async::quic::event::connection_closed const &ev) {
     EventLifetime lifetime{*this};
+    if (_starting_attempt) {
+        _attempt_ended_at_start = true; // delivered inside the endpoint's connect(): start_attempt() reads it there, and goes on
+        return;
+    }
     if (_closing_failed_attempt || (_deferred_close && _deferred_close->empty())) {
         return; // the explicit close already owns notification and teardown
+    }
+    using qb::io::quic::disconnect_reason;
+    if (_is_connecting && _connect_next < _connect_candidates.size()
+        && (ev.reason == disconnect_reason::transport_error || ev.reason == disconnect_reason::idle_timeout)
+        && (_connect_timeout <= qb::duration::zero() || std::chrono::steady_clock::now() < _connect_deadline)) {
+        // QUIC gave this address up before its share ended -- its own handshake timeout, ten seconds unless the settings say
+        // otherwise, or a datagram the network refused. That is no answer of a peer (a refusal by TLS, or by the peer, is
+        // one: handshake_failed, and final): an address is left and time is left, so the next is dialled, without a word.
+        // Taken as the end of the connect(), a silent first address failed it before the second was ever tried.
+        next_attempt("was given up by QUIC");
+        return;
     }
     std::string reason = ev.reason_phrase.empty() ? "HTTP/3 connection closed" : ev.reason_phrase;
     if (ev.error_code != 0) {
