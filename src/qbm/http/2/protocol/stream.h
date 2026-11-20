@@ -370,6 +370,8 @@ struct Http2ServerStream : public Http2StreamBase {
     bool                                  progressed_since_idle_sweep = false;
     std::chrono::steady_clock::time_point queued_since{}; ///< The sweep that first found the response queued; zero while none is
     std::uint64_t                         data_mark = 0; ///< The connection's DATA total at the stream's last progress (cleanup_idle_streams())
+    std::uint64_t output_mark = 0; ///< The output's count where its last DATA ends (appended_total()): taken by the socket below it (QB-1248)
+    std::uint64_t drain_seen  = 0; ///< What the socket took (socket_written()) at the last sweep: a count that moved is progress
 
     /**
      * @brief Construct a new server stream

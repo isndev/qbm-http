@@ -22,6 +22,7 @@
 #ifndef QBM_HTTP_TESTS_SHARED_HTTP2_RAW_CLIENT_H
 #define QBM_HTTP_TESTS_SHARED_HTTP2_RAW_CLIENT_H
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -110,6 +111,14 @@ public:
     /// How long one write may take before it gives up. A client that floods a server sets it far past what a loaded
     /// host can stall for: its writes then stop only when the connection is broken.
     std::chrono::milliseconds write_budget = std::chrono::seconds(2);
+    /// The most one read takes, and what every read took: a reader that takes its time reads a bounded slice at each of its
+    /// turns (read_up_to(), Huly QB-1248).
+    std::size_t read_cap   = 64 * 1024;
+    std::size_t bytes_read = 0;
+    /// The socket's receive buffer, set before connect() when above 0: the window the kernel advertises from the SYN on stays
+    /// that small, so a server's output drains at the pace a slow reader reads (Huly QB-1248). Set once connected, it bounds
+    /// nothing: the kernel advertised its window already, and holds what a slow reader leaves -- a whole window, on macOS.
+    int receive_buffer = 0;
 
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
@@ -117,6 +126,10 @@ public:
     connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {}) {
         _sock = qb::io::tcp::ssl::socket{qb::io::ssl::Context::client().alpn({"h2"})};
         _sock.set_insecure();
+        if (receive_buffer > 0
+            && (_sock.qb::io::tcp::socket::init(AF_INET) != 0
+                || qb::io::socket::set_optval(_sock.native_handle(), SOL_SOCKET, SO_RCVBUF, receive_buffer) != 0))
+            return false;
         if (_sock.connect_v4("127.0.0.1", port) != 0)
             return false;
         if (_sock.get_alpn_selected_protocol() != "h2")
@@ -285,6 +298,14 @@ public:
         }
     }
 
+    /// Read until @p octets more came or nothing is there to read: one turn of a reader that takes its time.
+    void
+    read_up_to(std::size_t octets) {
+        const auto start = bytes_read;
+        while (!eof && bytes_read - start < octets && read_some()) {
+        }
+    }
+
     [[nodiscard]] RawStream const &
     stream(std::uint32_t stream_id) {
         return streams[stream_id];
@@ -337,13 +358,14 @@ private:
     bool
     read_some() {
         char      tmp[64 * 1024];
-        const int n = _sock.read(tmp, sizeof tmp);
+        const int n = _sock.read(tmp, std::min(sizeof tmp, read_cap));
         if (n < 0) {
             eof = true; // the TLS socket reports the end of the connection as -1, and "nothing yet" as 0
             return false;
         }
         if (n == 0)
             return false;
+        bytes_read += static_cast<std::size_t>(n);
         _in.insert(_in.end(), tmp, tmp + n);
         std::size_t at = 0; // one erase a read, not one a frame: a read of a flood's replies holds thousands of frames
         while (_in.size() - at >= 9) {

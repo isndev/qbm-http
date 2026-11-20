@@ -852,31 +852,40 @@ All notable changes to the qbm-http module are documented here. The format is ba
   pass that leaves a stream open, the timer fires every `CLEANUP_INTERVAL` (5 s) while a stream remains, and stops at
   the first fire that finds none, with the connection and when the session is extracted -- a read pass that extracts its
   session arms nothing. The cost at the end of a read pass is one load and compare, one more while a stream is open (the
-  timer's state), and no clock read; `pending_write` no longer sweeps. And the sweep's rule is the peer's progress, as
-  nginx's and Go's timeouts are, and the session's timeout for a stream its handler holds -- no sooner, for a timeout
-  that changes, than the session's own countdown. A request not yet complete is reset once its octets have stopped
-  arriving for the incomplete bound. A dispatched stream whose response is queued waits on the peer: it is reset once
-  none of it has left for the idle bound, counted from the later of its progress and the sweep that first finds it
-  queued -- a response behind a window the client does not open is reset there, and a stream `WINDOW_UPDATE` that lets
-  nothing out moves no clock (marked on its own, one small frame per stream within the bound pinned every response a
-  peer had asked for and did not read). A response only the connection's window holds, its own window open, takes its
-  turn when that window opens: the server drains the streams that wait a frame's worth each -- 16 KiB at most, whatever
-  frame size the peer allows -- from the stream after the last one served, in rounds that each find their streams again
-  while the window lasts and the last round sent something (a response another stream's turn sent, a pushed one that
-  turn's end let out, takes its turn in the next round; a stream whose own window is shut is left out until its
-  WINDOW_UPDATE sends it) -- a round robin, as Go's write scheduler and nghttp2's fair queue, and streamed responses
-  that wait for the socket's room resume in turn the same way --; taken greedily, the window went to the first streams
-  every time, and one behind another its peer read steadily was reset as idle. A stream's progress is its own octets: an
-  octet of the connection's window let out now and then no longer keeps every stream that waits from its bound. And a
-  response that waits on the connection's window alone, its own open, progresses with the connection once 16 KiB of DATA
-  have been written for the connection, every stream's, since that stream's own last progress, whatever the sweeps'
-  period: the floor is 16 KiB written for the connection since a stream's last progress, within its idle bound -- 50
-  downloads behind a 64 KiB window opened 16 KiB at a time wait some 50 s for a turn and are kept --, and a peer that
-  lets out less keeps only the stream each octet reaches. The octets counted are the ones written into the session's
-  output, not the ones the socket took: a peer that never reads its socket fills that output, which the session's write
-  cap bounds. A dispatched stream with nothing queued waits on its handler, and is reset once it has made no progress
-  for the session's timeout (`getTimeout()`, read at each sweep; none when it is zero), counted from the later of its
-  own progress -- its dispatch, its last piece -- and the sweep that first saw the timeout's value (qb-io restarts the
+  timer's state); arming the timer reads the loop's clock, once a period at most; `pending_write` no longer sweeps. And
+  the sweep's rule is the peer's progress, as nginx's and Go's timeouts are, and the session's timeout for a stream its
+  handler holds -- no sooner, for a timeout that changes, than the session's own countdown. A request not yet complete
+  is reset once its octets have stopped arriving for the incomplete bound. A dispatched stream whose response is queued
+  waits on the peer: it is reset once none of it has left for the idle bound, counted from the later of its progress and
+  the sweep that first finds it queued -- a response behind a window the client does not open is reset there, and a
+  stream `WINDOW_UPDATE` that lets nothing out moves no clock (marked on its own, one small frame per stream within the
+  bound pinned every response a peer had asked for and did not read). A stream whose last DATA the socket has not taken
+  yet waits on the socket, not on its peer, which gives a window back only for what it has read: it progresses as the
+  socket takes the session's output, and its peer's bound starts once that DATA has left -- what nginx's `send_timeout`
+  and Go's `WriteByteTimeout` judge. A healthy download the windows let run ahead of the socket was reset: a client with
+  a 6 MiB window that gives it back at half (nghttp2's and Chromium's policy), reading 20 MiB at 80 KB/s, sends its
+  first stream WINDOW_UPDATE some 39 s in, and its stream was reset CANCEL at 30 to 40 s while the socket drained at the
+  pace it was read. The drain is what the server sees: what the peer's own socket buffers hold past it is the peer's,
+  and the bound starts once the socket has taken the last DATA. A response only the connection's window holds, its own
+  window open, takes its turn when that window opens: the server drains the streams that wait a frame's worth each -- 16
+  KiB at most, whatever frame size the peer allows -- from the stream after the last one served, in rounds that each
+  find their streams again while the window lasts and the last round sent something (a response another stream's turn
+  sent, a pushed one that turn's end let out, takes its turn in the next round; a stream whose own window is shut is
+  left out until its WINDOW_UPDATE sends it, or a raise of the initial window opens it -- the streams a raise opens take
+  the window in turn the same way, where the first in the map's order took it all) -- a round robin, as Go's write
+  scheduler and nghttp2's fair queue, and streamed responses that wait for the socket's room resume in turn the same way
+  --; taken greedily, the window went to the first streams every time, and one behind another its peer read steadily was
+  reset as idle. A stream's progress is its own octets: an octet of the connection's window let out now and then no
+  longer keeps every stream that waits from its bound. And a response that waits on the connection's window alone, its
+  own open, progresses with the connection once 16 KiB of DATA have been written for the connection, every stream's,
+  since that stream's own last progress, whatever the sweeps' period: the floor is 16 KiB written for the connection
+  since a stream's last progress, within its idle bound -- 50 downloads behind a 64 KiB window opened 16 KiB at a time
+  wait some 50 s for a turn and are kept --, and a peer that lets out less keeps only the stream each octet reaches. The
+  octets that progress counts are the ones written into the session's output; a peer that never reads its socket fills
+  that output, which the session's write cap bounds, and its stream, whose DATA the socket does not take, makes none. A
+  dispatched stream with nothing queued waits on its handler, and is reset once it has made no progress for the
+  session's timeout (`getTimeout()`, read at each sweep; none when it is zero), counted from the later of its own
+  progress -- its dispatch, its last piece -- and the sweep that first saw the timeout's value (qb-io restarts the
   session's countdown at `setTimeout()`: a timeout lowered at run time cuts no stream sooner than it would end a quiet
   connection; a `setTimeout()` of the same value restarts that countdown and no stream's clock): on HTTP/2 any stream's
   activity restarts the session's timeout, so it bounded no stream of its own, and a request its handler never answered,
@@ -891,53 +900,56 @@ All notable changes to the qbm-http module are documented here. The format is ba
   to a stream that was gone ended the connection (RFC 9113 §4.3). nginx's shape: its `client_header_timeout`, armed on a
   block a read cut (`ngx_http_v2_state_headers_save()`), resets the stream with PROTOCOL_ERROR
   (`ngx_http_v2_close_stream_handler()`) -- 60 s there, 10 s here, the bound of every request not yet complete, for a
-  fragment of up to 1 MiB and an HPACK decoder held mid-block. A refused block open past the bound again has no stream
-  to reset: the sweep ends the connection with GOAWAY(PROTOCOL_ERROR) and delivers it before closing after the peer, as
-  at the drain's deadline: sent from the sweep's timer, no read pass writes it. Go reads a block whole and holds it to
-  no bound of its own. A request not yet complete is held to the incomplete bound alone, a wider one included. A peer
-  that grants a window of one octet at a time still holds a response for as long as it trickles (the class of
-  CVE-2019-9511): each octet leaves, and is progress -- a stream `WINDOW_UPDATE` alone did it before, with no octet; no
-  total deadline is set by default, as on nginx and Go, and `set_max_sessions()`, the concurrent-stream limit and a
-  streamed response's `set_min_rate()` are the bounds: per connection, a 1-octet connection WINDOW_UPDATE for each
-  stream within each idle bound pins every stream, some 650 octets per 30 s for 50 streams; a whole response has no rate
-  floor, `set_min_rate()` covers streamed ones only. The sweep's callback holds its session to the next turn of the
-  loop, so a reset's observer that releases the session does not destroy it under the sweep. The bounds and the period
-  are the constants by default; a session class sets its own in its constructor with the protected
-  `set_stream_sweep(idle, incomplete, period)` -- a value of zero or less is refused -- and reads
-  `stream_sweep_armed()`: the witnesses run at bounds of 0.6 s and 1.2 s, a period of 0.2 s. The protocol tells the
-  session through a hook found by a requires-expression, `http2_streams_open()`, answers `has_streams()` (a header block
-  open too), and `cleanup_idle_streams()` takes the handler's bound as a third argument. Witnesses:
-  `qbm-http-test-system-http2-client` (two stalled uploads reset beside an upload that trickles, which is served; a
-  stalled upload reset beside an event stream that goes on; a response its peer does not take reset at its bound; a
-  handler one and a half idle bounds long answered; an event stream that beats slower than the idle bound still open; a
-  request its handler never answers reset at the session's timeout, not before, beside an event stream that beats and
-  goes on; two downloads behind a connection window the client opens 8 KiB at a time, served in turn, neither going more
-  than two increments without an octet; sixteen downloads behind a connection window the client opens 16 KiB every 0.1
-  s, each turn 1.6 s apart, none reset; twenty-four downloads behind a connection window the client opens 4 KiB every
-  0.1 s, each turn 1.9 s apart, a sweep seeing 8 KiB written at most, none reset; a header block stalled a sweep and
-  more under the incomplete bound, then ended, its request answered on a live connection, and a request that refers to a
-  field it indexed answered; a header block held open beside an event stream that beats, its stream reset at the
-  incomplete bound with PROTOCOL_ERROR, the event stream beating on and the next request, which refers to a field the
-  reset block indexed, answered; a header block held past the bound twice, the connection ended with
-  GOAWAY(PROTOCOL_ERROR); a stream its handler holds, its session's timeout lowered by another stream's handler, reset
-  no sooner than that timeout after the change; two responses behind a connection window the client never opens reset
-  whatever stream `WINDOW_UPDATE`s it sends; the timer armed while a stream is open and only then, an idle connection
-  ending at the session's timeout; the timer stopped when its connection ends and when its session is extracted, on a
-  later turn or by a handler in its own read pass, and nothing written by the session afterwards; a session its reset's
-  observer released destroyed a turn later, not under its sweep; values of zero refused),
-  `qbm-http-test-unit-http2-server-protocol` (the session told at the end of a read pass that leaves a stream open, not
-  by a pass that answers what it brought, not between two frames; a stream its handler holds reset at its own bound, not
-  before, whatever another stream does, and never under a bound of zero; a handler's clock started at the dispatch; a
-  response's clock started where its output is queued; the connection's window taken in turn by the responses that wait
-  on it, a frame's worth each, a whole response and a streamed piece alike; fifty responses fed an octet of the
-  connection's window at a time reset at their bound, but the few it serves within it; a timeout changed at run time
-  counted from the sweep that first saw it; a header block open past the incomplete bound, its stream reset with
-  PROTOCOL_ERROR and the rest decoded, the next block's reference to a field it indexed answered, and open past the
-  bound again, the connection ended with GOAWAY(PROTOCOL_ERROR) -- a refused one, which has no stream, at the first --,
-  and an incomplete bound wider than the idle one kept; a response sent from inside a turn, a pushed one a closing
-  stream's slot let out, served in the next round; four downloads behind a connection window opened a frame's worth
-  every 10 ms kept past an idle bound of 30 ms, and an octet at a time keeping none; forty-eight downloads behind a
-  window opened 4 KiB every 10 ms kept past a bound of 400 ms, 16 KiB written every 40 ms and 4 KiB a sweep, and 4 KiB
+  fragment of up to 1 MiB and an HPACK decoder held mid-block. A refused block has no stream to reset: the sweep ends
+  the connection with GOAWAY(PROTOCOL_ERROR) -- at the block's first bound when it was refused at its HEADERS, at its
+  second when the first turned it so -- and delivers it before closing after the peer, as at the drain's deadline: sent
+  from the sweep's timer, no read pass writes it. Go reads a block whole and holds it to no bound of its own. A request
+  not yet complete is held to the incomplete bound alone, a wider one included. A peer that grants a window of one octet
+  at a time still holds a response for as long as it trickles (the class of CVE-2019-9511): each octet leaves, and is
+  progress -- a stream `WINDOW_UPDATE` alone did it before, with no octet; no total deadline is set by default, as on
+  nginx and Go, and `set_max_sessions()`, the concurrent-stream limit and a streamed response's `set_min_rate()` are the
+  bounds: per connection, a 1-octet connection WINDOW_UPDATE for each stream within each idle bound pins every stream,
+  some 650 octets per 30 s for 50 streams; a whole response has no rate floor, `set_min_rate()` covers streamed ones
+  only. The sweep's callback holds its session to the next turn of the loop, so a reset's observer that releases the
+  session does not destroy it under the sweep; a turn it cannot ask -- an allocation -- holds it to its next sweep or
+  its connection's end. The bounds and the period are the constants by default; a session class sets its own in its
+  constructor with the protected `set_stream_sweep(idle, incomplete, period)` -- a value of zero or less is refused, and
+  a period under a millisecond (`min_stream_sweep_period`), which armed the timer again at every pass -- and reads
+  `stream_sweep_armed()` and `stream_sweep_period()`: the witnesses run at bounds of 0.6 s and 1.2 s, a period of 0.2 s.
+  The protocol tells the session through a hook found by a requires-expression, `http2_streams_open()`, answers
+  `has_streams()` (a header block open too), and `cleanup_idle_streams()` takes the handler's bound as a third argument.
+  Witnesses: `qbm-http-test-system-http2-client` (two stalled uploads reset beside an upload that trickles, which is
+  served; a stalled upload reset beside an event stream that goes on; a response its peer does not take reset at its
+  bound; a handler one and a half idle bounds long answered; an event stream that beats slower than the idle bound still
+  open; a request its handler never answers reset at the session's timeout, not before, beside an event stream that
+  beats and goes on; two downloads behind a connection window the client opens 8 KiB at a time, served in turn, neither
+  going more than one increment without an octet; a download its peer reads 40 KiB every 0.1 s, its 1 MiB window given
+  back 768 KiB at a time, kept while the socket drains it; sixteen downloads behind a connection window the client opens
+  16 KiB every 0.1 s, each turn 1.6 s apart, none reset; twenty-four downloads behind a connection window the client
+  opens 4 KiB every 0.1 s, each turn 1.9 s apart, a sweep seeing 8 KiB written at most, none reset; a header block
+  stalled a sweep and more under the incomplete bound, then ended, its request answered on a live connection, and a
+  request that refers to a field it indexed answered; a header block held open beside an event stream that beats, its
+  stream reset at the incomplete bound with PROTOCOL_ERROR, the event stream beating on and the next request, which
+  refers to a field the reset block indexed, answered; a header block held past the bound twice, the connection ended
+  with GOAWAY(PROTOCOL_ERROR); a stream its handler holds, its session's timeout lowered by another stream's handler,
+  reset no sooner than that timeout after the change; two responses behind a connection window the client never opens
+  reset whatever stream `WINDOW_UPDATE`s it sends; the timer armed while a stream is open and only then, an idle
+  connection ending at the session's timeout; the timer stopped when its connection ends and when its session is
+  extracted, on a later turn or by a handler in its own read pass, and nothing written by the session afterwards; a
+  session its reset's observer released destroyed a turn later, not under its sweep; values of zero, and a period under
+  the floor, refused), `qbm-http-test-unit-http2-server-protocol` (the session told at the end of a read pass that
+  leaves a stream open, not by a pass that answers what it brought, not between two frames; a stream its handler holds
+  reset at its own bound, not before, whatever another stream does, and never under a bound of zero; a handler's clock
+  started at the dispatch; a response's clock started where its output is queued; the connection's window taken in turn
+  by the responses that wait on it, a frame's worth each, a whole response and a streamed piece alike; fifty responses
+  fed an octet of the connection's window at a time reset at their bound, but the few it serves within it; a timeout
+  changed at run time counted from the sweep that first saw it; a header block open past the incomplete bound, its
+  stream reset with PROTOCOL_ERROR and the rest decoded, the next block's reference to a field it indexed answered, and
+  open past the bound again, the connection ended with GOAWAY(PROTOCOL_ERROR) -- a refused one, which has no stream, at
+  the first --, and an incomplete bound wider than the idle one kept; a response sent from inside a turn, a pushed one a
+  closing stream's slot let out, served in the next round; four downloads behind a connection window opened a frame's
+  worth every 10 ms kept past an idle bound of 30 ms, and an octet at a time keeping none; forty-eight downloads behind
+  a window opened 4 KiB every 10 ms kept past a bound of 400 ms, 16 KiB written every 40 ms and 4 KiB a sweep, and 4 KiB
   every 200 ms keeping none; a turn of 16 KiB under a peer's 16 MiB frames; a reset protocol keeping no clock of a
   block; a response its own window holds reset whatever the connection moves, a frame's worth between two sweeps
   included; a stream `WINDOW_UPDATE` that lets nothing out holding no response; a promised stream never answered reset

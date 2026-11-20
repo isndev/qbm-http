@@ -3825,6 +3825,33 @@ TEST(HTTP2ServerProtocol, TheConnectionsWindowGoesToTheResponsesThatWaitOnItInTu
     EXPECT_EQ(protocol.cleanup_idle_streams(15ms, 1h), 2u) << "a response that left nothing was kept";
 }
 
+// A raise of SETTINGS_INITIAL_WINDOW_SIZE that opens the windows of responses the old size had shut gives the connection's
+// window to them in turn, as a connection WINDOW_UPDATE does (Huly QB-1248). In the map's order, the first took the whole
+// window at every raise, the others waiting for the next. Two responses whose own windows of 1000 octets are spent, the
+// connection's open: one raise sends a frame's worth to each in turn.
+TEST(HTTP2ServerProtocol, ARaiseOfTheInitialWindowSendsTheResponsesItReopensInTurn) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 1000);
+    open_get_stream_end_stream(protocol, io, 1, "/a");
+    open_get_stream_end_stream(protocol, io, 3, "/b");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(200000, 'w');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_TRUE(protocol.send_response(3, response));
+    const std::size_t before[2] = {sum_data_bytes(io.output, 1), sum_data_bytes(io.output, 3)};
+    ASSERT_EQ(before[0], 1000u) << "the first response's own window was not spent";
+    ASSERT_EQ(before[1], 1000u) << "the second response's own window was not spent";
+    push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 1u << 20}}));
+    drive(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    const std::size_t got[2] = {sum_data_bytes(io.output, 1) - before[0], sum_data_bytes(io.output, 3) - before[1]};
+    EXPECT_EQ(got[0] + got[1], 65535u - 2000u) << "the connection's window was not spent";
+    EXPECT_GE(got[0], 16384u) << "the raise did not send the responses it reopened in turn (" << got[0] << ", " << got[1] << ")";
+    EXPECT_GE(got[1], 16384u) << "the raise did not send the responses it reopened in turn (" << got[0] << ", " << got[1] << ")";
+}
+
 // A streamed response takes its turn of the connection's window as a whole one does (Huly QB-1248): a whole response and
 // a streamed one wait on it, their own windows open, and two increments of the connection's go one to each, whichever
 // stream is the streamed one. A stream's progress is its own octets: those of the other never counted for it.
@@ -4405,7 +4432,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the response's header list, counted uncompressed, exceeds it, the stream
-// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1315-1318).
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1321-1324).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4433,7 +4460,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1299-1304).
+// (2/protocol/server.h:1305-1310).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4453,7 +4480,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:3101-3104).
+// (2/protocol/server.h:3120-3123).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4473,7 +4500,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:3095-3100).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:3114-3119).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4496,7 +4523,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1108-1113).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1114-1119).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4515,7 +4542,7 @@ TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlE
 
 // A connection WINDOW_UPDATE flushes streams that had data queued behind an
 // exhausted connection window. Drives the drain of that window, in rounds
-// that each find their streams again (2/protocol/server.h:3696-3713).
+// that each find their streams again (2/protocol/server.h:3715-3732).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateFlushesPendingStreamData) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4712,7 +4739,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:446-455).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:452-461).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4735,7 +4762,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:446-450).
+// (qbm/http/src/qbm/http/2/protocol/server.h:452-456).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4752,7 +4779,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1224-1234 else arm).
+// (no stream context to store into; 2/protocol/server.h:1230-1240 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4771,7 +4798,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1133-1145);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1139-1151);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -9624,12 +9651,21 @@ TEST(HTTP2ServerProtocol, ResponsesThatWaitOnTheConnectionsWindowAloneProgressWi
     do_handshake(protocol, io);
     ASSERT_NO_FATAL_FAILURE(downloads_behind_the_connections_window(protocol, io, 4, 400000));
     EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/30ms, /*max_incomplete=*/1h), 0u);
+    int  within = 0;
+    auto swept  = std::chrono::steady_clock::now();
     for (int i = 0; i < 12; ++i) {
         std::this_thread::sleep_for(10ms);
         make_window_update_frame(io, 0, 16384);
         drive(protocol, io);
-        EXPECT_EQ(protocol.cleanup_idle_streams(30ms, 1h), 0u) << "increment " << i << ": a download its peer reads steadily was reset";
+        const auto cleaned = protocol.cleanup_idle_streams(30ms, 1h);
+        const auto now     = std::chrono::steady_clock::now();
+        if (now - swept < 25ms) { // a sweep the host did not stall past the bound: one increment, 16 KiB, since the last
+            ++within;
+            EXPECT_EQ(cleaned, 0u) << "increment " << i << ": a download its peer reads steadily was reset";
+        }
+        swept = now;
     }
+    ASSERT_GT(within, 0) << "every sweep fell past the bound: the host is too loaded for the case to prove anything";
     std::size_t reset = 0;
     for (int i = 0; i < 12 && reset == 0; ++i) {
         std::this_thread::sleep_for(10ms);
@@ -9759,13 +9795,20 @@ TEST(HTTP2ServerProtocol, AResponseItsOwnWindowHoldsDoesNotProgressWithTheConnec
     make_window_update_frame(io, 3, 1u << 24);
     drive(protocol, io);
     EXPECT_EQ(protocol.cleanup_idle_streams(/*max_idle=*/30ms, /*max_incomplete=*/1h), 0u);
-    std::size_t reset = 0;
+    std::size_t reset   = 0;
+    bool        stalled = false; // two sweeps further apart than the bound: the download served between them meets it too
+    auto        swept   = std::chrono::steady_clock::now();
     for (int i = 0; i < 12 && reset == 0; ++i) {
         std::this_thread::sleep_for(10ms);
         make_window_update_frame(io, 0, 16384);
         drive(protocol, io);
         reset += protocol.cleanup_idle_streams(30ms, 1h);
+        const auto now = std::chrono::steady_clock::now();
+        stalled        = stalled || now - swept >= 25ms;
+        swept          = now;
     }
+    if (stalled && last_rst_stream_error(io.output, 3).has_value())
+        GTEST_SKIP() << "the host stalled past the bound between two sweeps: the served download's reset proves nothing";
     EXPECT_EQ(reset, 1u) << "a response its own window held was kept by the connection's progress";
     EXPECT_EQ(last_rst_stream_error(io.output, 1), ErrorCode::CANCEL);
     EXPECT_FALSE(last_rst_stream_error(io.output, 3).has_value()) << "the download the connection served was reset";

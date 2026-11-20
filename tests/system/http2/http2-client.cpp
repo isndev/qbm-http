@@ -4208,6 +4208,8 @@ inline std::atomic<int>  g_released_session_outlived_its_sweep{-1};
 /// Whether a request's hook may release its session: while the case that asks for it waits on the sweep, and never at the
 /// connection's end, which completes the request and runs the hook too.
 inline std::atomic<bool> g_release_at_a_reset{false};
+/// Whether a request's hook clears its session's protocols at the reset that completes it.
+inline std::atomic<bool> g_clear_at_a_reset{false};
 /// Whether the sessions created from now on ask for bounds and a period of zero once they have set theirs.
 inline std::atomic<bool> g_ask_for_zero{false};
 
@@ -4224,6 +4226,10 @@ public:
     [[nodiscard]] bool
     sweep_armed() const noexcept {
         return this->stream_sweep_armed();
+    }
+    [[nodiscard]] qb::duration
+    sweep_period() const noexcept {
+        return this->stream_sweep_period();
     }
     void
     lower_timeout(ms timeout) noexcept {
@@ -4279,6 +4285,27 @@ public:
             ctx->response().body()   = std::string(std::stoul(ctx->request().query_or("kib", "256")) * 1024, 'l');
             ctx->complete();
         });
+        router().get("/large-to-a-slow-reader", [](auto ctx) { // `kib`, through a socket that holds 16 KiB: the rest waits in the output
+            static_cast<void>(qb::io::socket::set_optval(ctx->session()->transport().native_handle(), SOL_SOCKET, SO_SNDBUF, 16384));
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(std::stoul(ctx->request().query_or("kib", "1280")) * 1024, 's');
+            ctx->complete();
+        });
+        router().get("/cleared-at-reset", [](auto ctx) { // a response its peer does not take, and an observer that clears the protocols
+            ctx->add_lifecycle_hook([](auto &context, qb::http::HookPoint point) {
+                if (point == qb::http::HookPoint::REQUEST_COMPLETE && g_clear_at_a_reset.load())
+                    context.session()->clear_protocols();
+            });
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(256 * 1024, 'c');
+            ctx->complete();
+        });
+        router().get("/period", [](auto ctx) { // the sweep's period the session kept, in microseconds
+            const auto period        = ctx->session()->sweep_period();
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(period).count());
+            ctx->complete();
+        });
         router().get("/never", [this](auto ctx) { _unanswered.push_back(ctx); }); // held, never answered
         router().get("/slow", [](auto ctx) {                                      // a handler that answers after `ms`
             qb::io::async::callback(
@@ -4331,8 +4358,10 @@ Session::Session(Server &server)
     this->set_stream_sweep(kIdle, kIncomplete, kPeriod);
     if (g_period_ms.load() != kPeriod.count())
         this->set_stream_sweep(kIdle, kIncomplete, ms(g_period_ms.load())); // a period of its own
-    if (g_ask_for_zero.load())
-        this->set_stream_sweep(ms(0), ms(0), ms(0)); // what the setter refuses
+    if (g_ask_for_zero.load()) {
+        this->set_stream_sweep(ms(0), ms(0), ms(0));                             // what the setter refuses,
+        this->set_stream_sweep(kIdle, kIncomplete, std::chrono::nanoseconds(1)); // and a period under its floor
+    }
 }
 
 class Http2StreamSweep : public ::testing::Test {
@@ -4349,6 +4378,7 @@ protected:
         g_turn_passed                         = false;
         g_released_session_outlived_its_sweep = -1;
         g_release_at_a_reset                  = false;
+        g_clear_at_a_reset                    = false;
         const std::string cert                = qb::http::test::ssl_cert_path().string();
         const std::string key                 = qb::http::test::ssl_key_path().string();
         thread                                = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key](Server &srv) -> bool {
@@ -4733,8 +4763,8 @@ TEST_F(Http2StreamSweep, AHeaderBlockHeldOpenBesideAnEventStreamHasItsStreamRese
     const std::vector<std::pair<std::string, std::string>> indexed{{"x-trace", std::string(64, 't')}};
     const auto                                             block = raw.next_header_block("/slow?ms=0", "GET", indexed);
     const std::size_t                                      half  = block.second.size() / 2;
+    const auto                                             begun = Clock::now(); // a lower bound: taken before the frame that opens the block
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, std::vector<uint8_t>(block.second.begin(), block.second.begin() + half)));
-    const auto begun = Clock::now();
     const auto beats = raw.streams[events].data_bytes;
     raw.read_until([&] { return raw.streams[block.first].reset || !alive(); }, kDeadline);
     ASSERT_TRUE(alive()) << "a header block held open past its bound ended the connection";
@@ -4784,9 +4814,9 @@ TEST_F(Http2StreamSweep, ATimeoutLoweredAtRunTimeCutsAHeldStreamNoSoonerThanItse
     const auto held   = raw.request("/never");
     raw.read_for(ms(1500));
     ASSERT_FALSE(raw.streams[held].reset) << "reset under the timeout of 10 s";
-    const auto lower = raw.request("/lower?ms=1000");
+    const auto lowered = Clock::now(); // a lower bound: taken before the request whose handler lowers the timeout
+    const auto lower   = raw.request("/lower?ms=1000");
     ASSERT_TRUE(raw.read_until([&] { return raw.streams[lower].end_stream || !alive(); }, kDeadline));
-    const auto lowered = Clock::now();
     ASSERT_TRUE(raw.read_until([&] { return raw.streams[held].reset || !alive(); }, kDeadline)) << "the held stream was never reset";
     ASSERT_TRUE(alive()) << "the connection ended at " << since(lowered).count() << " ms";
     EXPECT_GE(since(lowered), ms(1000) - kBeat) << "a lowered timeout cut the stream its handler holds sooner than itself";
@@ -4871,6 +4901,74 @@ TEST_F(Http2StreamSweep, ASessionReleasedByAResetsObserverOutlivesItsSweep) {
     EXPECT_EQ(g_released_session_outlived_its_sweep.load(), 1) << "the session was destroyed under the sweep that was resetting its stream";
 }
 
+// A whole response its peer reads steadily, through a socket that takes it at the pace it is read, is kept (Huly QB-1248):
+// its DATA is written into the session's output as far as the windows allow, whatever the socket takes, and a peer can
+// give a window back only for what it has read. A reader whose window is 1 MiB reads 40 KiB every 0.1 s and gives the
+// windows back 768 KiB at a time -- some 1.9 s on, past the idle bound of 1.2 s. The socket takes the output in bursts as
+// the reader frees its buffers (some 256 KiB on macOS's loopback, measured, the buffers asked for 16 KiB): 0.64 s apart at
+// that pace, a sweep's period under the bound. Its progress was the write: it was reset at that bound while the socket
+// drained at the reader's pace. It now progresses as the socket takes, and its peer's bound starts once its DATA has left.
+TEST_F(Http2StreamSweep, AWholeResponseItsPeerReadsSlowlyIsKeptWhileTheSocketDrainsIt) {
+    using namespace http2_stream_sweep_test;
+    constexpr std::uint32_t window = 1u << 20, giveback = 768u * 1024;
+    constexpr std::size_t   body = 1280u * 1024;
+    raw.receive_buffer           = 16384; // before the connection: the window its kernel advertises stays that small
+    connect({{Raw::SETTINGS_INITIAL_WINDOW_SIZE, window}});
+    ASSERT_TRUE(raw.window_updates({{0u, window}})); // the connection's window as wide as the stream's: the stream's holds
+    raw.read_cap         = 8 * 1024;
+    const auto  download = raw.request("/large-to-a-slow-reader?kib=1280");
+    std::size_t given    = 0;
+    const auto  deadline = Clock::now() + ms(30000);
+    while (raw.streams[download].data_bytes < body && !raw.streams[download].reset && alive() && Clock::now() < deadline) {
+        std::this_thread::sleep_for(kBeat);
+        raw.read_up_to(40 * 1024);
+        const std::size_t read = raw.streams[download].data_bytes;
+        if (read - given >= giveback) {
+            const auto octets = static_cast<std::uint32_t>(read - given);
+            ASSERT_TRUE(raw.window_updates({{download, octets}, {0u, octets}}));
+            given = read;
+        }
+    }
+    EXPECT_FALSE(raw.streams[download].reset) << "a response its peer read steadily was reset while the socket drained it, at "
+                                              << raw.streams[download].data_bytes << " octets";
+    EXPECT_EQ(raw.streams[download].data_bytes, body);
+    EXPECT_TRUE(alive());
+}
+
+// The other half (Huly QB-1248): a whole response whose peer opens its windows and never reads its socket is reset at
+// its bound -- the socket takes nothing of the output, so the stream waits on its peer and makes no progress. The client
+// reads nothing for twice the bound and a sweep, then reads what the server had written: the stream's RST_STREAM behind
+// part of the body. (Before the socket's drain was the rule it was reset as well: a control.)
+TEST_F(Http2StreamSweep, AWholeResponseWhoseSocketItsPeerNeverReadsIsResetAtItsBound) {
+    using namespace http2_stream_sweep_test;
+    constexpr std::uint32_t window = 1u << 20;
+    raw.receive_buffer             = 16384; // before the connection: the window its kernel advertises stays that small
+    connect({{Raw::SETTINGS_INITIAL_WINDOW_SIZE, window}});
+    ASSERT_TRUE(raw.window_updates({{0u, window}}));
+    const auto download = raw.request("/large-to-a-slow-reader?kib=1280");
+    std::this_thread::sleep_for(2 * kIdle + kPeriod); // nothing read: the socket takes nothing of the output
+    ASSERT_TRUE(raw.read_until([&] { return raw.streams[download].reset || raw.streams[download].end_stream || !alive(); }, kDeadline));
+    EXPECT_TRUE(raw.streams[download].reset) << "a response whose socket its peer never read was kept, " << raw.streams[download].data_bytes
+                                             << " octets of it read once the client read again";
+    EXPECT_LT(raw.streams[download].data_bytes, 1280u * 1024);
+}
+
+// A reset's observer that clears the session's protocols (Huly QB-1248): the sweep resets a response its peer does not
+// take, and the hook that reset runs, REQUEST_COMPLETE, calls clear_protocols(). qb-io retires a protocol only inside a
+// read dispatch: from the sweep's timer the clear destroys the protocol at once, and the sweep goes on in it -- a
+// heap-use-after-free under AddressSanitizer. Disabled until qb-io retires a protocol cleared outside a read pass as it
+// does inside one, and the sweep runs in that scope.
+TEST_F(Http2StreamSweep, DISABLED_AResetsObserverThatClearsTheProtocolsLeavesTheSweepNothingFreedToRunIn) {
+    using namespace http2_stream_sweep_test;
+    g_timeout_ms = 60000; // within the case nothing but the sweep ends this stream
+    connect({{Raw::SETTINGS_INITIAL_WINDOW_SIZE, 16}});
+    g_clear_at_a_reset = true;
+    const auto doomed  = raw.request("/cleared-at-reset"); // 16 octets leave; the rest waits on a window the client never opens
+    raw.read_until([&] { return raw.streams[doomed].reset || !alive(); }, kDeadline);
+    g_clear_at_a_reset = false;
+    EXPECT_TRUE(raw.streams[doomed].reset || !alive()) << "the sweep never reached the response";
+}
+
 #ifdef NDEBUG
 // A value of zero or less would reset every stream at once, or stop the sweep: the setter refuses each and keeps what
 // it had. The session here asks for a bound, an incomplete bound and a period of zero once it has set its own; its
@@ -4888,6 +4986,10 @@ TEST_F(Http2StreamSweep, AValueOfZeroIsRefusedAndTheSweepRunsAsItWasSet) {
     ASSERT_TRUE(raw.read_until([&] { return raw.streams[large].reset || !alive(); }, kDeadline)) << "a value of zero stopped the sweep";
     EXPECT_GE(since(begun), kIdle) << "an idle bound of zero was taken";
     EXPECT_TRUE(alive());
+    const auto period = raw.request("/period");
+    ASSERT_TRUE(raw.read_until([&] { return raw.streams[period].end_stream || !alive(); }, kDeadline));
+    EXPECT_EQ(raw.streams[period].body(), std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(kPeriod).count()))
+        << "a period under the floor was taken";
 }
 #endif
 

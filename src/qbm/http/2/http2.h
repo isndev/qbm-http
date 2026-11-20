@@ -124,6 +124,14 @@ public:
         const auto queued = this->out().size();
         return _appended_total > queued ? _appended_total - queued : 0;
     }
+    /// What the socket took, ever: the TLS layer's count of the octets it wrote to it. It moves as the socket takes them;
+    /// drained_total() moves when a TLS write reports its records written, which a slow reader left 800 KiB behind (QB-1248).
+    [[nodiscard]] std::uint64_t
+    socket_written() const noexcept {
+        SSL *const ssl = this->transport().ssl_handle();
+        BIO *const bio = ssl ? SSL_get_wbio(ssl) : nullptr;
+        return bio ? static_cast<std::uint64_t>(BIO_number_written(bio)) : 0;
+    }
     using ContextType = qb::http::Context<Derived>;
     using Router      = typename qb::http::Router<Derived>;
 
@@ -760,6 +768,7 @@ public:
     void
     sweep_streams() noexcept {
         auto owner = this->weak_from_this().lock(); // a reset's observer may release the session: not under this call,
+        _sweep_hold.reset();                        // nor what an earlier sweep could not hand over (below): `owner` holds it now
         if (auto *const protocol = this->is_connected() ? live_http2_protocol() : nullptr) {
             _sweeping = true; // a header block open past its bound ends the connection here, from the timer (Huly QB-1248)
             protocol->cleanup_idle_streams(_stream_idle_timeout, _stream_incomplete_timeout, this->getTimeout());
@@ -767,7 +776,11 @@ public:
         }
         if (auto *const protocol = this->is_connected() ? live_http2_protocol() : nullptr; protocol && protocol->has_streams())
             http2_streams_open(); // asked again: a reset's observer may have ended the connection, cleared its protocols or extracted it
-        qb::io::async::defer([owner = std::move(owner)] {}); // nor under its timer's action, which never releases its timer: a turn later
+        try {
+            qb::io::async::defer([hold = owner] {}); // nor under its timer's action, which never releases its timer: a turn later
+        } catch (...) {
+            _sweep_hold = std::move(owner); // no turn to be had (an allocation): kept to the next sweep or stop_sweep(), never let go here
+        }
     }
 
     /// End of stream: the socket took everything the output held.
@@ -794,7 +807,7 @@ public:
         // Stop the libev watcher immediately so this event loop stops monitoring
         // the socket before it is moved to another io_handler.
         this->stop();
-        _sweep_timer.stop();  // and the sweep's timer: nothing of this session's stays armed on this loop (Huly QB-1248)
+        stop_sweep();         // and the sweep's timer: nothing of this session's stays armed on this loop (Huly QB-1248)
         cancel_all_streams(); // the producers are told first: the cancellation of a context then resets nothing (Huly QB-86)
         for (auto &[stream_id, context] : _contexts) {
             context->cancel("Session extracted");
@@ -822,7 +835,7 @@ public:
         } else {
             LOG_HTTP_INFO_PA(this->id(), "Disconnected. Reason code: " << e.reason);
         }
-        _sweep_timer.stop();  // the connection ended: its sweep with it (Huly QB-1248)
+        stop_sweep();         // the connection ended: its sweep with it (Huly QB-1248)
         cancel_all_streams(); // the producers are told first (Huly QB-86)
         for (auto &context : _contexts) {
             context.second->cancel("Session disconnected");
@@ -926,23 +939,37 @@ protected:
     /// The stream sweep's bounds and period (Huly QB-1248), the constants by default: a session class may set its own in its constructor, as it
     /// may setTimeout(). @p idle bounds a response its peer does not take, @p incomplete a request that stops arriving; the session's timeout,
     /// read at each sweep, bounds a stream its handler holds. A value of zero or less is refused -- asserted -- and the one in place kept: it
-    /// would reset every stream at once, or stop the sweep.
+    /// would reset every stream at once, or stop the sweep -- and so is a period under min_stream_sweep_period.
     void
     set_stream_sweep(qb::duration idle, qb::duration incomplete, qb::duration period = constants::CLEANUP_INTERVAL) noexcept {
-        assert(idle > qb::duration::zero() && incomplete > qb::duration::zero() && period > qb::duration::zero());
+        assert(idle > qb::duration::zero() && incomplete > qb::duration::zero() && period >= min_stream_sweep_period);
         _stream_idle_timeout       = idle > qb::duration::zero() ? idle : _stream_idle_timeout;
         _stream_incomplete_timeout = incomplete > qb::duration::zero() ? incomplete : _stream_incomplete_timeout;
-        _stream_sweep_period       = period > qb::duration::zero() ? period : _stream_sweep_period;
+        _stream_sweep_period       = period >= min_stream_sweep_period ? period : _stream_sweep_period;
     }
+    /// The shortest period set_stream_sweep() takes: a shorter one armed the timer again at every pass of the loop (Huly QB-1248).
+    static constexpr qb::duration min_stream_sweep_period = std::chrono::milliseconds(1);
     [[nodiscard]] bool
     stream_sweep_armed() const noexcept { // its timer armed: from a read pass leaving a stream open to the first fire that finds none
         return _sweep_timer.armed();
     }
+    [[nodiscard]] qb::duration
+    stream_sweep_period() const noexcept { // the period set_stream_sweep() kept
+        return _stream_sweep_period;
+    }
 
 private:
-    qb::duration _stream_idle_timeout{constants::STREAM_IDLE_TIMEOUT};             ///< The sweep's bound on a response its peer does not take
-    qb::duration _stream_incomplete_timeout{constants::STREAM_INCOMPLETE_TIMEOUT}; ///< Its bound on a request that stops arriving
-    qb::duration _stream_sweep_period{constants::CLEANUP_INTERVAL};                ///< Its period: greater than zero (set_stream_sweep())
+    qb::duration          _stream_idle_timeout{constants::STREAM_IDLE_TIMEOUT}; ///< The sweep's bound on a response its peer does not take
+    qb::duration          _stream_incomplete_timeout{constants::STREAM_INCOMPLETE_TIMEOUT}; ///< Its bound on a request that stops arriving
+    qb::duration          _stream_sweep_period{constants::CLEANUP_INTERVAL};                ///< Its period: min_stream_sweep_period at least
+    std::shared_ptr<void> _sweep_hold; ///< The session, when no turn could be asked to let it go: to the next sweep or stop_sweep()
+
+    void
+    stop_sweep() noexcept { // the timer, and a hold of the session (_sweep_hold) while another owner keeps it: let go, it frees nothing
+        _sweep_timer.stop();
+        if (_sweep_hold.use_count() > 1)
+            _sweep_hold.reset();
+    }
 };
 
 /// HTTP/2 I/O handler with routing (Derived: the CRTP derived type; Session: the session type).

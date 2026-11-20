@@ -577,6 +577,56 @@ BM_H2_StatsSnapshotRequested(benchmark::State &state) {
     measure_h2_stats_snapshot<true>(state);
 }
 
+// A connection to the HTTP/2 server, from its connect to its first response and its end (Huly QB-1248): each iteration a
+// fresh client connects -- TCP, the TLS handshake, ALPN --, asks GET /bench/1, is answered and disconnects, and the
+// server has let its session go before the next. The server builds a session at each accept, on h2 and on the HTTP/1.1
+// its ALPN falls back to -- the session class is one, its stream sweep's timer a member of it -- so this cell carries
+// what a session costs to build and to release. Arg 0: h2 (qb::http2::Client); 1: HTTP/1.1 over the same listener
+// (qb::http1::Client, which offers no ALPN). The plain HTTP/1.1 server's session has no sweep timer: no cell of its own.
+template <typename ClientPtr>
+bool
+first_response(Fixture &fixture, ClientPtr client, std::size_t sessions_before) {
+    bool connected = false, refused = false, answered = false, ok = false;
+    client->set_verify_peer(false);
+    client->set_connect_timeout(std::chrono::seconds(5));
+    if (!client->connect([&](bool up, const std::string &) { (up ? connected : refused) = true; })
+        || !http_client_bench::pump_until([&] { return connected || refused; }) || !connected) {
+        return false;
+    }
+    client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/bench/1")}, [&](qb::http::Response response) {
+        ok       = response.status() == qb::http::status::OK && response.body().as<std::string>() == "1";
+        answered = true;
+    });
+    if (!http_client_bench::pump_until([&] { return answered; }) || !ok) {
+        return false;
+    }
+    client->disconnect();
+    return http_client_bench::pump_until([&] { return fixture.server->sessions().size() == sessions_before; });
+}
+
+void
+BM_H2Server_ConnectToFirstResponse(benchmark::State &state) {
+    const bool http11 = state.range(0) != 0;
+    Fixture    fixture; // its own h2 client stays connected, idle, beside each iteration's
+    if (!fixture.ready) {
+        state.SkipWithError("HTTP/2 loopback TLS handshake failed or certificate missing");
+        return;
+    }
+    const auto origin = "https://localhost:" + std::to_string(fixture.server->transport().local_endpoint().port());
+    const auto before = fixture.server->sessions().size();
+    for (auto _ : state) {
+        const bool good = http11 ? first_response(fixture, qb::http1::make_client(origin), before)
+                                 : first_response(fixture, qb::http2::make_client(origin), before);
+        if (!good) {
+            state.SkipWithError("a connection was not answered, or its session outlived it");
+            return;
+        }
+    }
+    state.SetItemsProcessed(state.iterations());
+    state.counters["connections"] = static_cast<double>(state.iterations());
+    state.SetLabel(http11 ? "HTTP/1.1 over the HTTP/2 server's listener (no ALPN offered)" : "h2 (ALPN)");
+}
+
 } // namespace
 
 BENCHMARK(BM_H2_WarmPendingBurst)->Unit(benchmark::kMicrosecond);
@@ -595,5 +645,13 @@ BENCHMARK(BM_H2_ValidDrain)
     ->Args({50, 25, 1, 0})
     ->Args({32, 32, 8, 4}) // 256 completed in eight waves, never 256 active streams
     ->ArgNames({"requests", "closed", "waves", "anchors"})
+    ->Unit(benchmark::kMicrosecond);
+BENCHMARK(BM_H2Server_ConnectToFirstResponse)
+    ->Arg(0)
+    ->Arg(1)
+    ->ArgNames({"http11"})
+    // A fresh TCP pair each iteration: calibration would exhaust the host's ephemeral ports. Bound identical work on both sides.
+    ->Iterations(64)
+    ->UseRealTime()
     ->Unit(benchmark::kMicrosecond);
 BENCHMARK_MAIN();
