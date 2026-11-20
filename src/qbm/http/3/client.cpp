@@ -137,11 +137,13 @@ Client::given_now(from who) const noexcept {
     if (!weak_from_this().expired()) {
         return false; // kept for the client's turn
     }
-    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. An answer the client gives by
-    // itself is given inside the call, by the destructor's own rule. One the loop brings while the destructor still has
-    // answers to hear -- a callback it runs ran the loop -- takes its place behind them, as in ordinary operation: the
-    // destructor hears it in its turn. Given at once, it went ahead of what was owed before it (Huly QB-1246).
-    return who == from::the_client || _owed.empty();
+    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. While the destructor still has
+    // answers to hear, any other takes its place behind them, as in ordinary operation, and the destructor hears it in
+    // its turn: one the loop brings -- a callback it runs ran the loop --, and one the client gives by itself -- a
+    // callback it runs called disconnect(). Given at once, it went ahead of what was owed before it (Huly QB-1246). With
+    // nothing owed it is given inside the call: a plain object owes nothing, ever, and a push the destructor answers has
+    // a rule of its own (push_request()).
+    return _owed.empty();
 }
 
 void
@@ -612,6 +614,13 @@ Client::ensure_absolute_uri(qb::http::Request &request) {
 
 std::optional<qb::http::Response>
 Client::prepare_request(qb::http::Request &request) {
+    // A target the HTTP/1.1 serializer refuses is refused here, where it is pushed, by the same check: a query with SP, a
+    // control byte or DEL, and a URI that failed to parse. The engine wrote the first into `:path` as it was -- a field no
+    // client may send --: a qb server closed the connection for it, and every request on it failed for the fault of one.
+    // The second, made absolute below, named another resource, and was sent (Huly QB-1246).
+    if (const char *why = qb::http::detail::unsendable_target(request.uri())) {
+        return create_error_response(qb::http::status::BAD_REQUEST, std::string("HTTP/3 request URI cannot be sent: ") + why);
+    }
     ensure_absolute_uri(request);
     if (request.uri().host().empty()) {
         return create_error_response(qb::http::status::BAD_REQUEST, "HTTP/3 request URI is missing a host");
@@ -739,7 +748,12 @@ Client::cancel_request(request_id id, std::string const &reason) {
     }
     const auto stream_id = active->first; // the client is kept through the callback and the RFC 9114 §4.1 stream reset (above)
     fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST, from::the_client);
-    reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+    try {
+        reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+    } catch (...) {
+        // the reset could not be written: the stream ends with its connection. Thrown on, it left the pass below unrun:
+        // a request that waited for this stream stayed queued until the next push (Huly QB-1246)
+    }
     process_pending_requests(from::the_client);
     return true;
 }
@@ -869,35 +883,15 @@ Client::time_pending() noexcept {
 
 void
 Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
-    const auto own = [&](RequestContext const &ctx) {
-        return (request_id != 0 && ctx.request_id == request_id) || (batch_id != 0 && ctx.batch_id == batch_id);
-    };
+    // Out of the queue, and the batch with its callback. A member already in flight needs nothing here: an exception
+    // leaves a push with one in flight only when a submission of that push was cut short, which ends the connection,
+    // and that close answers a member through its batch alone -- gone below.
     for (auto queued = _pending_requests.begin(); queued != _pending_requests.end();) {
-        if (*queued && own(**queued)) {
+        if (*queued && ((request_id != 0 && (*queued)->request_id == request_id) || (batch_id != 0 && (*queued)->batch_id == batch_id))) {
             ++_failed_requests;
             queued = _pending_requests.erase(queued); // its timer goes with it
         } else {
             ++queued;
-        }
-    }
-    std::uint64_t streams[16]; // a batch larger than this is taken back sixteen streams a pass
-    for (std::size_t found = 1; found != 0;) {
-        found = 0;
-        for (auto const &[stream_id, ctx] : _active_requests) {
-            if (ctx && own(*ctx) && found < std::size(streams)) {
-                streams[found++] = stream_id;
-            }
-        }
-        for (std::size_t i = 0; i < found; ++i) {
-            ++_failed_requests;
-            _active_requests.erase(streams[i]);
-        }
-        for (std::size_t i = 0; i < found && _h3 && is_connected() && !_deferred_close; ++i) { // not on a connection that is going
-            try {
-                reset_stream(0, streams[i], NGHTTP3_H3_REQUEST_CANCELLED); // RFC 9114 section 4.1: the client no longer wants it
-            } catch (...) {
-                // the reset could not be written: the stream ends with its connection
-            }
         }
     }
     if (batch_id != 0) {
@@ -932,14 +926,15 @@ Client::process_pending_requests(from who, std::uint64_t own_request, std::uint6
         _pending_requests.pop_front();
 
         // A submission that an exception cuts short -- an allocation, or what a hook of the transport throws under the
-        // send it makes -- has one outcome, and still finishes the close it deferred, as a read does (Huly QB-1246):
+        // send it makes -- ends the connection, and gives its request one outcome (Huly QB-1246):
         // - cut short inside the call of the program that pushed it, the exception is that outcome: the request is taken
-        //   back unanswered here, with whatever else that call pushed once the exception leaves it (withdraw()) -- the
-        //   rule of an initiating function that throws: its completion handler is never invoked;
+        //   back unanswered here, with whatever else that call pushed (withdraw()) -- the rule of an initiating function
+        //   that throws: its completion handler is never invoked;
         // - cut short anywhere else -- the loop submitting what waited for a connection, a call the program made for
         //   another request --, the request is answered 503, once, and the exception goes on to whoever ran the pass.
-        // The request had left the queue and was in no registry yet: it was destroyed unheard, and the close stayed half
-        // done, its mark keeping every later request, disconnect() and connect() out. Then it was answered AND thrown at.
+        // The request had left the queue and was in no registry yet: it was destroyed unheard, and a close deferred to the
+        // end of the submission stayed half done, its mark keeping every later request, disconnect() and connect() out.
+        // Then it was answered AND thrown at. Then the connection was kept when no close was deferred: see below.
         std::uint64_t      stream_id     = 0;
         bool               opened        = false;
         bool               submitted     = false;
@@ -963,6 +958,16 @@ Client::process_pending_requests(from who, std::uint64_t own_request, std::uint6
             submitted = _h3->submit_request(stream_id, ctx->request);
         } catch (...) {
             cut_short = std::current_exception();
+        }
+        if (cut_short && !_deferred_close) {
+            // The engine hands its bytes to the transport, then is told how many went (drain()): an exception at the end
+            // of the send leaves between the two, and the engine writes them again. On the request's own stream that is
+            // nothing -- the stream was reset --, but the QPACK encoder's stream lives on: with a dynamic table in use the
+            // peer reads an instruction twice and ends the connection (H3_QPACK_ENCODER_STREAM_ERROR), or keeps another
+            // table than ours. Nothing here knows whether the transport took the bytes, so the connection ends, as nghttp3
+            // itself treats a callback's failure: by the close below, with this for its reason. It was kept: one cut, and 26
+            // of the next 30 requests failed against a peer that advertises a table (Huly QB-1246).
+            _deferred_close.emplace("HTTP/3 submission cut short by an exception");
         }
         const bool thrown_at_its_own_call =
             cut_short && ((own_request != 0 && ctx->request_id == own_request) || (own_batch != 0 && ctx->batch_id == own_batch));
@@ -1021,17 +1026,17 @@ Client::process_pending_requests(from who, std::uint64_t own_request, std::uint6
             return;
         }
         if (!submitted) {
-            // The request never made it onto the wire, or not whole. Settled first, then its stream abandoned the way the
-            // client cancels any request (RFC 9114 section 4.1), in a try of its own: sharing one with the refusal, a
-            // reset that threw too -- a hook that throws again, an allocation that still fails -- left the request
-            // unanswered (Huly QB-1246).
+            // The engine refused the request, or an exception cut its submission short under a read, whose end closes the
+            // connection. Settled first, then -- on a connection that stays -- its stream abandoned the way the client
+            // cancels any request (RFC 9114 section 4.1), in a try of its own: sharing one with the refusal, a reset that
+            // threw left the request unanswered (Huly QB-1246).
             std::exception_ptr heard_error; // what the callback of the refusal throws reaches the caller of the push, as before
             try {
                 settle("Failed to submit HTTP/3 request");
             } catch (...) {
                 heard_error = std::current_exception();
             }
-            if (opened && _h3 && is_connected()) {
+            if (opened && _h3 && is_connected() && !_deferred_close) {
                 try {
                     reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
                 } catch (...) {
@@ -1117,7 +1122,7 @@ Client::handle_connection_failure(std::string const &error, from who) {
 }
 
 void
-Client::close_failed_transport(std::string_view reason) {
+Client::close_failed_transport(std::string_view reason) noexcept {
     struct CloseGuard {
         bool &flag;
         explicit CloseGuard(bool &value) noexcept
@@ -1128,7 +1133,18 @@ Client::close_failed_transport(std::string_view reason) {
             flag = false;
         }
     } guard(_closing_failed_attempt);
-    qb::io::async::quic::endpoint::close(0, reason);
+    // Nothing leaves this close: it ends a connection already given up, and what follows it -- the failure of what that
+    // connection carried -- must run. The endpoint's close stops where its drain threw (what cut a submission short may
+    // throw again there: an allocation that still fails), its socket left open and no later connect() possible; asked a
+    // second time, it finishes (Huly QB-1246).
+    for (int tries = 0; tries < 2; ++tries) {
+        try {
+            qb::io::async::quic::endpoint::close(0, reason);
+            return;
+        } catch (...) {
+            // again, once
+        }
+    }
 }
 
 std::exception_ptr
@@ -1313,7 +1329,11 @@ Client::request_timed_out(std::uint64_t request_id) noexcept {
             const auto stream_id = it->first;
             fail_request(stream_id, "HTTP/3 request timeout", qb::http::status::REQUEST_TIMEOUT);
             // Timeout aborts the in-flight request stream (RFC 9114 §4.1).
-            reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+            try {
+                reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+            } catch (...) {
+                // the reset could not be written: the stream ends with its connection, and the pass below still runs
+            }
             process_pending_requests();
         },
         "the timeout of a request");

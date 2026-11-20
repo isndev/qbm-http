@@ -174,11 +174,13 @@ Client::given_now(from who) const noexcept {
     if (!weak_from_this().expired()) {
         return false; // kept for the client's turn
     }
-    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. An answer the client gives by
-    // itself is given inside the call, by the destructor's own rule. One the loop brings while the destructor still has
-    // answers to hear -- a callback it runs ran the loop -- takes its place behind them, as in ordinary operation: the
-    // destructor hears it in its turn. Given at once, it went ahead of what was owed before it (Huly QB-1246).
-    return who == from::the_client || _owed.empty();
+    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. While the destructor still has
+    // answers to hear, any other takes its place behind them, as in ordinary operation, and the destructor hears it in
+    // its turn: one the loop brings -- a callback it runs ran the loop --, and one the client gives by itself -- a
+    // callback it runs called disconnect(). Given at once, it went ahead of what was owed before it (Huly QB-1246). With
+    // nothing owed it is given inside the call: a plain object owes nothing, ever, and a push the destructor answers has
+    // a rule of its own (push_request()).
+    return _owed.empty();
 }
 
 void
@@ -355,6 +357,10 @@ Client::connect(ConnectionCallback callback) {
         // that just closed: no pass reads it before start_connection() re-stamps it, but a deferred attempt owns no stale start time.
         _connect_after_close = true;
         _connect_started_at  = std::chrono::steady_clock::now();
+        // And armed now: the connect timeout counts from the moment connect() is asked, as on the two other clients. It
+        // was armed only by whatever armed the timer next -- a push made after it --, so a callback that ran the loop
+        // until its connect() was answered waited for ever, or heard `false` at a deadline nobody had set (Huly QB-1246).
+        arm_request_timeout();
         return true;
     }
     start_connection();
@@ -423,6 +429,15 @@ Client::close_connection(const std::string &error_message, from who) {
     // once, and the next attempt starts only after the transport that dropped has been disposed. After an EXPLICIT
     // disconnect no run follows, so a push made from one of these callbacks connects on its own, as it would on the
     // HTTP/1.1 client: it is not a failure pass then.
+    // What a callback throws does not stop the close: every other callback is still called, and the transport below is
+    // still ended -- the first exception goes on once that is done. Thrown on at once, it left the transport marked as
+    // closing and never closed: every later connect() waited for an end that never came (Huly QB-1246).
+    std::exception_ptr thrown;
+    const auto         keep = [&thrown] {
+        if (!thrown) {
+            thrown = std::current_exception();
+        }
+    };
     {
         auto                     ended = detach_requests();
         const failure_pass_scope pass{_in_failure_pass, _auto_reconnect && !_intentional_disconnect};
@@ -433,11 +448,19 @@ Client::close_connection(const std::string &error_message, from who) {
             _connection_callbacks.clear();
             for (auto &callback : callbacks) {
                 if (callback) {
-                    notify(_destroying, "HTTP/2", [&] { tell_connect(callback, false, error_message, who); });
+                    try {
+                        notify(_destroying, "HTTP/2", [&] { tell_connect(callback, false, error_message, who); });
+                    } catch (...) {
+                        keep();
+                    }
                 }
             }
         }
-        fail_detached(std::move(ended), error_message, who);
+        try {
+            fail_detached(std::move(ended), error_message, who);
+        } catch (...) {
+            keep();
+        }
     }
 
     if (announce) {
@@ -456,6 +479,9 @@ Client::close_connection(const std::string &error_message, from who) {
                 },
                 GOAWAY_FLUSH_LIMIT);
         }
+        if (thrown) {
+            std::rethrow_exception(thrown);
+        }
         return;
     }
 
@@ -464,6 +490,9 @@ Client::close_connection(const std::string &error_message, from who) {
     // before it (Huly QB-1246).
     if (ends_transport && _transport_ended != owned) {
         BaseTcpClient::disconnect(); // the `disconnected` it raises decides on the reconnection
+    }
+    if (thrown) {
+        std::rethrow_exception(thrown);
     }
 }
 
@@ -495,6 +524,13 @@ Client::ensure_absolute_uri(qb::http::Request &request) {
 
 std::optional<qb::http::Response>
 Client::prepare_request(qb::http::Request &request) {
+    // A target the HTTP/1.1 serializer refuses is refused here, where it is pushed, by the same check: a query with SP, a
+    // control byte or DEL, and a URI that failed to parse. Queued, the first reached the field encoder, which refuses a
+    // control byte in `:path`: the protocol sent its own GOAWAY from under the send, and every request on the connection
+    // failed for the fault of one. The second, made absolute below, named another resource, and was sent (Huly QB-1246).
+    if (const char *why = qb::http::detail::unsendable_target(request.uri())) {
+        return create_error_response(qb::http::status::BAD_REQUEST, std::string("HTTP/2 request URI cannot be sent: ") + why);
+    }
     ensure_absolute_uri(request);
     if (request.uri().host().empty()) {
         return create_error_response(qb::http::status::BAD_REQUEST, "HTTP/2 request URI is missing a host");
@@ -553,6 +589,8 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     context->request    = std::move(request);
     context->callback   = callback;
     context->created_at = std::chrono::steady_clock::now();
+    context->id         = _next_request_id++;
+    const auto pushed   = context->id;
 
     LOG_HTTP_DEBUG_PA(_client_id, "Queuing request: " << context->request.method() << " " << context->request.uri().path());
 
@@ -560,13 +598,22 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     _pending_requests.push_back(std::move(context));
     arm_request_timeout();
 
-    // If connected, process immediately
-    if (is_connected()) {
-        process_pending_requests(from::the_client);
-    } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
-        // Auto-connect if not already connecting. Behind a scheduled reconnection, or from a
-        // failure callback, the request queues for the attempt the run decides on (QB-103).
-        connect(nullptr);
+    // One outcome for this call: its answer through the callback, or the exception that leaves it -- the rule of an
+    // initiating function that throws, as on HTTP/3. The pass below sends what waited before this request too, and the
+    // callback of one it refuses may throw: the exception left this call, and the request stayed queued, sent and
+    // answered by the next pass -- thrown at AND answered (Huly QB-1246).
+    try {
+        // If connected, process immediately
+        if (is_connected()) {
+            process_pending_requests(from::the_client);
+        } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
+            // Auto-connect if not already connecting. Behind a scheduled reconnection, or from a
+            // failure callback, the request queues for the attempt the run decides on (QB-103).
+            connect(nullptr);
+        }
+    } catch (...) {
+        withdraw(pushed, 0);
+        throw;
     }
 
     return true;
@@ -678,15 +725,39 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     // Store batch context
     _active_batches[batch_id] = std::move(batch_context);
 
-    // If connected, process immediately
-    if (is_connected()) {
-        process_pending_requests(from::the_client);
-    } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
-        // Auto-connect if not already connecting (same rule as push_request, QB-103).
-        connect(nullptr);
+    // One outcome for this call, as for a single request: an exception that leaves it takes the whole batch back, and
+    // its callback is never called.
+    try {
+        // If connected, process immediately
+        if (is_connected()) {
+            process_pending_requests(from::the_client);
+        } else if (!_is_connecting && !_reconnect_scheduled && !_in_failure_pass) {
+            // Auto-connect if not already connecting (same rule as push_request, QB-103).
+            connect(nullptr);
+        }
+    } catch (...) {
+        withdraw(0, batch_id);
+        throw;
     }
 
     return admitted_all;
+}
+
+void
+Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
+    // Out of the queue: an exception leaves a push before the pass has reached what that push queued, last in line. A
+    // member the pass has sent stays in flight; its answer finds no batch, and is dropped (batch_member_answered()).
+    for (auto queued = _pending_requests.begin(); queued != _pending_requests.end();) {
+        if (*queued && ((request_id != 0 && (*queued)->id == request_id) || (batch_id != 0 && (*queued)->batch_id == batch_id))) {
+            ++_failed_requests;
+            queued = _pending_requests.erase(queued);
+        } else {
+            ++queued;
+        }
+    }
+    if (batch_id != 0) {
+        _active_batches.erase(batch_id); // with its callback, unheard
+    }
 }
 
 void
@@ -832,6 +903,10 @@ Client::handle_connection_failure(const std::string &error_message) {
     // (no h2 over ALPN, no protocol) -- is closed here rather than left open with its watcher
     // registered: the `disconnected` it raises then finds the state already settled and the
     // pending work preserved, and the decision below is idempotent under it.
+    // A connect() that waited for the previous transport's end is this attempt: it has failed, and nothing is left to
+    // start when that end comes. Left set, the connect() was answered `false` at its deadline, and the client then
+    // connected by itself once the callback had returned -- an attempt nobody was waiting for (Huly QB-1246).
+    _connect_after_close       = false;
     const bool close_transport = _transport_started;
     const auto owned           = _transports_started; // as close_connection(): the transport this failure ends
     _transport_started         = false;
@@ -845,32 +920,55 @@ Client::handle_connection_failure(const std::string &error_message) {
     _h2_protocol              = nullptr;
     // The queue's flag too, for the transport closed below: a loop pass a callback runs can read its end, whose
     // `disconnected` clears both flags. Set after the callbacks, they outlived it: the next connect() waited for an end
-    // that never came, and the queue of the next transport did not hear its own (Huly QB-1246).
-    _preserve_pending_on_next_disconnect = close_transport;
+    // that never came, and the queue of the next transport did not hear its own (Huly QB-1246). Never cleared here: an
+    // attempt that had no transport -- a connect() that waited for the previous one's end, and timed out -- fails while
+    // that transport still closes, and what is pushed from here on is the next attempt's, not that transport's.
+    _preserve_pending_on_next_disconnect = _preserve_pending_on_next_disconnect || close_transport;
 
     // The work of the attempt that failed is taken out of the client before any callback is called, those of connect()
     // included, and all of them are called inside one failure pass: a request one of them pushes is the next attempt's --
     // it queues for the run when the client reconnects by itself, and connects on its own otherwise. Taken out after the
     // connect() callbacks, a request one of them had just pushed was failed by the pass that followed, with the error of
     // an attempt it never rode, while the attempt its push had started went on for nobody (Huly QB-1246).
+    std::exception_ptr thrown; // as close_connection(): what a callback throws goes on once the failure has run to its end
+    const auto         keep = [&thrown] {
+        if (!thrown) {
+            thrown = std::current_exception();
+        }
+    };
     {
         auto                     failed = detach_requests();
         const failure_pass_scope pass{_in_failure_pass, _auto_reconnect};
         auto                     callbacks = std::move(_connection_callbacks);
         _connection_callbacks.clear();
         for (auto &callback : callbacks) {
-            tell_connect(callback, false, error_message, from::the_loop);
+            try {
+                tell_connect(callback, false, error_message, from::the_loop);
+            } catch (...) {
+                keep();
+            }
         }
-        fail_detached(std::move(failed), "Connection failed: " + error_message);
+        try {
+            fail_detached(std::move(failed), "Connection failed: " + error_message);
+        } catch (...) {
+            keep();
+        }
     }
 
     // Reconnect only if failure callbacks queued fresh work.
     if (_auto_reconnect && has_pending_or_active_work()) {
-        attempt_reconnection();
+        try {
+            attempt_reconnection();
+        } catch (...) {
+            keep();
+        }
     }
 
     if (close_transport && _transport_ended != owned) { // not the next connection's, come up while a callback ran the loop
         BaseTcpClient::disconnect();
+    }
+    if (thrown) {
+        std::rethrow_exception(thrown);
     }
 }
 
@@ -973,13 +1071,21 @@ Client::finish_graceful_goaway_if_drained() {
         return;
     }
 
+    std::exception_ptr thrown; // as close_connection(): the transport is ended whatever a callback of the drain's end throws
     if (!_pending_requests.empty()) {
-        fail_all_requests(stream_ids_exhausted ? "HTTP/2 connection used its last stream identifier and automatic reconnection is disabled"
-                                               : "Server sent GOAWAY and automatic reconnection is disabled");
+        try {
+            fail_all_requests(stream_ids_exhausted ? "HTTP/2 connection used its last stream identifier and automatic reconnection is disabled"
+                                                   : "Server sent GOAWAY and automatic reconnection is disabled");
+        } catch (...) {
+            thrown = std::current_exception();
+        }
     }
 
     if (_transport_ended != owned) { // not the next connection's, come up while a callback above ran the loop
         BaseTcpClient::disconnect();
+    }
+    if (thrown) {
+        std::rethrow_exception(thrown);
     }
 }
 
@@ -1008,14 +1114,25 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
     auto &active_requests_to_fail  = detached.active;
     auto &pending_requests_to_fail = detached.pending;
     auto &active_batches_to_fail   = detached.batches;
-    // A member of a batch is answered with its batch, below: it has no callback of its own. Each answer is made inside the
-    // call of its callback, so what it fails to allocate is contained with it.
+    // Every one of them hears, whatever a callback throws: the first exception is kept and goes on once the last has been
+    // called, as on HTTP/3. Thrown on at once, it left the requests behind it destroyed unheard (Huly QB-1246). A member
+    // of a batch is answered with its batch, below: it has no callback of its own. Each answer is made inside the call
+    // of its callback, so what it fails to allocate is contained with it.
+    std::exception_ptr thrown;
+    const auto         answer = [&](auto &&call) {
+        try {
+            notify(_destroying, "HTTP/2", call);
+        } catch (...) {
+            if (!thrown) {
+                thrown = std::current_exception();
+            }
+        }
+    };
     for (auto &[stream_id, context] : active_requests_to_fail) {
         (void) stream_id;
         _failed_requests++;
         if (context->batch_id == 0) {
-            notify(_destroying, "HTTP/2",
-                   [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
+            answer([&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
         }
     }
 
@@ -1026,8 +1143,7 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
 
         _failed_requests++;
         if (context->batch_id == 0) {
-            notify(_destroying, "HTTP/2",
-                   [&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
+            answer([&] { give(*context, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error_message), who); });
         }
     }
 
@@ -1035,7 +1151,7 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
     for (auto &[batch_id, batch_context] : active_batches_to_fail) {
         (void) batch_id;
         if (!batch_context->all_completed) {
-            notify(_destroying, "HTTP/2", [&] {
+            answer([&] {
                 // Answer the members still unanswered (status 0, see push_requests): the ones a response or a refusal
                 // answered before this pass keep their own.
                 for (size_t i = 0; i < batch_context->responses.size(); ++i) {
@@ -1048,6 +1164,9 @@ Client::fail_detached(DetachedRequests detached, const std::string &error_messag
         }
     }
     arm_request_timeout();
+    if (thrown) {
+        std::rethrow_exception(thrown);
+    }
 }
 
 void

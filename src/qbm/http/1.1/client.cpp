@@ -454,6 +454,13 @@ Client::ensure_absolute_uri(qb::http::Request &request) {
 
 std::optional<qb::http::Response>
 Client::prepare_request(qb::http::Request &request) {
+    // A target the serializer refuses where it writes it is refused here, where it is pushed, as on the two other clients
+    // and by the same check: a query with SP, a control byte or DEL -- it was refused only once its turn to be written
+    // came, a connection made for it --, and a URI that failed to parse: made absolute below, it named another resource
+    // than the one asked for, and was sent (Huly QB-1246).
+    if (const char *why = qb::http::detail::unsendable_target(request.uri())) {
+        return create_error_response(qb::http::status::BAD_REQUEST, std::string("HTTP/1.1 request URI cannot be sent: ") + why);
+    }
     ensure_absolute_uri(request);
     if (request.uri().host().empty()) {
         return create_error_response(qb::http::status::BAD_REQUEST, "HTTP/1.1 request URI is missing a host");
@@ -715,11 +722,13 @@ Client::given_now(from who) const noexcept {
     if (!weak_from_this().expired()) {
         return false; // kept for the client's turn
     }
-    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. An answer the client gives by
-    // itself is given inside the call, by the destructor's own rule. One the loop brings while the destructor still has
-    // answers to hear -- a callback it runs ran the loop -- takes its place behind them, as in ordinary operation: the
-    // destructor hears it in its turn. Given at once, it went ahead of what was owed before it (Huly QB-1246).
-    return who == from::the_client || _owed.empty();
+    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. While the destructor still has
+    // answers to hear, any other takes its place behind them, as in ordinary operation, and the destructor hears it in
+    // its turn: one the loop brings -- a callback it runs ran the loop --, and one the client gives by itself -- a
+    // callback it runs called disconnect(). Given at once, it went ahead of what was owed before it (Huly QB-1246). With
+    // nothing owed it is given inside the call: a plain object owes nothing, ever, and a push the destructor answers has
+    // a rule of its own (push_request()).
+    return _owed.empty();
 }
 
 void

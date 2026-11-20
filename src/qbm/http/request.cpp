@@ -484,3 +484,19 @@ pipe<char>::put<qb::http::MessageHead<qb::http::Request>>(const qb::http::Messag
     return *this;
 }
 } // namespace qb::allocator
+
+namespace qb::http::detail {
+
+const char *
+unsendable_target(const qb::io::uri &uri) noexcept {
+    if (!uri.is_valid()) {
+        return "the request URI is invalid";
+    }
+    // The serializer's own check, not a copy of it (Huly QB-494): one definition of what a query may carry.
+    if (!qb::allocator::raw_query_is_valid(uri.encoded_queries())) {
+        return "the query carries SP, a control byte or DEL; percent-encode it";
+    }
+    return nullptr;
+}
+
+} // namespace qb::http::detail

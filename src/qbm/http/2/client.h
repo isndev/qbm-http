@@ -123,6 +123,9 @@ struct RequestContext {
     /// has no callback: its answer is recorded in its batch, whose callback is what the program hears.
     std::uint64_t batch_id    = 0;
     std::size_t   batch_index = 0;
+    /// Its number among the requests pushed alone on this client; 0 for a member of a batch. What a push names when an
+    /// exception leaves it and it takes its request back.
+    std::uint64_t id = 0;
 };
 
 /**
@@ -218,7 +221,8 @@ private:
     std::deque<std::unique_ptr<RequestContext>>                       _pending_requests;
     qb::unordered_map<uint32_t, std::unique_ptr<RequestContext>>      _active_requests;
     qb::unordered_map<uint64_t, std::unique_ptr<BatchRequestContext>> _active_batches;
-    uint64_t                                                          _next_batch_id = 1;
+    uint64_t                                                          _next_batch_id   = 1;
+    uint64_t                                                          _next_request_id = 1; ///< RequestContext::id
 
     // Configuration
     qb::duration _connect_timeout        = std::chrono::seconds(30);
@@ -670,7 +674,11 @@ private:
     /// was taken does not answer.
     [[nodiscard]] DetachedRequests detach_requests();
     /// Answers what detach_requests() took, each with @p error_message. fail_all_requests() is the two, one after the other.
+    /// Every one of them is answered whatever a callback throws; the first exception goes on once the last has heard.
     void fail_detached(DetachedRequests detached, const std::string &error_message, from who = from::the_loop);
+    /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: the request
+    /// @p request_id, or every member of the batch @p batch_id and the batch with its callback. Never throws.
+    void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
     /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
     [[nodiscard]] bool given_now(from who) const noexcept;
     /// Calls @p fn, a callback of the program, now: counted while it runs. What @p fn throws goes on to the caller.

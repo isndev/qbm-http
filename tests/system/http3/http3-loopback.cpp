@@ -4101,16 +4101,17 @@ protected:
     }
 };
 
-/// The hooks of the cases below, and what each does to the connection.
+/// The hooks of the cases below. Each cuts a submission short, and the connection ends with it, whichever: the two last
+/// make the send overflow its queue first, so that the transport is lost under the submission.
 struct Hook {
     std::string_view name;
     CutShort::at     where;
     int              times;
-    bool             loses_its_connection;
+    bool             overflows;
 };
 inline constexpr Hook k_hooks[] = {
-    {"thrown at the end of a send, the connection kept", CutShort::at::the_end_of_a_send, 1, false},
-    {"thrown at the end of a send and again at the reset of its stream", CutShort::at::the_end_of_a_send, 2, false},
+    {"thrown at the end of a send", CutShort::at::the_end_of_a_send, 1, false},
+    {"thrown at the end of a send and again at the close that follows", CutShort::at::the_end_of_a_send, 2, false},
     {"thrown once the send lost its connection", CutShort::at::a_close, 1, true},
     {"thrown once the send lost its connection and a disconnect() was called", CutShort::at::a_close_it_then_disconnects, 1, true},
 };
@@ -4131,7 +4132,82 @@ awaits_two(std::shared_ptr<CutShort> client, qb::http::Request first, Hook hook,
     said->push_back("second: " + std::to_string(static_cast<int>(second.status().code())));
 }
 
+class TableSession;
+/// An HTTP/3 server that advertises a QPACK dynamic table, as most servers do and no qb server does: the encoder of a
+/// client that talks to it uses the table, and its encoder stream carries instructions. A type of its own, so that the
+/// engine built for it -- and for no other owner -- can be given that one setting (the constructor below).
+class TableServer : public qb::http3::use<TableServer>::server<TableSession> {};
+class TableSession : public qb::http3::use<TableSession>::session<TableServer> {
+public:
+    using Base = qb::http3::use<TableSession>::session<TableServer>;
+    explicit TableSession(TableServer &server)
+        : Base(server) {}
+};
+
+/// A body no two offsets of which read alike over a short span: a run of bytes sent twice, or missing, shows.
+inline std::string
+pattern(std::size_t const size, unsigned const salt) {
+    std::string out(size, '\0');
+    unsigned    x = 2463534242u ^ (salt * 2654435761u);
+    for (std::size_t i = 0; i < size; ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        out[i] = static_cast<char>('a' + (x % 26));
+    }
+    return out;
+}
+
+/// A request the engine refuses where it is submitted, with no exception: a trailer section may not carry content-length.
+inline qb::http::Request
+unsendable() {
+    qb::http::Request request{qb::io::uri("/ok")};
+    request.trailers().set_header("content-length", "3");
+    return request;
+}
+
+/// Targets no client may send: a query that carries SP, a control byte or DEL as written (the path of a URI holds path
+/// characters only: such a byte there fails the parse, and the URI names no target).
+struct UnsendableTarget {
+    std::string_view what;
+    std::string      target;
+};
+inline const UnsendableTarget k_unsendable_targets[] = {
+    {"LF in the query", std::string("/ok?q=a\nb")},
+    {"CR in the query", std::string("/ok?q=a\rb")},
+    {"0x1F in the query", std::string("/ok?q=a\x1F") + "b"},
+    {"DEL in the query", std::string("/ok?q=a\x7F") + "b"},
+    {"SP in the query", std::string("/ok?q=a b")},
+    {"LF in the path", std::string("/ok/a\nb")},
+    {"CR in the path", std::string("/ok/a\rb")},
+    {"0x1F in the path", std::string("/ok/a\x1F") + "b"},
+    {"DEL in the path", std::string("/ok/a\x7F") + "b"},
+    {"SP in the path", std::string("/ok/a b")},
+};
+
 } // namespace http3_client_submit_test
+
+namespace qb::protocol::http3 {
+/// The engine of http3_client_submit_test::TableServer: the library's constructor, with a dynamic table of 4096 octets
+/// advertised where the library pins none. An explicit specialization for that one owner: no other engine is touched.
+template <>
+inline connection<qb::http3::internal::server<http3_client_submit_test::TableServer, http3_client_submit_test::TableSession>>::connection(
+    qb::http3::internal::server<http3_client_submit_test::TableServer, http3_client_submit_test::TableSession> &owner,
+    std::uint64_t connection_id, role r)
+    : _owner(owner)
+    , _role(r)
+    , _connection_id(connection_id) {
+    nghttp3_settings settings;
+    nghttp3_settings_default(&settings);
+    settings.qpack_blocked_streams     = 32;
+    settings.qpack_max_dtable_capacity = 4096; // the one difference
+    settings.max_field_section_size    = detail::max_field_section_size;
+    const auto cb                      = callbacks();
+    if (nghttp3_conn_server_new(&_conn, &cb, &settings, nghttp3_mem_default(), _anchor.get()) != 0) {
+        throw std::runtime_error("nghttp3_conn_server_new failed");
+    }
+}
+} // namespace qb::protocol::http3
 
 // A submission that an exception cuts short inside the call of the program that made it has one outcome: the exception
 // (Huly QB-1246). Everything that call pushed is taken back unanswered -- the request, or the whole batch, the members
@@ -4164,7 +4240,7 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortInsideThePushThatMadeItHasTheExcept
             auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
             client->set_verify_peer(false);
             client->set_request_timeout(400ms);
-            if (hook.loses_its_connection) {
+            if (hook.overflows) {
                 auto quic                     = client->settings();
                 quic.max_pending_stream_bytes = 16 * 1024; // the upload below overflows it: the send closes the transport
                 client->set_settings(quic);
@@ -4177,14 +4253,9 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortInsideThePushThatMadeItHasTheExcept
                 other_said = response.body().as<std::string>();
             });
             ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
-            const auto quiet = std::chrono::steady_clock::now() + 100ms; // the peer's own streams have come by then
-            while (std::chrono::steady_clock::now() < quiet) {
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-            }
-            const auto streams_held = client->get_stream_state_count(); // the connection's own, and the other request's
 
             qb::http::Request upload{qb::http::method::POST, qb::io::uri("/upload")};
-            upload.body()            = std::string(hook.loses_its_connection ? 256 * 1024 : 16, 'x');
+            upload.body()            = std::string(hook.overflows ? 256 * 1024 : 16, 'x');
             const bool second_member = form == "push_requests(), at its second member";
             const auto began         = std::chrono::steady_clock::now();
             if (form != "co_await push_request()") { // the coroutine arms the hook itself, at its push
@@ -4224,10 +4295,10 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortInsideThePushThatMadeItHasTheExcept
             // The other request, and for a batch cut short at its second member the first, submitted before it.
             EXPECT_EQ(client->in_flight_when_thrown, second_member ? 2u : 1u)
                 << "the hook threw at another submission: the case proves nothing";
-            EXPECT_EQ(client->is_connected(), !hook.loses_its_connection) << "the close the submission deferred was not run";
-            if (form != "co_await push_request()") { // (the coroutine has gone on to its second request by now)
-                EXPECT_EQ(client->get_active_request_count(), hook.loses_its_connection ? 0u : 1u)
-                    << "what the call pushed was not taken back: only the other request is in flight, when its connection is";
+            if (form != "co_await push_request()") { // (the coroutine has gone on to its second request by now, and dialled for it)
+                EXPECT_FALSE(client->is_connected()) << "a submission cut short did not end its connection";
+                EXPECT_EQ(client->get_active_request_count(), 0u) << "the close left a request in flight";
+                EXPECT_EQ(client->get_stream_state_count(), 0u) << "the close left the engine of the connection it ended";
             }
             EXPECT_EQ(own, 0) << "the call threw and its callback was called";
             if (form == "co_await push_request()") {
@@ -4243,17 +4314,13 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortInsideThePushThatMadeItHasTheExcept
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             }
             EXPECT_EQ(own, 0) << "what the call pushed was answered on a later turn";
-            EXPECT_EQ(other, hook.loses_its_connection ? 1 : 0)
-                << "the other request is answered once by the close, and only by it: " << other_said;
-            if (!hook.loses_its_connection && form != "co_await push_request()") { // (the coroutine's second request has a stream)
-                EXPECT_EQ(client->get_stream_state_count(), streams_held) << "a stream of what the call pushed was left open";
-            }
+            EXPECT_EQ(other, 1) << "the other request is answered once, by the close: " << other_said;
 
             // And the client goes on: a request is served, on a new connection where the old one went.
             client->push_request(qb::http::Request{qb::io::uri("/ok")},
                                  [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
             EXPECT_TRUE(pump([&] { return served == 1; }, 3s)) << "the client was left unable to serve a request";
-            EXPECT_EQ(client->get_active_request_count(), hook.loses_its_connection ? 0u : 1u)
+            EXPECT_EQ(client->get_active_request_count(), 0u)
                 << "something the call pushed was still queued, and was sent with the next request";
             client->disconnect();
             EXPECT_EQ(own, 0);
@@ -4287,7 +4354,7 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
 
             auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
             client->set_verify_peer(false);
-            if (hook.loses_its_connection) {
+            if (hook.overflows) {
                 auto quic                     = client->settings();
                 quic.max_pending_stream_bytes = 16 * 1024; // the upload below overflows it: the send closes the transport
                 client->set_settings(quic);
@@ -4310,7 +4377,7 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
             ASSERT_NE(first_id, 0u);
             client->set_request_timeout(qb::duration::zero()); // the request that waits has no deadline of its own
             qb::http::Request second{qb::io::uri("/ok")};
-            if (hook.loses_its_connection) { // an upload whose send overflows the queue: the transport closes under it
+            if (hook.overflows) { // an upload whose send overflows the queue: the transport closes under it
                 second        = qb::http::Request{qb::http::method::POST, qb::io::uri("/upload")};
                 second.body() = std::string(256 * 1024, 'x');
             }
@@ -4330,9 +4397,8 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortWhereTheLoopOrAnotherCallMadeItAnsw
             EXPECT_EQ(first, 1);
             EXPECT_EQ(waiting, 1) << "the request the pass was writing was not answered";
             EXPECT_EQ(heard.status(), qb::http::status::SERVICE_UNAVAILABLE);
-            EXPECT_EQ(heard.body().as<std::string>(),
-                      hook.loses_its_connection ? "HTTP/3 connection closed during request submission" : "Failed to submit HTTP/3 request");
-            EXPECT_EQ(client->is_connected(), !hook.loses_its_connection) << "the close the submission deferred was not run";
+            EXPECT_EQ(heard.body().as<std::string>(), "HTTP/3 connection closed during request submission");
+            EXPECT_FALSE(client->is_connected()) << "a submission cut short did not end its connection";
             EXPECT_EQ(client->get_active_request_count(), 0u);
             const auto settle = std::chrono::steady_clock::now() + 100ms;
             while (std::chrono::steady_clock::now() < settle) {
@@ -6995,6 +7061,313 @@ TEST_F(Http3LoopbackTest, AConnectionThatNegotiatesAnotherProtocolIsClosedWithAC
     server->close();
 }
 
+// A submission an exception cuts short ends its connection (Huly QB-1246). The engine hands its bytes to the transport,
+// then is told how many went: an exception at the end of the send leaves between the two, and the engine writes them
+// again. Against a server that advertises a QPACK dynamic table -- most do; no qb server does -- the encoder stream then
+// carries an instruction twice. The connection was kept when no close was deferred: after one cut, 26 of the next 30
+// requests failed, "HTTP/3 protocol read error (514)", H3_QPACK_ENCODER_STREAM_ERROR. It ends now, and the requests that
+// follow are served on a new one, every echo right.
+TEST_F(Http3LoopbackTest, ASubmissionCutShortEndsTheConnectionWhoseEngineItLeftBehind) {
+    using namespace http3_client_submit_test;
+    int         right = 0, wrong = 0, failed = 0, cut_answers = 0; // before the client: its callbacks count here
+    std::string why;
+    const auto  port = next_port();
+    TableServer server;
+    server.router().post("/echo", [](auto ctx) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().body()   = ctx->request().body().template as<std::string>();
+        ctx->complete();
+    });
+    server.router().compile();
+    ASSERT_TRUE(server.listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    const auto attempts = qb::http3::ClientTestPeer::attempts(*client);
+    const auto upload   = [](std::size_t const size, unsigned const salt) {
+        qb::http::Request request{qb::http::method::POST, qb::io::uri("/echo")};
+        request.body() = pattern(size, salt);
+        return request;
+    };
+    const auto round = [&](int const count) {
+        static constexpr std::size_t sizes[] = {0, 16, 1000, 20000, 70000};
+        right = wrong = failed = 0;
+        why.clear();
+        for (int i = 0; i < count; ++i) {
+            const auto size = sizes[i % 5];
+            const auto salt = static_cast<unsigned>(i) + 7u;
+            client->push_request(upload(size, salt), [&, size, salt](qb::http::Response response) {
+                if (response.status() != qb::http::status::OK) {
+                    ++failed;
+                    why = std::to_string(static_cast<int>(response.status().code())) + " " + response.body().as<std::string>();
+                } else if (response.body().as<std::string>() == pattern(size, salt)) {
+                    ++right;
+                } else {
+                    ++wrong;
+                }
+            });
+        }
+        static_cast<void>(pump([&] { return right + wrong + failed == count; }, 8s));
+    };
+    round(10);
+    ASSERT_EQ(right, 10) << "the server with a table does not serve: the case proves nothing (" << why << ")";
+
+    client->throws = CutShort::at::the_end_of_a_send;
+    client->times  = 1;
+    bool threw     = false;
+    try {
+        client->push_request(upload(16, 3), [&](qb::http::Response) { ++cut_answers; });
+    } catch (std::runtime_error const &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw) << "the hook did not cut the submission short: the case proves nothing";
+    EXPECT_FALSE(client->is_connected()) << "the connection was kept, its engine behind what the transport took";
+
+    round(30);
+    EXPECT_EQ(right, 30) << failed << " failed (" << why << "), " << wrong << " echoed wrong";
+    EXPECT_EQ(wrong, 0);
+    EXPECT_EQ(failed, 0) << why;
+    EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), attempts + 1) << "they are served on a new connection, one";
+    EXPECT_EQ(cut_answers, 0) << "the request whose push threw was answered later";
+    client->disconnect();
+    server.close();
+}
+
+// The reset of a stream the client abandons has a `try` of its own (Huly QB-1246): what it throws -- a hook of the
+// transport at the end of its send, an allocation -- does not stop what follows it. A cancellation, and a timeout, fail
+// their request, reset its stream, then submit what waited for that stream. A reset that threw left that pass unrun: the
+// request that waited stayed queued until the next push, and the exception left cancel_request().
+TEST_F(Http3LoopbackTest, AResetThatThrowsDoesNotLeaveWhatWaitedForItsStreamUnsent) {
+    using http3_client_submit_test::CutShort;
+    for (const std::string_view by : {"a cancellation", "a timeout"}) {
+        SCOPED_TRACE(by);
+        int        first = 0, served = 0; // before the client: its callbacks count here
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
+        client->set_verify_peer(false);
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        client->set_max_concurrent_streams(1); // one stream: the second request waits in the queue
+        client->set_request_timeout(by == "a timeout" ? qb::duration(250ms) : qb::duration::zero());
+        const auto arm = [&] {
+            client->throws = CutShort::at::the_end_of_a_send; // the next send is the reset of the stream that is freed
+            client->times  = 1;
+            client->skip   = 0;
+        };
+        const auto first_id = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) {
+            ++first;
+            if (by == "a timeout") {
+                arm(); // from the callback of the timeout: the reset follows it
+            }
+        });
+        ASSERT_NE(first_id, 0u);
+        client->set_request_timeout(qb::duration::zero()); // the request that waits has no deadline of its own
+        client->push_request(qb::http::Request{qb::io::uri("/ok")},
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        if (by == "a cancellation") {
+            arm();
+            EXPECT_NO_THROW(client->cancel_request(first_id)) << "what the reset threw left the cancellation";
+        }
+        // No push follows: the pass behind the reset is what sends the request that waited.
+        EXPECT_TRUE(pump([&] { return first == 1 && served == 1; }, 3s)) << "the request that waited for the stream was left in the queue";
+        EXPECT_EQ(client->thrown, 1) << "the hook did not throw at the reset: the case proves nothing";
+        EXPECT_TRUE(client->is_connected());
+        client->disconnect();
+        server->close();
+    }
+}
+
+// The same for the stream of a request the engine refuses where it is submitted, with no exception (Huly QB-1246): the
+// request is answered first, 503, once, and what the reset of its stream then throws stops nothing -- no exception
+// leaves the push, the connection stays. The reset shared a `try` with the refusal and came first: thrown at, the
+// request was never answered.
+TEST_F(Http3LoopbackTest, ARequestTheEngineRefusesIsAnsweredThoughTheResetOfItsStreamThrows) {
+    using namespace http3_client_submit_test;
+    int              refused = 0, served = 0; // before the client: its callbacks count here
+    qb::http::status status = qb::http::status::OK;
+    const auto       port   = next_port();
+    auto             server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
+    client->set_verify_peer(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    client->throws = CutShort::at::the_end_of_a_send; // the one send of this push is the reset of the stream it opened
+    client->times  = 1;
+    EXPECT_NO_THROW(client->push_request(unsendable(), [&](qb::http::Response response) {
+        ++refused;
+        status = response.status();
+    })) << "what the reset threw left the push";
+    EXPECT_EQ(client->thrown, 1) << "the hook did not throw at the reset: the case proves nothing";
+    EXPECT_EQ(refused, 1) << "the request the engine refused was not answered";
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_TRUE(client->is_connected()) << "no submission was cut short: the connection stays";
+    client->push_request(qb::http::Request{qb::io::uri("/ok")},
+                         [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+    EXPECT_TRUE(pump([&] { return served == 1; }, 3s));
+    EXPECT_EQ(refused, 1);
+    client->disconnect();
+    server->close();
+}
+
+// A push has one outcome, whatever throws under it (Huly QB-1246): the pass a push runs submits what waited before its
+// own request, and the callback of one the engine refuses there may throw -- no submission is cut short, the connection
+// stays. A is in flight on the one stream the client allows; B waits behind it, a request the engine refuses where it
+// is submitted, and its callback throws; the limit is raised and R is pushed, a request, then a batch. The exception
+// leaves push(R) with R still in the queue: the push takes it back. Left there, it was sent by the next pass and its
+// callback called: thrown at AND answered.
+TEST_F(Http3LoopbackTest, ACallbackThatThrowsUnderAnotherPushLeavesThatPushOneOutcome) {
+    using namespace http3_client_submit_test;
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        int        a = 0, b = 0, r = 0, x = 0; // before the client: its callbacks count here
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_request_timeout(qb::duration::zero());
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        client->set_max_concurrent_streams(1);
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++a; });
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        client->push_request(unsendable(), [&](qb::http::Response response) {
+            ++b;
+            EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+            throw std::runtime_error("the callback of the request that waited throws");
+        });
+        ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+        client->set_max_concurrent_streams(10);
+        bool threw = false;
+        try {
+            if (form == "a request") {
+                client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.emplace_back(qb::io::uri("/ok"));
+                two.emplace_back(qb::io::uri("/ok"));
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        EXPECT_EQ(r, 0);
+        EXPECT_TRUE(client->is_connected()) << "no submission was cut short: the connection stays";
+        client->push_request(qb::http::Request{qb::io::uri("/ok")}, // the next pass
+                             [&](qb::http::Response response) { x += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(pump([&] { return x == 1; }, 3s)) << "the client was left unable to serve a request";
+        const auto settle = std::chrono::steady_clock::now() + 150ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(r, 0) << "the push threw, and its callback was called by the next pass: two outcomes";
+        client->disconnect();
+        server->close();
+        EXPECT_EQ(a, 1);
+        EXPECT_EQ(r, 0);
+    }
+}
+
+// A close calls every callback it owes and runs to its end, whatever one of them throws; the first exception goes on
+// once that is done (Huly QB-1246). Three requests are in flight, the program disconnects, the callback of the first
+// throws: the two others hear, the exception leaves disconnect(), and the client connects again.
+TEST_F(Http3LoopbackTest, ADisconnectWhoseFirstCallbackThrowsStillAnswersTheOthers) {
+    int        heard = 0, served = 0; // before the client: its callbacks count here
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().get("/stall", [](auto) {});
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    for (int i = 0; i < 3; ++i) {
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) {
+            if (++heard == 1) {
+                throw std::runtime_error("the first failure callback throws");
+            }
+        });
+    }
+    ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 3; }));
+    EXPECT_THROW(client->disconnect(), std::runtime_error) << "what the callback threw did not reach the caller of disconnect()";
+    EXPECT_EQ(heard, 3) << "the requests behind the one whose callback threw were not answered";
+    EXPECT_FALSE(client->is_connected());
+    client->push_request(qb::http::Request{qb::io::uri("/ok")},
+                         [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+    EXPECT_TRUE(pump([&] { return served == 1; }, 3s)) << "the client was left unable to connect";
+    EXPECT_EQ(heard, 3) << "a request was answered twice";
+    client->disconnect();
+    server->close();
+}
+
+// A request whose target cannot be sent is refused where it is pushed, 400, as a refusal the client gives by itself, and
+// costs nothing else (Huly QB-1246): the connection stays, what it carries goes on, the next request is served on it.
+// The check is the HTTP/1.1 serializer's, shared by the three clients. On HTTP/3 the engine wrote such a query into
+// `:path` as it was -- a field no client may send: a qb server closed the connection for it, "QUIC connection close
+// received", and the request in flight failed with the one at fault --; a URI that failed to parse was sent, to another
+// resource.
+TEST_F(Http3LoopbackTest, ARequestWhoseTargetCannotBeSentIsRefusedWhereItIsPushedAndNoOtherWithIt) {
+    using namespace http3_client_submit_test;
+    for (const auto &row : k_unsendable_targets) {
+        SCOPED_TRACE(row.what);
+        int              held = 0, refused = 0, served = 0; // before the client: its callbacks count here
+        qb::http::status status = qb::http::status::OK;
+        std::string      body;
+        const auto       port   = next_port();
+        auto             server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_request_timeout(qb::duration::zero());
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        const auto attempts = qb::http3::ClientTestPeer::attempts(*client);
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++held; });
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri(row.target)}, [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        }));
+        EXPECT_EQ(refused, 1) << "the request was not refused where it was pushed";
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_TRUE(client->is_connected()) << "a request refused for its own target ended the connection";
+        EXPECT_EQ(held, 0) << "and the request in flight with it";
+        client->push_request(qb::http::Request{qb::io::uri("/ok")},
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(pump([&] { return served == 1; }, 3s));
+        EXPECT_EQ(held, 0);
+        EXPECT_EQ(refused, 1);
+        EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), attempts) << "the refusal cost the connection";
+        client->disconnect();
+        server->close();
+    }
+}
+
 // A request's timer that fires before the request timeout has passed is armed again, in place, for the time left, and
 // the request times out at its timeout (Huly QB-1246). Dropped, the one-shot fire is lost: the request stays queued, or
 // in flight, for ever. The loop can wake a timer a little early by itself -- its timers run on a clock of their own --;
@@ -7082,12 +7455,11 @@ TEST_F(Http3LoopbackTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTak
     server->close();
 }
 
-// While the client is destroyed, an answer it gives by itself is given inside the call, whatever is still owed: no later
-// turn exists to keep it for (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the
-// first calls disconnect(), which ends a request in flight. That failure (9) is heard inside the disconnect(), before
-// the end of the callback (-1) and before the second refusal (2) -- where an answer the loop brings there waits behind
-// what is owed (the case above).
-TEST_F(Http3LoopbackTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresInsideTheCall) {
+// And so does an answer the client gives by itself there: the destructor has one rule, the order the client came to owe
+// its answers (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the first calls
+// disconnect(), which ends a request in flight. That failure (9) takes its place behind the second refusal (2), as it
+// would in ordinary operation. It was given inside the disconnect(), ahead of it: 1 9 -1 2.
+TEST_F(Http3LoopbackTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresBehindWhatIsOwed) {
     using http3_client_lifetime_test::Told;
     const auto port   = next_port();
     auto       server = qb::http3::make_server();
@@ -7116,7 +7488,7 @@ TEST_F(Http3LoopbackTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFail
     });
     client.reset(); // the last reference: the destructor hears what is owed
     EXPECT_EQ(destroyed, 1);
-    EXPECT_EQ(order, (std::vector<int>{1, 9, -1, 2})) << "an answer the client gave by itself while destroyed was kept for a turn";
+    EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the client gave by itself was given ahead of one still owed";
     const auto settle = std::chrono::steady_clock::now() + 50ms;
     while (std::chrono::steady_clock::now() < settle) {
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);

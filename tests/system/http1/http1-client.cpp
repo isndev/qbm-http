@@ -5282,12 +5282,11 @@ TEST(Http1ClientTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTakesIt
     EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the loop brought was given ahead of one still owed";
 }
 
-// While the client is destroyed, an answer it gives by itself is given inside the call, whatever is still owed: no later
-// turn exists to keep it for (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the
-// first calls disconnect(), which ends a request in flight. That failure (9) is heard inside the disconnect(), before
-// the end of the callback (-1) and before the second refusal (2) -- where an answer the loop brings there waits behind
-// what is owed (the case above).
-TEST(Http1ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresInsideTheCall) {
+// And so does an answer the client gives by itself there: the destructor has one rule, the order the client came to owe
+// its answers (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the first calls
+// disconnect(), which ends a request in flight. That failure (9) takes its place behind the second refusal (2), as it
+// would in ordinary operation. It was given inside the disconnect(), ahead of it: 1 9 -1 2.
+TEST(Http1ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresBehindWhatIsOwed) {
     using http1_client_lifetime_test::Told;
     LoopbackHttp1Server   server;
     int                   destroyed = 0; // before the client: its callbacks write here
@@ -5312,7 +5311,7 @@ TEST(Http1ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailures
     client.reset(); // the last reference of the program: the hold of the callback above runs on the next loop turn
     ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed == 1; }));
     drain_client_callbacks();
-    EXPECT_EQ(order, (std::vector<int>{1, 9, -1, 2})) << "an answer the client gave by itself while destroyed was kept for a turn";
+    EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the client gave by itself was given ahead of one still owed";
 }
 
 // An empty batch pushed from a callback the destructor runs follows the destructor's rule, as a request does (Huly
@@ -5372,4 +5371,89 @@ TEST(Http1ClientTest, ARunSyncOfACoroutinePushFromACallbackTheClientsTurnHearsCo
     EXPECT_FALSE(done) << "a refusal of a push made from a callback was heard inside the push";
     ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return done; }));
     EXPECT_EQ(status, qb::http::status::BAD_REQUEST);
+}
+
+namespace http1_client_target_test {
+/// Targets no client may send: a query that carries SP, a control byte or DEL as written (the path of a URI holds path
+/// characters only: such a byte there fails the parse, and the URI names no target).
+struct UnsendableTarget {
+    std::string_view what;
+    std::string      target;
+};
+inline const UnsendableTarget k_unsendable_targets[] = {
+    {"LF in the query", std::string("/ping?q=a\nb")},
+    {"CR in the query", std::string("/ping?q=a\rb")},
+    {"0x1F in the query", std::string("/ping?q=a\x1F") + "b"},
+    {"DEL in the query", std::string("/ping?q=a\x7F") + "b"},
+    {"SP in the query", std::string("/ping?q=a b")},
+    {"LF in the path", std::string("/ping/a\nb")},
+    {"CR in the path", std::string("/ping/a\rb")},
+    {"0x1F in the path", std::string("/ping/a\x1F") + "b"},
+    {"DEL in the path", std::string("/ping/a\x7F") + "b"},
+    {"SP in the path", std::string("/ping/a b")},
+};
+} // namespace http1_client_target_test
+
+// A request whose target cannot be sent is refused where it is pushed, 400, as a refusal the client gives by itself, and
+// costs nothing else (Huly QB-1246): the connection stays, what it carries goes on, the next request is served on it.
+// The check is the HTTP/1.1 serializer's, shared by the three clients. On HTTP/1.1 a query the serializer refuses was answered only once the
+// request's turn to be written came, a connection made for it; and a URI that failed to parse was made absolute and
+// sent, to another resource than the one asked for.
+TEST(Http1ClientTest, ARequestWhoseTargetCannotBeSentIsRefusedWhereItIsPushed) {
+    for (const auto &row : http1_client_target_test::k_unsendable_targets) {
+        SCOPED_TRACE(row.what);
+        LoopbackHttp1Server server;
+        int                 refused = 0, served = 0; // before the client: its callbacks count here
+        bool                connected = false;
+        qb::http::status    status    = qb::http::status::OK;
+        std::string         body;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+        const auto requests = server.request_count();
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, row.target), [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        }));
+        EXPECT_EQ(refused, 1) << "the request was not refused where it was pushed";
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_TRUE(client->is_connected());
+        client->push_request(request(qb::http::method::GET, "/ping"),
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        EXPECT_EQ(refused, 1);
+        EXPECT_EQ(server.connection_count(), 1) << "the refusal cost the connection";
+        EXPECT_EQ(server.request_count(), requests + 1) << "the server was sent the request that was refused";
+        client->disconnect();
+    }
+}
+
+// A close calls every callback it owes, whatever one of them throws (Huly QB-1246). On HTTP/1.1 nothing a callback
+// throws leaves the client: it is logged, and the close goes on -- three requests wait for a connection nobody answers,
+// the program disconnects, the callback of the first throws, and the two others hear all the same; a connect() asked
+// afterwards starts. (The HTTP/2 client let the exception out at once: the two others were never answered, and no later
+// connect() could start.)
+TEST(Http1ClientTest, ADisconnectWhoseFirstCallbackThrowsStillAnswersTheOthers) {
+    LoopbackHttp1Server server;
+    int                 first = 0, second = 0, third = 0, served = 0; // before the client: its callbacks count here
+    bool                connected = false;
+    auto                client    = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { // in flight
+        ++first;
+        throw std::runtime_error("the first failure callback throws");
+    });
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++second; }); // queued behind it
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++third; });
+    EXPECT_NO_THROW(client->disconnect());
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(second + third, 2) << "the requests behind the one whose callback threw were not answered";
+    client->push_request(request(qb::http::method::GET, "/ping"),
+                         [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; })) << "the client was left unable to connect";
+    EXPECT_EQ(first + second + third, 3) << "a request was answered twice";
+    client->disconnect();
 }

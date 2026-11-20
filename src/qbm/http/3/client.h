@@ -474,7 +474,7 @@ private:
     /// 0 for none: a submission of it that an exception cuts short has that exception for its one outcome.
     void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
     /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: out of the
-    /// queue, out of the requests in flight -- their streams reset --, and the batch with it. Never throws.
+    /// queue, and the batch with it (a member in flight goes with the connection, which the cut ends). Never throws.
     void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
     /// Mark the connection up, notify callbacks, and flush pending requests.
     void handle_connection_success(std::string const &alpn);
@@ -482,7 +482,7 @@ private:
     /// client itself when a submission the program's own call made lost the connection.
     void handle_connection_failure(std::string const &error, from who = from::the_loop);
     /// Close an unsuccessful QUIC attempt without delivering its own close event twice.
-    void close_failed_transport(std::string_view reason);
+    void close_failed_transport(std::string_view reason) noexcept;
     /// Fail every pending/active request and batch with @p error.
     [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error, from who = from::the_loop);
     void                             complete_disconnect(
