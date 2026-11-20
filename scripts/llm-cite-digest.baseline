@@ -321,15 +321,15 @@ llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:301-320	d7b73835a1df	Client:
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:356-388	863e87e38aa8	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:417-428	289b3dda3894	Client::disconnect() {
 llm/qbm-http.llm.api.md	src/qbm/http/1.1/client.cpp:797-867	4f91b500a501	Client::reset_deferred_connection_if_ready() {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:1195-1213	47312d8d7b6e	Client::on(qb::io::async::event::dispose const &) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:173-248	0008436245a8	Client::close_connection(const std::string &error_message) {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:383-390	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:408-419	744de9ed5944	// Each member is admitted as push_request() admits one, against the ...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:442-454	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:532-578	51b878e29227	void
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:544-552	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:163-163	b5d9130b44cc	class Client
-llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:481-506	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:1411-1429	47312d8d7b6e	Client::on(qb::io::async::event::dispose const &) {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:277-293	6a8a3bac23dd	Client::batch_member_answered(std::uint64_t batch_id, std::size_t ind...
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:380-460	9ab3314bdc93	Client::close_connection(const std::string &error_message) {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:607-614	bc81daa2929c	batch_context->responses.resize(batch_context->requests.size());
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:632-643	744de9ed5944	// Each member is admitted as push_request() admits one, against the ...
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:728-777	e8e7834daeda	void
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.cpp:745-753	0efd396defa1	if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:167-167	b5d9130b44cc	class Client
+llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:531-556	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/client.h:93-93	99ed1922a069	using RetryPolicy = qb::http::RetryPolicy;
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:157-270	89b4ca310dd3	reclaim_completed_stream_contexts() noexcept {
 llm/qbm-http.llm.api.md	src/qbm/http/2/http2.h:749-800	1b87798dee32	on(qb::io::async::event::pending_write &&event) {
@@ -510,13 +510,13 @@ llm/qbm-http.llm.md	src/qbm/http/1.1/http.h:1255-1255	a1a423966669	set_tls_conte
 llm/qbm-http.llm.md	src/qbm/http/1.1/http.h:1269-1269	03895991895f	reload_certificates(std::filesystem::path cert_file, std::filesystem:...
 llm/qbm-http.llm.md	src/qbm/http/1.1/http.h:1279-1279	967107c41a70	listen(qb::io::uri uri, TLSContext &&context) {
 llm/qbm-http.llm.md	src/qbm/http/1.1/http.h:1290-1290	26cc9c388317	listen_no_start(qb::io::uri uri, TLSContext &&context) {
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1053-1053	a498ec26d24e	std::string error_msg = (event.sent ? "GOAWAY sent by client: " : "Se...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1056-1056	b5f195258c69	if (event.sent || event.error_code != qb::protocol::http2::ErrorCode:...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1195-1213	47312d8d7b6e	Client::on(qb::io::async::event::dispose const &) {
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:173-248	0008436245a8	Client::close_connection(const std::string &error_message) {
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:442-454	2bb9873dc739	if (batch.completed_count == batch.requests.size() && !batch.all_comp...
-llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:532-578	51b878e29227	void
-llm/qbm-http.llm.md	src/qbm/http/2/client.h:481-506	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1258-1258	a498ec26d24e	std::string error_msg = (event.sent ? "GOAWAY sent by client: " : "Se...
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1261-1261	b5f195258c69	if (event.sent || event.error_code != qb::protocol::http2::ErrorCode:...
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:1411-1429	47312d8d7b6e	Client::on(qb::io::async::event::dispose const &) {
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:277-293	6a8a3bac23dd	Client::batch_member_answered(std::uint64_t batch_id, std::size_t ind...
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:380-460	9ab3314bdc93	Client::close_connection(const std::string &error_message) {
+llm/qbm-http.llm.md	src/qbm/http/2/client.cpp:728-777	e8e7834daeda	void
+llm/qbm-http.llm.md	src/qbm/http/2/client.h:531-556	cfed3799f7ec	enable_auto_reconnect(RetryPolicy policy = RetryPolicy{}) noexcept {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:1208-1208	e6164c1688f6	set_tls_context(qb::io::ssl::Context context) {
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:1219-1219	4baf7f11b3a0	reload_certificates(std::filesystem::path cert_file, std::filesystem:...
 llm/qbm-http.llm.md	src/qbm/http/2/http2.h:1227-1227	967107c41a70	listen(qb::io::uri uri, TLSContext &&context) {

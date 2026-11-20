@@ -303,9 +303,15 @@ public:
      *                 for fire-and-forget (you will still be able to
      *                 `push_request` before connection completes; they will
      *                 be queued and flushed on handshake).
-     * @return true when the callback will hear the outcome -- at once when already connected, with the attempt under way
-     *         or the one this call starts otherwise. false only while the client is being destroyed: nothing starts, and
-     *         the callback is never called.
+     * @return true when the callback will hear the outcome -- at once when already connected, no callback of this client
+     *         on the stack and no answer owed, on the client's turn of the loop otherwise; with the attempt under way or
+     *         the one this call starts when not connected. false only while the client is being destroyed: nothing
+     *         starts, and the callback is never called.
+     *
+     * @note Asked from a callback of a close, of a failure or of a lost connection, the attempt starts once the
+     *       transport that ended is torn down, never under that callback: its outcome comes after the callback has
+     *       returned -- do not run the loop there to wait for it (the coroutine connect() answers false at once for
+     *       that reason).
      *
      * @note The default argument is intentionally removed (compared to pre-coroutine
      *       versions of this API) so that the coroutine overload `connect()` is
@@ -373,8 +379,23 @@ public:
     /**
      * @brief Send a single HTTP request (callback-style).
      * @param request HTTP request to send
-     * @param callback Callback to handle the response
-     * @return true if request was queued successfully
+     * @param callback Response handler; must be non-null. A request the client refuses at once -- another origin, the
+     *                 pending bound, a request the connection cannot take -- is answered inside this call when no
+     *                 callback of this client is on the stack and no answer is owed; otherwise on the client's turn of
+     *                 the loop, in the order the client came to owe its answers. A callback that pushes back at every
+     *                 refusal is never called from inside its own push. Bound such a retry all the same, with a delay:
+     *                 it spins otherwise.
+     *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
+     *                 another one of the same client: the nesting is exactly one (disconnect() apart: called from a
+     *                 callback, it gives the failures of the requests it ends inside the call when nothing is owed).
+     *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
+     *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
+     *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without
+     *                 nesting, push back and return.
+     * @return @c false if @p callback is null; if the request would take the queued + active count past
+     *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on that turn; or if the
+     *         push is made from inside the answer of a push the destructor refused, where @p callback is never called.
+     *         @c true otherwise, a request for another origin (400) included.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
 
@@ -396,8 +417,12 @@ public:
     /**
      * @brief Send multiple HTTP requests as a batch (callback-style).
      * @param requests Vector of HTTP requests to send
-     * @param callback Callback to handle all responses (in same order as requests)
-     * @return true if batch was queued successfully
+     * @param callback Callback to handle all responses (in same order as requests): one answer, given as a request's
+     *                 is -- inside this call for an empty batch or one whose members are all refused, when no callback of
+     *                 this client is on the stack and no answer is owed; on the client's turn of the loop otherwise.
+     * @return @c false if @p callback is null (for a batch that is not empty), if a member was refused by the pending
+     *         bound, or if the push is made from inside the answer of a push the destructor refused, where @p callback
+     *         is never called. @c true otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
 
