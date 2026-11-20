@@ -711,8 +711,7 @@ void
 Client::time_pending() noexcept {
     try {
         for (auto queued = _pending_requests.rbegin(); queued != _pending_requests.rend() && *queued && !(*queued)->timed; ++queued) {
-            (*queued)->timed = true;
-            arm_request_timeout((*queued)->request_id);
+            time(**queued);
         }
     } catch (...) {
         // no timer could be armed (an allocation): that request waits without one, as with no request timeout
@@ -788,11 +787,8 @@ Client::process_pending_requests() {
             ++_failed_requests;
             try {
                 // Through refuse(), as every refusal of a push: its callback may push the request back.
-                refuse([shared   = std::shared_ptr<RequestContext>(std::move(ctx)),
-                        response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                                         "HTTP/3 connection closed during request submission")]() mutable {
-                    shared->callback(std::move(response));
-                });
+                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                                     "HTTP/3 connection closed during request submission"));
             } catch (...) {
                 if (!transition_error) {
                     transition_error = std::current_exception();
@@ -808,16 +804,10 @@ Client::process_pending_requests() {
             // stream the same way the client cancels any request (RFC 9114 §4.1).
             reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
             ++_failed_requests;
-            refuse([shared   = std::shared_ptr<RequestContext>(std::move(ctx)),
-                    response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request")]() mutable {
-                shared->callback(std::move(response));
-            });
+            refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
             continue;
         }
-        if (!ctx->timed) {
-            ctx->timed = true; // in flight: timed from here, its wait counted from its push (created_at)
-            arm_request_timeout(ctx->request_id);
-        }
+        time(*ctx); // in flight: timed from here if it was not while it waited, its timeout counted from its push (created_at)
         _active_requests.emplace(stream_id, std::move(ctx));
     }
 }
@@ -910,6 +900,15 @@ Client::fail_all_requests(std::string const &error) {
     active.swap(_active_requests);
     pending.swap(_pending_requests);
     batches.swap(_active_batches);
+    // Every one of them is answered by this pass, a member of a batch with its batch: none stays timed while the
+    // callbacks of the others run.
+    for (auto &[id, ctx] : active) {
+        (void) id;
+        ctx->timer.reset();
+    }
+    for (auto &ctx : pending) {
+        ctx->timer.reset();
+    }
     hear_owed(); // the refusals owed before this failure are heard before it
     std::exception_ptr callback_error;
     const auto         capture = [&](auto &&call) { // what `call` allocates for its answer is contained with it
@@ -928,7 +927,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        capture([&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
+        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
     }
     while (!pending.empty()) {
         auto ctx = std::move(pending.front());
@@ -937,7 +936,7 @@ Client::fail_all_requests(std::string const &error) {
             continue;
         }
         ++_failed_requests;
-        capture([&] { ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
+        capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error)); });
     }
     for (auto &[id, batch] : batches) {
         (void) id;
@@ -1007,59 +1006,79 @@ Client::arm_connect_timeout() {
 }
 
 void
-Client::arm_request_timeout(std::uint64_t request_id) {
-    if (_destroying || _request_timeout <= qb::duration::zero()) {
-        return; // nothing is armed for a client being destroyed (Huly QB-1246)
-    }
-    schedule_request_timeout(request_id, _request_timeout);
+Client::refuse_request(std::unique_ptr<RequestContext> ctx, qb::http::Response response) {
+    auto callback = std::move(ctx->callback);
+    ctx.reset(); // the request has its answer: nothing of it stays while the refusal waits its turn, its timer first
+    refuse([callback = std::move(callback), response = std::move(response)]() mutable { callback(std::move(response)); });
 }
 
 void
-Client::schedule_request_timeout(std::uint64_t request_id, qb::duration delay) {
-    auto weak_self = weak_from_this();
-    qb::io::async::callback(
-        [weak_self, request_id]() {
-            auto self = weak_self.lock();
-            if (!self) {
-                return;
-            }
+Client::time(RequestContext &ctx) {
+    if (ctx.timed) {
+        return;
+    }
+    ctx.timed = true;
+    if (_destroying || _request_timeout <= qb::duration::zero()) {
+        return; // nothing is armed for a client being destroyed (Huly QB-1246)
+    }
+    // Owned by the request: it is stopped with the request's answer, whatever gives it (give(), refuse(),
+    // fail_all_requests()). Armed through the loop, it stayed armed for the whole request timeout after the answer -- one
+    // live watcher for every request of the last sixty seconds, at the default.
+    ctx.timer.emplace(*this, ctx.request_id, _request_timeout);
+}
+
+void
+request_timer::on(qb::io::async::event::timer const &) noexcept {
+    auto      &client     = _client; // read first: the request this timer belongs to, and the timer with it, may go below
+    const auto request_id = _request_id;
+    client.request_timed_out(request_id);
+}
+
+void
+Client::request_timed_out(std::uint64_t request_id) noexcept {
+    auto owner = weak_from_this().lock(); // a callback below may drop the last reference
+    if (!owner) {
+        return;
+    }
+    qb::http::detail::contained(
+        "HTTP/3",
+        [&] {
             const auto now = std::chrono::steady_clock::now();
-            for (auto const &ctx : self->_pending_requests) {
+            for (auto const &ctx : _pending_requests) {
                 if (!ctx || ctx->request_id != request_id) {
                     continue;
                 }
                 const auto elapsed = std::chrono::duration_cast<qb::duration>(now - ctx->created_at);
-                if (elapsed >= self->_request_timeout) {
-                    self->fail_pending_request(request_id, "HTTP/3 request timeout while pending", qb::http::status::REQUEST_TIMEOUT);
-                    self->process_pending_requests();
-                } else {
-                    // The event-loop timer source can wake this callback slightly
-                    // before the steady_clock deadline (the two clocks are not the
-                    // same). Re-arm for the remaining time instead of dropping the
-                    // timeout — otherwise the one-shot fire is lost and the request
-                    // stays queued forever (never completes, never fails).
-                    self->schedule_request_timeout(request_id, self->_request_timeout - elapsed);
+                if (elapsed >= _request_timeout) {
+                    fail_pending_request(request_id, "HTTP/3 request timeout while pending", qb::http::status::REQUEST_TIMEOUT);
+                    process_pending_requests();
+                } else if (ctx->timer) {
+                    // The event-loop timer source can wake this callback slightly before the steady_clock deadline (the
+                    // two clocks are not the same). Armed again, in place, for the time left: dropped, the one-shot fire
+                    // is lost and the request stays queued for ever.
+                    ctx->timer->setTimeout(_request_timeout - elapsed);
                 }
                 return;
             }
-            auto it = std::find_if(self->_active_requests.begin(), self->_active_requests.end(),
+            auto it = std::find_if(_active_requests.begin(), _active_requests.end(),
                                    [request_id](auto const &entry) { return entry.second && entry.second->request_id == request_id; });
-            if (it == self->_active_requests.end()) {
+            if (it == _active_requests.end()) {
                 return;
             }
             const auto elapsed = std::chrono::duration_cast<qb::duration>(now - it->second->created_at);
-            if (elapsed < self->_request_timeout) {
-                // Woke early (see note above) — re-arm for the remaining time.
-                self->schedule_request_timeout(request_id, self->_request_timeout - elapsed);
+            if (elapsed < _request_timeout) {
+                if (it->second->timer) {
+                    it->second->timer->setTimeout(_request_timeout - elapsed); // woke early (the note above)
+                }
                 return;
             }
             const auto stream_id = it->first;
-            self->fail_request(stream_id, "HTTP/3 request timeout", qb::http::status::REQUEST_TIMEOUT);
+            fail_request(stream_id, "HTTP/3 request timeout", qb::http::status::REQUEST_TIMEOUT);
             // Timeout aborts the in-flight request stream (RFC 9114 §4.1).
-            self->reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
-            self->process_pending_requests();
+            reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+            process_pending_requests();
         },
-        delay);
+        "the timeout of a request");
 }
 
 qb::http::Response

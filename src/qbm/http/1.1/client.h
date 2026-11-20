@@ -62,14 +62,37 @@ struct ConnectResult {
     }
 };
 
+class Client;
+
+/**
+ * @brief The timer of one queued request's wait, owned by the request (Huly QB-1246): it goes when the request is sent
+ *        or answered, whatever answers it, so an answered request leaves no timer armed behind it. A request has one
+ *        at most.
+ */
+class pending_timer : public qb::io::async::with_timeout<pending_timer> {
+    Client       &_client;
+    std::uint64_t _request_id;
+
+public:
+    /// @param after The request timeout: how long the request may wait in the queue.
+    pending_timer(Client &client, std::uint64_t request_id, qb::duration after)
+        : qb::io::async::with_timeout<pending_timer>(after)
+        , _client(client)
+        , _request_id(request_id) {}
+
+    /// The wait has lasted the request timeout: the request fails, `408`, if it is still queued.
+    void on(qb::io::async::event::timer const &) noexcept;
+};
+
 /**
  * @brief Internal bookkeeping for a single in-flight or pending request.
  */
 struct RequestContext {
-    std::uint64_t                         request_id = 0; /**< Monotonic id used to match pending timeouts. */
+    std::uint64_t                         request_id = 0; /**< Monotonic id used to match pending timeouts: never used twice. */
     qb::http::Request                     request;        /**< The prepared request to send. */
     ResponseCallback                      callback;       /**< User callback to invoke with the response. */
     std::chrono::steady_clock::time_point created_at;     /**< Enqueue time stamp. */
+    std::optional<pending_timer>          timer;          /**< Armed while the request waits in the queue. */
 };
 
 /**
@@ -97,6 +120,7 @@ class Client : public std::enable_shared_from_this<Client> {
     class callback_scope;
     class tick_hold;
     struct failure_cohort;
+    friend class pending_timer;
 
     class connection_base {
     public:
@@ -363,7 +387,13 @@ private:
     void           fail_retired_requests(failure_cohort &cohort, std::string const &error, qb::http::status active_status,
                                          std::string const &pending_error, qb::http::status pending_status);
     void           process_pending_requests();
-    void           arm_pending_timeout(std::uint64_t request_id); ///< For a request still queued; nothing otherwise
+    void           arm_pending_timeout(std::uint64_t request_id);        ///< For a request still queued; nothing otherwise
+    void           pending_timed_out(std::uint64_t request_id) noexcept; ///< The timer of a queued request's wait fired
+    /// The answer of one request -- its response, a failure --: its timer is stopped first, then what is owed is heard,
+    /// then its callback. Every answer of a request goes through here. @p make builds the response, under the callback's
+    /// containment.
+    template <typename Make>
+    void give(RequestContext &ctx, Make &&make) noexcept;
     bool fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::REQUEST_TIMEOUT);
     void handle_connection_success();
     void handle_connection_failure(std::string const &error);

@@ -68,6 +68,27 @@ struct ConnectResult {
     }
 };
 
+class Client;
+
+/**
+ * @brief The timer of one request's timeout, owned by the request (Huly QB-1246): it goes with the request's answer,
+ *        whatever gives it, so an answered request leaves no timer armed behind it. A request has one at most.
+ */
+class request_timer : public qb::io::async::with_timeout<request_timer> {
+    Client       &_client;
+    std::uint64_t _request_id;
+
+public:
+    /// @param after The request timeout, counted from the request's push: what is left of it.
+    request_timer(Client &client, std::uint64_t request_id, qb::duration after)
+        : qb::io::async::with_timeout<request_timer>(after)
+        , _client(client)
+        , _request_id(request_id) {}
+
+    /// The request timeout has passed: the request fails, `408`, if it is still queued or in flight.
+    void on(qb::io::async::event::timer const &) noexcept;
+};
+
 /**
  * @brief Internal bookkeeping for a single in-flight or queued request.
  */
@@ -75,10 +96,11 @@ struct RequestContext {
     qb::http::Request                     request;
     ResponseCallback                      callback;
     std::chrono::steady_clock::time_point created_at;
-    qb::http3::request_id                 request_id = 0;
+    qb::http3::request_id                 request_id = 0; ///< Never used twice: what the request's timer looks it up by
     std::uint64_t                         stream_id  = 0;
     std::uint64_t                         batch_id   = 0;
-    bool timed = false; ///< Its timeout is armed: once it waits in the queue or is in flight, never for one refused where it is submitted
+    bool                                  timed      = false; ///< It has come to rest -- queued, or in flight -- and was timed there
+    std::optional<request_timer>          timer;              ///< Armed from there to its answer, when a request timeout is set
 };
 
 /**
@@ -122,6 +144,7 @@ class Client
 public:
     using h3_connection = qb::protocol::http3::connection<Client>;
     friend struct ClientTestPeer;
+    friend class request_timer;
 
 private:
     qb::io::uri   _base_uri;
@@ -459,9 +482,11 @@ private:
         }
     }
     void hear_owed_now() noexcept;
-    /// The answer of one request -- its response, its failure --, after what was owed before it.
+    /// The answer of one request -- its response, its failure --: its timer is stopped first, then what was owed before
+    /// it is heard, then its callback. Every answer a request's own callback hears goes through here.
     void
     give(RequestContext &ctx, qb::http::Response response) {
+        ctx.timer.reset();
         hear_owed();
         ctx.callback(std::move(response));
     }
@@ -478,12 +503,15 @@ private:
     void start_deferred_connect();
     /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.
     void give_up_deferred_connects();
-    /// Arm the per-request timeout for @p request_id.
-    void arm_request_timeout(std::uint64_t request_id);
+    /// Times @p ctx, once: it has come to rest. Its timer is armed when a request timeout is set.
+    void time(RequestContext &ctx);
+    /// The refusal of a request that was queued: the request ends here, its timer with it, and its callback hears
+    /// @p response as every refusal is heard (refuse()).
+    void refuse_request(std::unique_ptr<RequestContext> ctx, qb::http::Response response);
+    /// The timer of the request @p request_id fired: fails it if its timeout has passed, arms the timer again if not.
+    void request_timed_out(std::uint64_t request_id) noexcept;
     /// Arms the timeout of every queued request that has none yet: the last of the queue.
     void time_pending() noexcept;
-    /// (Re)schedule the request-timeout callback for @p request_id after @p delay.
-    void schedule_request_timeout(std::uint64_t request_id, qb::duration delay);
     /// @return @c true if any pending request, active request, or batch remains.
     [[nodiscard]] bool has_pending_or_active_work() const noexcept;
     /// Build a text/plain error response with @p status and @p message.

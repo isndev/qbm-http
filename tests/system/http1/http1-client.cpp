@@ -961,6 +961,117 @@ TEST(Http1ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
     }
 }
 
+// An answered request leaves no timer armed (Huly QB-1246). A request that waits in the queue owns the timer of its
+// wait, which goes when the request is sent or answered. It was the loop's, and stayed armed for the whole request
+// timeout whatever became of the request -- one live watcher for every request that had waited. Two readings of the
+// loop's count of watchers with no loop turn between them: two clients alike, each with a request in flight, one with
+// ten more queued behind it, are disconnected one after the other; the second gives back ten watchers more. And ten
+// requests that waited, were sent and were served leave the count no higher than it was (loop turns passed there: a
+// timer of an earlier case may have expired, none been added).
+TEST(Http1ClientTest, AnAnsweredRequestLeavesNoTimerArmed) {
+    const auto watchers = [] {
+        return static_cast<std::ptrdiff_t>(qb::io::async::listener::current.size());
+    };
+    {
+        SCOPED_TRACE("answered by a close");
+        int                         answers = 0; // declared before the clients: their destructors may still answer
+        std::vector<std::ptrdiff_t> seen;        // the count as each callback reads it
+        LoopbackHttp1Server         server;
+        const auto                  in_flight = [&](int queued) {
+            auto client = qb::http1::make_client(server.url("/"));
+            for (int i = 0; i < 1 + queued; ++i) {
+                client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) {
+                    ++answers;
+                    seen.push_back(watchers());
+                });
+            }
+            EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+            return client;
+        };
+        auto       alone  = in_flight(0);
+        auto       queued = in_flight(10);
+        const auto first  = watchers();
+        alone->disconnect();
+        const auto second = watchers();
+        seen.clear();
+        queued->disconnect();
+        const auto third = watchers();
+        EXPECT_EQ(answers, 12);
+        EXPECT_EQ((second - third) - (first - second), 10) << "the requests a close answered left the timers of their wait armed";
+        ASSERT_EQ(seen.size(), 11u);
+        EXPECT_EQ(seen, std::vector<std::ptrdiff_t>(11, seen.front())) << "a request was still timed while the callback of another ran";
+        drain_client_callbacks();
+    }
+    {
+        SCOPED_TRACE("sent, then served");
+        int                 served = 0;
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++served; }); // connects
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        {
+            // A request that waited and is then sent is timed by its connection alone: its own timer stops there.
+            bool       first_served = false;
+            const auto idle         = watchers();
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { first_served = true; });
+            client->push_request(request(qb::http::method::GET, "/never"), [](qb::http::Response) {}); // waits, then is sent
+            EXPECT_EQ(watchers(), idle + 1);
+            ASSERT_TRUE(
+                ServerThread<Http1ClientTestServer>::pump_until([&] { return first_served && client->get_active_request_count() == 1; }));
+            EXPECT_LE(watchers(), idle) << "a request that was sent kept the timer of its wait";
+            client->disconnect(); // answers the one in flight
+            drain_client_callbacks();
+            served = 0;
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++served; }); // connects again
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        }
+        const auto before = watchers();
+        for (int i = 0; i < 10; ++i) { // one is sent at once, nine wait for it
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::OK);
+                ++served;
+            });
+        }
+        EXPECT_EQ(watchers(), before + 9) << "a request that waits is timed, one that is sent at once is not";
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 11; }));
+        EXPECT_LE(watchers(), before) << "the requests that waited, then were served, left the timers of their wait armed";
+        client->disconnect();
+        drain_client_callbacks();
+    }
+#ifdef QB_HAS_SSL
+    {
+        // The wait itself: no case made a queued request time out. The peer completes the TCP handshake and answers
+        // nothing, so the TLS handshake lasts and the requests wait behind it for their timeout.
+        SCOPED_TRACE("answered by the timeout of its wait");
+        std::vector<std::ptrdiff_t> seen; // the count as each callback reads it
+        std::vector<std::string>    said;
+        qb::io::tcp::listener       silent;
+        ASSERT_EQ(silent.listen_v4(0, "127.0.0.1"), qb::io::SocketStatus::Done);
+        auto client = qb::http1::make_client("https://127.0.0.1:" + std::to_string(silent.local_endpoint().port()));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        client->set_request_timeout(200ms);
+        const auto began = std::chrono::steady_clock::now();
+        for (int i = 0; i < 3; ++i) {
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                said.push_back(response.body().as<std::string>());
+                seen.push_back(watchers());
+            });
+        }
+        const auto armed = watchers(); // the three timers of the three waits
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return seen.size() == 3; }));
+        EXPECT_GE(std::chrono::steady_clock::now() - began, 150ms);
+        EXPECT_EQ(said, std::vector<std::string>(3, "HTTP/1.1 request timeout while pending"));
+        // Loop turns passed since `armed` was read, so only an upper bound: its own timer is stopped before each answer.
+        EXPECT_LE(seen[0], armed - 1) << "the timer of a wait was still armed when its request heard its timeout";
+        EXPECT_LE(seen[2], armed - 3);
+        client->disconnect();
+        drain_client_callbacks();
+    }
+#endif
+}
+
 // A request the client refuses leaves no timer behind (Huly QB-1246). One with nothing to connect for it -- automatic
 // reconnection off, no connection -- was queued, timed, then failed with the queue: the timer of its wait stayed armed
 // for the request timeout, one for each push of a callback that pushes back at every failure. And one refused where it

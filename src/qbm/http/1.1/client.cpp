@@ -279,6 +279,13 @@ Client::invoke_user_callback(Fn &&fn) noexcept {
     qb::http::detail::contained("HTTP/1.1", std::forward<Fn>(fn));
 }
 
+template <typename Make>
+void
+Client::give(RequestContext &ctx, Make &&make) noexcept {
+    ctx.timer.reset(); // first: an answered request leaves nothing armed (Huly QB-1246)
+    invoke_user_callback([&] { ctx.callback(std::forward<Make>(make)()); });
+}
+
 Client::Client(std::string const &base_uri)
     : Client(qb::io::uri(base_uri)) {}
 
@@ -628,6 +635,7 @@ Client::process_pending_requests() {
     }
     _active_request = std::move(_pending_requests.front());
     _pending_requests.pop_front();
+    _active_request->timer.reset(); // its wait is over: the connection times it from here
     _connection->send(_active_request->request, _request_timeout);
     if (!_active_request) {
         process_pending_requests();
@@ -769,6 +777,11 @@ Client::detach_failure_cohort(bool fail_pending) {
     if (fail_pending && !_pending_requests.empty()) {
         cohort.pending.emplace(std::move(_pending_requests));
         _pending_requests.clear();
+        for (auto &ctx : *cohort.pending) {
+            if (ctx) {
+                ctx->timer.reset(); // each is answered by this close: none waits any more, whatever its callbacks run
+            }
+        }
     }
     cohort.callbacks = std::move(_connection_callbacks);
     _connection_callbacks.clear();
@@ -786,14 +799,14 @@ Client::fail_retired_requests(failure_cohort &cohort, std::string const &error, 
     if (cohort.active) {
         auto ctx = std::move(cohort.active);
         ++_failed_requests;
-        invoke_user_callback([&] { ctx->callback(create_error_response(active_status, error)); });
+        give(*ctx, [&] { return create_error_response(active_status, error); });
     }
     if (cohort.pending) {
         while (!cohort.pending->empty()) {
             auto ctx = std::move(cohort.pending->front());
             cohort.pending->pop_front();
             ++_failed_requests;
-            invoke_user_callback([&] { ctx->callback(create_error_response(pending_status, pending_error)); });
+            give(*ctx, [&] { return create_error_response(pending_status, pending_error); });
         }
     }
 }
@@ -803,25 +816,41 @@ Client::arm_pending_timeout(std::uint64_t request_id) {
     if (_destroying || _request_timeout <= qb::duration::zero()) {
         return; // nothing is armed for a client being destroyed: after its thread's loop a timer stops the process (Huly QB-1246)
     }
-    bool queued = false; // still in the queue: its last request, unless a callback of the push queued behind it
-    for (auto ctx = _pending_requests.rbegin(); ctx != _pending_requests.rend() && !queued; ++ctx) {
-        queued = *ctx && (*ctx)->request_id == request_id;
+    RequestContext *queued = nullptr; // still in the queue: its last request, unless a callback of the push queued behind it
+    for (auto ctx = _pending_requests.rbegin(); ctx != _pending_requests.rend() && queued == nullptr; ++ctx) {
+        if (*ctx && (*ctx)->request_id == request_id) {
+            queued = ctx->get();
+        }
     }
-    auto weak_self = weak_from_this();
-    if (!queued || weak_self.expired()) {
-        return; // sent or answered already; or no owner the timer could find again
+    if (queued == nullptr || queued->timer || weak_from_this().expired()) {
+        return; // sent or answered already; timed already; or no owner the timer could act for
     }
-    qb::io::async::callback(
-        [weak_self, request_id]() {
-            auto self = weak_self.lock();
-            if (!self) {
-                return;
-            }
-            if (self->fail_pending_request(request_id, "HTTP/1.1 request timeout while pending", qb::http::status::REQUEST_TIMEOUT)) {
-                self->process_pending_requests();
+    // Owned by the request: it goes with it, when it is sent or answered (give()). Armed through the loop it stayed armed
+    // for the whole request timeout whatever became of the request -- one live watcher a request that waited.
+    queued->timer.emplace(*this, request_id, _request_timeout);
+}
+
+void
+pending_timer::on(qb::io::async::event::timer const &) noexcept {
+    auto      &client     = _client; // read first: the request this timer belongs to, and the timer with it, go below
+    const auto request_id = _request_id;
+    client.pending_timed_out(request_id);
+}
+
+void
+Client::pending_timed_out(std::uint64_t request_id) noexcept {
+    auto owner = weak_from_this().lock(); // a callback below may drop the last reference
+    if (!owner) {
+        return;
+    }
+    qb::http::detail::contained(
+        "HTTP/1.1",
+        [&] {
+            if (fail_pending_request(request_id, "HTTP/1.1 request timeout while pending", qb::http::status::REQUEST_TIMEOUT)) {
+                process_pending_requests();
             }
         },
-        _request_timeout);
+        "the timeout of a queued request");
 }
 
 bool
@@ -834,7 +863,7 @@ Client::fail_pending_request(std::uint64_t request_id, std::string const &error,
         auto ctx = std::move(*it);
         _pending_requests.erase(it);
         ++_failed_requests;
-        invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
+        give(*ctx, [&] { return create_error_response(status, error); });
         return true;
     }
     return false;
@@ -883,7 +912,7 @@ Client::handle_response(qb::http::Response response) {
     const bool keep_alive = response.keep_alive && !has_connection_close(response);
     ++_successful_requests;
     if (keep_alive) {
-        invoke_user_callback([&] { ctx->callback(std::move(response)); });
+        give(*ctx, [&] { return std::move(response); });
         if (!_intentional_disconnect) {
             process_pending_requests();
         }
@@ -894,7 +923,7 @@ Client::handle_response(qb::http::Response response) {
     // a connection asked for it with automatic reconnection, failed without --, never by the reset the loop's deferred
     // queue runs later: no close is under way there, and a connect() awaited from a callback could not complete (QB-1246).
     retire_connection();
-    invoke_user_callback([&] { ctx->callback(std::move(response)); });
+    give(*ctx, [&] { return std::move(response); });
     if (!_intentional_disconnect) {
         process_pending_requests();
     }
@@ -941,10 +970,11 @@ Client::fail_active_request(std::string const &error, qb::http::status status) {
     if (!_active_request) {
         return;
     }
-    std::shared_ptr<RequestContext> ctx = std::move(_active_request);
+    auto callback = std::move(_active_request->callback);
+    _active_request.reset(); // the request has its answer: nothing of it stays while the refusal waits its turn
     ++_failed_requests;
     // Through refuse(): a request that cannot be sent fails inside the push that sent it, where its callback may push it back.
-    refuse([ctx, response = create_error_response(status, error)]() mutable { ctx->callback(std::move(response)); });
+    refuse([callback = std::move(callback), response = create_error_response(status, error)]() mutable { callback(std::move(response)); });
 }
 
 void
@@ -956,7 +986,7 @@ Client::fail_all_requests(std::string const &error, qb::http::status status) {
         auto ctx = std::move(pending.front());
         pending.pop_front();
         ++_failed_requests;
-        invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
+        give(*ctx, [&] { return create_error_response(status, error); });
     }
 }
 
