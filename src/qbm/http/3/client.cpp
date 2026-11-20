@@ -15,6 +15,8 @@
 
 #include <nghttp3/nghttp3.h>
 
+#include <qb/io/tcp/socket.h> // resolve_endpoints(), connect_attempt_budget(): the rules of the TCP connector
+
 #include "../detail/client_callback.h"
 #include "../origin.h"
 
@@ -125,33 +127,115 @@ Client::connect(ConnectionCallback callback) {
         }
         return true;
     }
+    // The host is resolved here, as the TCP connector of the two other clients resolves it (a blocking lookup, every address
+    // of the family the URI names, in the resolver's order): the QUIC endpoint dials an address, as every QUIC stack's core
+    // does, and until 3.4 this client handed it the name -- a host name never connected (Huly QB-1246). One connect timeout
+    // covers the lookup and every address, stamped before the lookup.
+    const auto                    began = std::chrono::steady_clock::now();
+    std::vector<qb::io::endpoint> candidates;
+    try {
+        candidates = qb::io::tcp::resolve_endpoints(_base_uri.af(), _host, _base_uri.u_port());
+    } catch (...) {
+        // the lookup could not allocate its answer: no address
+    }
+    return dial(std::move(candidates), std::move(callback), began);
+}
+
+bool
+Client::dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callback, std::chrono::steady_clock::time_point began) {
+    auto       owner             = weak_from_this().lock();
     const bool heard_by_callback = static_cast<bool>(callback);
     if (heard_by_callback) {
         _connection_callbacks.push_back(std::move(callback));
     }
-    ++_connect_epoch;
-    _is_connecting   = true;
-    _h3_ready        = false;
-    _remote_shutdown = false;
-
-    qb::io::quic::tls_config tls;
-    tls.server_name = _host;
-    tls.verify_peer = _verify_peer;
-    if (!qb::io::async::quic::endpoint::connect(_base_uri, std::move(tls), {"h3"})) {
-        // An attempt that cannot start -- the host is not an address (this client resolves no name), or the UDP socket cannot
-        // be opened or bound -- answers this call by its return value alone, like a refusal: its own callback is dropped unheard
-        // (it was called here, inside the call, where one that dials again on `false` recursed without end). What was already
-        // waiting -- queued requests, a connect() this attempt was started for -- hears.
-        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: not an address, or no UDP socket opened and bound");
+    const auto epoch    = ++_connect_epoch;
+    _is_connecting      = true;
+    _h3_ready           = false;
+    _remote_shutdown    = false;
+    _connect_deadline   = _connect_timeout > qb::duration::zero() ? began + _connect_timeout : std::chrono::steady_clock::time_point{};
+    _connect_next       = 0;
+    _connect_candidates = std::move(candidates);
+    const char *failure = nullptr;
+    if (_connect_candidates.empty()) {
+        failure = "Unable to start QUIC connection";
+        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: the host resolves to no address");
+    } else if (_connect_timeout > qb::duration::zero() && std::chrono::steady_clock::now() >= _connect_deadline) {
+        failure = "HTTP/3 connection timeout"; // the lookup outlasted it: nothing is dialled
+    } else if (!start_attempt()) {
+        failure = "Unable to start QUIC connection";
+        LOG_HTTP_WARN_PA(_client_id, "HTTP/3 connection to " << _host << " cannot start: no UDP socket opened and bound");
+    }
+    if (failure == nullptr) {
+        arm_connect_timeout();
+        return true;
+    }
+    if (!owner) {
+        // No shared owner to hear for on a later turn (a plain object, not make_client()'s): the return value alone, and
+        // its own callback dropped unheard. What was already waiting hears.
         if (heard_by_callback) {
             _connection_callbacks.pop_back();
         }
-        close_failed_transport("Unable to start QUIC connection");
-        handle_connection_failure("Unable to start QUIC connection");
+        close_failed_transport(failure);
+        handle_connection_failure(failure);
         return false;
     }
-    arm_connect_timeout();
+    // An attempt that cannot start is a connection that failed, heard as one: through the callback, on a later turn of the
+    // loop, as on the HTTP/1.1 and HTTP/2 clients, whose connector delivers it so. It answered this call by its return value
+    // alone, and ran the failure of what was waiting from inside the call -- where a request whose callback pushes it back
+    // dialled again, without end (Huly QB-1246).
+    qb::io::async::defer([weak_self = weak_from_this(), epoch, error = std::string(failure)] {
+        auto self = weak_self.lock();
+        if (!self || self->_connect_epoch != epoch || !self->_is_connecting) {
+            return; // a disconnect(), or a connection, since
+        }
+        self->close_failed_transport(error);
+        self->handle_connection_failure(error);
+    });
     return true;
+}
+
+bool
+Client::start_attempt() {
+    while (_connect_next < _connect_candidates.size()) {
+        const auto &remote = _connect_candidates[_connect_next++];
+        // The endpoint is given the address; the name stays the caller's, for SNI and for the certificate.
+        qb::io::quic::tls_config tls;
+        tls.server_name = _host;
+        tls.verify_peer = _verify_peer;
+        const auto dialed =
+            "https://" + (remote.af() == AF_INET6 ? "[" + remote.ip() + "]" : remote.ip()) + ":" + std::to_string(remote.port());
+        if (qb::io::async::quic::endpoint::connect(qb::io::uri(dialed), std::move(tls), {"h3"})) {
+            ++_connect_attempt;
+            // Its share of what is left, by the TCP connector's rule (connect_attempt_budget()). The last address has all of
+            // it -- the connect timeout ends it --, and with no timeout no address is given up: QUIC has no refusal to hear.
+            const std::size_t left = _connect_candidates.size() - _connect_next + 1;
+            if (left > 1 && !_destroying && _connect_timeout > qb::duration::zero()) {
+                const auto remaining = std::chrono::duration_cast<qb::duration>(_connect_deadline - std::chrono::steady_clock::now());
+                qb::io::async::callback(
+                    [weak_self = weak_from_this(), epoch = _connect_epoch, attempt = _connect_attempt] {
+                        auto self = weak_self.lock();
+                        if (self && self->_connect_epoch == epoch && self->_connect_attempt == attempt && self->_is_connecting) {
+                            self->next_attempt();
+                        }
+                    },
+                    qb::io::tcp::connect_attempt_budget(remaining, left));
+            }
+            return true;
+        }
+        close_failed_transport("HTTP/3 attempt could not start"); // what the endpoint opened before it gave up
+    }
+    return false;
+}
+
+void
+Client::next_attempt() {
+    LOG_HTTP_INFO_PA(_client_id, "HTTP/3 address " << _connect_next << " of " << _connect_candidates.size() << " for " << _host
+                                                   << " did not answer in its share of the connect timeout: the next is dialled");
+    close_failed_transport("HTTP/3 address did not answer"); // no failure: the connect() goes on
+    if (!start_attempt()) {
+        close_failed_transport("Unable to start QUIC connection");
+        handle_connection_failure("Unable to start QUIC connection");
+    }
 }
 
 void
@@ -728,6 +812,9 @@ Client::arm_connect_timeout() {
     }
     auto       weak_self = weak_from_this();
     const auto epoch     = _connect_epoch;
+    // What is left of the connect timeout: the lookup took its part (a microsecond at least: zero would arm nothing).
+    const auto left = std::max(std::chrono::duration_cast<qb::duration>(_connect_deadline - std::chrono::steady_clock::now()),
+                               qb::duration(std::chrono::microseconds(1)));
     qb::io::async::callback(
         [weak_self, epoch]() {
             auto self = weak_self.lock();
@@ -737,7 +824,7 @@ Client::arm_connect_timeout() {
             self->close_failed_transport("HTTP/3 connection timeout");
             self->handle_connection_failure("HTTP/3 connection timeout");
         },
-        _connect_timeout);
+        left);
 }
 
 void

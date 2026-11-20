@@ -132,6 +132,12 @@ private:
     bool          _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
     bool          _connect_after_close    = false; ///< A connect() asked while a close is deferred: started when it has completed
     std::uint64_t _connect_epoch          = 0;
+    // The addresses the host resolved to, and the next to dial: an attempt its address does not answer in its share of the
+    // connect timeout is closed, without a word, and the next address is dialled (Huly QB-1246). One deadline for all of it.
+    std::vector<qb::io::endpoint>         _connect_candidates;
+    std::size_t                           _connect_next    = 0;
+    std::uint64_t                         _connect_attempt = 0; ///< Counts the attempts: the one a share's timer was armed for
+    std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -201,8 +207,14 @@ public:
      *                 client is already connected. Asked while a close is under way -- from a callback of disconnect(),
      *                 of a read that has just disconnected, or of a read that lost its connection -- the attempt starts
      *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
-     * @return @c true when the callback will hear the outcome. @c false when nothing starts -- the client is being
-     *         destroyed, or the attempt cannot start (no address, no UDP socket) -- and the callback is never called.
+     *                 The host is resolved here, by a blocking lookup as the HTTP/1.1 and HTTP/2 clients' connector makes:
+     *                 every address of the family the URI names (IPv4 for a host name), in the resolver's order, each
+     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. The name given
+     *                 stays the one sent as SNI and checked against the certificate.
+     * @return @c true when the callback will hear the outcome -- of an attempt that cannot start too (a name that does
+     *         not resolve, no UDP socket), on a later turn of the loop, as on the two other clients. @c false when
+     *         nothing starts and the callback is never called: the client is being destroyed, or has no shared owner
+     *         to hear later for.
      */
     bool connect(ConnectionCallback callback);
     /**
@@ -407,8 +419,14 @@ private:
     void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
     /// Fail the pending request with @p request_id with @p status and @p error.
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
-    /// Arm the one-shot connect-timeout callback.
+    /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
+    /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.
+    bool dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callback, std::chrono::steady_clock::time_point began);
+    /// Dials the next address that takes an attempt, and arms its share; false when none is left.
+    [[nodiscard]] bool start_attempt();
+    /// The address under way did not answer in its share: closed without a word, the next one dialled.
+    void next_attempt();
     /// Starts the connect() asked while a close was deferred, its teardown now complete: each callback joins the one attempt.
     void start_deferred_connect();
     /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.

@@ -2186,6 +2186,12 @@ struct ClientTestPeer {
         client.disconnect();
         --client._read_depth;
     }
+    /// connect() past its lookup: the addresses a name resolved to are the test's own (no resolver gives two loopback
+    /// addresses of which the first is silent).
+    static bool
+    dial(Client &client, std::vector<qb::io::endpoint> candidates, ConnectionCallback callback) {
+        return client.dial(std::move(candidates), std::move(callback), std::chrono::steady_clock::now());
+    }
 };
 
 } // namespace qb::http3
@@ -2209,7 +2215,7 @@ struct LosingClient : qb::http3::Client {
 // inside the call is measured by its depth, not by the stack it overflows.
 struct Redial {
     qb::http3::Client *client = nullptr; ///< set once the client exists: a Redial is declared before it, and outlives it
-    int                dials = 0, heard_true = 0, heard_false = 0, depth = 0, deepest = 0;
+    int                dials = 0, heard_true = 0, heard_false = 0, depth = 0, deepest = 0, cap = 64;
 
     bool
     dial() {
@@ -2217,7 +2223,7 @@ struct Redial {
         return client->connect([this](bool ok, std::string const &) {
             deepest = std::max(deepest, ++depth);
             ++(ok ? heard_true : heard_false);
-            if (!ok && dials < 64) {
+            if (!ok && dials < cap) {
                 static_cast<void>(dial());
             }
             --depth;
@@ -2494,8 +2500,8 @@ await_connect(qb::http3::Client &client, qb::http3::ConnectResult &result, int &
 
 } // namespace http3_client_redial_test
 
-// connect() awaited for an attempt that cannot start: connect() returns false and never calls the awaiter's callback, so
-// the awaiter completes itself -- once, `false`, with the reason.
+// connect() awaited for an attempt that cannot start -- a name that resolves to nothing --: the awaiter completes once,
+// `false`, with the reason, on a later turn of the loop, as for any attempt that failed.
 TEST_F(Http3LoopbackTest, AConnectAwaitedForAnAttemptThatCannotStartCompletesFalseOnce) {
     int                      completions = 0;
     qb::http3::ConnectResult result{true, "not completed"};
@@ -2813,27 +2819,136 @@ TEST_F(Http3LoopbackTest, ARunSyncOfConnectFromTheFailureCallbackOfARequestWhose
     server->close();
 }
 
-// An attempt that cannot start -- the host is not an address, and this client resolves no name -- is answered by connect()'s
-// return value alone. Its callback is never called: it was, inside the call, and one that dials again on `false` recursed
-// without end (Huly QB-1246). A request such a client is given is answered inside its push.
-TEST_F(Http3LoopbackTest, AConnectThatCannotStartIsAnsweredByItsReturnValueAlone) {
-    Redial             redial;
-    int                calls = 0;
-    qb::http::Response response;
-    auto               client = qb::http3::make_client("https://qb-http3-client.invalid:4433");
-    redial.client             = client.get();
-    EXPECT_FALSE(redial.dial());
-    EXPECT_EQ(redial.heard_true + redial.heard_false, 0) << "the callback of a connect() that starts nothing is never called";
-    EXPECT_EQ(redial.dials, 1);
+// An attempt that cannot start -- a name that resolves to no address -- is a connection that failed, heard as one: through
+// the callback, on a later turn of the loop, as on the HTTP/1.1 and HTTP/2 clients. connect() returns true. It returned
+// false and ran the failure of what waited from inside the call (and, before that, called its own callback there): a
+// callback that dials again on `false`, and a request whose callback pushes it back, were then called from inside their
+// own call, without end (Huly QB-1246). Here both relaunch at every failure, and each is heard one loop turn at a time:
+// never nested, and done at its count.
+TEST_F(Http3LoopbackTest, AnAttemptThatCannotStartIsHeardThroughTheLoopAndARelaunchIsNeverNested) {
+    Redial redial;
+    redial.cap    = 6; // each dial is a lookup of a name that does not resolve
+    auto client   = qb::http3::make_client("https://qb-http3-client.invalid:4433");
+    redial.client = client.get();
+    EXPECT_TRUE(redial.dial());
+    EXPECT_EQ(redial.heard_true + redial.heard_false, 0) << "the callback was called inside connect()";
+    EXPECT_TRUE(client->is_connecting());
+    ASSERT_TRUE(pump([&] { return redial.heard_false == 6; }));
+    EXPECT_EQ(redial.dials, 6);
+    EXPECT_EQ(redial.heard_true, 0);
+    EXPECT_EQ(redial.deepest, 1) << "a redial was answered from inside its own connect()";
     EXPECT_FALSE(client->is_connecting());
 
-    client->push_request(qb::http::Request{qb::io::uri("/")}, [&](qb::http::Response answered) {
-        ++calls;
-        response = std::move(answered);
+    // A request whose callback pushes it back at every failure: one failure a loop turn, the callback never under itself.
+    int                   pushes = 0, answers = 0, depth = 0, deepest = 0;
+    std::function<void()> push;
+    push = [&] {
+        ++pushes;
+        client->push_request(qb::http::Request{qb::io::uri("/")}, [&](qb::http::Response answered) {
+            deepest = std::max(deepest, ++depth);
+            ++answers;
+            EXPECT_NE(answered.status(), qb::http::status::OK);
+            if (pushes < 6) {
+                push();
+            }
+            --depth;
+        });
+    };
+    push();
+    EXPECT_EQ(answers, 0) << "a request the client cannot connect for was answered inside its push";
+    ASSERT_TRUE(pump([&] { return answers == 6; }));
+    EXPECT_EQ(pushes, 6);
+    EXPECT_EQ(deepest, 1) << "a request pushed back from its failure callback was answered from inside its own push";
+}
+
+// A host name connects (Huly QB-1246): the client resolves it -- `localhost`, the loopback address of the family the URI
+// names -- and hands the QUIC endpoint the address, the name staying the one sent as SNI. Until 3.4 the endpoint was
+// handed the name, which it takes for an address: connect() answered that nothing could start.
+TEST_F(Http3LoopbackTest, AHostNameIsResolvedAndItsRequestServed) {
+    const auto port   = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/named", [](auto ctx) { ctx->text("by name"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client("https://localhost:" + std::to_string(port));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    int                connected = -1;
+    qb::http::Response response;
+    bool               answered = false;
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &) { connected = ok ? 1 : 0; }));
+    ASSERT_TRUE(pump([&] { return connected != -1; }));
+    ASSERT_EQ(connected, 1) << "a host name did not connect";
+    client->push_request(qb::http::Request{qb::io::uri("/named")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        answered = true;
     });
-    EXPECT_EQ(calls, 1) << "a request the client cannot connect for is answered inside its push";
-    EXPECT_NE(response.status(), qb::http::status::OK);
-    EXPECT_EQ(redial.heard_true + redial.heard_false, 0);
+    ASSERT_TRUE(pump([&] { return answered; }));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    EXPECT_EQ(response.body().as<std::string>(), "by name");
+    client->disconnect();
+    server->close();
+}
+
+// An address that does not answer gives way to the next (Huly QB-1246): QUIC has no refusal to hear, so each address has
+// its share of the connect timeout -- the TCP connector's rule, half of what is left for the first of two, two seconds at
+// least -- and the next is dialled when it ends, without a word to the callbacks. The first address here is a loopback
+// port nothing is bound to, the second the server's.
+TEST_F(Http3LoopbackTest, AnAddressThatDoesNotAnswerGivesWayToTheNextWithinTheConnectTimeout) {
+    const auto port   = next_port();
+    const auto silent = next_port();
+    auto       server = qb::http3::make_server();
+    server->router().get("/second", [](auto ctx) { ctx->text("second address"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    int        calls = 0, connected = -1;
+    const auto began = std::chrono::steady_clock::now();
+    ASSERT_TRUE(qb::http3::ClientTestPeer::dial(*client, {qb::io::endpoint("127.0.0.1", silent), qb::io::endpoint("127.0.0.1", port)},
+                                                [&](bool ok, std::string const &) {
+                                                    ++calls;
+                                                    connected = ok ? 1 : 0;
+                                                }));
+    ASSERT_TRUE(pump([&] { return calls != 0; }, 8s));
+    const auto took = std::chrono::steady_clock::now() - began;
+    EXPECT_EQ(calls, 1);
+    ASSERT_EQ(connected, 1) << "the second address was never dialled";
+    EXPECT_GE(took, 2s) << "the first address was given up before its share";
+    EXPECT_LT(took, 5s) << "the second address was dialled only at the connect timeout";
+    qb::http::Response response;
+    bool               answered = false;
+    client->push_request(qb::http::Request{qb::io::uri("/second")}, [&](qb::http::Response res) {
+        response = std::move(res);
+        answered = true;
+    });
+    ASSERT_TRUE(pump([&] { return answered; }));
+    EXPECT_EQ(response.status(), qb::http::status::OK);
+    client->disconnect();
+    server->close();
+}
+
+// The control: one address that does not answer has the whole connect timeout, and fails at it.
+TEST_F(Http3LoopbackTest, ALoneAddressThatDoesNotAnswerFailsAtTheConnectTimeout) {
+    const auto silent = next_port();
+    auto       client = qb::http3::make_client(https_origin(silent));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(600ms);
+    int         calls = 0, connected = -1;
+    std::string error;
+    const auto  began = std::chrono::steady_clock::now();
+    ASSERT_TRUE(client->connect([&](bool ok, std::string const &message) {
+        ++calls;
+        connected = ok ? 1 : 0;
+        error     = message;
+    }));
+    ASSERT_TRUE(pump([&] { return calls != 0; }));
+    EXPECT_EQ(connected, 0);
+    EXPECT_EQ(error, "HTTP/3 connection timeout");
+    EXPECT_GE(std::chrono::steady_clock::now() - began, 550ms);
 }
 
 TEST_F(Http3LoopbackTest, ConnectFailureCallbackMaySubmitFreshRequest) {
