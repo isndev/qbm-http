@@ -3379,6 +3379,103 @@ TEST_F(Http3LoopbackTest, ALoneAddressThatDoesNotAnswerFailsAtTheConnectTimeout)
     EXPECT_GE(std::chrono::steady_clock::now() - began, 550ms);
 }
 
+// An answered request leaves no timer armed (Huly QB-1246). A request owns the timer of its timeout, and whatever gives
+// its answer stops it first: a response, a cancellation, a close. It was the loop's: armed where the request was queued,
+// it stayed armed for the whole request timeout whatever became of the request -- one live watcher for every request
+// of the last sixty seconds, at the default. The loop's count of watchers is read with no loop turn between its two
+// readings wherever the answers can be given without one (a turn lets the timers of earlier cases expire).
+TEST_F(Http3LoopbackTest, AnAnsweredRequestLeavesNoTimerArmed) {
+    const auto watchers = [] {
+        return static_cast<std::ptrdiff_t>(qb::io::async::listener::current.size());
+    };
+    for (const std::string_view answered_by : {"a cancellation, in flight", "a cancellation, queued", "a close", "a response"}) {
+        SCOPED_TRACE(answered_by);
+        std::vector<std::ptrdiff_t> seen; // the count as each callback reads it; declared before the client
+        const auto                  port   = next_port();
+        auto                        server = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().compile();
+        if (answered_by != "a cancellation, queued") {
+            ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        }
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        if (answered_by != "a cancellation, queued") {
+            bool warm = false; // connected, and one request served: what the connection itself registers is there
+            client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) { warm = true; });
+            ASSERT_TRUE(pump([&] { return warm; }));
+        }
+        const std::ptrdiff_t count = 20;
+        if (answered_by == "a close") {
+            client->set_max_concurrent_streams(10); // ten in flight, ten left in the queue: a close answers both kinds
+        }
+        const auto                         before = watchers();
+        std::vector<qb::http3::request_id> ids;
+        for (std::ptrdiff_t i = 0; i < count; ++i) {
+            ids.push_back(client->push_request_with_id(qb::http::Request{qb::io::uri(answered_by == "a response" ? "/ok" : "/stall")},
+                                                       [&](qb::http::Response) { seen.push_back(watchers()); }));
+        }
+        if (answered_by == "a response") {
+            ASSERT_TRUE(pump([&] { return seen.size() == static_cast<std::size_t>(count); }));
+            // Loop turns passed: a timer of an earlier case may have expired meanwhile, never one been added.
+            EXPECT_LE(watchers(), before) << "the requests served left their timers armed";
+        } else {
+            if (answered_by != "a cancellation, queued") {
+                const auto in_flight = static_cast<std::size_t>(answered_by == "a close" ? 10 : count);
+                ASSERT_TRUE(pump([&] { return client->get_active_request_count() == in_flight; }));
+            }
+            const auto                  armed = watchers(); // every request has its timer
+            std::vector<std::ptrdiff_t> expected;
+            if (answered_by == "a close") {
+                client->disconnect();
+                expected.assign(static_cast<std::size_t>(count), armed - count); // all of them stopped before the first callback
+            } else {
+                for (const auto id : ids) {
+                    EXPECT_TRUE(client->cancel_request(id));
+                }
+                for (std::ptrdiff_t k = 1; k <= count; ++k) {
+                    expected.push_back(armed - k); // its own stopped before its callback, the others still armed
+                }
+                EXPECT_EQ(watchers(), armed - count) << "an answered request left its timer armed";
+            }
+            EXPECT_EQ(seen, expected) << "a timer was not stopped before the answer of its request";
+        }
+        client->disconnect();
+        server->close();
+    }
+    {
+        // A request that waited -- timed there -- and is refused where it is submitted: its timer is gone before the
+        // refusal is heard, not kept with the request until then. One stream: the first request holds it, the second
+        // (a trailer no section may carry) waits; cancelling the first submits the second, inside the cancellation.
+        SCOPED_TRACE("a refusal where it is submitted, after a wait");
+        std::ptrdiff_t at_the_refusal = -1;
+        const auto     port           = next_port();
+        auto           server         = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_max_concurrent_streams(1);
+        const auto held = client->push_request_with_id(qb::http::Request{qb::io::uri("/stall")}, [](qb::http::Response) {});
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        qb::http::Request refused{qb::http::method::POST, qb::io::uri("/x")};
+        refused.trailers().set_header("content-length", "7");
+        refused.body() = "payload";
+        client->push_request(std::move(refused), [&](qb::http::Response response) {
+            EXPECT_EQ(response.body().as<std::string>(), "Failed to submit HTTP/3 request");
+            at_the_refusal = watchers();
+        });
+        const auto armed = watchers(); // the two requests have their timers
+        EXPECT_TRUE(client->cancel_request(held));
+        EXPECT_EQ(at_the_refusal, armed - 2) << "the request refused where it was submitted was still timed when it heard so";
+        client->disconnect();
+        server->close();
+    }
+}
+
 // A request is timed wherever it comes to rest (Huly QB-1246): in flight, left in the queue by a pass that could not
 // submit it (the stream limit), queued behind a connection that is not there yet. Its timeout is no longer armed where
 // it is queued, so each of the three places that arm it has its request here: `408`, at the request timeout.
