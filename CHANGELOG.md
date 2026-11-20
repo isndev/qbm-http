@@ -603,9 +603,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the reconnection run's, or one it starts for it once the close's transport has ended. The three clients are also
   destroyed under one contract (the entry under Fixed). What a program sees change against 3.3.0, every change of the
   two entries, client by client:
-  - **A callback that always pushes again (HTTP/1.1, HTTP/2, HTTP/3): this amends the rule this entry first carried,
-    "bound every retry".** Each of the three clients keeps one queue of the answers it owes, oldest first. Two things
-    hear it: the client's own turn of the loop, and its destructor. An answer the client gives by itself -- a refusal
+  - **A callback that always pushes again (HTTP/1.1, HTTP/2, HTTP/3): a change of the clients' contract, which the
+    maintainer accepted on 2026-11-20.** The contract as accepted on 2026-11-13 answered a push made from a callback
+    inside that push -- in ordinary operation as 3.3.0 did, and from the callbacks the destructor runs -- and left the
+    program to "bound every retry": a callback that always pushes again was called from inside its own push, without
+    end. It now reads: what the client answers by itself to a push made from one of its own callbacks is heard on the
+    client's next turn of the loop, and while the client is destroyed a push made from inside the answer of a push is
+    refused, `false`, its callback never called. Each of the three clients keeps one queue of the answers it owes,
+    oldest first. Two things hear it: the client's own turn of the loop, and its destructor. An answer the client gives by itself -- a refusal
     known at once (another origin, the pending bound, a request that cannot be written or submitted, one the connection
     cannot take on HTTP/2 -- the server's limit of concurrent streams --, no connection with automatic reconnection off
     on HTTP/1.1, a `disconnect()` under way or a server's GOAWAY on HTTP/3, a batch whose members are all refused),
