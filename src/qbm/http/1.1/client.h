@@ -146,13 +146,16 @@ class Client : public std::enable_shared_from_this<Client> {
     // cycle whenever that closure never got to run.
     std::size_t _callback_depth = 0;
     std::size_t _holds_queued   = 0; ///< Holds the loop's deferred queue owns (tick_hold): none left means none keeps this client (QB-1246)
-    // A refusal is answered inside the push that earned it -- unless that push is made from one of this client's own
-    // callbacks: then it is heard on the loop's next turn, so a callback that pushes its request back at every failure is
-    // never called from inside its own push (Huly QB-1246). What waits for that turn, in the order it came to be owed: it
-    // is heard before any answer the client gives after it (hear_owed()).
-    std::deque<std::function<void()>> _late_answers;
-    std::uint64_t                     _late_heard      = 0; ///< How many of them were heard: a pass hears those owed as it starts
-    std::size_t                       _destroy_answers = 0; ///< Pushes the destructor's callbacks made, being answered inside themselves
+    // The answers this client owes, in the order it came to owe them (Huly QB-1246). An answer the client gives by itself
+    // -- a refusal, a connect() on a connected client, an empty batch, a coroutine push completed at once -- is given
+    // inside the call only when no callback of this client is on the stack and nothing is owed; an answer the loop brings
+    // -- a response, a timeout, a failure, a close -- is given at once when nothing is owed. Otherwise it is kept here.
+    // What is kept is heard in two places only: the client's turn (a task of its own in the loop's deferred queue, one a
+    // loop turn at most), and its destructor. So the order is total, and what a callback pushes is never answered in the push.
+    std::deque<std::function<void()>> _owed;
+    std::uint64_t                     _owed_heard      = 0;     ///< How many of them were heard: a turn hears those owed as it starts
+    bool                              _turn_asked      = false; ///< The client's turn is in the loop's queue
+    std::size_t                       _destroy_answers = 0;     ///< Pushes the destructor's callbacks made, being answered inside themselves
     // While true, _connection still owns the retired dispatch. connect() may
     // record a new intent, but only deferred cleanup can replace that owner.
     bool _deferred_connection_reset = false;
@@ -208,12 +211,12 @@ public:
 
     /**
      * @brief Open (or reuse) the connection, notifying via callback.
-     * @param callback Invoked with the connection outcome. If already connected,
-     *                 it is invoked immediately with success; if a connection is
-     *                 in progress, it is queued. May be empty.
+     * @param callback Invoked with the connection outcome. If already connected, it hears success inside this call,
+     *                 or on the client's turn of the loop when a callback of this client is on the stack or an answer
+     *                 is owed (as a refusal is heard: push_request()); queued while a connection is in progress. May be empty.
      *                 During retirement, the accepted next attempt starts after
      *                 the old callbacks and protocol/I/O dispatch have unwound.
-     * @return `true` when the callback will hear the outcome -- at once when already connected, with the attempt
+     * @return `true` when the callback will hear the outcome -- as said above when already connected, with the attempt
      *         under way or the one this call starts otherwise. `false` when the client refuses -- it is being destroyed,
      *         or has no shared owner (`make_client`) -- and nothing starts: the callback is then never called. Also
      *         `false` for an empty callback while an attempt is under way: nothing was queued.
@@ -251,12 +254,13 @@ public:
      *                with default `Host`/`User-Agent`/`Accept-Encoding` headers.
      * @param callback Invoked with the response or a synthesized error response. A request the client refuses at
      *                 once -- another origin, the pending-request limit, nothing to connect for it (automatic
-     *                 reconnection off), a request that cannot be written -- is answered inside this call when the
-     *                 program makes it, and once the callback has returned when it is made from one of this
-     *                 client's own callbacks: a callback that pushes back at every failure is never called from
-     *                 inside its own push. Bound such a retry all the same, with a delay: it spins otherwise.
+     *                 reconnection off), a request that cannot be written -- is answered inside this call when no
+     *                 callback of this client is on the stack and no answer is owed; otherwise on the client's turn
+     *                 of the loop, in the order the client came to owe its answers. A callback that pushes back at
+     *                 every failure is never called from inside its own push. Bound such a retry all the same, with
+     *                 a delay: it spins otherwise.
      * @return `false` if @p callback is empty; if the pending-request limit is reached (the callback hears a 503,
-     *         inside the call or once the calling callback has returned); or if the push is made from inside the
+     *         inside the call or on the client's turn of the loop); or if the push is made from inside the
      *         answer of a push the destructor refused, where the callback is never called. `true` otherwise.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
@@ -268,9 +272,9 @@ public:
     [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
     /**
      * @brief Queue multiple requests, delivering all responses once via a single callback.
-     * @param requests The requests to send; an empty vector invokes @p callback with `{}`.
+     * @param requests The requests to send; an empty vector answers @p callback with `{}`, as a refusal is heard.
      * @param callback Invoked once with responses in request order -- as push_request()'s callback, inside this
-     *                 call or once the calling callback has returned when every member is refused at once.
+     *                 call or on the client's turn of the loop when every member is refused at once.
      * @return `false` if @p callback is empty or any request failed to queue -- and then, pushed from inside the
      *         answer of a push the destructor refused, with @p callback never called; `true` otherwise.
      */
@@ -359,28 +363,25 @@ private:
     void                                            ensure_absolute_uri(qb::http::Request &request);
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
     void                                            hold_through_current_tick();
-    void                                            refuse(std::function<void()> answer); ///< A refusal's answer: now, or on the next turn
-    void                                            run_late_answers();                   ///< What refuse() kept for the next turn
-    [[nodiscard]] bool                              answers_wait_a_turn() const noexcept; ///< A callback of this client is on the stack
-    /// What is owed is heard first: before every callback the client calls, so that no answer overtakes a refusal kept
-    /// before it. One test when nothing is owed.
-    void
-    hear_owed() noexcept {
-        if (!_late_answers.empty()) [[unlikely]] {
-            hear_owed_now();
-        }
-    }
-    void               hear_owed_now() noexcept;
+    enum class from : bool { the_client, the_loop }; ///< Who gives an answer: the client by itself, or the loop that brings it
+    /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
+    [[nodiscard]] bool given_now(from who) const noexcept;
+    void               owe(std::function<void()> answer) noexcept;     ///< Kept for the client's turn, which is asked
+    void               answer_by_itself(std::function<void()> answer); ///< An answer the client gives by itself: now, or kept
+    void               tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who) noexcept;
+    void               ask_turn() noexcept;       ///< The client's turn is asked of the loop, if it is not
+    void               run_turn() noexcept;       ///< The client's turn: what was owed as it starts is heard
     [[nodiscard]] bool can_send() const noexcept; ///< Connected, on a connection that is open
     void               enter_user_callback();
     void               leave_user_callback() noexcept;
-    // Invoke a user-supplied callback under a callback_scope, containing any
+    // Call a user-supplied callback now, under a callback_scope, containing any
     // exception it throws. User callbacks are reached from qb-io's noexcept
     // dispatch (protocol onMessage / timeout / disconnect events), where an
     // escaping exception would call std::terminate; this is the single
-    // chokepoint that prevents it.
+    // chokepoint that prevents it. Whether an answer is called now or kept is
+    // decided before it (given_now()).
     template <typename Fn>
-    void           invoke_user_callback(Fn &&fn) noexcept;
+    void           call_now(Fn &&fn) noexcept;
     void           reset_deferred_connection_if_ready();
     void           retire_connection(bool defer_cleanup = true);
     failure_cohort detach_failure_cohort(bool fail_pending);
@@ -389,11 +390,11 @@ private:
     void           process_pending_requests();
     void           arm_pending_timeout(std::uint64_t request_id);        ///< For a request still queued; nothing otherwise
     void           pending_timed_out(std::uint64_t request_id) noexcept; ///< The timer of a queued request's wait fired
-    /// The answer of one request -- its response, a failure --: its timer is stopped first, then what is owed is heard,
-    /// then its callback. Every answer of a request goes through here. @p make builds the response, under the callback's
-    /// containment.
+    /// The answer of one request -- its response, a failure --: its timer is stopped first, then its callback is called,
+    /// or kept for the client's turn behind what is owed. Every answer of a request goes through here. @p make builds
+    /// the response, under the callback's containment.
     template <typename Make>
-    void give(RequestContext &ctx, Make &&make) noexcept;
+    void give(RequestContext &ctx, Make &&make, from who = from::the_loop) noexcept;
     bool fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::REQUEST_TIMEOUT);
     void handle_connection_success();
     void handle_connection_failure(std::string const &error);
