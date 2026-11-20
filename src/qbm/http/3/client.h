@@ -247,8 +247,10 @@ public:
      *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
      *                 The host is resolved here, by a blocking lookup as the HTTP/1.1 and HTTP/2 clients' connector makes:
      *                 every address of the family the URI names (IPv4 for a host name), in the resolver's order, each
-     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. The name given
-     *                 stays the one sent as SNI and checked against the certificate.
+     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. QUIC's own
+     *                 handshake bound follows that timeout for each attempt: the endpoint's `handshake_timeout`
+     *                 setting applies only with no connect timeout. The name given stays the one sent as SNI and
+     *                 checked against the certificate.
      * @return @c true when the callback will hear the outcome -- of an attempt that cannot start too (a name that does
      *         not resolve, no UDP socket), on a later turn of the loop, as on the two other clients. @c false when
      *         nothing starts and the callback is never called: the client is being destroyed, or has no shared owner
