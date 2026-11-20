@@ -558,12 +558,16 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
     ctx->request_id       = _next_request_id++;
     const auto request_id = ctx->request_id;
     _pending_requests.push_back(std::move(ctx));
-    arm_request_timeout(request_id);
-
+    // Its timeout is armed once it has come to rest -- left in the queue, or in flight --, not here: a request refused
+    // where it is submitted left that timer armed for the request timeout, one for each push of a callback that pushes
+    // back at every refusal (Huly QB-1246). process_pending_requests() arms it, for what it submits and for what it leaves.
     if (is_connected()) {
         process_pending_requests();
-    } else if (!_is_connecting) {
-        connect(nullptr);
+    } else {
+        time_pending();
+        if (!_is_connecting) {
+            connect(nullptr);
+        }
     }
     return request_id;
 }
@@ -659,13 +663,12 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
             admitted_all = false;
             continue;
         }
-        auto ctx              = std::make_unique<RequestContext>();
-        ctx->request          = std::move(requests[i]);
-        ctx->created_at       = std::chrono::steady_clock::now();
-        ctx->request_id       = _next_request_id++;
-        ctx->batch_id         = batch_id;
-        const auto request_id = ctx->request_id;
-        ctx->callback         = [this, batch_id, i](qb::http::Response response) {
+        auto ctx        = std::make_unique<RequestContext>();
+        ctx->request    = std::move(requests[i]);
+        ctx->created_at = std::chrono::steady_clock::now();
+        ctx->request_id = _next_request_id++;
+        ctx->batch_id   = batch_id;
+        ctx->callback   = [this, batch_id, i](qb::http::Response response) {
             auto it = _active_batches.find(batch_id);
             if (it == _active_batches.end()) {
                 return;
@@ -680,8 +683,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
                 done(std::move(responses));
             }
         };
-        _pending_requests.push_back(std::move(ctx));
-        arm_request_timeout(request_id);
+        _pending_requests.push_back(std::move(ctx)); // timed once it has come to rest, as a single request (admit_request())
     }
 
     if (batch->completed_count == batch->responses.size()) {
@@ -697,15 +699,37 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
 
     if (is_connected()) {
         process_pending_requests();
-    } else if (!_is_connecting) {
-        connect(nullptr);
+    } else {
+        time_pending();
+        if (!_is_connecting) {
+            connect(nullptr);
+        }
     }
     return admitted_all;
 }
 
 void
+Client::time_pending() noexcept {
+    try {
+        for (auto queued = _pending_requests.rbegin(); queued != _pending_requests.rend() && *queued && !(*queued)->timed; ++queued) {
+            (*queued)->timed = true;
+            arm_request_timeout((*queued)->request_id);
+        }
+    } catch (...) {
+        // no timer could be armed (an allocation): that request waits without one, as with no request timeout
+    }
+}
+
+void
 Client::process_pending_requests() {
     auto owner = weak_from_this().lock();
+    // However this pass is left, what it leaves in the queue is timed: the requests pushed since the last one.
+    struct TimesWhatWaits {
+        Client &client;
+        ~TimesWhatWaits() {
+            client.time_pending();
+        }
+    } const timing{*this};
     if (!_h3 || !is_connected() || _remote_shutdown) {
         return;
     }
@@ -790,6 +814,10 @@ Client::process_pending_requests() {
                 shared->callback(std::move(response));
             });
             continue;
+        }
+        if (!ctx->timed) {
+            ctx->timed = true; // in flight: timed from here, its wait counted from its push (created_at)
+            arm_request_timeout(ctx->request_id);
         }
         _active_requests.emplace(stream_id, std::move(ctx));
     }
@@ -1272,9 +1300,10 @@ Client::connect() {
             complete(ConnectResult{false, "HTTP/3 connection is closing"});
             return;
         }
-        // connect() answers through its callback -- at once when connected, at the attempt's end otherwise -- and returns false,
-        // given one, only when nothing starts (a client being destroyed, an attempt it cannot start), where it never calls it:
-        // the awaiter then completes here.
+        // connect() answers through its callback -- at once when connected, at the attempt's end otherwise, an attempt that
+        // cannot start included, on a later turn. Given one it returns false only for a client it refuses, whose callback
+        // it never calls: one being destroyed -- which this awaiter cannot hold --, or one with no shared owner -- which
+        // has no weak reference to lock above. The awaiter completes here all the same, should a refusal be added.
         // `complete` is COPIED into the callback so this end still holds one (one allocation on a connection attempt: a cold path).
         if (!self->connect([complete](bool ok, std::string const &error) mutable { complete(ConnectResult{ok, error}); })) {
             complete(ConnectResult{false, "Unable to start QUIC connection"});
@@ -1307,17 +1336,10 @@ Client::push_request(qb::http::Request request) {
                 return;
             }
             // The callback answers every outcome, a refusal by the pending bound included (push_request returns false then,
-            // its 503 delivered or owed its turn) -- but one: pushed from inside an answer the destructor's close delivers, the
-            // push is refused by its return value alone and never calls its callback. The awaiter completes here then.
-            auto answered = std::make_shared<bool>(false);
-            if (!self->push_request(std::move(req),
-                                    [complete, answered](qb::http::Response response) mutable {
-                                        *answered = true;
-                                        complete(std::move(response));
-                                    })
-                && !*answered && self->_destroying) {
-                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client disconnect"));
-            }
+            // its 503 delivered or owed its turn). The one push that never calls its callback -- from inside an answer the
+            // destructor's close delivers -- cannot come from here: a client being destroyed is not locked above.
+            static_cast<void>(self->push_request(
+                std::move(req), [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); }));
         });
 }
 
@@ -1343,12 +1365,10 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
                 complete(std::move(closing));
                 return;
             }
-            const bool unheard = self->_destroying && self->_refusal_depth != 0; // refused by the return value alone: see push_request()
-            self->push_requests(std::move(reqs),
-                                [complete](std::vector<qb::http::Response> responses) mutable { complete(std::move(responses)); });
-            if (unheard) {
-                complete({});
-            }
+            static_cast<void>(
+                self->push_requests(std::move(reqs), [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
+                    complete(std::move(responses));
+                }));
         });
 }
 
