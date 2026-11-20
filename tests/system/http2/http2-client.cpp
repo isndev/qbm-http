@@ -6441,4 +6441,25 @@ TEST_F(Http2ClientTest, AnEmptyBatchPushedBackFromTheDestructorsCallbacksEndsAtI
     EXPECT_EQ(accepted, (std::vector<bool>{true, false}));
 }
 
+// A run_sync() of a coroutine push made from a callback the client's turn hears completes. The refusal it awaits is
+// kept for the client's next turn -- a callback of the client is on the stack --, and the loop run_sync() runs brings
+// that turn from the loop's deferred queue, whose drain is still running the first turn. qb-io runs deferred callbacks
+// under a nested turn (Huly QB-1246, in qb): where that drain does not nest, this wait never ends -- the one queue of
+// owed answers needs that drain, and must not be used without it.
+TEST_F(Http2ClientTest, ARunSyncOfACoroutinePushFromACallbackTheClientsTurnHearsCompletes) {
+    bool             done   = false; // before the client: its callbacks write here
+    qb::http::status status = qb::http::status::OK;
+    auto             client = make_test_client();
+    client->push_request(elsewhere(), [&](qb::http::Response) {     // answered inside the program's push
+        client->push_request(elsewhere(), [&](qb::http::Response) { // kept: heard by the client's turn
+            qb::http::test::watchdog bound("run_sync() of a coroutine push from a callback the client's turn hears", 5s);
+            status = qb::io::async::run_sync(client->push_request(elsewhere())).status();
+            done   = true;
+        });
+    });
+    EXPECT_FALSE(done) << "a refusal of a push made from a callback was heard inside the push";
+    ASSERT_TRUE(ServerThread::pump_until([&] { return done; }));
+    EXPECT_EQ(status, qb::http::status::BAD_REQUEST);
+}
+
 } // namespace http2_client_callbacks_test
