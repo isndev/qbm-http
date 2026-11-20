@@ -6531,3 +6531,62 @@ TEST_F(Http3LoopbackTest, AConnectionThatNegotiatesAnotherProtocolIsClosedWithAC
     EXPECT_EQ(backend->close_codes.size(), 1u);
     server->close();
 }
+
+// The loop can wake a request's timer before the steady clock's deadline -- its timers run on a clock of their own --:
+// the timer is then armed again, in place, for the time left, and the request times out at its timeout. Dropped, the
+// one-shot fire is lost: the request stays queued, or in flight, for ever. Here the loop is handed a time 600 ms ahead of
+// its clock (qev's ev_now_set), on a thread of its own so that no other case inherits that loop: the pass that follows
+// finds every timer due within 600 ms, which a control timer armed beside the request's shows (Huly QB-1246).
+TEST_F(Http3LoopbackTest, ARequestTimerTheLoopWakesEarlyIsArmedAgainForTheTimeLeft) {
+    for (const std::string_view where : {"in the queue", "in flight"}) {
+        SCOPED_TRACE(where);
+        bool slow = false;
+        std::thread([&] {
+            qb::io::async::init();
+            const auto port   = next_port();
+            auto       server = qb::http3::make_server();
+            server->router().get("/stall", [](auto) {});
+            server->router().compile();
+            int                       answered = 0; // before the client: its callbacks count here
+            bool                      control  = false;
+            qb::http::status          status   = qb::http::status::OK;
+            std::chrono::milliseconds took{0};
+            auto                      client = qb::http3::make_client(https_origin(port));
+            client->set_verify_peer(false);
+            client->set_connect_timeout(20s);
+            if (where == "in flight") {
+                ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+                ASSERT_TRUE(client->connect(nullptr));
+                ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+            } // else nobody answers at that port: the request waits behind a connection
+            client->set_request_timeout(400ms);
+            const auto pushed = std::chrono::steady_clock::now();
+            client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) {
+                ++answered;
+                status = response.status();
+                took   = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - pushed);
+            });
+            ASSERT_EQ(client->get_active_request_count(), where == "in flight" ? 1u : 0u);
+            qb::io::async::callback([&] { control = true; }, 400ms); // a timer of the same delay, beside the request's
+            ev_now_set(static_cast<struct ev_loop *>(qb::io::async::listener::current.loop()), ev_clock_now() + 0.6);
+            qb::io::async::run(EVRUN_NOWAIT); // one pass, on the time the loop was handed
+            const auto woke = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - pushed);
+            ASSERT_TRUE(control) << "the loop did not wake its 400 ms timers on the time it was handed: the case proves nothing";
+            if (woke >= 300ms) {
+                slow = true; // the wake was not early enough to tell
+                client->disconnect();
+                server->close();
+                return;
+            }
+            EXPECT_EQ(answered, 0) << "the request was timed out " << woke.count() << " ms after its push, before its timeout";
+            EXPECT_TRUE(pump([&] { return answered != 0; }, 5s)) << "the timer that woke early was not armed again";
+            EXPECT_EQ(answered, 1);
+            EXPECT_EQ(status, qb::http::status::REQUEST_TIMEOUT);
+            EXPECT_GE(took, 400ms);
+            client->disconnect();
+            server->close();
+        }).join();
+        if (slow)
+            GTEST_SKIP() << "the host ran too slowly: 300 ms had passed before the early wake";
+    }
+}
