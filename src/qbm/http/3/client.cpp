@@ -300,9 +300,40 @@ Client::start_attempt() {
         // That close is this attempt's: under the flag it is only recorded (dispatch(connection_closed)), and the address
         // counts as one that could not start. Heard as a failure there, the connect()'s callback was called inside
         // connect(), a relaunch dialled again from inside its own call, and the next address was never tried (Huly QB-1246).
+        // The time this attempt has: its share of what is left of the connect timeout, by the TCP connector's rule
+        // (connect_attempt_budget()) -- all of it for the last address, or the only one. Zero with no connect timeout, or
+        // with nothing left of it.
+        const std::size_t left      = _connect_candidates.size() - _connect_next + 1; // this address and those after it
+        qb::duration      remaining = qb::duration::zero(), share = qb::duration::zero();
+        if (_connect_timeout > qb::duration::zero()) {
+            remaining = std::chrono::duration_cast<qb::duration>(_connect_deadline - std::chrono::steady_clock::now());
+            share     = qb::io::tcp::connect_attempt_budget(remaining, left);
+        }
         _attempt_ended_at_start = false;
         bool started            = false;
         {
+            // QUIC's own bound on a handshake follows the connect timeout, as curl's ngtcp2 backend takes its from the
+            // connect timeout when one is set: it is this attempt's time, and a second more, so that the timers of this
+            // client decide -- one moment, one reason. Left at the endpoint's setting -- ten seconds by default --, it ended
+            // a lone address at ten seconds of a thirty-second connect timeout, where the two other clients wait thirty.
+            // With no connect timeout the endpoint's setting stands. The program's settings are put back once the attempt
+            // has taken its own (the endpoint configures its backend inside connect()).
+            struct AttemptSettings {
+                Client                      &client;
+                const qb::io::quic::settings configured;
+                AttemptSettings(Client &owner, qb::duration time)
+                    : client(owner)
+                    , configured(owner.settings()) {
+                    if (time > qb::duration::zero()) {
+                        auto bound              = configured;
+                        bound.handshake_timeout = time + std::chrono::seconds(1);
+                        client.set_settings(bound);
+                    }
+                }
+                ~AttemptSettings() noexcept {
+                    client.set_settings(configured);
+                }
+            } const attempt_settings{*this, share};
             struct Starting {
                 bool &flag;
                 explicit Starting(bool &value) noexcept
@@ -317,24 +348,18 @@ Client::start_attempt() {
         }
         if (started && !_attempt_ended_at_start) {
             ++_connect_attempt;
-            // Its share of what is left, by the TCP connector's rule (connect_attempt_budget(), and the connector's own
-            // test: a share that is all of what is left arms nothing, the connect timeout ends it). The last address has
-            // all of it, and with no timeout no address is given up for its time: QUIC has no refusal to hear, only its own
-            // handshake timeout (dispatch(connection_closed)).
-            const std::size_t left = _connect_candidates.size() - _connect_next + 1;
-            if (left > 1 && !_destroying && _connect_timeout > qb::duration::zero()) {
-                const auto remaining = std::chrono::duration_cast<qb::duration>(_connect_deadline - std::chrono::steady_clock::now());
-                const auto budget    = qb::io::tcp::connect_attempt_budget(remaining, left);
-                if (budget < remaining) { // not armed for nothing left either: a delay of zero would run next_attempt() here, inline
-                    qb::io::async::callback(
-                        [weak_self = weak_from_this(), epoch = _connect_epoch, attempt = _connect_attempt] {
-                            auto self = weak_self.lock();
-                            if (self && self->_connect_epoch == epoch && self->_connect_attempt == attempt && self->_is_connecting) {
-                                self->next_attempt("did not answer in its share of the connect timeout");
-                            }
-                        },
-                        budget);
-                }
+            // The share's own timer, by the connector's test: a share that is all of what is left arms nothing, the
+            // connect timeout ends it -- the last address, a lone one. With no connect timeout no address is given up for
+            // its time: QUIC has no refusal to hear, only its own handshake timeout (dispatch(connection_closed)).
+            if (left > 1 && !_destroying && share < remaining) { // nor for nothing left: a delay of zero would run next_attempt() here, inline
+                qb::io::async::callback(
+                    [weak_self = weak_from_this(), epoch = _connect_epoch, attempt = _connect_attempt] {
+                        auto self = weak_self.lock();
+                        if (self && self->_connect_epoch == epoch && self->_connect_attempt == attempt && self->_is_connecting) {
+                            self->next_attempt("did not answer in its share of the connect timeout");
+                        }
+                    },
+                    share);
             }
             return true;
         }

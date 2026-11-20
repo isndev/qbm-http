@@ -3751,11 +3751,49 @@ TEST_F(Http3LoopbackTest, AnAddressTheNetworkRefusesAtOnceIsHeardOnALaterTurnOrG
     }
 }
 
-// QUIC gives an address up by itself: its handshake timeout, ten seconds by default, shorter than the share an address
-// has of the default connect timeout (Huly QB-1246). That close is no answer of a peer, an address is left and time is
-// left: the next one is dialled. It was taken for the end of the connect(), which failed at QUIC's timeout with the
-// second address never tried. The handshake timeout is shortened here to 300 ms, under a share of three seconds.
-TEST_F(Http3LoopbackTest, AnAddressQuicGivesUpBeforeItsShareGivesWayToTheNext) {
+// The connect timeout is the bound of a connect() on the three clients (Huly QB-1246): QUIC's own bound on a handshake
+// follows it for each attempt, as curl's ngtcp2 backend takes its from the connect timeout when one is set. A lone
+// address that does not answer has the whole connect timeout. It was given up at QUIC's own handshake timeout -- ten
+// seconds by default, of a connect timeout of thirty --, with QUIC's words. Two measures: the default, eleven seconds
+// against QUIC's ten; and a handshake timeout the program shortened to 300 ms under a connect timeout of 1.5 s, which
+// leaves the program's setting as the program set it.
+TEST_F(Http3LoopbackTest, ALoneAddressThatDoesNotAnswerHasTheWholeConnectTimeoutNotQuicsOwn) {
+    struct Measure {
+        std::chrono::milliseconds connect_timeout, quic_handshake_timeout, at_least;
+    };
+    for (const auto &measure : {Measure{1500ms, 300ms, 1400ms}, Measure{11s, 0ms, 10800ms}}) {
+        SCOPED_TRACE(measure.connect_timeout.count());
+        int         calls = 0, connected = -1; // declared before the client
+        std::string error;
+        auto        client = qb::http3::make_client(https_origin(next_port())); // nobody answers
+        client->set_verify_peer(false);
+        client->set_connect_timeout(measure.connect_timeout);
+        if (measure.quic_handshake_timeout > 0ms) {
+            auto quic              = client->settings();
+            quic.handshake_timeout = measure.quic_handshake_timeout;
+            client->set_settings(quic);
+        }
+        const auto configured = client->settings().handshake_timeout;
+        const auto began      = std::chrono::steady_clock::now();
+        ASSERT_TRUE(client->connect([&](bool ok, std::string const &message) {
+            ++calls;
+            connected = ok ? 1 : 0;
+            error     = message;
+        }));
+        ASSERT_TRUE(pump([&] { return calls != 0; }, measure.connect_timeout + 3s));
+        const auto took = std::chrono::steady_clock::now() - began;
+        EXPECT_EQ(connected, 0);
+        EXPECT_GE(took, measure.at_least) << "the address was given up at QUIC's own handshake timeout: " << error;
+        EXPECT_EQ(error, "HTTP/3 connection timeout");
+        EXPECT_EQ(client->settings().handshake_timeout, configured) << "the program's QUIC settings were changed";
+        client->disconnect();
+    }
+}
+
+// With no connect timeout QUIC's own handshake timeout is the one bound, and an address it gives up leaves its place to
+// the next (Huly QB-1246): that close is no answer of a peer. It was taken for the end of the connect(), which failed
+// with the second address never tried. The handshake timeout is shortened here to 300 ms.
+TEST_F(Http3LoopbackTest, WithNoConnectTimeoutAnAddressQuicGivesUpGivesWayToTheNext) {
     const auto port   = next_port();
     const auto silent = next_port();
     auto       server = qb::http3::make_server();
@@ -3764,7 +3802,7 @@ TEST_F(Http3LoopbackTest, AnAddressQuicGivesUpBeforeItsShareGivesWayToTheNext) {
 
     auto client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
-    client->set_connect_timeout(6s);
+    client->set_connect_timeout(qb::duration::zero());
     auto quic              = client->settings();
     quic.handshake_timeout = 300ms;
     client->set_settings(quic);
@@ -3782,7 +3820,7 @@ TEST_F(Http3LoopbackTest, AnAddressQuicGivesUpBeforeItsShareGivesWayToTheNext) {
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(connected, 1) << "QUIC's own timeout on the first address ended the connect(): " << error;
     EXPECT_GE(took, 250ms) << "the first address was given up before QUIC gave it up";
-    EXPECT_LT(took, 2s) << "the second address waited for the first one's share";
+    EXPECT_LT(took, 900ms) << "QUIC's bound was not the endpoint's own setting";
     client->disconnect();
     server->close();
 }
