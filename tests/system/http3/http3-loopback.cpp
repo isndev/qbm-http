@@ -3482,6 +3482,81 @@ TEST_F(Http3LoopbackTest, TwoRefusalsOwedWhenTheClientIsDestroyedAreHeardAlike) 
     EXPECT_EQ(order, (std::vector<int>{1, 10, 2, 20})) << "each refusal owed, then the answer of the push its callback made";
 }
 
+// A callback the destructor hears -- the answer of what is still owed when the client is destroyed -- may run the loop
+// (Huly QB-1246). The turn that was asked for that answer is still in the loop's queue, and the loop the callback runs
+// reaches it: it finds no client to hear for, and touches nothing. What the callback pushes then is answered as from
+// any callback the destructor runs: inside the push, and by the return value alone from inside that answer. And a
+// response on its way when the client is destroyed may come in that loop: its request hears once, the response or the
+// close. The client is owned apart from its control block, so that a sanitizer sees the object freed.
+TEST_F(Http3LoopbackTest, ACallbackTheDestructorHearsThatRunsTheLoopEndsCleanly) {
+    using http3_client_lifetime_test::Told;
+    for (const std::string_view with : {"nothing else under way", "a response on its way"}) {
+        SCOPED_TRACE(with);
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+        int                   destroyed = 0, kept = 0, answers = 0, first = 0;      // before the client: its callbacks count here
+        int                   destroyed_when_heard = -1;                            // 1: heard by the destructor, the object's end begun
+        int                   second = 0, second_under_the_first = 0, in_first = 0; // a second answer owed behind the first
+        std::vector<bool>     accepted;
+        std::shared_ptr<Told> client(new Told(https_origin(port), destroyed));
+        auto *const           raw = client.get();
+        raw->set_verify_peer(false);
+        const auto elsewhere = [] {
+            return qb::http::Request{qb::io::uri("https://other.invalid/")};
+        }; // refused at once
+        if (with == "a response on its way") {
+            ASSERT_TRUE(raw->connect(nullptr));
+            ASSERT_TRUE(pump([&] { return raw->is_connected(); }));
+            raw->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) { ++first; }); // submitted at once: in flight
+        }
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) {     // answered inside the program's push
+            raw->push_request(elsewhere(), [&, raw](qb::http::Response) { // kept: the destructor's
+                ++kept;
+                in_first             = 1;
+                destroyed_when_heard = destroyed;
+                const auto until     = std::chrono::steady_clock::now() + 100ms;
+                while (std::chrono::steady_clock::now() < until) {
+                    qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // the turn that was asked runs here, and what the connection brings
+                }
+                const bool outer = raw->push_request(qb::http::Request{qb::io::uri("/ok")}, [&, raw](qb::http::Response response) {
+                    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+                    ++answers;
+                    accepted.push_back(raw->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) { ++answers; }));
+                });
+                accepted.push_back(outer);
+                in_first = 0;
+            });
+            raw->push_request(elsewhere(), [&](qb::http::Response) { // kept behind it: the destructor's too, once the first has returned
+                ++second;
+                second_under_the_first += in_first;
+            });
+        });
+        EXPECT_EQ(kept, 0) << "a refusal of a push made from a callback was heard inside the push";
+        client.reset(); // the last reference, with those answers owed and their turn asked: no loop turn since
+        EXPECT_EQ(destroyed, 1);
+        EXPECT_EQ(kept, 1);
+        EXPECT_EQ(destroyed_when_heard, 1) << "the answer owed was not heard by the destructor: the case shows nothing";
+        EXPECT_EQ(answers, 1)
+            << "a push made from a callback the destructor runs is answered inside it; one made from inside that answer is not";
+        EXPECT_EQ(accepted, (std::vector<bool>{false, true}));
+        EXPECT_EQ(second, 1) << "the second answer owed is heard once";
+        EXPECT_EQ(second_under_the_first, 0) << "the turn that was asked heard for a client being destroyed, inside the loop its callback ran";
+        const auto settle = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(kept, 1) << "the turn that was asked heard for a client that is gone";
+        EXPECT_EQ(second, 1);
+        EXPECT_EQ(answers, 1);
+        EXPECT_EQ(first, with == "a response on its way" ? 1 : 0) << "the request in flight when the client was destroyed hears once";
+        server->close();
+    }
+}
+
 namespace http3_client_relaunch_test {
 
 /// A callback that pushes its request back at every refusal -- it never gives up -- and then does one thing more.
@@ -3599,44 +3674,58 @@ TEST_F(Http3LoopbackTest, ARequestPushedBackThenACallTheClientAnswersByItselfIsN
     }
 }
 
-// The same callback, which also runs the loop, while ten other requests of the client time out in the queue (Huly
-// QB-1246). An answer of this client runs under another one only through a loop turn the program itself runs there:
-// every call of the callback finds on the stack the loop turns it is running, and one call more. A timeout delivered in
-// such a turn heard the kept refusal first, inside its own answer, whatever turn was running: ten deep here. Every push
-// is answered once: the ten the timeouts make, and one for each call before the sixtieth.
-TEST_F(Http3LoopbackTest, ARequestPushedBackByACallbackThatRunsTheLoopWhileOthersTimeOutIsNeverAnsweredUnderAnotherAnswer) {
+// The same callback while ten other requests of the client time out in the queue, in two shapes (Huly QB-1246).
+// Returning once it has pushed back, it is never called inside another call of this client: every call is exactly one
+// deep, whatever the loop brings in between -- the ten timeouts, and the refusals that keep coming. Running the loop
+// itself once it has pushed back -- qb::io::async::run() here; run_once(), run_until() and run_sync() are such turns
+// too --, it receives inside that loop whatever the client owes, the refusal it has just earned included: it recurses
+// once for each refusal, and that recursion is the program's. So that shape checks an invariant, not a depth: every
+// call finds on the stack the loop turns this callback is itself running, and one call more. The invariant also held
+// on the code before the one queue, whose nesting went through the same loop turns: this is no witness of what
+// changed -- the shapes that run no loop are. Every push is answered once in both shapes: the ten the timeouts make,
+// and one for each call before the sixtieth.
+TEST_F(Http3LoopbackTest, ARequestPushedBackWhileOthersTimeOutIsCalledUnderItselfOnlyThroughTheLoopTurnsItsCallbackRuns) {
     using http3_client_relaunch_test::Relaunch;
-    int      timed_out = 0; // before the client: its callbacks count here
-    Relaunch r;
-    r.client = qb::http3::make_client(https_origin(next_port())); // nobody answers there: the requests wait behind a connection
-    r.client->set_verify_peer(false);
-    r.client->set_connect_timeout(20s);
-    r.client->set_request_timeout(150ms);
-    r.cap  = 60;
-    r.then = [&] {
-        r.run_the_loop();
-    };
-    for (int i = 0; i < 10; ++i) {
-        r.client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) {
-            EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
-            ++timed_out; // runs no loop turn, and is not counted in the depth: the callback that pushes back is
-            r.push();
-        });
+    for (const bool runs_the_loop : {false, true}) {
+        SCOPED_TRACE(runs_the_loop ? "the callback runs the loop" : "the callback returns");
+        int      timed_out = 0; // before the client: its callbacks count here
+        Relaunch r;
+        r.client = qb::http3::make_client(https_origin(next_port())); // nobody answers there: the requests wait behind a connection
+        r.client->set_verify_peer(false);
+        r.client->set_connect_timeout(20s);
+        r.client->set_request_timeout(150ms);
+        r.cap  = 60;
+        r.then = [&] {
+            if (runs_the_loop) {
+                r.run_the_loop();
+            }
+        };
+        for (int i = 0; i < 10; ++i) {
+            r.client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                ++timed_out; // runs no loop turn, and is not counted in the depth: the callback that pushes back is
+                r.push();
+            });
+        }
+        ASSERT_TRUE(pump([&] { return timed_out == 10 && r.calls == r.pushes && r.calls >= r.cap; }));
+        const auto settle = std::chrono::steady_clock::now() + 50ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(timed_out, 10);
+        EXPECT_EQ(r.pushes, 69) << "the ten the timeouts made, and one for each of the fifty-nine calls that pushed back";
+        EXPECT_EQ(r.calls, 69) << "every push is answered once";
+        EXPECT_EQ(r.under_another, 0) << "a call of the callback found something else on the stack than the loop turns it runs itself";
+        EXPECT_EQ(r.deepest, r.deepest_loop_turns + 1);
+        if (runs_the_loop) {
+            RecordProperty("deepest", r.deepest); // measured, not asserted: the recursion of the program, which the loop it runs allows
+            RecordProperty("deepest_loop_turns", r.deepest_loop_turns);
+        } else {
+            EXPECT_EQ(r.deepest_loop_turns, 0);
+            EXPECT_EQ(r.deepest, 1) << "a callback that runs no loop turn was called inside another call of this client";
+        }
+        r.client->disconnect();
     }
-    ASSERT_TRUE(pump([&] { return timed_out == 10 && r.calls == r.pushes && r.calls >= r.cap; }));
-    const auto settle = std::chrono::steady_clock::now() + 50ms;
-    while (std::chrono::steady_clock::now() < settle) {
-        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-    }
-    EXPECT_EQ(timed_out, 10);
-    EXPECT_EQ(r.pushes, 69) << "the ten the timeouts made, and one for each of the fifty-nine calls that pushed back";
-    EXPECT_EQ(r.calls, 69) << "every push is answered once";
-    EXPECT_EQ(r.under_another, 0) << "an answer ran under another answer of this client with no loop turn of the program between the two";
-    EXPECT_EQ(r.deepest, r.deepest_loop_turns + 1);
-    EXPECT_EQ(r.deepest, 1) << "the callback was called under itself";
-    RecordProperty("deepest", r.deepest);
-    RecordProperty("deepest_loop_turns", r.deepest_loop_turns);
-    r.client->disconnect();
 }
 
 // A member of a batch refused where it is submitted has its own answer, whatever becomes of the batch, and is counted
