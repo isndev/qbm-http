@@ -79,7 +79,9 @@ Client::~Client() {
     } catch (...) {
         // An allocation the pass makes for itself failed: nothing leaves a destructor. The close below still runs.
     }
-    _deferred_close.reset(); // a close a submission cut short left half done is not this one: disconnect() below is the full close,
+    // No close is half done here: its mark is set only with a read or a submission of this client on the stack --
+    // disconnect() and a lost connection defer to them --, the outermost of them completes or clears it on every way
+    // out, an exception included, and each holds this client until then. disconnect() below is the full close.
     qb::http::detail::contained("HTTP/3", [&] { disconnect(); }, "destructor's close"); // every connect() still waiting hears it
 }
 
@@ -744,12 +746,20 @@ Client::process_pending_requests() {
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
 
-        auto stream              = open_bidirectional_stream(0);
-        ctx->stream_id           = stream.id();
-        const auto stream_id     = ctx->stream_id;
-        const auto attempt_epoch = _connect_epoch;
-        bool       submitted     = false;
-        {
+        // A submission that an exception cuts short -- an allocation, or what a hook of the transport throws under the
+        // send it makes -- still answers its request and finishes the close it deferred, as a read does; the exception
+        // goes on once that is done. The request had left the queue and was in no registry yet: it was destroyed unheard.
+        // And the close stayed half done: its mark kept every later request, disconnect() and connect() out (Huly QB-1246).
+        std::uint64_t      stream_id     = 0;
+        bool               opened        = false;
+        bool               submitted     = false;
+        const auto         attempt_epoch = _connect_epoch;
+        std::exception_ptr cut_short;
+        try {
+            auto stream    = open_bidirectional_stream(0);
+            ctx->stream_id = stream.id();
+            stream_id      = ctx->stream_id;
+            opened         = true;
             struct SubmitGuard {
                 int &depth;
                 explicit SubmitGuard(int &value) noexcept
@@ -761,8 +771,10 @@ Client::process_pending_requests() {
                 }
             } guard(_submit_depth);
             submitted = _h3->submit_request(stream_id, ctx->request);
+        } catch (...) {
+            cut_short = std::current_exception();
         }
-        std::exception_ptr transition_error;
+        std::exception_ptr transition_error     = cut_short; // the submission's own exception is the one that goes on
         bool               closed_during_submit = false;
         if (_deferred_close && _read_depth == 0 && _submit_depth == 0) {
             closed_during_submit     = true;
@@ -779,7 +791,9 @@ Client::process_pending_requests() {
                     }
                 }
             } catch (...) {
-                transition_error = std::current_exception();
+                if (!transition_error) {
+                    transition_error = std::current_exception();
+                }
             }
         }
         if (closed_during_submit || attempt_epoch != _connect_epoch || !_h3 || !is_connected()) {
@@ -800,11 +814,22 @@ Client::process_pending_requests() {
             return;
         }
         if (!submitted) {
-            // Request never made it onto the wire; abandon the just-opened
+            // Request never made it onto the wire, or not whole; abandon the just-opened
             // stream the same way the client cancels any request (RFC 9114 §4.1).
-            reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
             ++_failed_requests;
-            refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
+            try {
+                if (opened) {
+                    reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+                }
+                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
+            } catch (...) {
+                if (!cut_short) {
+                    throw; // as before: what the callback of a refusal throws reaches the caller of the push
+                }
+            }
+            if (cut_short) {
+                std::rethrow_exception(cut_short);
+            }
             continue;
         }
         time(*ctx); // in flight: timed from here if it was not while it waited, its timeout counted from its push (created_at)

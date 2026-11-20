@@ -117,10 +117,9 @@ struct BatchRequestContext {
 };
 
 /**
- * @brief Test seam: what no call of the public surface reaches -- a disconnect() deferred and never completed (what a
- *        submission an exception cuts short leaves), the addresses a lookup returned and the time it took, an attempt
- *        started with nothing left of the connect timeout. Declared only; the qbm-http test suite defines it, no
- *        production code names it.
+ * @brief Test seam: what no call of the public surface reaches -- the addresses a lookup returned and the time it
+ *        took, an attempt started with nothing left of the connect timeout, the count of attempts. Declared only; the
+ *        qbm-http test suite defines it, no production code names it.
  */
 struct ClientTestPeer;
 
