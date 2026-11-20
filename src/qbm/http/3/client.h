@@ -469,12 +469,18 @@ private:
     /// Admit one request (push_request() and push_request_with_id()); @return its id, or 0 when it
     /// was answered at once. @p refused_by_bound is set when the pending bound refused it.
     [[nodiscard]] request_id admit_request(qb::http::Request request, ResponseCallback callback, bool &refused_by_bound);
-    /// Submit as many queued requests as the concurrency limit allows.
-    void process_pending_requests();
+    /// Submit as many queued requests as the concurrency limit allows. @p who brought the pass here: a call of the
+    /// program (a push, a cancellation), or the loop. @p own_request / @p own_batch name what that call is itself pushing,
+    /// 0 for none: a submission of it that an exception cuts short has that exception for its one outcome.
+    void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
+    /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: out of the
+    /// queue, out of the requests in flight -- their streams reset --, and the batch with it. Never throws.
+    void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
     /// Mark the connection up, notify callbacks, and flush pending requests.
     void handle_connection_success(std::string const &alpn);
-    /// Mark the connection down, notify callbacks, and fail all requests.
-    void handle_connection_failure(std::string const &error);
+    /// Mark the connection down, notify callbacks, and fail all requests. @p who gives those answers: the loop, or the
+    /// client itself when a submission the program's own call made lost the connection.
+    void handle_connection_failure(std::string const &error, from who = from::the_loop);
     /// Close an unsuccessful QUIC attempt without delivering its own close event twice.
     void close_failed_transport(std::string_view reason);
     /// Fail every pending/active request and batch with @p error.

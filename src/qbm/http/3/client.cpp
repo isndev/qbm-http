@@ -698,13 +698,21 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
     // Its timeout is armed once it has come to rest -- left in the queue, or in flight --, not here: a request refused
     // where it is submitted would have a timer armed only for its answer to stop it, one for each push of a callback that
     // pushes back at every refusal (Huly QB-1246). process_pending_requests() arms it, for what it submits and leaves.
-    if (is_connected()) {
-        process_pending_requests();
-    } else {
-        time_pending();
-        if (!_is_connecting) {
-            connect(nullptr);
+    // One outcome for this call: its answer through the callback, or the exception that leaves it. What an exception
+    // leaves this call with is taken back unanswered -- a submission cut short answered the request AND threw: a
+    // coroutine caught the exception, awaited its next request, and was resumed by the answer of this one (Huly QB-1246).
+    try {
+        if (is_connected()) {
+            process_pending_requests(from::the_client, request_id);
+        } else {
+            time_pending();
+            if (!_is_connecting) {
+                connect(nullptr);
+            }
         }
+    } catch (...) {
+        withdraw(request_id, 0);
+        throw;
     }
     return request_id;
 }
@@ -732,7 +740,7 @@ Client::cancel_request(request_id id, std::string const &reason) {
     const auto stream_id = active->first; // the client is kept through the callback and the RFC 9114 §4.1 stream reset (above)
     fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST, from::the_client);
     reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
-    process_pending_requests();
+    process_pending_requests(from::the_client);
     return true;
 }
 
@@ -830,13 +838,20 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
 
     _active_batches.emplace(batch_id, std::move(batch));
 
-    if (is_connected()) {
-        process_pending_requests();
-    } else {
-        time_pending();
-        if (!_is_connecting) {
-            connect(nullptr);
+    // One outcome for this call, as for a single request: an exception that leaves it takes the whole batch back -- the
+    // members still queued, those already in flight, and the batch's callback, which is never called.
+    try {
+        if (is_connected()) {
+            process_pending_requests(from::the_client, 0, batch_id);
+        } else {
+            time_pending();
+            if (!_is_connecting) {
+                connect(nullptr);
+            }
         }
+    } catch (...) {
+        withdraw(0, batch_id);
+        throw;
     }
     return admitted_all;
 }
@@ -853,7 +868,45 @@ Client::time_pending() noexcept {
 }
 
 void
-Client::process_pending_requests() {
+Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
+    const auto own = [&](RequestContext const &ctx) {
+        return (request_id != 0 && ctx.request_id == request_id) || (batch_id != 0 && ctx.batch_id == batch_id);
+    };
+    for (auto queued = _pending_requests.begin(); queued != _pending_requests.end();) {
+        if (*queued && own(**queued)) {
+            ++_failed_requests;
+            queued = _pending_requests.erase(queued); // its timer goes with it
+        } else {
+            ++queued;
+        }
+    }
+    std::uint64_t streams[16]; // a batch larger than this is taken back sixteen streams a pass
+    for (std::size_t found = 1; found != 0;) {
+        found = 0;
+        for (auto const &[stream_id, ctx] : _active_requests) {
+            if (ctx && own(*ctx) && found < std::size(streams)) {
+                streams[found++] = stream_id;
+            }
+        }
+        for (std::size_t i = 0; i < found; ++i) {
+            ++_failed_requests;
+            _active_requests.erase(streams[i]);
+        }
+        for (std::size_t i = 0; i < found && _h3 && is_connected() && !_deferred_close; ++i) { // not on a connection that is going
+            try {
+                reset_stream(0, streams[i], NGHTTP3_H3_REQUEST_CANCELLED); // RFC 9114 section 4.1: the client no longer wants it
+            } catch (...) {
+                // the reset could not be written: the stream ends with its connection
+            }
+        }
+    }
+    if (batch_id != 0) {
+        _active_batches.erase(batch_id); // with its callback, unheard
+    }
+}
+
+void
+Client::process_pending_requests(from who, std::uint64_t own_request, std::uint64_t own_batch) {
     auto owner = weak_from_this().lock();
     // However this pass is left, what it leaves in the queue is timed: the requests pushed since the last one.
     struct TimesWhatWaits {
@@ -879,9 +932,14 @@ Client::process_pending_requests() {
         _pending_requests.pop_front();
 
         // A submission that an exception cuts short -- an allocation, or what a hook of the transport throws under the
-        // send it makes -- still answers its request and finishes the close it deferred, as a read does; the exception
-        // goes on once that is done. The request had left the queue and was in no registry yet: it was destroyed unheard.
-        // And the close stayed half done: its mark kept every later request, disconnect() and connect() out (Huly QB-1246).
+        // send it makes -- has one outcome, and still finishes the close it deferred, as a read does (Huly QB-1246):
+        // - cut short inside the call of the program that pushed it, the exception is that outcome: the request is taken
+        //   back unanswered here, with whatever else that call pushed once the exception leaves it (withdraw()) -- the
+        //   rule of an initiating function that throws: its completion handler is never invoked;
+        // - cut short anywhere else -- the loop submitting what waited for a connection, a call the program made for
+        //   another request --, the request is answered 503, once, and the exception goes on to whoever ran the pass.
+        // The request had left the queue and was in no registry yet: it was destroyed unheard, and the close stayed half
+        // done, its mark keeping every later request, disconnect() and connect() out. Then it was answered AND thrown at.
         std::uint64_t      stream_id     = 0;
         bool               opened        = false;
         bool               submitted     = false;
@@ -906,6 +964,23 @@ Client::process_pending_requests() {
         } catch (...) {
             cut_short = std::current_exception();
         }
+        const bool thrown_at_its_own_call =
+            cut_short && ((own_request != 0 && ctx->request_id == own_request) || (own_batch != 0 && ctx->batch_id == own_batch));
+        if (cut_short && (own_request != 0 || own_batch != 0)) {
+            // The exception will leave the call of the program that ran this pass: what that call pushed goes out of the
+            // registries now, before a close finished below can answer it -- whichever submission was cut short.
+            withdraw(own_request, own_batch);
+        }
+        // The request this pass was writing: taken back, or refused -- an answer the client gives by itself, through the
+        // queue of what is owed, as every refusal of a push.
+        const auto settle = [&](const char *why) {
+            ++_failed_requests;
+            if (thrown_at_its_own_call) {
+                ctx.reset(); // unanswered: the exception is its outcome
+            } else {
+                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why));
+            }
+        };
         std::exception_ptr transition_error     = cut_short; // the submission's own exception is the one that goes on
         bool               closed_during_submit = false;
         if (_deferred_close && _read_depth == 0 && _submit_depth == 0) {
@@ -913,11 +988,14 @@ Client::process_pending_requests() {
             const std::string reason = std::move(*_deferred_close);
             _deferred_close.reset();
             try {
+                // What this close ends is answered by who ran the pass: under a push of the program those failures are
+                // the client's own answers, kept for its turn when a callback of this client is on the stack. Given as
+                // the loop's, a push made from a callback heard the other requests' failures inside it (Huly QB-1246).
                 if (reason.empty()) {
-                    complete_disconnect(); // the disconnect() deferred to the end of this submission
+                    complete_disconnect(who); // the disconnect() deferred to the end of this submission
                 } else {
                     close_failed_transport("HTTP/3 connection closed");
-                    handle_connection_failure(reason);
+                    handle_connection_failure(reason, who);
                     if (_auto_reconnect && has_pending_or_active_work()) {
                         connect(nullptr);
                     }
@@ -930,11 +1008,8 @@ Client::process_pending_requests() {
         }
         if (closed_during_submit || attempt_epoch != _connect_epoch || !_h3 || !is_connected()) {
             const FailureScope failing{_failure_callbacks}; // the request of a connection that has just ended (Huly QB-1246)
-            ++_failed_requests;
             try {
-                // An answer the client gives by itself, as every refusal of a push: its callback may push the request back.
-                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
-                                                                     "HTTP/3 connection closed during request submission"));
+                settle("HTTP/3 connection closed during request submission");
             } catch (...) {
                 if (!transition_error) {
                     transition_error = std::current_exception();
@@ -946,21 +1021,28 @@ Client::process_pending_requests() {
             return;
         }
         if (!submitted) {
-            // Request never made it onto the wire, or not whole; abandon the just-opened
-            // stream the same way the client cancels any request (RFC 9114 §4.1).
-            ++_failed_requests;
+            // The request never made it onto the wire, or not whole. Settled first, then its stream abandoned the way the
+            // client cancels any request (RFC 9114 section 4.1), in a try of its own: sharing one with the refusal, a
+            // reset that threw too -- a hook that throws again, an allocation that still fails -- left the request
+            // unanswered (Huly QB-1246).
+            std::exception_ptr heard_error; // what the callback of the refusal throws reaches the caller of the push, as before
             try {
-                if (opened) {
-                    reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
-                }
-                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
+                settle("Failed to submit HTTP/3 request");
             } catch (...) {
-                if (!cut_short) {
-                    throw; // as before: what the callback of a refusal throws reaches the caller of the push
+                heard_error = std::current_exception();
+            }
+            if (opened && _h3 && is_connected()) {
+                try {
+                    reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
+                } catch (...) {
+                    // the reset could not be written: the stream ends with its connection
                 }
             }
             if (cut_short) {
                 std::rethrow_exception(cut_short);
+            }
+            if (heard_error) {
+                std::rethrow_exception(heard_error);
             }
             continue;
         }
@@ -1002,7 +1084,7 @@ Client::handle_connection_success(std::string const &alpn) {
 }
 
 void
-Client::handle_connection_failure(std::string const &error) {
+Client::handle_connection_failure(std::string const &error, from who) {
     const FailureScope failing{_failure_callbacks};
     ++_connect_epoch;
     _is_connected    = false;
@@ -1017,11 +1099,11 @@ Client::handle_connection_failure(std::string const &error) {
     // Retire old requests before connection callbacks can enqueue a new attempt.
     // fail_all_requests swaps its registries first, so work started by any of
     // its callbacks belongs to the next connection.
-    auto callback_error = fail_all_requests(error);
+    auto callback_error = fail_all_requests(error, who);
     for (auto &cb : callbacks) {
         if (cb) {
             try {
-                tell_connect(cb, false, error, from::the_loop);
+                tell_connect(cb, false, error, who);
             } catch (...) {
                 if (!callback_error) {
                     callback_error = std::current_exception();
