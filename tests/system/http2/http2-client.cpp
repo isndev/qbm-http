@@ -5824,6 +5824,14 @@ refused_then_awaits(qb::http2::Client &client, std::vector<int> &order, int kept
     order.push_back(done);
 }
 
+/// The same, awaiting connect(): from a callback of a close it completes `false` at once -- behind what is owed.
+qb::io::async::task<void>
+refused_then_connects(qb::http2::Client &client, std::vector<int> &order, int kept, int done) {
+    client.push_request(elsewhere(), [&order, kept](qb::http::Response) { order.push_back(kept); });
+    const auto connected = co_await client.connect();
+    order.push_back(connected ? -done : done);
+}
+
 // The answers come in the order the client came to owe them (Huly QB-1246): one queue, oldest first, heard on the
 // client's turn. While a refusal is kept for that turn, every answer that comes after it takes its place behind it --
 // the refusal of a push the program makes next, an empty batch, the failures of a disconnect() the same callback
@@ -5905,12 +5913,15 @@ TEST_F(Http2ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
             // at once: completed behind that refusal, by a loop turn run_sync() runs, it gets past its await after it.
             qb::io::async::run_sync(refused_then_awaits(*client, order, 3, 10, false));
             qb::io::async::run_sync(refused_then_awaits(*client, order, 5, 11, true));
+            // And one that awaits connect(): its `false` at once is an answer the client gives by itself too (7, then 12).
+            qb::io::async::run_sync(refused_then_connects(*client, order, 7, 12));
         });
         ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
         client->disconnect();
-        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11})) << "a coroutine push completed at once overtook the refusal owed before it";
+        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11, 7, 12}))
+            << "a coroutine push or connect() completed at once overtook the refusal owed before it";
         settle();
-        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11}));
+        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11, 7, 12}));
     }
     {
         SCOPED_TRACE("a timeout that comes while a refusal is owed");
@@ -6366,6 +6377,68 @@ TEST_F(Http2ClientTest, ACallbackThatDropsTheLastReferenceEndsCleanlyWhoeverCall
         EXPECT_EQ(destroyed_when_heard, 0) << "the callback was called by a destroyed client";
         EXPECT_EQ(destroyed, 1);
     }
+}
+
+// While the destructor hears what the client still owes, an answer the loop brings takes its place behind it, as in
+// ordinary operation (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the first runs
+// the loop, and the response of a request in flight comes in that loop. The order the client came to owe them is the
+// first refusal (1; -1 marks the end of its callback), the second (2), then the response (9). The response was given at
+// once, under the first callback and ahead of the second refusal: 1 9 -1 2.
+TEST_F(Http2ClientTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTakesItsPlaceBehindIt) {
+    int                   destroyed = 0; // before the client: its callbacks write here
+    bool                  up        = false;
+    std::vector<int>      order;
+    std::shared_ptr<Told> client(new Told(url(), destroyed));
+    auto *const           raw = client.get();
+    raw->set_verify_peer(false);
+    raw->set_connect_timeout(5s);
+    raw->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    raw->push_request(reconnect::get_test(), [&](qb::http::Response) { order.push_back(9); }); // in flight
+    raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                              // inside the program's push
+        raw->push_request(elsewhere(), [&](qb::http::Response) {                               // owed first
+            order.push_back(1);
+            settle(150ms); // the response comes in this loop
+            order.push_back(-1);
+        });
+        raw->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // owed second
+    });
+    client.reset(); // the last reference: the destructor hears what is owed
+    EXPECT_EQ(destroyed, 1);
+    EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the loop brought was given ahead of one still owed";
+    settle();
+}
+
+// An empty batch pushed from a callback the destructor runs follows the destructor's rule, as a request does (Huly
+// QB-1246): it is answered inside the push, and one pushed from inside that answer is refused by the return value alone,
+// its callback unheard. An empty batch pushed back from its own callback had no end there: a hundred calls, a hundred
+// deep, where the case stops it.
+TEST_F(Http2ClientTest, AnEmptyBatchPushedBackFromTheDestructorsCallbacksEndsAtItsSecondPush) {
+    int                   calls = 0, depth = 0, deepest = 0;
+    std::vector<bool>     accepted;
+    qb::http2::Client    *raw = nullptr;
+    std::function<void()> push_empty;
+    push_empty = [&] {
+        const auto index = accepted.size(); // a push returns after the ones its callback makes
+        accepted.push_back(false);
+        const bool taken = raw->push_requests({}, [&](std::vector<qb::http::Response>) {
+            deepest = std::max(deepest, ++depth);
+            if (++calls < 100) {
+                push_empty();
+            }
+            --depth;
+        });
+        accepted[index]  = taken;
+    };
+    {
+        auto client = make_test_client();
+        raw         = client.get();
+        client->push_request(reconnect::get_test(), [&](qb::http::Response) { push_empty(); }); // fails with the client
+        ASSERT_TRUE(client->is_connecting()); // queued behind a connection the loop has not made
+    } // destroyed with that request waiting
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(deepest, 1);
+    EXPECT_EQ(accepted, (std::vector<bool>{true, false}));
 }
 
 } // namespace http2_client_callbacks_test

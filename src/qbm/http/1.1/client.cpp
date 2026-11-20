@@ -401,7 +401,9 @@ Client::connect() {
             // Awaited from a callback of a close -- the connection retired, its callbacks running --, it answers at once.
             // connect(callback) queues the attempt until those callbacks have unwound: a coroutine blocked on it there --
             // run_sync() pumps the loop until it completes -- waited for ever (Huly QB-1246).
-            complete(ConnectResult{false, "HTTP/1.1 connection is closing"});
+            // An answer the client gives by itself, as a refusal: kept for the client's turn, a callback being on the stack,
+            // behind whatever is owed. The loop run_sync() runs hears it.
+            self->answer_by_itself([complete]() mutable { complete(ConnectResult{false, "HTTP/1.1 connection is closing"}); });
             return;
         }
         // connect() answers through its callback -- at once when connected, at the attempt's end otherwise -- and returns false,
@@ -566,6 +568,17 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         return false;
     }
     if (requests.empty()) {
+        if (_destroying) {
+            // As a request pushed from a callback the destructor runs: answered inside the push, and refused by the return
+            // value alone from inside that answer -- an empty batch pushed back from its own callback had no end there.
+            if (_destroy_answers != 0) {
+                return false;
+            }
+            ++_destroy_answers;
+            call_now([&] { callback({}); });
+            --_destroy_answers;
+            return true;
+        }
         answer_by_itself([callback = std::move(callback)] { callback({}); });
         return true;
     }
@@ -699,9 +712,14 @@ Client::given_now(from who) const noexcept {
     if (_owed.empty() && (who == from::the_loop || _callback_depth == 0)) [[likely]] {
         return true;
     }
-    // Kept only where a turn can come for it: not for a client with no shared owner -- one being destroyed, whose
-    // destructor answers by its own rule, or a plain object.
-    return weak_from_this().expired();
+    if (!weak_from_this().expired()) {
+        return false; // kept for the client's turn
+    }
+    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. An answer the client gives by
+    // itself is given inside the call, by the destructor's own rule. One the loop brings while the destructor still has
+    // answers to hear -- a callback it runs ran the loop -- takes its place behind them, as in ordinary operation: the
+    // destructor hears it in its turn. Given at once, it went ahead of what was owed before it (Huly QB-1246).
+    return who == from::the_client || _owed.empty();
 }
 
 void

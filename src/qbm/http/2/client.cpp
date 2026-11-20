@@ -171,9 +171,14 @@ Client::given_now(from who) const noexcept {
     if (_owed.empty() && (who == from::the_loop || _callback_depth == 0)) [[likely]] {
         return true;
     }
-    // Kept only where a turn can come for it: not for a client with no shared owner -- one being destroyed, whose
-    // destructor answers by its own rule, or a plain object.
-    return weak_from_this().expired();
+    if (!weak_from_this().expired()) {
+        return false; // kept for the client's turn
+    }
+    // No shared owner -- a client being destroyed, or a plain object --: no turn will come. An answer the client gives by
+    // itself is given inside the call, by the destructor's own rule. One the loop brings while the destructor still has
+    // answers to hear -- a callback it runs ran the loop -- takes its place behind them, as in ordinary operation: the
+    // destructor hears it in its turn. Given at once, it went ahead of what was owed before it (Huly QB-1246).
+    return who == from::the_client || _owed.empty();
 }
 
 void
@@ -573,8 +578,16 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     auto owner = weak_from_this().lock();
     if (requests.empty()) {
         LOG_HTTP_WARN_PA(_client_id, "Empty request batch");
-        if (callback) { // an answer the client gives by itself: now, or on its turn
-            notify(_destroying, "HTTP/2", [&] { answer_by_itself([callback = std::move(callback)] { callback({}); }); });
+        if (callback && _destroying) {
+            // As a request pushed from a callback the destructor runs: answered inside the push, and refused by the return
+            // value alone from inside that answer -- an empty batch pushed back from its own callback had no end there.
+            if (_destroy_answers != 0) {
+                return false;
+            }
+            const destroy_answer answering{_destroy_answers};
+            notify(_destroying, "HTTP/2", [&] { call_now([&] { callback({}); }); });
+        } else if (callback) { // an answer the client gives by itself: now, or on its turn
+            answer_by_itself([callback = std::move(callback)] { callback({}); });
         }
         return true;
     }
@@ -1470,7 +1483,9 @@ Client::connect() {
             // drain. A coroutine blocked there -- run_sync() pumps the loop until it completes -- waited for that end or that
             // failure, for the connect timeout or for ever, or got an attempt that connected in the pump and that the close,
             // resumed, ended (Huly QB-1246).
-            complete(ConnectResult{false, "HTTP/2 connection is closing"});
+            // An answer the client gives by itself, as a refusal: kept for the client's turn, a callback being on the stack,
+            // behind whatever is owed. The loop run_sync() runs hears it.
+            self->answer_by_itself([complete]() mutable { complete(ConnectResult{false, "HTTP/2 connection is closing"}); });
             return;
         }
         // connect() answers through its callback -- at once when connected, at the attempt's end otherwise -- and returns false only
