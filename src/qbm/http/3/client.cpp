@@ -601,6 +601,9 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
 
 bool
 Client::cancel_request(request_id id, std::string const &reason) {
+    // What is owed is heard before the answer below, and one of those callbacks may drop the last reference: the client
+    // lives to the end of this call (Huly QB-1246).
+    auto owner = weak_from_this().lock();
     auto pending =
         std::find_if(_pending_requests.begin(), _pending_requests.end(), [id](auto const &ctx) { return ctx && ctx->request_id == id; });
     if (pending != _pending_requests.end()) {
@@ -616,8 +619,7 @@ Client::cancel_request(request_id id, std::string const &reason) {
     if (active == _active_requests.end()) {
         return false;
     }
-    const auto stream_id = active->first;
-    auto       owner     = weak_from_this().lock(); // Keep alive through callback and RFC 9114 §4.1 stream reset.
+    const auto stream_id = active->first; // the client is kept through the callback and the RFC 9114 §4.1 stream reset (above)
     fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST);
     reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
     process_pending_requests();
@@ -626,6 +628,9 @@ Client::cancel_request(request_id id, std::string const &reason) {
 
 bool
 Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback) {
+    // What is owed is heard before an answer given here, and one of those callbacks may drop the last reference: the
+    // client lives to the end of this call. It went on, on a destroyed client, for an empty batch (Huly QB-1246).
+    auto owner = weak_from_this().lock();
     if (requests.empty()) {
         if (callback) {
             hear_owed();

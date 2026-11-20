@@ -2975,9 +2975,9 @@ TEST_F(Http3LoopbackTest, APushRefusedAtOnceWhoseCallbackDropsTheLastReferenceEn
     };
     for (const std::string_view refusal : {"another origin", "the pending bound"}) {
         SCOPED_TRACE(refusal);
-        int         destroyed = 0;
-        auto        client    = std::make_shared<Told>(https_origin(next_port()), destroyed);
-        auto *const raw       = client.get();
+        int         destroyed = 0, destroyed_under_the_callback = -1;
+        auto        client = std::make_shared<Told>(https_origin(next_port()), destroyed);
+        auto *const raw    = client.get();
         if (refusal == "the pending bound") {
             client->set_max_pending_requests(0);
         }
@@ -2987,8 +2987,10 @@ TEST_F(Http3LoopbackTest, APushRefusedAtOnceWhoseCallbackDropsTheLastReferenceEn
                                                     ++answers;
                                                     EXPECT_NE(response.status(), qb::http::status::OK);
                                                     client.reset(); // the last reference
+                                                    destroyed_under_the_callback = destroyed;
                                                 });
         EXPECT_EQ(answers, 1);
+        EXPECT_EQ(destroyed_under_the_callback, 0) << "the client was destroyed under the callback of its own refusal"; // in any build
         EXPECT_EQ(accepted, refusal == "another origin") << "the bound refuses by its return value too";
         EXPECT_EQ(destroyed, 1) << "something else held the client";
     }
@@ -3183,6 +3185,60 @@ TEST_F(Http3LoopbackTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
         EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
         client->disconnect();
         server->close();
+    }
+}
+
+namespace http3_client_lifetime_test {
+
+/// A client that tells when it is destroyed.
+struct Told : qb::http3::Client {
+    int &destroyed;
+    Told(std::string const &origin, int &count)
+        : qb::http3::Client(origin)
+        , destroyed(count) {}
+    ~Told() {
+        ++destroyed;
+    }
+};
+
+} // namespace http3_client_lifetime_test
+
+// A refusal owed its turn may be heard by a call the program makes, and its callback may drop the last reference to the
+// client (Huly QB-1246): the client lives to the end of that call. An empty batch pushed with a refusal owed heard it
+// first, was destroyed there, and went on: it called the batch's callback, and read its own state, as a destroyed
+// client. Read in any build: the batch's callback says whether the client was destroyed when it ran. Both ways of owning
+// the client -- with the storage of the object in the control block, which a weak reference keeps, and apart from it,
+// which a sanitizer then sees freed.
+TEST_F(Http3LoopbackTest, AnEmptyBatchPushedWithARefusalOwedWhoseCallbackDropsTheLastReferenceEndsCleanly) {
+    using http3_client_lifetime_test::Told;
+    for (const std::string_view owned : {"in one block", "apart"}) {
+        SCOPED_TRACE(owned);
+        int         destroyed = 0, destroyed_when_the_batch_heard = -1, kept_heard = 0, batch_heard = 0;
+        const auto  origin = https_origin(next_port());
+        auto        client = owned == "apart" ? std::shared_ptr<Told>(new Told(origin, destroyed)) : std::make_shared<Told>(origin, destroyed);
+        auto *const raw    = client.get();
+        const auto  elsewhere = [] {
+            return qb::http::Request{qb::io::uri("https://other.invalid/")};
+        }; // refused at once
+        raw->push_request(elsewhere(), [&](qb::http::Response) {
+            raw->push_request(elsewhere(), [&](qb::http::Response) { // kept for its turn
+                ++kept_heard;
+                client.reset(); // the last reference
+            });
+        });
+        EXPECT_EQ(kept_heard, 0);
+        raw->push_requests({}, [&](std::vector<qb::http::Response>) {
+            ++batch_heard;
+            destroyed_when_the_batch_heard = destroyed;
+        });
+        const auto settle = std::chrono::steady_clock::now() + 50ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(kept_heard, 1);
+        EXPECT_EQ(batch_heard, 1);
+        EXPECT_EQ(destroyed_when_the_batch_heard, 0) << "the batch's callback was called by a destroyed client";
+        EXPECT_EQ(destroyed, 1);
     }
 }
 
