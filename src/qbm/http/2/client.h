@@ -119,6 +119,10 @@ struct RequestContext {
     std::chrono::steady_clock::time_point created_at;
     uint32_t                              stream_id = 0;
     bool                                  completed = false;
+    /// The batch this request is a member of, and its place there; 0 for a request with a callback of its own. A member
+    /// has no callback: its answer is recorded in its batch, whose callback is what the program hears.
+    std::uint64_t batch_id    = 0;
+    std::size_t   batch_index = 0;
 };
 
 /**
@@ -251,6 +255,20 @@ private:
 
     // Callbacks
     std::vector<ConnectionCallback> _connection_callbacks;
+
+    // The answers this client owes, in the order it came to owe them (Huly QB-1246). An answer the client gives by itself
+    // -- a refusal, a connect() on a connected client, an empty batch, a coroutine push completed at once -- is given
+    // inside the call only when no callback of this client is on the stack and nothing is owed; an answer the loop brings
+    // -- a response, a timeout, a failure, a close -- is given at once when nothing is owed. Otherwise it is kept here.
+    // What is kept is heard in two places only: the client's turn (a task in the loop's deferred queue, one a loop turn
+    // at most), and its destructor. So the order is total, and what a callback pushes is never answered inside that push.
+    std::deque<std::function<void()>> _owed;
+    std::uint64_t                     _owed_heard      = 0;     ///< How many of them were heard: a turn hears those owed as it starts
+    bool                              _turn_asked      = false; ///< The client's turn is in the loop's queue
+    int                               _callback_depth  = 0;     ///< Callbacks of this client on the stack
+    int                               _destroy_answers = 0;     ///< Pushes the destructor's callbacks made, being answered inside themselves
+    struct CallbackScope;                                       ///< Counts one callback while it runs
+    enum class from : bool { the_client, the_loop };            ///< Who gives an answer: the client by itself, or the loop that brings it
 
     // Statistics
     uint64_t _total_requests{0};
@@ -577,7 +595,7 @@ private:
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
 
     /// Process pending requests queue
-    void process_pending_requests();
+    void process_pending_requests(from who = from::the_loop);
 
     /// Handle successful connection
     void handle_connection_success();
@@ -628,9 +646,29 @@ private:
     [[nodiscard]] DetachedRequests detach_requests();
     /// Answers what detach_requests() took, each with @p error_message. fail_all_requests() is the two, one after the other.
     void fail_detached(DetachedRequests detached, const std::string &error_message);
-    /// fail_all_requests() runs: it detached the registries, so a batch member it fails finds no batch. Expected there, and
-    /// not logged once per member -- the pass said "Failing all requests" once (Huly QB-1246).
-    bool _failing_all = false;
+    /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
+    [[nodiscard]] bool given_now(from who) const noexcept;
+    /// Calls @p fn, a callback of the program, now: counted while it runs. What @p fn throws goes on to the caller.
+    template <typename Fn>
+    void call_now(Fn &&fn);
+    /// Keeps @p answer for the client's turn, which is asked.
+    void owe(std::function<void()> answer) noexcept;
+    /// An answer the client gives by itself: now, or kept.
+    void answer_by_itself(std::function<void()> answer);
+    /// The outcome of a connect(), told to @p callback: now, or kept.
+    void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
+    /// The answer of a batch, told to its callback: now, or kept.
+    void tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who);
+    /// The answer of one request -- its response, a failure, a refusal --: a member of a batch is recorded in its batch at
+    /// once (the batch's callback is the answer); a request's own callback is called now, or kept behind what is owed.
+    /// Every answer of a request goes through here.
+    void give(RequestContext &ctx, qb::http::Response response, from who = from::the_loop);
+    /// One member of a batch has its answer: recorded; the batch's callback is told when it was the last.
+    void batch_member_answered(std::uint64_t batch_id, std::size_t index, qb::http::Response response, from who);
+    /// Asks the client's turn of the loop, if it is not asked.
+    void ask_turn() noexcept;
+    /// The client's turn: what was owed as it starts is heard, in order.
+    void run_turn() noexcept;
     /// A close or a failure runs the callbacks of what it ends: the coroutine connect() answers there at once -- one rule, as
     /// what it would wait for is, after most of them, heard only once those callbacks return (Huly QB-1246).
     int _closing_callbacks = 0;
