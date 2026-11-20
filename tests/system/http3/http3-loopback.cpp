@@ -2910,6 +2910,57 @@ TEST_F(Http3LoopbackTest, ARequestPushedBackAtEveryFailureOfADisconnectIsNeverCa
     server->close();
 }
 
+// A refusal kept for the next turn is heard exactly once (Huly QB-1246), whatever happens before that turn. The answer
+// that earned it may run the loop -- a turn of its own, which spends the one that was asked --: the kept refusal is not
+// heard under it, and is heard once after. And the client may be destroyed before any turn: its destructor delivers
+// what is still owed, and the turn that was asked finds nothing left.
+TEST_F(Http3LoopbackTest, ARefusalKeptForTheNextTurnIsHeardExactlyOnce) {
+    for (const std::string_view then : {"the answer runs the loop", "the client is destroyed before the turn"}) {
+        SCOPED_TRACE(then);
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+
+        int  kept_heard = 0, heard_under_the_answer = -1, answers = 0;
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false);
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { // fails with the close
+            ++answers;
+            client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { // refused inside its push
+                ++answers;
+                client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++kept_heard; }); // kept
+                if (then == "the answer runs the loop") {
+                    for (int pass = 0; pass < 4; ++pass) {
+                        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                    }
+                }
+                heard_under_the_answer = kept_heard;
+            });
+        });
+        ASSERT_TRUE(pump([&] { return client->get_active_request_count() == 1; }));
+        client->disconnect();
+        EXPECT_EQ(answers, 2);
+        EXPECT_EQ(heard_under_the_answer, 0) << "the kept refusal was heard under the answer that earned it";
+        if (then == "the client is destroyed before the turn") {
+            EXPECT_EQ(kept_heard, 0);
+            client.reset();
+            EXPECT_EQ(kept_heard, 1) << "the destructor did not deliver the refusal still owed its turn";
+        }
+        const auto settle = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < settle) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        EXPECT_EQ(kept_heard, 1) << "a refusal kept for the next turn is heard once, and once only";
+        if (client) {
+            client->disconnect();
+        }
+        server->close();
+    }
+}
+
 // The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
 // destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
 // alone, its callback destroyed unheard. Three pushes, two answers, never deeper than two.
