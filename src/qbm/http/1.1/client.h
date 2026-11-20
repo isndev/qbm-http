@@ -122,6 +122,12 @@ class Client : public std::enable_shared_from_this<Client> {
     // cycle whenever that closure never got to run.
     std::size_t _callback_depth = 0;
     std::size_t _holds_queued   = 0; ///< Holds the loop's deferred queue owns (tick_hold): none left means none keeps this client (QB-1246)
+    // A refusal is answered inside the push that earned it -- unless that push is made from one of this client's own
+    // callbacks: then it is heard on the loop's next turn, so a callback that pushes its request back at every failure is
+    // never called from inside its own push (Huly QB-1246). What waits for that turn, and the queue's own settling.
+    std::deque<std::function<void()>> _late_answers;
+    bool                              _late_process    = false;
+    std::size_t                       _destroy_answers = 0; ///< Pushes the destructor's callbacks made, being answered inside themselves
     // While true, _connection still owns the retired dispatch. connect() may
     // record a new intent, but only deferred cleanup can replace that owner.
     bool _deferred_connection_reset = false;
@@ -320,6 +326,9 @@ private:
     void                                            ensure_absolute_uri(qb::http::Request &request);
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
     void                                            hold_through_current_tick();
+    void                                            refuse(std::function<void()> answer); ///< A refusal's answer: now, or on the next turn
+    void                                            run_late_answers();                   ///< What refuse() kept for the next turn
+    [[nodiscard]] bool                              answers_wait_a_turn() const noexcept; ///< A callback of this client is on the stack
     void                                            enter_user_callback();
     void                                            leave_user_callback() noexcept;
     // Invoke a user-supplied callback under a callback_scope, containing any

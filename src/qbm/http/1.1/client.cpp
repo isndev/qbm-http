@@ -256,6 +256,7 @@ public:
         auto self = std::move(_self); // run: no longer queued, and released when this returns
         --self->_holds_queued;
         self->reset_deferred_connection_if_ready();
+        self->run_late_answers(); // the refusals kept for this turn: no callback of the client is on the stack here, or they wait
     }
 };
 
@@ -288,6 +289,7 @@ Client::~Client() {
     _destroying = true;
     try {
         disconnect();
+        run_late_answers(); // a refusal still owed its turn is heard here, once
     } catch (...) {
         // An allocation the close makes for itself failed -- its callbacks are contained --: nothing leaves a destructor.
     }
@@ -449,19 +451,28 @@ Client::push_request(qb::http::Request request, ResponseCallback callback) {
     ++_total_requests;
     if (_destroying) { // pushed from a callback the destructor runs: answered here, never queued, nothing armed (Huly QB-1246)
         ++_failed_requests;
+        if (_destroy_answers != 0) {
+            // Pushed from inside the answer of such a push: refused by the return value alone, as connect() is, and its callback
+            // destroyed unheard. There is no later turn to hear it on, and answered here a callback that always pushes again
+            // was called from inside its own push without end.
+            return false;
+        }
         const auto *const text = _auto_reconnect ? "HTTP/1.1 client no longer available" : "HTTP/1.1 client is not connected";
+        ++_destroy_answers;
         invoke_user_callback([&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, text)); });
+        --_destroy_answers;
         return true;
     }
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
-        invoke_user_callback([&] { callback(std::move(*error)); });
+        refuse([callback = std::move(callback), response = std::move(*error)]() mutable { callback(std::move(response)); });
         return true;
     }
     if (_pending_requests.size() + (_active_request ? 1u : 0u) >= _max_pending_requests) {
         ++_failed_requests;
-        invoke_user_callback(
-            [&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client pending request limit reached")); });
+        refuse([this, callback = std::move(callback)]() mutable { // run by this client, alive: a hold's turn, or its destructor
+            callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client pending request limit reached"));
+        });
         return false;
     }
     auto ctx              = std::make_unique<RequestContext>();
@@ -489,8 +500,17 @@ Client::push_request(qb::http::Request request) {
                 complete(std::move(response));
                 return;
             }
-            self->push_request(std::move(req),
-                               [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); });
+            // Refused by its return value alone -- pushed from inside an answer the destructor's close delivers --, the push
+            // never calls its callback: the awaiter completes here.
+            auto answered = std::make_shared<bool>(false);
+            if (!self->push_request(std::move(req),
+                                    [complete, answered](qb::http::Response response) mutable {
+                                        *answered = true;
+                                        complete(std::move(response));
+                                    })
+                && !*answered && self->_destroying) {
+                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client no longer available"));
+            }
         });
 }
 
@@ -502,6 +522,11 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     if (requests.empty()) {
         invoke_user_callback([&] { callback({}); });
         return true;
+    }
+    if (_destroying && _destroy_answers != 0) {
+        _total_requests += requests.size();
+        _failed_requests += requests.size();
+        return false; // as push_request() there: refused by the return value alone, the batch's callback unheard
     }
     const auto batch_id = _next_batch_id++;
     auto       batch    = std::make_unique<BatchRequestContext>();
@@ -543,9 +568,12 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
                 complete({});
                 return;
             }
-            self->push_requests(std::move(reqs), [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
-                complete(std::move(responses));
-            });
+            const bool unheard = self->_destroying && self->_destroy_answers != 0; // refused by the return value alone: see push_request()
+            self->push_requests(std::move(reqs),
+                                [complete](std::vector<qb::http::Response> responses) mutable { complete(std::move(responses)); });
+            if (unheard) {
+                complete({});
+            }
         });
 }
 
@@ -561,6 +589,10 @@ Client::process_pending_requests() {
             return;
         }
         if (!_auto_reconnect) {
+            if (answers_wait_a_turn()) {
+                _late_process = true; // pushed from one of this client's callbacks: the queue fails on the loop's next turn
+                return;
+            }
             fail_all_requests("HTTP/1.1 client is not connected");
             return;
         }
@@ -603,6 +635,40 @@ Client::hold_through_current_tick() {
     // makes the hold provably sufficient — the Client cannot expire before the callback,
     // so there is no lock()-or-give-up path left to reason about.
     qb::io::async::defer(tick_hold{std::move(self)});
+}
+
+bool
+Client::answers_wait_a_turn() const noexcept {
+    // A turn exists to wait for only while a hold can be queued for it: not for a client being destroyed, nor for one with no
+    // shared owner.
+    return _callback_depth != 0 && !_destroying && !weak_from_this().expired();
+}
+
+void
+Client::refuse(std::function<void()> answer) {
+    if (!answers_wait_a_turn()) {
+        invoke_user_callback(answer);
+        return;
+    }
+    // Heard by the hold that runs once this callback has returned (tick_hold; leave_user_callback() queues one when the
+    // callback's own was drained under it).
+    _late_answers.push_back(std::move(answer));
+}
+
+void
+Client::run_late_answers() {
+    if (_callback_depth != 0) {
+        return; // drained under a callback: the hold queued when it returns delivers
+    }
+    // Taken first: what one of them pushes is kept for the next turn, not this one.
+    auto       answers = std::exchange(_late_answers, {});
+    const bool process = std::exchange(_late_process, false);
+    for (auto &answer : answers) {
+        invoke_user_callback(answer);
+    }
+    if (process && !_destroying) {
+        process_pending_requests();
+    }
 }
 
 void
@@ -831,9 +897,10 @@ Client::fail_active_request(std::string const &error, qb::http::status status) {
     if (!_active_request) {
         return;
     }
-    auto ctx = std::move(_active_request);
+    std::shared_ptr<RequestContext> ctx = std::move(_active_request);
     ++_failed_requests;
-    invoke_user_callback([&] { ctx->callback(create_error_response(status, error)); });
+    // Through refuse(): a request that cannot be sent fails inside the push that sent it, where its callback may push it back.
+    refuse([ctx, response = create_error_response(status, error)]() mutable { ctx->callback(std::move(response)); });
 }
 
 void
