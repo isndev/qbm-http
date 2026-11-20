@@ -78,6 +78,7 @@ struct RequestContext {
     qb::http3::request_id                 request_id = 0;
     std::uint64_t                         stream_id  = 0;
     std::uint64_t                         batch_id   = 0;
+    bool timed = false; ///< Its timeout is armed: once it waits in the queue or is in flight, never for one refused where it is submitted
 };
 
 /**
@@ -94,8 +95,10 @@ struct BatchRequestContext {
 };
 
 /**
- * @brief Test seam: reaches the one state no call leaves behind, a disconnect() deferred by a read that never completed
- *        it. Declared only; the qbm-http test suite defines it, no production code names it.
+ * @brief Test seam: what no call of the public surface reaches -- a disconnect() deferred and never completed (what a
+ *        submission an exception cuts short leaves), the addresses a lookup returned and the time it took, an attempt
+ *        started with nothing left of the connect timeout. Declared only; the qbm-http test suite defines it, no
+ *        production code names it.
  */
 struct ClientTestPeer;
 
@@ -460,6 +463,8 @@ private:
     void give_up_deferred_connects();
     /// Arm the per-request timeout for @p request_id.
     void arm_request_timeout(std::uint64_t request_id);
+    /// Arms the timeout of every queued request that has none yet: the last of the queue.
+    void time_pending() noexcept;
     /// (Re)schedule the request-timeout callback for @p request_id after @p delay.
     void schedule_request_timeout(std::uint64_t request_id, qb::duration delay);
     /// @return @c true if any pending request, active request, or batch remains.

@@ -528,17 +528,10 @@ Client::push_request(qb::http::Request request) {
                 complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 connection is closing"));
                 return;
             }
-            // Refused by its return value alone -- pushed from inside an answer the destructor's close delivers --, the push
-            // never calls its callback: the awaiter completes here.
-            auto answered = std::make_shared<bool>(false);
-            if (!self->push_request(std::move(req),
-                                    [complete, answered](qb::http::Response response) mutable {
-                                        *answered = true;
-                                        complete(std::move(response));
-                                    })
-                && !*answered && self->_destroying) {
-                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/1.1 client no longer available"));
-            }
+            // The callback answers every outcome. The one push that never calls its callback -- from inside an answer the
+            // destructor's close delivers -- cannot come from here: a client being destroyed is not locked above.
+            static_cast<void>(self->push_request(
+                std::move(req), [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); }));
         });
 }
 
@@ -607,12 +600,10 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
                 complete(std::move(closing));
                 return;
             }
-            const bool unheard = self->_destroying && self->_destroy_answers != 0; // refused by the return value alone: see push_request()
-            self->push_requests(std::move(reqs),
-                                [complete](std::vector<qb::http::Response> responses) mutable { complete(std::move(responses)); });
-            if (unheard) {
-                complete({});
-            }
+            static_cast<void>(
+                self->push_requests(std::move(reqs), [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
+                    complete(std::move(responses));
+                }));
         });
 }
 
