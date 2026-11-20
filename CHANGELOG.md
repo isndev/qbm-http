@@ -621,17 +621,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
     destructor refused returns `false` and is never answered (`push_requests()` likewise). The coroutine
     `push_request()` and `push_requests()` awaited from a callback of a close complete `503` at once, "... connection
     is closing", as the coroutine `connect()` does: a `run_sync()` of one there waited for the request's timeout on
-    HTTP/1.1 (`408`), for the attempt it had started on HTTP/3. A request the client refuses at once leaves no timer
-    behind on these two clients: on HTTP/1.1 one with nothing to connect for it is refused before it is queued, and a
-    wait is timed only for a request that waits; on HTTP/3 a request is timed once it is in flight or left in the
-    queue.
+    HTTP/1.1 (`408`), for the attempt it had started on HTTP/3. No request leaves a timer armed behind it on these
+    two clients, refused or answered (the entry on the request's timer, under Fixed).
     **What stays the program's: bound every retry, and space the attempts.** A callback that pushes back at once at
-    every failure does not recurse on these two clients, but it spins -- one push a loop turn for as long as the cause
-    lasts -- and a request that was accepted keeps the timer of its timeout until it fires, whatever answered it first
-    (on HTTP/1.1, one that waited for a connection; on HTTP/3, every one). Give a retry a count of attempts or a
-    deadline, and a delay between two. On HTTP/2, and on a client of any protocol with no
-    shared owner, a refusal is answered inside every push: an unbounded retry there recurses until the stack
-    overflows.
+    every failure does not recurse on these two clients, but it spins: one push a loop turn for as long as the cause
+    lasts. Give a retry a count of attempts or a deadline, and a delay between two. On HTTP/2, and on a client of any
+    protocol with no shared owner, a refusal is answered inside every push: an unbounded retry there recurses until
+    the stack overflows.
     Witnesses, each red on the code before it: on HTTP/1.1 a callback that always pushes back, automatic reconnection
     off, hears fifty refusals, one a turn, then is served by the push that connects (it nested 64 deep, where the case
     stops it); on HTTP/3 one survives two rounds of a `disconnect()` with a request in flight, two deep, and each of
@@ -888,6 +884,36 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ended from `main` and from a callback of the loop where both apply -- 41 cases; with the HTTP/2 client as it was, 27
   of them fail under AddressSanitizer (macOS arm64, Apple clang 21).
 
+- **An answered request no longer leaves its timer armed (HTTP/1.1, HTTP/3; Huly QB-1246).** The timer of a request's
+  timeout belonged to the loop: armed when the request was queued, and never stopped. An answered request left it
+  armed for the whole request timeout -- on `qb::http3::Client` every request, on `qb::http1::Client` every request
+  that had waited for a connection or for its turn: as many live timers as requests in the last sixty seconds, at the
+  default. Each request now owns its timer, one at most, and whatever gives the request its answer stops it first: a
+  response, a failure, a cancellation, a refusal, a close, the destructor. On HTTP/1.1 the timer of a wait also stops
+  when the request is sent, where its connection times it; a request sent at once has none. On HTTP/3 a request is
+  timed once it has come to rest, in flight or left in the queue, its timeout still counted from its push. A stale
+  timer could not reach another request -- it looked its own up by an identifier that is never used twice --: the cost
+  was the timers, not a wrong answer. Witnesses in `qbm-http-test-system-http3-loopback` and
+  `qbm-http-test-system-http1-client`, the loop's count of watchers read with no loop turn between two readings
+  wherever the answers allow: twenty requests cancelled in flight and twenty queued, each callback reading its own
+  timer gone; a close of ten in flight and ten queued, every callback reading all twenty gone; a request refused where
+  it is submitted after a wait; requests served; on HTTP/1.1 two clients alike, one with ten requests queued,
+  disconnected in turn, and three requests whose wait times out. Twenty timers were left in each HTTP/3 case, ten and
+  nine in the HTTP/1.1 ones. Ten mutants, nine caught; the tenth needs the loop's timer to fire before the steady
+  clock's deadline.
+
+- **An HTTP/3 submission that an exception cuts short answers its request and finishes the close it deferred (Huly
+  QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
+  that -- an allocation, or what a hook of the transport throws under the send -- left the request destroyed unheard:
+  it was in no registry yet. And a close deferred to the end of that submission, the transport lost under it or a
+  `disconnect()` called there, was never run: the client stayed "connected" to a transport that was gone, every later
+  request queued behind it, or kept every later `disconnect()` and `connect()` out. The submission now ends as a read
+  does: the close it deferred is run, the request hears `503`, and the exception goes on to the caller; with no close
+  deferred the stream is abandoned and the connection kept. No close can be left half done any more, so the line of
+  the destructor that cleared one, and its witness, are gone. Witness: a client derived in the test throws from the
+  two hooks the QUIC endpoint runs inside a send -- three cases, the request heard once and the next one served in
+  each; none was heard before, and the client served nothing more. Six mutants, six caught.
+
 - **A response callback of the HTTP/1.1 client that runs the loop, then drops the last reference, no longer destroys the
   client under its own connection (Huly QB-1246).** What keeps `qb::http1::Client` alive under its connection's handler
   is a closure in the loop's deferred queue, queued as each callback is entered. A loop turn the callback runs -- a
@@ -912,19 +938,24 @@ All notable changes to the qbm-http module are documented here. The format is ba
   QUIC stack is. The resolution is blocking, like the TCP clients': it is qb-io's `tcp::resolve_endpoints()`, which the
   connector of the HTTP/1.1 and HTTP/2 clients calls. One connect timeout covers the lookup and every address -- a
   lookup that outlasts it fails the `connect()` with nothing dialled.
+  The connect timeout is the one bound, as on the two other clients: QUIC's own bound on a handshake follows it for
+  each attempt -- the attempt's time, and a second more so that the client's timers decide --, as curl's ngtcp2
+  backend takes its from the connect timeout when one is set. A lone address that does not answer has the whole
+  connect timeout; it was given up at the endpoint's own handshake timeout, ten seconds by default, of a connect
+  timeout of thirty. The program's QUIC settings are left as the program set them.
   An address leaves its place to the next, without a word to the callbacks, in three cases. It does not answer in its
   share of the connect timeout, by the connector's rule: what is left over the addresses left, two seconds at least,
-  and no share for an address that would have all of what is left. QUIC gives it up first: its own handshake timeout,
-  ten seconds unless the endpoint's settings say otherwise, which is under the share the first of two addresses has of
-  the default thirty. Or the network refuses its first datagram -- no route to an address of that family, a host that
-  is unreachable --, which the endpoint reports inside its own `connect()`. A refusal is an answer, and final: an
-  address whose server answers and is refused, by TLS or by the peer, ends the `connect()`. With no connect timeout an
-  address is given up by QUIC only. The name stays the one sent as SNI and checked against the certificate.
+  and no share for an address that would have all of what is left. QUIC gives it up -- a transport error; or, with no
+  connect timeout, the endpoint's own handshake timeout, the one bound there is then. Or the network refuses its first
+  datagram -- no route to an address of that family, a host that is unreachable --, which the endpoint reports inside
+  its own `connect()`. A refusal is an answer, and final: an address whose server answers and is refused, by TLS or
+  by the peer, ends the `connect()`. The name stays the one sent as SNI and checked against the certificate.
   No fallback across families, as on the two other clients: a name that has AAAA records only resolves to no address
   here, and its `connect()` fails as one that cannot start -- name the IPv6 literal.
   Witnesses in `qbm-http-test-system-http3-loopback`: a request served through `localhost` (red on the commit before:
   `connect()` answered that nothing could start); a silent address giving way to the next at 2.5 s of a 5 s timeout;
-  a lone silent address failing at its timeout; an address QUIC gives up at 300 ms under a share of 3 s (the
+  a lone silent address failing at its timeout -- at eleven seconds of eleven where QUIC's own ten ended it, and at
+  1.5 s where the program had set QUIC's to 300 ms; with no connect timeout, an address QUIC gives up at 300 ms (the
   `connect()` failed there); the broadcast address, whose datagram `sendto()` refuses, alone and before an address
   that answers (its callback heard `false` inside `connect()`, six deep for a callback that dials again); a server
   whose certificate is not verified, twice in the list, one attempt; a lookup that outlasts the timeout; an attempt
@@ -958,9 +989,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   callback of a `connect()` made on a connected client, now contained too. An answer is made inside the call of its
   callback, so a failed allocation there is contained with it, and what a destructor's own pass could still throw stops
   at the destructor, on each of the three. The HTTP/3 client's close is the whole close however it is left: its mark
-  goes with it whatever ends it, a read that an exception cuts short completes the close it deferred, and the destructor
-  clears a mark left behind all the same -- such a mark kept every later `disconnect()` out, the destructor's included,
-  and a `connect()` still waiting was destroyed unheard. The HTTP/2 client's end of a transport settles its state before
+  goes with it whatever ends it, and a read or a submission that an exception cuts short completes the close it
+  deferred -- a mark left behind kept every later `disconnect()` out, the destructor's included, and a `connect()`
+  still waiting was destroyed unheard (the entry on the submission, above). The HTTP/2 client's end of a transport
+  settles its state before
   a waiting `connect()` hears it, as its other closes do. The HTTP/2 destructor logs "Failing all requests" only when
   there is something to fail. The HTTP/1.1 and HTTP/3 destructors gain no line of their own -- logging at the end of a
   process is a risk of its own --: the one line a destruction can add is the helper's, when a callback throws. A request
