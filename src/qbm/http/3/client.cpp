@@ -80,6 +80,52 @@ Client::~Client() {
     }
     _deferred_close.reset(); // a close a read left half done is not this one: disconnect() below is the full close,
     qb::http::detail::contained("HTTP/3", [&] { disconnect(); }, "destructor's close"); // every connect() still waiting hears it
+    qb::http::detail::contained("HTTP/3", [&] { run_late_answers(); }, "refusals still owed their turn"); // heard here, once
+}
+
+namespace {
+/// Counts a refusal while it is answered inside its push, however that answer is left.
+struct RefusalScope {
+    int &depth;
+    explicit RefusalScope(int &value) noexcept
+        : depth(value) {
+        ++depth;
+    }
+    RefusalScope(RefusalScope const &)            = delete;
+    RefusalScope &operator=(RefusalScope const &) = delete;
+    ~RefusalScope() noexcept {
+        --depth;
+    }
+};
+} // namespace
+
+void
+Client::refuse(std::function<void()> answer) {
+    if (_refusal_depth == 0 || _destroying || weak_from_this().expired()) {
+        const RefusalScope answering{_refusal_depth};
+        answer(); // inside the push, as before: what the callback throws reaches the caller of the push
+        return;
+    }
+    // Pushed from inside the answer of a refusal: answered there too, a callback that pushes its request back at every
+    // refusal was called from inside its own push, one frame deeper each time, without end. Heard on the loop's next turn.
+    _late_answers.push_back(std::move(answer));
+    if (!_late_scheduled) {
+        _late_scheduled = true;
+        qb::io::async::defer([weak_self = weak_from_this()] {
+            if (auto self = weak_self.lock()) {
+                self->run_late_answers();
+            }
+        });
+    }
+}
+
+void
+Client::run_late_answers() {
+    _late_scheduled = false;
+    auto answers    = std::exchange(_late_answers, {}); // taken first: what one of them pushes is refused, or kept, anew
+    for (auto &answer : answers) {
+        qb::http::detail::contained("HTTP/3", answer); // no caller is left to hear what it throws
+    }
 }
 
 void
@@ -401,25 +447,38 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
     ++_total_requests;
     if (_destroying) { // pushed from a callback the destructor runs: answered here, never queued, nothing armed (Huly QB-1246)
         ++_failed_requests;
+        if (_refusal_depth != 0) {
+            // Pushed from inside the answer of such a push: refused by the return value alone, as connect() is there, its
+            // callback destroyed unheard. No later turn exists to hear it on, and answered here a callback that always pushes
+            // again was called from inside its own push without end.
+            refused_by_bound = true;
+            return 0;
+        }
+        const RefusalScope answering{_refusal_depth};
         notify(_destroying, "HTTP/3",
                [&] { callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client disconnect")); });
         return 0;
     }
     if (auto error = prepare_request(request)) {
         ++_failed_requests;
-        callback(std::move(*error));
+        refuse([callback = std::move(callback), response = std::move(*error)]() mutable { callback(std::move(response)); });
         return 0;
     }
     if (_remote_shutdown) {
         ++_failed_requests;
         const auto *reason = _deferred_close && _deferred_close->empty() ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
-        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
+        refuse([callback = std::move(callback), response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason)]() mutable {
+            callback(std::move(response));
+        });
         return 0;
     }
     if (_pending_requests.size() + _active_requests.size() >= _max_pending_requests) {
         ++_failed_requests;
         refused_by_bound = true;
-        callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client pending request limit reached"));
+        refuse([callback = std::move(callback), response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                                                 "HTTP/3 client pending request limit reached")]() mutable {
+            callback(std::move(response));
+        });
         return 0;
     }
     auto ctx              = std::make_unique<RequestContext>();
@@ -480,14 +539,23 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
             _destroying || (_deferred_close && _deferred_close->empty()) ? "HTTP/3 client disconnect" : "HTTP/3 server is shutting down";
         _total_requests += requests.size();
         _failed_requests += requests.size();
-        notify(_destroying, "HTTP/3", [&] {
+        if (_destroying && _refusal_depth != 0) {
+            return false; // as push_request() there: refused by the return value alone, the batch's callback unheard
+        }
+        const auto answer = [this, count = requests.size(), reason](BatchResponseCallback const &heard) {
             std::vector<qb::http::Response> responses;
-            responses.reserve(requests.size());
-            for (std::size_t i = 0; i < requests.size(); ++i) {
+            responses.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
                 responses.push_back(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, reason));
             }
-            callback(std::move(responses));
-        });
+            heard(std::move(responses));
+        };
+        if (_destroying) {
+            const RefusalScope answering{_refusal_depth};
+            notify(_destroying, "HTTP/3", [&] { answer(callback); });
+        } else {
+            refuse([answer, callback = std::move(callback)] { answer(callback); });
+        }
         return true;
     }
 
@@ -624,8 +692,12 @@ Client::process_pending_requests() {
             const FailureScope failing{_failure_callbacks}; // the request of a connection that has just ended (Huly QB-1246)
             ++_failed_requests;
             try {
-                ctx->callback(
-                    create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 connection closed during request submission"));
+                // Through refuse(), as every refusal of a push: its callback may push the request back.
+                refuse([shared   = std::shared_ptr<RequestContext>(std::move(ctx)),
+                        response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE,
+                                                         "HTTP/3 connection closed during request submission")]() mutable {
+                    shared->callback(std::move(response));
+                });
             } catch (...) {
                 if (!transition_error) {
                     transition_error = std::current_exception();
@@ -641,7 +713,10 @@ Client::process_pending_requests() {
             // stream the same way the client cancels any request (RFC 9114 §4.1).
             reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
             ++_failed_requests;
-            ctx->callback(create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request"));
+            refuse([shared   = std::shared_ptr<RequestContext>(std::move(ctx)),
+                    response = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to submit HTTP/3 request")]() mutable {
+                shared->callback(std::move(response));
+            });
             continue;
         }
         _active_requests.emplace(stream_id, std::move(ctx));
@@ -1124,10 +1199,18 @@ Client::push_request(qb::http::Request request) {
                 complete(std::move(response));
                 return;
             }
-            // The callback answers every outcome, a refusal by the pending bound included (push_request
-            // returns false then, its 503 already delivered), so the return value adds nothing here.
-            (void) self->push_request(std::move(req),
-                                      [complete = std::move(complete)](qb::http::Response response) mutable { complete(std::move(response)); });
+            // The callback answers every outcome, a refusal by the pending bound included (push_request returns false then,
+            // its 503 delivered or owed its turn) -- but one: pushed from inside an answer the destructor's close delivers, the
+            // push is refused by its return value alone and never calls its callback. The awaiter completes here then.
+            auto answered = std::make_shared<bool>(false);
+            if (!self->push_request(std::move(req),
+                                    [complete, answered](qb::http::Response response) mutable {
+                                        *answered = true;
+                                        complete(std::move(response));
+                                    })
+                && !*answered && self->_destroying) {
+                complete(self->create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 client disconnect"));
+            }
         });
 }
 
@@ -1141,9 +1224,12 @@ Client::push_requests(std::vector<qb::http::Request> requests) {
                 complete({});
                 return;
             }
-            self->push_requests(std::move(reqs), [complete = std::move(complete)](std::vector<qb::http::Response> responses) mutable {
-                complete(std::move(responses));
-            });
+            const bool unheard = self->_destroying && self->_refusal_depth != 0; // refused by the return value alone: see push_request()
+            self->push_requests(std::move(reqs),
+                                [complete](std::vector<qb::http::Response> responses) mutable { complete(std::move(responses)); });
+            if (unheard) {
+                complete({});
+            }
         });
 }
 
