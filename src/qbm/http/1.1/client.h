@@ -170,8 +170,9 @@ public:
      * @brief Disconnect and fail any outstanding requests.
      * @details Every request in flight or queued hears once, with a 503 ("Connection closed"), and every `connect()`
      *          still waiting hears `false` once. From one of those callbacks a request pushed, alone or in a batch,
-     *          is answered inside the push (503), and a `connect()` is refused: it returns false and its callback is
-     *          never called. Nothing is queued, armed or connected. A client with static storage is destroyed after
+     *          is answered inside the push (503) -- and one pushed from inside THAT answer is refused by the return
+     *          value alone, `false`, its callback never called --, and a `connect()` is refused: it returns false and
+     *          its callback is never called. Nothing is queued, armed or connected. A client with static storage is destroyed after
      *          its thread's event loop (`listener::current`, which `exit()` destroys first): the callbacks then run
      *          there, where nothing can be asked of the loop any more -- no timer, no connection (Huly QB-1246). The
      *          coroutine forms need nothing: the coroutines parked on them were destroyed with the loop.
@@ -224,10 +225,15 @@ public:
      * @brief Queue a single request, delivering its response via callback.
      * @param request The request to send; rewritten to an absolute same-origin URI
      *                with default `Host`/`User-Agent`/`Accept-Encoding` headers.
-     * @param callback Invoked with the response or a synthesized error response.
-     * @return `false` if @p callback is empty or the pending-request limit is
-     *         reached (the callback still fires with an error in the latter case);
-     *         `true` otherwise.
+     * @param callback Invoked with the response or a synthesized error response. A request the client refuses at
+     *                 once -- another origin, the pending-request limit, nothing to connect for it (automatic
+     *                 reconnection off), a request that cannot be written -- is answered inside this call when the
+     *                 program makes it, and once the callback has returned when it is made from one of this
+     *                 client's own callbacks: a callback that pushes back at every failure is never called from
+     *                 inside its own push. Bound such a retry all the same, with a delay: it spins otherwise.
+     * @return `false` if @p callback is empty; if the pending-request limit is reached (the callback hears a 503,
+     *         inside the call or once the calling callback has returned); or if the push is made from inside the
+     *         answer of a push the destructor refused, where the callback is never called. `true` otherwise.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
     /**
@@ -239,8 +245,10 @@ public:
     /**
      * @brief Queue multiple requests, delivering all responses once via a single callback.
      * @param requests The requests to send; an empty vector invokes @p callback with `{}`.
-     * @param callback Invoked once with responses in request order.
-     * @return `false` if @p callback is empty or any request failed to queue; `true` otherwise.
+     * @param callback Invoked once with responses in request order -- as push_request()'s callback, inside this
+     *                 call or once the calling callback has returned when every member is refused at once.
+     * @return `false` if @p callback is empty or any request failed to queue -- and then, pushed from inside the
+     *         answer of a push the destructor refused, with @p callback never called; `true` otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
     /**

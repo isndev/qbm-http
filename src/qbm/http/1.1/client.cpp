@@ -13,7 +13,6 @@
  */
 #include "./client.h"
 
-#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -804,10 +803,12 @@ Client::arm_pending_timeout(std::uint64_t request_id) {
     if (_destroying || _request_timeout <= qb::duration::zero()) {
         return; // nothing is armed for a client being destroyed: after its thread's loop a timer stops the process (Huly QB-1246)
     }
-    const auto queued    = std::find_if(_pending_requests.rbegin(), _pending_requests.rend(),
-                                        [request_id](auto const &ctx) { return ctx && ctx->request_id == request_id; });
-    auto       weak_self = weak_from_this();
-    if (queued == _pending_requests.rend() || weak_self.expired()) {
+    bool queued = false; // still in the queue: its last request, unless a callback of the push queued behind it
+    for (auto ctx = _pending_requests.rbegin(); ctx != _pending_requests.rend() && !queued; ++ctx) {
+        queued = *ctx && (*ctx)->request_id == request_id;
+    }
+    auto weak_self = weak_from_this();
+    if (!queued || weak_self.expired()) {
         return; // sent or answered already; or no owner the timer could find again
     }
     qb::io::async::callback(

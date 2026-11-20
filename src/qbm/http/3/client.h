@@ -204,8 +204,10 @@ public:
      * @brief Destructor: fails all outstanding requests and tears down the connection.
      * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and every
      *          `connect()` still waiting hears `false` once. From one of those callbacks a request pushed, alone or
-     *          in a batch, is answered inside the push (503, "HTTP/3 client disconnect"), and a `connect()` is
-     *          refused: it returns false and its callback is never called. A callback that throws is logged.
+     *          in a batch, is answered inside the push (503, "HTTP/3 client disconnect") -- and one pushed from
+     *          inside THAT answer is refused by the return value alone, its callback never called --, and a
+     *          `connect()` is refused: it returns false and its callback is never called. A callback that throws is
+     *          logged.
      *          A client with static storage is destroyed after its thread's event loop (`listener::current`,
      *          which `exit()` destroys first): the callbacks then run there, where nothing can be asked of the
      *          loop any more (Huly QB-1246). The coroutines parked on the awaiter forms were destroyed with it.
@@ -254,12 +256,17 @@ public:
     /**
      * @brief Queue a request, delivering the response via @p callback.
      * @param request  Request to send (made absolute against the base origin).
-     * @param callback Response handler; must be non-null.
-     * @return @c false if @p callback is null, or if the request would take the queued + active
-     *         count past set_max_pending_requests() -- @p callback has then already received its
-     *         503, as with the HTTP/1.1 and HTTP/2 clients. @c true otherwise, an invalid request
-     *         (400) or one refused after the server's GOAWAY (503) included: those are answered
-     *         through @p callback.
+     * @param callback Response handler; must be non-null. A request the client refuses at once -- another origin,
+     *                 the pending bound, a disconnect() under way, the server's GOAWAY, a submission the connection
+     *                 cannot take -- is answered inside this call, unless the call is made from inside the answer of
+     *                 another refusal: it is then heard on the loop's next turn, so a callback that pushes back at
+     *                 every refusal is never called from inside its own push. Bound such a retry all the same, with a
+     *                 delay: it spins otherwise.
+     * @return @c false if @p callback is null; if the request would take the queued + active count past
+     *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on the next turn, as
+     *         with the HTTP/1.1 and HTTP/2 clients; or if the push is made from inside the answer of a push the
+     *         destructor refused, where @p callback is never called. @c true otherwise, an invalid request (400)
+     *         or one refused after the server's GOAWAY (503) included: those are answered through @p callback.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
     /**
@@ -288,14 +295,17 @@ public:
      * The members are admitted in order, each exactly as push_request() would admit it: an
      * invalid member completes with its 400, and a member that would take the queued + active
      * count past set_max_pending_requests() completes with a 503, both at its index and before
-     * any state is allocated for it. @p callback runs once, with every result in request order
-     * -- at once when no member was admitted.
+     * any state is allocated for it. @p callback runs once, with every result in request order.
+     * When no member was admitted the batch is one refusal, heard as push_request() hears one:
+     * inside this call, or on the loop's next turn when the call is made from inside the answer
+     * of another refusal.
      *
      * @param requests Requests to send; an empty batch completes immediately.
      * @param callback Batch handler; must be non-null for a non-empty batch.
-     * @return @c false if @p callback is null, or if the bound refused at least one member, as
-     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do;
-     *         @c true otherwise.
+     * @return @c false if @p callback is null; if the bound refused at least one member, as
+     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do; or if
+     *         the batch is pushed from inside the answer of a push the destructor refused, where
+     *         @p callback is never called. @c true otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
     /**
@@ -311,8 +321,9 @@ public:
         _max_concurrent_streams = value;
     }
     /// Set the cap on queued+active requests (bounds `_pending_requests`); a push past the
-    /// bound is failed synchronously with 503 -- a single push, or each batch member past it
-    /// (see push_requests()). The setter mirrors `http2::Client` for API parity.
+    /// bound is refused with 503 -- a single push, or each batch member past it (see
+    /// push_requests()) --, heard as every refusal known at once (push_request()). The setter
+    /// mirrors `http2::Client` for API parity.
     void
     set_max_pending_requests(std::size_t value) noexcept {
         _max_pending_requests = value;

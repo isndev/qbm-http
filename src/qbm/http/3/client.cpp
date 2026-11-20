@@ -73,8 +73,8 @@ Client::~Client() {
     // pushed from one of those callbacks is answered inside its push, a connect() refused by its return value alone. A client
     // with static storage is destroyed after its thread's event loop, where a timer or a connection asked stops the process.
     _destroying = true;
-    hear_owed(); // the refusals still owed their turn are heard here, once, and first: they were owed before this end
     try {
+        // The refusals still owed their turn are heard by this pass, once, and before its failures: they were owed first.
         (void) fail_all_requests("HTTP/3 client destroyed"); // what a callback throws is logged where it is thrown: notify()
     } catch (...) {
         // An allocation the pass makes for itself failed: nothing leaves a destructor. The close below still runs.
