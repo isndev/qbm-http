@@ -313,7 +313,7 @@ if (!client->push_request(std::move(req), cb)) {
 <!-- src: qbm/http/src/qbm/http/2/client.h:354,377,436-443 -->
 
 The client bounds the body of a response too: `set_max_body_size(std::size_t)`, 100 MiB by default (`qb::http::protocol_limits::MAX_BODY_SIZE`), 0 for none, read back by `max_body_size()` (Huly QB-1248: the constant was every response's bound, with no setting). A response that declares a `content-length` past it is refused at its header block, one that delivers more at the `DATA` frame that passes it: its stream is reset with `ENHANCE_YOUR_CALM` and its request fails with a `502` whose error names the limit. Only that stream ends -- the connection and its other requests go on, so nothing is closed at once, as the HTTP/1.1 client's connection is when a bound cut its response; what the server still sends on the stream is discarded (below).
-<!-- src: qbm/http/src/qbm/http/2/client.h:534,539; qbm/http/src/qbm/http/2/protocol/client.h:480-481,2736-2737,3016,3025 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:538,543; qbm/http/src/qbm/http/2/protocol/client.h:480-481,2736-2737,3016,3025 -->
 
 ### Flood protection against a hostile server
 
