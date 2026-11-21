@@ -628,10 +628,14 @@ All notable changes to the qbm-http module are documented here. The format is ba
     order the client came to owe it, and a request has one outcome: its answer, or the exception that left its own
     push before any answer, never both. On HTTP/2 and HTTP/3 a push lets through what the callback of another request
     throws when that push answers it on its way, and on HTTP/3 what cuts its submission short (the two entries under
-    Fixed): what it was pushing is then taken back, unanswered. The HTTP/1.1 client logs what a callback throws. And
+    Fixed): what it was pushing is then taken back, unanswered, and the requests that waited behind the one whose
+    callback threw are still sent before the exception goes on. The HTTP/1.1 client logs what a callback throws. And
     what a callback the loop brought throws -- a response, a failure, a timeout, a close -- is contained and logged by
-    the three clients: it costs no other request its answer, no connection, and not the process (under Fixed). With
-    callbacks that run no loop turn of their own, no callback of a client is called inside another one of the same
+    the three clients: it costs no other request its answer, no connection, and not the process (under Fixed).
+    "Logged", in this entry and in those below, is a WARN line where the build has a logger: with `QB_WITH_LOGGING`,
+    the default, in qb's log -- `./qb.1.log`, or the file `qb::io::log::init()` names --; with `QB_STDOUT_LOGGING` in
+    its place, on the standard output. A build with neither writes nothing, and contains the exception all the same.
+    With callbacks that run no loop turn of their own, no callback of a client is called inside another one of the same
     client: nesting is exactly one outside the destructor. A callback that runs the loop -- `qb::io::async::run()`,
     `run_once()`, `run_until()`, `run_sync()` -- receives inside that loop whatever the client owes, its own refusals
     included: one that pushes a refused request back and then runs the loop recurses once per refusal. To relaunch
@@ -1106,9 +1110,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   callback the loop brought throws is contained by the client where it calls that callback.** A response, a failure, a
   timeout, a close, a GOAWAY, a reset, a connection that comes up, the client's turn, the hook of a retry policy: no
   call of the program is there to hear the exception, so it is logged at WARN -- "exception escaped an HTTP/2 client
-  callback; contained", with what it says -- and goes no further. What the call was part of goes on: every other
-  request is answered, once; the close runs to its end and ends its transport; the reconnection is asked; the next
-  request is sent. It ends neither the process nor the connection.
+  callback; contained", with what it says -- and goes no further. The line is written where the build has a logger
+  (`QB_WITH_LOGGING`, the default, or `QB_STDOUT_LOGGING`: the entry on a callback that always pushes again, under
+  Changed, says where it goes); a build with neither contains the exception and says nothing. What the call was part
+  of goes on: every other request is answered, once; the close runs to its end and ends its transport; the
+  reconnection is asked; the next request is sent. It ends neither the process nor the connection.
   **Under a call of the program it still reaches that call.** `disconnect()` answers every request and every
   `connect()` it ends, ends its transport, then rethrows the first exception: it left at the first callback that threw
   -- with TLS up and no SETTINGS and three requests waiting, one callback heard, two never, and the next `connect()`
@@ -1119,14 +1125,27 @@ All notable changes to the qbm-http module are documented here. The format is ba
   holds nothing, and reads nothing of the client once its pass has returned or thrown. Taken back by the push after
   the pass, the request was looked up in a client that a callback under the pass had just destroyed -- one that drops
   the last reference and throws, or, on HTTP/3, the failure callback of another request when a submission cut short
-  ends the connection: a heap-use-after-free. While the client is destroyed nothing changes: what a callback throws is
-  logged and goes no further.
+  ends the connection: a heap-use-after-free.
+  **And that call first finishes what it was doing for the others**, as `disconnect()` does. The pass of a push stopped
+  at the callback that threw: a request that waited behind the refused one was not sent -- three seconds later it
+  still waited --, and went out with the next push. The pass now runs again, to its end, once what the push itself
+  pushed has been taken back, so that it is not sent; what one more callback throws under it is dropped, and the first
+  exception is the one that leaves the push. `cancel_request()` on HTTP/3 left at the callback of the request it
+  cancelled, before it reset the stream and before its pass: the client kept the stream's state, and a request that
+  waited for that stream stayed queued until the next push. The stream is reset and the pass run, then the exception
+  goes on. And a push takes back what it pushed wherever that has got to. A callback that pushes, then throws, runs a
+  pass of its own, which takes the first push's request out of the queue before the exception reaches that push: sent,
+  its response was heard after its push had thrown; refused there, its refusal was heard on the client's next turn, and
+  a batch's likewise. Such a request now stays in flight with its answer dropped when it comes, and an answer already
+  owed is never heard.
+  While the client is destroyed nothing changes: what a callback throws is logged and goes no further.
   Two loops of the clients' own were cut short the same way, and are whole: a graceful GOAWAY on HTTP/2 fails every
   request above the stream it names, then looks at the drain's end -- the others were destroyed unheard, and a drained
   connection left open --, and a server's GOAWAY on HTTP/3 refuses every request that waited -- the others stayed
   queued, to be failed with their connection under another text. A refusal the HTTP/3 client gives where the loop
   submits is contained too, and the pass goes on to what waits behind it.
-  Do not throw from a callback all the same: under the loop, the log is all that hears it.
+  Do not throw from a callback all the same: under the loop the log is all that hears it, and in a build with no
+  logger nothing does.
   Witnesses, red on the code before, in `qbm-http-test-system-http2-client`, one an entry point of the loop: a response
   whose callback throws, a request's and a batch's -- the request behind it sent with no other push (it stalled); a
   RST_STREAM; a GOAWAY read from the connection, naming a stream below two requests; a `connect()` callback that throws
@@ -1145,7 +1164,17 @@ All notable changes to the qbm-http module are documented here. The format is ba
   first callback throws; that last push case, and a submission cut short whose close drops the last reference. A
   `connect()` callback that throws as an HTTP/3 connection comes up, and a lost HTTP/3 connection whose first failure
   callback throws, held before and are pinned: qb-io took the first one frame out, and a request pushed back there
-  connects by itself. The line logged is not read by a case: the suites build with no logger.
+  connects by itself. Under a push whose pass goes on, in both binaries: behind a request in flight wait one refused
+  where it is sent, whose callback throws, one the server never answers, a second refused one whose callback throws,
+  and a valid one; then a push -- the first exception out of the push, both callbacks called, the two others sent by
+  that pass, with no response to run another, and the request of the push neither heard nor sent, by the server's
+  count (the pass stopped at the first). What a pass under the callback had taken before the exception reached the
+  push -- a request and a batch in flight, a request and a batch refused --, never heard once that push has thrown
+  (three of the four were; a batch in flight already found no batch, a pin). On HTTP/3, a cancellation whose callback
+  throws: the exception out of the call, the request that waited served with no other push, and as many stream states
+  kept as with a callback that returns (4 against 3, and the request left queued).
+  The line logged is read by a case of `qbm-http-test-system-http2-client`, in a log of its own: the suites build with
+  `QB_WITH_LOGGING`, and no case read it (it held before, a pin).
   Mutants, the whole binary each, the unmutated tree first and the restored tree last. The containments, one removed
   at a time -- a request's callback, a `connect()`'s, a batch's, the retry hook, the refusal under the loop's pass, and
   the rule turned round (the program's own call contained too): 10 planted, 9 caught. The survivor throws on what a
@@ -1153,6 +1182,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   on to the pass first, and only the line logged differs. What stands of the forms before, planted again: the close
   of `disconnect()` and the take-back inside the pass, 11 planted, 9 caught; the two that survive drop what a push
   takes back when its own `connect()` throws, one a client -- only an allocation under that `connect()` reaches it.
+  The pass that goes on, what a push takes back and the cancellation, on the tree that has them: 22 planted, 22
+  caught -- the pass not run again, the take-back done after it, the pass that runs again stopped at the next throw,
+  the exception not thrown on or never leaving the pass, a request in flight or an answer owed left to be heard, an
+  answer owed that does not say whose it is, the line logged changed; on HTTP/3 the reset, the pass and the exception
+  of a cancellation each left out. The 21 mutants of this paragraph and the one on the engine's bound, planted again
+  on that tree: 22 planted, 19 caught, the same three surviving.
 
 - **An HTTP/3 submission that an exception cuts short gives its request one outcome and ends the connection (Huly
   QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
