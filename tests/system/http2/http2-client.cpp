@@ -7694,38 +7694,218 @@ TEST_F(Http2ClientTest, TheMembersOfABatchThatTimeOutAreResetEachOnItsStream) {
     EXPECT_EQ(heard, 1);
 }
 
-// Against a qb server, which allows 50 streams: 50 requests it never answers time out, then a request is pushed and
-// served. The 50 streams stayed open in the client's protocol, which refused every later request on that connection
-// where it was sent, 503 "Failed to send HTTP/2 request" -- for as long as the connection lived. The server is told of
-// each: it sees its 50 requests cancelled.
+// Against a qb server, which allows 50 streams: 60 requests it never answers time out, in two waves of 30, then a
+// request is pushed and served. The streams of those that timed out stayed open in the client's protocol, which refused
+// every request past the server's 50 where it was sent, 503 "Failed to send HTTP/2 request": the last ten of the
+// second wave, and every request after them on that connection, for as long as it lived. The server is told of each:
+// it sees its 60 requests cancelled.
 TEST_F(Http2ClientTest, RequestsThatTimeOutDoNotUseUpTheStreamsTheServerAllows) {
     Answer after; // before the client, which answers what it still holds when it is destroyed
-    int    timed_out = 0;
-    bool   up        = false;
-    auto   client    = make_test_client();
+    int    timed_out = 0, other = 0;
+    bool   up     = false;
+    auto   client = make_test_client();
     client->set_auto_reconnect(false);
     client->set_request_timeout(qb::duration::zero());
     client->connect([&](bool ok, const std::string &) { up = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
-    const auto routed = _server->server().hang_routed(), cancelled = _server->server().hang_cancelled();
-    client->set_request_timeout(500ms);
-    for (int i = 0; i < 50; ++i) {
-        ASSERT_TRUE(client->push_request(
-            hang(), [&](qb::http::Response response) { timed_out += response.status() == qb::http::status::REQUEST_TIMEOUT ? 1 : 0; }));
+    const auto cancelled = _server->server().hang_cancelled();
+    client->set_request_timeout(400ms);
+    for (int wave = 1; wave <= 2; ++wave) {
+        SCOPED_TRACE(wave);
+        const auto routed = _server->server().hang_routed();
+        for (int i = 0; i < 30; ++i) {
+            ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response response) {
+                (response.status() == qb::http::status::REQUEST_TIMEOUT ? timed_out : other) += 1;
+            }));
+        }
+        EXPECT_TRUE(loop_until([&] { return timed_out + other == 30 * wave; }, 5s)) << timed_out << " timed out, " << other << " else";
+        EXPECT_EQ(_server->server().hang_routed(), routed + 30) << "the server did not take the 30 requests of the wave";
     }
-    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == routed + 50; }, 5s))
-        << "the server did not take the 50 requests: the case proves nothing";
-    EXPECT_TRUE(loop_until([&] { return timed_out == 50; }, 5s)) << timed_out;
+    EXPECT_EQ(timed_out, 60);
+    EXPECT_EQ(other, 0) << "a request past the server's limit was refused where it was sent";
     client->set_request_timeout(qb::duration::zero());
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(after)));
     EXPECT_TRUE(loop_until([&] { return after.count != 0; }));
     EXPECT_EQ(after.status, qb::http::status::OK) << "the streams that timed out were still counted: " << after.body;
-    EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_cancelled() == cancelled + 50; }, 5s))
-        << "the server was not told: " << _server->server().hang_cancelled() - cancelled << " of 50";
+    EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_cancelled() == cancelled + 60; }, 5s))
+        << "the server was not told: " << _server->server().hang_cancelled() - cancelled << " of 60";
     EXPECT_TRUE(client->is_connected());
     client->disconnect();
     settle();
-    EXPECT_EQ(timed_out, 50);
+    EXPECT_EQ(timed_out, 60);
+}
+
+// The same against a qb server: one stream allowed by the client. A, a request the server never answers, times out at
+// 400 ms; B, pushed 200 ms after A, waits for A's stream, its own deadline at 600 ms. A pass at A's timeout sends B, which
+// the server answers at once, before B's deadline. No pass ran there: B waited, and heard 408 "Request timeout while
+// pending" at 600 ms.
+TEST_F(Http2ClientTest, WhatWaitsForTheStreamOfARequestThatTimesOutIsSentAtOnce) {
+    Answer a, b; // before the client, which answers what it still holds when it is destroyed
+    bool   up     = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(400ms);
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    client->set_max_concurrent_streams(1);
+    ASSERT_TRUE(client->push_request(hang(), std::ref(a)));
+    settle(200ms);
+    qb::http::Request user;
+    user.method() = qb::http::Method::GET;
+    user.uri()    = qb::io::uri("/api/users/6");
+    ASSERT_TRUE(client->push_request(std::move(user), std::ref(b)));
+    EXPECT_TRUE(loop_until([&] { return b.count != 0; }, 3s));
+    EXPECT_EQ(a.status, qb::http::status::REQUEST_TIMEOUT) << a.body;
+    EXPECT_EQ(b.status, qb::http::status::OK) << "the request that waited for the stream of a timed-out request was not sent: " << b.body;
+    EXPECT_EQ(b.body, "User ID: 6 (via HTTP/2)");
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(a.count + b.count, 2);
+}
+
+// ---- What a push takes back is taken back by its own number, and nothing else is (Huly QB-1246) ----
+
+// What a push takes back is named by its number: the request's, or the batch's. The client numbers its requests and its
+// batches apart, both from 1, so a request and a batch can carry the same number; and a Request object pushed twice is
+// two requests. X is refused where it is sent; its callback pushes P, then throws. R is pushed: a pass under X's callback
+// refuses R, then P -- both answers owed, each tagged. push(R) throws: R's answer is never heard, P's is heard once.
+//   - the same Request object pushed as R and as P;
+//   - R a request and P a batch with R's number: X request 1, R request 2, P batch 2 (a batch served first is batch 1);
+//   - R a batch and P a request with R's number: X a batch of one (batch 1), R batch 2, P request 2 (a request served
+//     first is request 1).
+TEST_F(Http2ClientTest, WhatAPushTakesBackIsNamedByItsNumberAndNothingElseIsTakenBack) {
+    for (const std::string_view form : {"the same object", "a request, a batch of its number", "a batch, a request of its number"}) {
+        SCOPED_TRACE(form);
+        int        r = 0, p = 0, x = 0; // before the client, which answers what it still holds when it is destroyed
+        int        p_status = -1;
+        bool       up       = false;
+        auto       client   = make_test_client();
+        const auto u        = unsendable();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        const bool r_is_a_batch = form == "a batch, a request of its number";
+        const bool p_is_a_batch = form == "a request, a batch of its number";
+        int        served       = 0; // the request or the batch served first, so that the two numbers meet
+        if (p_is_a_batch) {
+            std::vector<qb::http::Request> one;
+            one.push_back(reconnect::get_test());
+            ASSERT_TRUE(client->push_requests(std::move(one), [&](std::vector<qb::http::Response>) { ++served; }));
+            ASSERT_TRUE(loop_until([&] { return served == 1; }));
+        } else if (r_is_a_batch) {
+            ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++served; }));
+            ASSERT_TRUE(loop_until([&] { return served == 1; }));
+        }
+        client->set_max_concurrent_streams(0);
+        const auto push_p = [&] {
+            if (p_is_a_batch) {
+                std::vector<qb::http::Request> two{u, u};
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
+                    ++p;
+                    p_status = responses.empty() ? -1 : static_cast<int>(responses[0].status().code());
+                });
+            } else {
+                client->push_request(qb::http::Request(u), [&](qb::http::Response response) {
+                    ++p;
+                    p_status = static_cast<int>(response.status().code());
+                });
+            }
+        };
+        if (r_is_a_batch) {
+            std::vector<qb::http::Request> one{u};
+            ASSERT_TRUE(client->push_requests(std::move(one), [&](std::vector<qb::http::Response>) {
+                ++x;
+                push_p();
+                throw std::runtime_error("X's callback throws, once a pass under it has refused R and P");
+            }));
+        } else {
+            ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+                ++x;
+                push_p();
+                throw std::runtime_error("X's callback throws, once a pass under it has refused R and P");
+            }));
+        }
+        client->set_max_concurrent_streams(1);
+        bool threw = false;
+        try {
+            if (r_is_a_batch) {
+                std::vector<qb::http::Request> two{u, u};
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            } else {
+                client->push_request(qb::http::Request(u), [&](qb::http::Response) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(x, 1);
+        settle(300ms); // the client's turn
+        EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+        EXPECT_EQ(p, 1) << "another request's answer was taken back with what the push pushed";
+        EXPECT_EQ(p_status, static_cast<int>(qb::http::status::SERVICE_UNAVAILABLE));
+        client->disconnect();
+        settle();
+        EXPECT_EQ(r, 0);
+        EXPECT_EQ(p, 1);
+    }
+}
+
+// The connection ends under the callback, then the callback throws. X's callback pushes W -- whose pass sends R, a
+// request the server never answers, then a batch of two of them, on the one stream allowed --, calls disconnect(), then
+// throws. The close answers R and W, under a callback: their answers are owed, R's tagged with its number, through the
+// failure of a request or of a batch. push(R) throws: R hears nothing, W hears its 503 once, and the client connects
+// again and is served.
+TEST_F(Http2ClientTest, WhatAPushTakesBackIsTakenBackFromTheAnswersOfACloseMadeUnderTheCallback) {
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        Answer w, again; // before the client, which answers what it still holds when it is destroyed
+        int    b = 0, r = 0;
+        bool   up     = false;
+        auto   client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        client->set_max_concurrent_streams(0);
+        ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+            ++b;
+            client->push_request(reconnect::get_test(), std::ref(w)); // its pass sends R: W waits for its stream
+            client->disconnect();                                     // R and W answered by the close: owed, under this callback
+            throw std::runtime_error("the callback throws, once the close has answered what the push pushed");
+        }));
+        client->set_max_concurrent_streams(1);
+        bool threw = false;
+        try {
+            if (form == "a request") {
+                client->push_request(hang(), [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.push_back(hang());
+                two.push_back(hang());
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        settle(300ms); // the client's turn
+        EXPECT_EQ(r, 0) << "the push threw, and the close it made under the callback answered what it pushed: two outcomes";
+        EXPECT_EQ(w.count, 1);
+        EXPECT_EQ(w.status, qb::http::status::SERVICE_UNAVAILABLE) << w.body;
+        up = false;
+        ASSERT_TRUE(client->connect([&](bool ok, const std::string &) { up = ok; }));
+        ASSERT_TRUE(loop_until([&] { return up; }, 3s)) << "the client did not connect again";
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(again)));
+        EXPECT_TRUE(loop_until([&] { return again.count != 0; }));
+        EXPECT_EQ(again.status, qb::http::status::OK) << again.body;
+        client->disconnect();
+        settle();
+        EXPECT_EQ(r, 0);
+        EXPECT_EQ(w.count, 1);
+    }
 }
 
 #ifdef QB_WITH_LOGGING
