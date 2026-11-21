@@ -167,6 +167,7 @@ private:
     std::size_t                           _connect_next    = 0;
     std::uint64_t                         _connect_attempt = 0; ///< Counts the attempts: the one a share's timer was armed for
     std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
+    std::chrono::steady_clock::time_point _connect_asked_at{};  ///< When a connect() held back was asked: its timeout counts from there
     // The answers this client owes, in the order it came to owe them (Huly QB-1246). An answer the client gives by itself
     // -- a refusal, a connect() on a connected client, an empty batch, a cancellation, a coroutine push completed at
     // once -- is given inside the call only when no callback of this client is on the stack and nothing is owed; an
@@ -473,6 +474,9 @@ private:
     /// program (a push, a cancellation), or the loop. @p own_request / @p own_batch name what that call is itself pushing,
     /// 0 for none: a submission of it that an exception cuts short has that exception for its one outcome.
     void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
+    /// The pass itself: process_pending_requests() holds the client around it, and takes back under that hold what its
+    /// caller pushed when an exception leaves the pass.
+    void submit_pending(from who, std::uint64_t own_request, std::uint64_t own_batch);
     /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: out of the
     /// queue, and the batch with it (a member in flight goes with the connection, which the cut ends). Never throws.
     void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
@@ -531,6 +535,8 @@ private:
     void start_deferred_connect();
     /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.
     void give_up_deferred_connects();
+    /// connect(), its timeout counted from @p asked when that is a time: the moment a connect() held back was asked.
+    [[nodiscard]] bool connect_from(ConnectionCallback callback, std::chrono::steady_clock::time_point asked);
     /// Times @p ctx, once: it has come to rest. Its timer is armed when a request timeout is set.
     void time(RequestContext &ctx);
     /// The refusal of a request that was queued: the request ends here, its timer with it, and its callback hears

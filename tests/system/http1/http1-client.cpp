@@ -5457,3 +5457,43 @@ TEST(Http1ClientTest, ADisconnectWhoseFirstCallbackThrowsStillAnswersTheOthers) 
     EXPECT_EQ(first + second + third, 3) << "a request was answered twice";
     client->disconnect();
 }
+
+// A target longer than the serializer allows is refused where it is pushed, as the two other clients refuse it, and one
+// at the limit is sent (Huly QB-1246): the shared check measures what serialize_request() measures, the path and the
+// query together against MAX_URL_LENGTH. It was refused only where the request was written, once its turn had come:
+// queued behind a request in flight, it was not answered where it was pushed.
+TEST(Http1ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheLimitIsSent) {
+    LoopbackHttp1Server server;
+    int                 refused = 0, sent = 0, never = 0; // before the client: its callbacks count here
+    bool                connected      = false;
+    qb::http::status    refused_status = qb::http::status::OK, sent_status = qb::http::status::OK;
+    std::string         refused_body, sent_body;
+    auto                client = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+    const auto of = [](std::size_t const length) {
+        return "/" + std::string(length - 1, 'a');
+    }; // a path, and no query
+    client->push_request(request(qb::http::method::GET, of(qb::http::protocol_limits::MAX_URL_LENGTH)), [&](qb::http::Response response) {
+        ++sent;
+        sent_status = response.status();
+        sent_body   = response.body().as<std::string>();
+    });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return sent != 0; }));
+    // Sent: the answer is the server's, not one of the client's own.
+    EXPECT_EQ(sent_body.find("cannot be sent"), std::string::npos) << sent_body;
+    EXPECT_EQ(sent_body.find("serialization"), std::string::npos) << "the client did not send it: " << sent_body;
+    client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++never; }); // in flight
+    client->push_request(request(qb::http::method::GET, of(qb::http::protocol_limits::MAX_URL_LENGTH + 1)), [&](qb::http::Response response) {
+        ++refused;
+        refused_status = response.status();
+        refused_body   = response.body().as<std::string>();
+    });
+    EXPECT_EQ(refused, 1) << "the request was not refused where it was pushed";
+    EXPECT_EQ(refused_status, qb::http::status::BAD_REQUEST) << refused_body;
+    EXPECT_NE(refused_body.find("cannot be sent"), std::string::npos) << refused_body;
+    EXPECT_NE(refused_body.find("MAX_URL_LENGTH"), std::string::npos) << refused_body;
+    EXPECT_EQ(never, 0);
+    client->disconnect();
+    EXPECT_EQ(refused, 1) << "the request was answered twice";
+}

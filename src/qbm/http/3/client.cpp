@@ -277,6 +277,11 @@ Client::set_verify_peer(bool value) noexcept {
 
 bool
 Client::connect(ConnectionCallback callback) {
+    return connect_from(std::move(callback), std::chrono::steady_clock::time_point{});
+}
+
+bool
+Client::connect_from(ConnectionCallback callback, std::chrono::steady_clock::time_point asked) {
     if (_destroying) {
         return false; // refused, by the return value alone: the callback of a connect() that starts nothing is never called (QB-1246)
     }
@@ -290,6 +295,11 @@ Client::connect(ConnectionCallback callback) {
         // connection lost during that read. A close deferred by a submission alone queues nothing: no read is on the stack.
         if (callback) {
             _deferred_connects.push_back(std::move(callback));
+        }
+        if (!_connect_after_close) {
+            // One timeout from here, the moment connect() is asked: the wait for that teardown, then the attempt. The
+            // attempt was stamped where it started, and had the whole timeout once more (Huly QB-1246).
+            _connect_asked_at = std::chrono::steady_clock::now();
         }
         _connect_after_close = true;
         return true;
@@ -307,8 +317,9 @@ Client::connect(ConnectionCallback callback) {
     // The host is resolved here, as the TCP connector of the two other clients resolves it (a blocking lookup, every address
     // of the family the URI names, in the resolver's order): the QUIC endpoint dials an address, as every QUIC stack's core
     // does, and until 3.4 this client handed it the name -- a host name never connected (Huly QB-1246). One connect timeout
-    // covers the lookup and every address, stamped before the lookup.
-    const auto                    began = std::chrono::steady_clock::now();
+    // covers the lookup and every address, stamped before the lookup -- or where the connect() this attempt was held
+    // back for was asked (start_deferred_connect()).
+    const auto                    began = asked == std::chrono::steady_clock::time_point{} ? std::chrono::steady_clock::now() : asked;
     std::vector<qb::io::endpoint> candidates;
     try {
         candidates = qb::io::tcp::resolve_endpoints(_base_uri.af(), _host, _base_uri.u_port());
@@ -592,7 +603,8 @@ void
 Client::start_deferred_connect() {
     if (_connect_after_close) {
         give_up_deferred_connects(); // not given up: their callbacks wait for the attempt started here, and hear its outcome
-        (void) connect(nullptr);     // (an attempt that cannot start fails them with everything else that waits)
+        // (an attempt that cannot start fails them with everything else that waits). Its timeout counts from the ask.
+        (void) connect_from(nullptr, _connect_asked_at);
     }
 }
 
@@ -710,18 +722,21 @@ Client::admit_request(qb::http::Request request, ResponseCallback callback, bool
     // One outcome for this call: its answer through the callback, or the exception that leaves it. What an exception
     // leaves this call with is taken back unanswered -- a submission cut short answered the request AND threw: a
     // coroutine caught the exception, awaited its next request, and was resumed by the answer of this one (Huly QB-1246).
-    try {
-        if (is_connected()) {
-            process_pending_requests(from::the_client, request_id);
-        } else {
-            time_pending();
-            if (!_is_connecting) {
-                connect(nullptr);
-            }
+    // The pass takes the request back itself, under its own hold: this function holds nothing, and reads nothing of the
+    // client once the pass has returned or thrown -- a callback under the pass may have dropped the last reference. Taken
+    // back here, after the pass, the request was looked up in a client that such a callback had just destroyed.
+    if (is_connected()) {
+        process_pending_requests(from::the_client, request_id);
+        return request_id;
+    }
+    time_pending();
+    if (!_is_connecting) {
+        try {
+            connect(nullptr);
+        } catch (...) {
+            withdraw(request_id, 0); // connect() holds the client to its end, and with a shared owner calls none of its callbacks
+            throw;
         }
-    } catch (...) {
-        withdraw(request_id, 0);
-        throw;
     }
     return request_id;
 }
@@ -853,19 +868,20 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
     _active_batches.emplace(batch_id, std::move(batch));
 
     // One outcome for this call, as for a single request: an exception that leaves it takes the whole batch back -- the
-    // members still queued, those already in flight, and the batch's callback, which is never called.
-    try {
-        if (is_connected()) {
-            process_pending_requests(from::the_client, 0, batch_id);
-        } else {
-            time_pending();
-            if (!_is_connecting) {
-                connect(nullptr);
-            }
+    // members still queued and the batch's callback, which is never called. The pass takes it back, as it does a single
+    // request.
+    if (is_connected()) {
+        process_pending_requests(from::the_client, 0, batch_id);
+        return admitted_all;
+    }
+    time_pending();
+    if (!_is_connecting) {
+        try {
+            connect(nullptr);
+        } catch (...) {
+            withdraw(0, batch_id);
+            throw;
         }
-    } catch (...) {
-        withdraw(0, batch_id);
-        throw;
     }
     return admitted_all;
 }
@@ -909,6 +925,20 @@ Client::process_pending_requests(from who, std::uint64_t own_request, std::uint6
             client.time_pending();
         }
     } const timing{*this};
+    try {
+        submit_pending(who, own_request, own_batch);
+    } catch (...) {
+        // What the call that ran this pass pushed is taken back here, where the hold above is live: an exception is
+        // leaving that call, and is its one outcome. The push did it after the pass, on a client that a callback under
+        // the pass had destroyed as the pass let go of it -- the failure callback of another request, when a cut
+        // submission ends the connection, or one that drops the last reference and throws (Huly QB-1246).
+        withdraw(own_request, own_batch);
+        throw;
+    }
+}
+
+void
+Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_batch) {
     if (!_h3 || !is_connected() || _remote_shutdown) {
         return;
     }
@@ -1392,11 +1422,24 @@ Client::on_http3_stream_closed(std::uint64_t stream_id, std::uint64_t) {
 void
 Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
     _remote_shutdown = true;
+    // Every request that waited hears this refusal, whatever a callback throws: the first exception goes on once the
+    // last has been called. Thrown on at once, it left the others queued on a connection that takes nothing more, to
+    // be failed with it under another text (Huly QB-1246).
+    std::exception_ptr thrown;
     while (!_pending_requests.empty()) {
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
         ++_failed_requests;
-        give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
+        try {
+            give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
+        } catch (...) {
+            if (!thrown) {
+                thrown = std::current_exception();
+            }
+        }
+    }
+    if (thrown) {
+        std::rethrow_exception(thrown);
     }
 }
 

@@ -489,8 +489,12 @@ namespace qb::http::detail {
 
 const char *
 unsendable_target(const qb::io::uri &uri) noexcept {
+    // The three refusals serialize_request() makes on a target, in its order, on what it measures.
     if (!uri.is_valid()) {
         return "the request URI is invalid";
+    }
+    if (uri.path().size() + uri.encoded_queries().size() > qb::http::protocol_limits::MAX_URL_LENGTH) {
+        return "its path and query are longer than qb::http::protocol_limits::MAX_URL_LENGTH";
     }
     // The serializer's own check, not a copy of it (Huly QB-494): one definition of what a query may carry.
     if (!qb::allocator::raw_query_is_valid(uri.encoded_queries())) {

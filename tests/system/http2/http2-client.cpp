@@ -6867,4 +6867,271 @@ TEST_F(Http2ClientTest, ARequestWhoseTargetCannotBeSentIsRefusedWhereItIsPushedA
     }
 }
 
+// ---- A push that reads nothing of the client after its pass; the ends an exception no longer cuts short; one timeout a
+// connect(); the length of a target (Huly QB-1246) ----
+
+// The pass takes back what its push queued, under its own hold on the client: nothing reads the client once the pass
+// has thrown (Huly QB-1246). As ACallbackThatThrowsUnderAnotherPushLeavesThatPushOneOutcome, the client owned apart
+// from its control block: the callback of the request that waited drops the last reference, then throws. The push
+// took its request back after the pass -- in a client the end of that pass had just destroyed: a heap-use-after-free.
+TEST_F(Http2ClientTest, ACallbackUnderAPushThatDropsTheLastReferenceAndThrowsLeavesNoClientToRead) {
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        int                   destroyed = 0, destroyed_as_the_push_left = -1, a = 0, b = 0, r = 0; // before the client
+        bool                  up = false;
+        std::shared_ptr<Told> client(new Told(url(), destroyed));
+        auto *const           raw = client.get();
+        raw->set_verify_peer(false);
+        raw->set_auto_reconnect(false);
+        raw->set_request_timeout(qb::duration::zero());
+        raw->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        raw->set_max_concurrent_streams(1);
+        const auto before = _server->server().hang_routed();
+        ASSERT_TRUE(raw->push_request(hang(), [&](qb::http::Response) { ++a; }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
+        ASSERT_TRUE(raw->push_request(unsendable(), [&](qb::http::Response) {
+            ++b;
+            client.reset(); // the last reference
+            throw std::runtime_error("the callback of the request that waited drops the client and throws");
+        }));
+        ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+        raw->set_max_concurrent_streams(10);
+        bool threw = false;
+        try {
+            if (form == "a request") {
+                raw->push_request(reconnect::get_test(), [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.push_back(reconnect::get_test());
+                two.push_back(reconnect::get_test());
+                raw->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        destroyed_as_the_push_left = destroyed;
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        EXPECT_EQ(destroyed_as_the_push_left, 1) << "the client outlived the push under which its last reference was dropped";
+        settle(200ms);
+        EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+        EXPECT_EQ(a, 1) << "the request in flight hears once, from the destructor";
+        EXPECT_EQ(destroyed, 1);
+    }
+}
+
+// The end of a lost connection runs to its own end whatever a failure callback throws (Huly QB-1246). Three requests
+// are in flight; the server goes, and another listens on its port. The first failure callback called throws, and the
+// second pushes a request back -- for the reconnection the client makes by itself, or, with automatic reconnection off,
+// for a connect() it asks there, held back until the transport that ended is torn down. The client connects again, and
+// that request is served. The exception left the handler before it had asked for the reconnection, or started the
+// connect() held back: the request pushed back waited for a connection that nothing would open.
+TEST_F(Http2ClientTest, ALostConnectionWhoseFirstFailureCallbackThrowsStillReconnectsForWhatWasPushedBack) {
+    for (const std::string_view by : {"the reconnection the client makes by itself", "a connect() the callback asks"}) {
+        SCOPED_TRACE(by);
+        Answer again; // before the client, which answers what it still holds when it is destroyed
+        int    failures = 0;
+        bool   up       = false;
+        auto   server   = reconnect::make_h2_server_on(0);
+        ASSERT_TRUE(server->ready());
+        const auto port   = reconnect::port_of(*server);
+        auto       client = reconnect::make_client_for(port);
+        client->set_connect_timeout(2s);
+        client->set_request_timeout(qb::duration::zero());
+        if (by == "the reconnection the client makes by itself")
+            client->enable_auto_reconnect();
+        else
+            client->set_auto_reconnect(false);
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        for (int i = 0; i < 3; ++i) {
+            ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response) {
+                const int nth = ++failures;
+                if (nth == 2) {
+                    if (by == "a connect() the callback asks")
+                        client->connect(nullptr);
+                    client->push_request(reconnect::get_test(), std::ref(again));
+                }
+                if (nth == 1)
+                    throw std::runtime_error("the first failure callback throws");
+            }));
+        }
+        ASSERT_TRUE(ServerThread::pump_until([&] { return server->server().hang_routed() == 3; }));
+        server.reset(); // the connection is lost
+        auto back = reconnect::make_h2_server_on(port);
+        ASSERT_TRUE(back->ready()) << "no h2 server on the port the first left: the case proves nothing";
+        for (const auto until = std::chrono::steady_clock::now() + 8s; std::chrono::steady_clock::now() < until && again.count == 0;) {
+            try {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+            } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
+            }
+        }
+        EXPECT_EQ(failures, 3) << "a request behind the callback that threw was not answered";
+        EXPECT_EQ(again.count, 1) << "the request a failure callback pushed back was never served";
+        EXPECT_EQ(again.status, qb::http::status::OK) << again.body;
+        EXPECT_TRUE(client->is_connected());
+        client->disconnect();
+        settle();
+    }
+}
+
+// The same when the connection is lost before it is up, and the callback that throws is the connect()'s (Huly QB-1246).
+// The peer ends the connection once TLS is complete; a request waits behind the connect(), whose callback throws. The
+// request hears all the same. The exception left the handler before its failure pass: the request stayed queued behind
+// a connection that nothing would open, never answered.
+TEST_F(Http2ClientTest, ALostAttemptWhoseConnectCallbackThrowsStillAnswersTheRequestThatWaited) {
+    Answer                         waiting; // before the client, which answers what it still holds when it is destroyed
+    int                            told = 0;
+    qb::http::test::TlsClosingPeer peer(1);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        ++told;
+        EXPECT_FALSE(ok);
+        throw std::runtime_error("the callback of the connect() throws");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(waiting)));
+    const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
+        for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until && !done();) {
+            try {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+            } catch (std::runtime_error const &) {
+            }
+        }
+    };
+    run(5s, [&] { return told != 0; });
+    ASSERT_EQ(told, 1) << "the attempt was not lost: the case proves nothing";
+    run(300ms, [&] { return waiting.count != 0; });
+    EXPECT_EQ(waiting.count, 1) << "the request that waited behind the connect() was never answered";
+    EXPECT_NE(waiting.body.find("Connection lost"), std::string::npos) << waiting.body;
+    client->disconnect();
+    settle();
+    EXPECT_EQ(waiting.count, 1) << "the request was answered twice";
+}
+
+// A graceful GOAWAY fails every request above the stream it names, and the drain it starts is ended when it has failed
+// them all, whatever a callback throws (Huly QB-1246). A GOAWAY that names no stream is delivered by hand, with two
+// requests in flight and automatic reconnection off: read from the connection, it is dispatched from under the frame's
+// own handler, where what a callback throws ends the process (measured, with a peer that names stream 1 below two
+// requests). The first callback called throws: both hear, and the connection, drained, is closed. The exception left
+// the loop over the requests -- the other was destroyed unheard -- and the handler before it had looked at the drain's
+// end: the connection stayed open, held for a drain with nothing left to wait for.
+TEST_F(Http2ClientTest, AGracefulGoawayThatFailsEveryRequestUnderACallbackThatThrowsStillEndsItsDrain) {
+    int  failures = 0; // before the client
+    bool up       = false;
+    auto client   = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto before = _server->server().hang_routed();
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response) {
+            if (++failures == 1)
+                throw std::runtime_error("the first callback of a request the GOAWAY fails throws");
+        }));
+    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 2; }));
+    bool threw = false;
+    try {
+        client->on(qb::protocol::http2::Http2GoAwayEvent{qb::protocol::http2::ErrorCode::NO_ERROR, 0, "delivered by hand"});
+    } catch (std::runtime_error const &) {
+        threw = true;
+    }
+    EXPECT_TRUE(threw) << "what the callback threw did not leave the handler";
+    EXPECT_EQ(failures, 2) << "the request behind the callback that threw was never answered";
+    settle(200ms);
+    EXPECT_FALSE(client->transport().is_open()) << "the drained connection was left open behind the callback that threw";
+    EXPECT_FALSE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(failures, 2) << "a request was answered twice";
+}
+
+// One timeout covers a connect() from the moment it is asked: its wait for a transport that still closes, then its
+// attempt (Huly QB-1246). TLS is up and the peer never sends its SETTINGS; the program disconnects, and the callback of
+// the request that waited asks connect() -- held back: that transport still closes --, keeps the loop for 700 ms and
+// returns. The attempt starts then, against a peer that answers nothing, and hears `false` one second after the ask.
+// It was given the whole timeout again where it started: `false` came 1.7 s after the ask.
+TEST_F(Http2ClientTest, AConnectHeldBackHasOneTimeoutForItsWaitAndItsAttempt) {
+    Answer                                waiting; // before the client, which answers what it still holds when it is destroyed
+    int                                   connect_answers = 0;
+    bool                                  ok_again = true, answered_in_the_callback = false;
+    std::chrono::steady_clock::time_point asked{}, answered{};
+    qb::http::test::TlsClosingPeer        silent(1, 0, std::vector<std::string>{"h2"}, 15s);
+    ASSERT_NE(silent.port(), 0);
+    auto client = reconnect::make_client_for(silent.port());
+    client->set_connect_timeout(20s);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
+        waiting(std::move(response));
+        if (waiting.count != 1)
+            return;
+        client->set_connect_timeout(1s);
+        asked = std::chrono::steady_clock::now();
+        client->connect([&](bool ok, const std::string &) {
+            ++connect_answers;
+            ok_again = ok;
+            answered = std::chrono::steady_clock::now();
+        });
+        for (const auto until = asked + 700ms; std::chrono::steady_clock::now() < until;) // the wait: that transport still closes
+            qb::io::async::run(EVRUN_NOWAIT);
+        answered_in_the_callback = connect_answers != 0;
+    }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return client->transport().is_open(); }, 5s));
+    settle(300ms); // TLS comes up; the handshake waits for SETTINGS that never come
+    client->disconnect();
+    ASSERT_EQ(waiting.count, 1);
+    ASSERT_FALSE(answered_in_the_callback) << "the connect() was answered while it waited: the case proves nothing";
+    EXPECT_TRUE(ServerThread::pump_until([&] { return connect_answers != 0; }, 5s)) << "the connect() was never answered";
+    ASSERT_EQ(connect_answers, 1);
+    EXPECT_FALSE(ok_again);
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(answered - asked);
+    EXPECT_GE(took, 900ms) << "answered before its timeout";
+    EXPECT_LT(took, 1450ms) << "the attempt was given the whole timeout again once the wait was over";
+    client->disconnect();
+    settle();
+}
+
+// A target longer than the serializer allows is refused where it is pushed, and one at the limit is sent (Huly QB-1246):
+// the shared check measures what serialize_request() measures, the path and the query together against MAX_URL_LENGTH.
+TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheLimitIsSent) {
+    Answer held, refused, at_the_limit; // before the client, which answers what it still holds when it is destroyed
+    bool   up     = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto before = _server->server().hang_routed();
+    ASSERT_TRUE(client->push_request(hang(), std::ref(held)));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
+    const auto of = [](std::size_t const length) { // a path of that many octets, and no query
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri("/" + std::string(length - 1, 'a'));
+        return request;
+    };
+    EXPECT_TRUE(client->push_request(of(qb::http::protocol_limits::MAX_URL_LENGTH + 1), std::ref(refused)));
+    EXPECT_EQ(refused.count, 1) << "the request was not refused where it was pushed";
+    EXPECT_EQ(refused.status, qb::http::status::BAD_REQUEST) << refused.body;
+    EXPECT_NE(refused.body.find("cannot be sent"), std::string::npos) << refused.body;
+    EXPECT_NE(refused.body.find("MAX_URL_LENGTH"), std::string::npos) << refused.body;
+    EXPECT_TRUE(client->is_connected()) << "a request refused for its own target ended the connection";
+    ASSERT_TRUE(client->push_request(of(qb::http::protocol_limits::MAX_URL_LENGTH), std::ref(at_the_limit)));
+    EXPECT_EQ(at_the_limit.count, 0) << "a target at the limit was refused where it was pushed: " << at_the_limit.body;
+    EXPECT_TRUE(ServerThread::pump_until([&] { return at_the_limit.count != 0; }, 5s));
+    // Sent: the answer is the server's (its router finds the path too long for a route), not one of the client's own.
+    EXPECT_EQ(at_the_limit.body.find("cannot be sent"), std::string::npos) << at_the_limit.body;
+    EXPECT_NE(at_the_limit.status, qb::http::status::SERVICE_UNAVAILABLE) << "the client did not send it: " << at_the_limit.body;
+    EXPECT_TRUE(client->is_connected());
+    EXPECT_EQ(held.count, 0) << held.body;
+    client->disconnect();
+    settle();
+}
+
 } // namespace http2_client_callbacks_test

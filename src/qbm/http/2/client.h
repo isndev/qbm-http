@@ -623,8 +623,12 @@ private:
     /// Normalize and validate a request before it can be queued.
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
 
-    /// Process pending requests queue
-    void process_pending_requests(from who = from::the_loop);
+    /// Send what waits, up to the concurrency limit. @p who brought the pass here: a call of the program, or the loop.
+    /// @p own_request / @p own_batch name what that call is itself pushing, 0 for none: taken back, under the pass's own
+    /// hold on the client, when an exception leaves the pass.
+    void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
+    /// The pass itself (process_pending_requests() holds the client around it).
+    void send_pending(from who);
 
     /// Handle successful connection
     void handle_connection_success();
