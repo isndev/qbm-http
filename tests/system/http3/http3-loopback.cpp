@@ -7866,7 +7866,157 @@ TEST_F(Http3LoopbackTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAt
     EXPECT_EQ(sent_body.find("cannot be sent"), std::string::npos) << sent_body;
     EXPECT_NE(sent_status, qb::http::status::SERVICE_UNAVAILABLE) << "the client did not send it: " << sent_body;
     EXPECT_TRUE(client->is_connected());
+    // One limit for the three clients, on one quantity: a path and a query of MAX_URL_LENGTH together -- the `?` between
+    // them is not counted -- are sent as well. The engine counted the `?`, and refused it where it was submitted, 503.
+    int              with_a_query = 0;
+    qb::http::status query_status = qb::http::status::OK;
+    std::string      query_body;
+    client->push_request(qb::http::Request{qb::io::uri("/q?" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 2, 'a'))},
+                         [&](qb::http::Response response) {
+                             ++with_a_query;
+                             query_status = response.status();
+                             query_body   = response.body().as<std::string>();
+                         });
+    EXPECT_EQ(with_a_query, 0) << "a path and a query at the limit were refused where they were pushed: " << query_body;
+    EXPECT_TRUE(pump([&] { return with_a_query != 0; }, 5s));
+    EXPECT_EQ(query_body.find("cannot be sent"), std::string::npos) << query_body;
+    EXPECT_NE(query_status, qb::http::status::SERVICE_UNAVAILABLE) << "the client did not send it: " << query_body;
+    EXPECT_TRUE(client->is_connected());
     EXPECT_EQ(stalled, 0);
+    client->disconnect();
+    server->close();
+}
+
+// ---- What a callback the loop brought throws is contained by the client, where it is called (Huly QB-1246) ----
+
+// Under a response. One stream allowed; A is in flight, B waits for A's stream, and A's callback throws -- a request's,
+// then a batch's. B is submitted once A is answered and served on the same connection. The exception went on into the
+// engine's callback, which reports a failure: the connection ended, and B heard "HTTP/3 protocol read error (258)".
+TEST_F(Http3LoopbackTest, AResponseCallbackThatThrowsIsContainedAndTheRequestBehindItIsServed) {
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        int              a = 0, b = 0; // before the client: its callbacks count here
+        qb::http::status b_status = qb::http::status::SERVICE_UNAVAILABLE;
+        std::string      b_body;
+        const auto       port   = next_port();
+        auto             server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        const auto attempts = qb::http3::ClientTestPeer::attempts(*client);
+        client->set_max_concurrent_streams(1);
+        if (form == "a request") {
+            client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) {
+                ++a;
+                throw std::runtime_error("the response callback throws");
+            });
+        } else {
+            std::vector<qb::http::Request> one;
+            one.emplace_back(qb::io::uri("/ok"));
+            client->push_requests(std::move(one), [&](std::vector<qb::http::Response>) {
+                ++a;
+                throw std::runtime_error("the batch's callback throws");
+            });
+        }
+        client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+            ++b;
+            b_status = response.status();
+            b_body   = response.body().as<std::string>();
+        });
+        for (const auto until = std::chrono::steady_clock::now() + 3s; std::chrono::steady_clock::now() < until && b == 0;)
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        EXPECT_EQ(a, 1);
+        EXPECT_EQ(b, 1) << "the request that waited for that stream was not answered";
+        EXPECT_EQ(b_status, qb::http::status::OK) << "it was failed with the connection: " << b_body;
+        EXPECT_TRUE(client->is_connected()) << "the connection did not outlive the throw";
+        EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), attempts) << "it was served on another connection";
+        client->disconnect();
+        server->close();
+    }
+}
+
+// Under a pass the loop runs. A is in flight on the one stream allowed; B waits behind it, a request the engine refuses
+// where it is submitted, and its callback throws; C waits behind B. A's response frees the stream: the loop's pass
+// submits B, which is refused -- the client's own answer, with no call of the program to hear what its callback throws
+// --, then C, which is served on the same connection. The exception left the pass into the engine's callback: the
+// connection ended, and C failed with it.
+TEST_F(Http3LoopbackTest, ARefusalWhoseCallbackThrowsUnderAPassTheLoopRunsIsContainedAndThePassGoesOn) {
+    using namespace http3_client_submit_test;
+    int              a = 0, b = 0, c = 0; // before the client: its callbacks count here
+    qb::http::status c_status = qb::http::status::SERVICE_UNAVAILABLE;
+    std::string      c_body;
+    const auto       port   = next_port();
+    auto             server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    const auto attempts = qb::http3::ClientTestPeer::attempts(*client);
+    client->set_max_concurrent_streams(1);
+    client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response) { ++a; });
+    client->push_request(unsendable(), [&](qb::http::Response response) {
+        ++b;
+        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        throw std::runtime_error("the callback of the request the engine refuses throws");
+    });
+    client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+        ++c;
+        c_status = response.status();
+        c_body   = response.body().as<std::string>();
+    });
+    ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+    for (const auto until = std::chrono::steady_clock::now() + 3s; std::chrono::steady_clock::now() < until && c == 0;)
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(b, 1);
+    EXPECT_EQ(c, 1) << "the request behind the refusal was not answered";
+    EXPECT_EQ(c_status, qb::http::status::OK) << "it was failed with the connection: " << c_body;
+    EXPECT_TRUE(client->is_connected()) << "the connection did not outlive the throw";
+    EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), attempts) << "it was served on another connection";
+    client->disconnect();
+    server->close();
+}
+
+// Under the endpoint's dispatch, a connection that comes up. The callback of the connect() throws: the request that
+// waited for the connection is submitted and served. (The client went on to the pass before it threw on, and qb-io took
+// the exception there: this case held before. It is the client that takes it now, and says so.)
+TEST_F(Http3LoopbackTest, AConnectCallbackThatThrowsOnSuccessIsContainedAndWhatWaitedIsServed) {
+    int              told = 0, waiting = 0; // before the client: its callbacks count here
+    qb::http::status status = qb::http::status::SERVICE_UNAVAILABLE;
+    const auto       port   = next_port();
+    auto             server = qb::http3::make_server();
+    server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        ++told;
+        EXPECT_TRUE(ok);
+        throw std::runtime_error("the callback of a connect() that succeeded throws");
+    }));
+    client->push_request(qb::http::Request{qb::io::uri("/ok")}, [&](qb::http::Response response) {
+        ++waiting;
+        status = response.status();
+    });
+    for (const auto until = std::chrono::steady_clock::now() + 3s; std::chrono::steady_clock::now() < until && waiting == 0;)
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    EXPECT_EQ(told, 1);
+    EXPECT_EQ(waiting, 1);
+    EXPECT_EQ(status, qb::http::status::OK);
+    EXPECT_TRUE(client->is_connected());
     client->disconnect();
     server->close();
 }

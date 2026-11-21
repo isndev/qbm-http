@@ -506,6 +506,9 @@ private:
     void owe(std::function<void()> answer) noexcept;
     /// An answer the client gives by itself: now, or kept.
     void answer_by_itself(std::function<void()> answer);
+    /// In the handler of a `try` around a callback given at once: rethrows under a call of the program (@p who is the
+    /// client), logs and stops what the loop's callback threw otherwise.
+    void escaped(from who);
     /// The outcome of a connect(), told to @p callback: now, or kept.
     void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
     /// The answer of a batch, told to its callback: now, or kept.

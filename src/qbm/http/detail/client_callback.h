@@ -5,8 +5,12 @@
  * A client that is being destroyed answers what it still holds -- every request in flight or queued, every connect()
  * still waiting -- by calling the program's callbacks from its destructor. What one of them throws cannot leave a
  * destructor (`std::terminate`), and must not keep the callbacks after it from running: it is logged and goes no
- * further. The HTTP/1.1 client contains every user callback this way, at any time (`contained()`); the HTTP/2 and
- * HTTP/3 clients the ones their destructor runs (`notify()`). Not part of the public API.
+ * further. The same holds for every callback the loop brings -- a response, a failure, a timeout, a close, the client's
+ * own turn: no caller of the program is there to hear what it throws, so the client contains it where it calls the
+ * callback and logs it, as qb-io's loop does at its own boundaries. The HTTP/1.1 client contains every user callback,
+ * at any time (`contained()`); the HTTP/2 and HTTP/3 clients the ones their destructor runs (`notify()`) and the ones
+ * the loop brings (`escaped()`), and let what a callback throws under a call of the program reach that call. Not part
+ * of the public API.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -31,22 +35,32 @@ namespace qb::http::detail {
  */
 template <typename Fn>
 void
-contained([[maybe_unused]] char const *const client, Fn &&fn, [[maybe_unused]] char const *const what = "user callback") noexcept {
+contained([[maybe_unused]] char const *const client, Fn &&fn, [[maybe_unused]] char const *const what = "callback") noexcept {
     try {
         std::forward<Fn>(fn)();
     } catch ([[maybe_unused]] std::exception const &e) {
         try {
-            LOG_HTTP_WARN(client << " client " << what << " threw: " << e.what());
+            LOG_HTTP_WARN("exception escaped an " << client << " client " << what << "; contained: " << e.what());
         } catch (...) {
             // the line could not be written: nothing more is said
         }
     } catch (...) {
         try {
-            LOG_HTTP_WARN(client << " client " << what << " threw an unknown exception");
+            LOG_HTTP_WARN("exception escaped an " << client << " client " << what << "; contained");
         } catch (...) {
             // the line could not be written: nothing more is said
         }
     }
+}
+
+/**
+ * @brief For the handler of a `try` around a user callback the loop brought: logs the exception being handled, at
+ *        WARN under @p client, in the form of contained(), and lets it go no further. Never throws.
+ * @param client The client's name in the line logged.
+ */
+inline void
+escaped(char const *const client) noexcept {
+    contained(client, [] { throw; });
 }
 
 /**

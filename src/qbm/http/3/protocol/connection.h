@@ -599,7 +599,11 @@ make_request_headers(qb::http::Request const &request, std::optional<qb::http::d
     header_block block;
     std::size_t  fields = 0; // the regular fields alone, as a server reads them: pseudo-headers counted until Huly QB-1266
     std::string  target = request_target(request.uri()), authority = qb::http::origin::authority(request.uri());
-    if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+    // The target's bound is the HTTP/1.1 serializer's, on what it measures -- the path and the query, the `?` between
+    // them not counted: one limit for the three clients (Huly QB-1246). Measured on the target, a path and a query of
+    // MAX_URL_LENGTH together were refused here, and sent by the two other clients.
+    if (request.uri().path().size() + request.uri().encoded_queries().size() > qb::http::protocol_limits::MAX_URL_LENGTH
+        || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return std::nullopt;
     }
     block.add(":method", std::string(request.method()));

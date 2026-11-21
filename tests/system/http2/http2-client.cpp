@@ -6658,9 +6658,7 @@ TEST_F(Http2ClientTest, AFailedConnectWhoseCallbackThrowsStillAnswersTheRequests
 // And for the end of a graceful GOAWAY's drain (Huly QB-1246). The peer announces its GOAWAY and answers the request in
 // flight; the request pushed while the connection drained is failed by the drain's end -- automatic reconnection off --
 // and its callback throws. The transport is ended all the same; the peer never ends it. The exception left the drain's
-// end before its close: the connection stayed open behind a client that held it for closed. (An attempt that fails with
-// its transport up has no such case: its failure runs under the handshake's event or the timer's pass, and what a
-// callback throws there ends the process.)
+// end before its close: the connection stayed open behind a client that held it for closed.
 TEST_F(Http2ClientTest, AGracefulGoawaysDrainWhoseCallbackThrowsStillEndsItsTransport) {
     int                              answered = 0, failed = 0; // before the client
     qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::goaways_lowered, 30s);
@@ -7013,12 +7011,11 @@ TEST_F(Http2ClientTest, ALostAttemptWhoseConnectCallbackThrowsStillAnswersTheReq
 }
 
 // A graceful GOAWAY fails every request above the stream it names, and the drain it starts is ended when it has failed
-// them all, whatever a callback throws (Huly QB-1246). A GOAWAY that names no stream is delivered by hand, with two
-// requests in flight and automatic reconnection off: read from the connection, it is dispatched from under the frame's
-// own handler, where what a callback throws ends the process (measured, with a peer that names stream 1 below two
-// requests). The first callback called throws: both hear, and the connection, drained, is closed. The exception left
-// the loop over the requests -- the other was destroyed unheard -- and the handler before it had looked at the drain's
-// end: the connection stayed open, held for a drain with nothing left to wait for.
+// them all, whatever a callback throws (Huly QB-1246). A GOAWAY that names no stream is delivered by hand, as the loop
+// delivers one, with two requests in flight and automatic reconnection off. The first callback called throws: both
+// hear, nothing leaves the handler, and the connection, drained, is closed. The exception left the loop over the
+// requests -- the other was destroyed unheard -- and the handler before it had looked at the drain's end: the
+// connection stayed open, held for a drain with nothing left to wait for.
 TEST_F(Http2ClientTest, AGracefulGoawayThatFailsEveryRequestUnderACallbackThatThrowsStillEndsItsDrain) {
     int  failures = 0; // before the client
     bool up       = false;
@@ -7035,13 +7032,8 @@ TEST_F(Http2ClientTest, AGracefulGoawayThatFailsEveryRequestUnderACallbackThatTh
         }));
     }
     ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 2; }));
-    bool threw = false;
-    try {
-        client->on(qb::protocol::http2::Http2GoAwayEvent{qb::protocol::http2::ErrorCode::NO_ERROR, 0, "delivered by hand"});
-    } catch (std::runtime_error const &) {
-        threw = true;
-    }
-    EXPECT_TRUE(threw) << "what the callback threw did not leave the handler";
+    EXPECT_NO_THROW(client->on(qb::protocol::http2::Http2GoAwayEvent{qb::protocol::http2::ErrorCode::NO_ERROR, 0, "delivered by hand"}))
+        << "what a callback the loop brought threw left the handler";
     EXPECT_EQ(failures, 2) << "the request behind the callback that threw was never answered";
     settle(200ms);
     EXPECT_FALSE(client->transport().is_open()) << "the drained connection was left open behind the callback that threw";
@@ -7129,7 +7121,283 @@ TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTh
     EXPECT_EQ(at_the_limit.body.find("cannot be sent"), std::string::npos) << at_the_limit.body;
     EXPECT_NE(at_the_limit.status, qb::http::status::SERVICE_UNAVAILABLE) << "the client did not send it: " << at_the_limit.body;
     EXPECT_TRUE(client->is_connected());
+    // One limit for the three clients, on one quantity: a path and a query of MAX_URL_LENGTH together -- the `?` between
+    // them is not counted -- are sent as well.
+    Answer     with_a_query;
+    const auto at = [](std::string const &target) {
+        qb::http::Request request;
+        request.method() = qb::http::Method::GET;
+        request.uri()    = qb::io::uri(target);
+        return request;
+    };
+    ASSERT_TRUE(client->push_request(at("/q?" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 2, 'a')), std::ref(with_a_query)));
+    EXPECT_EQ(with_a_query.count, 0) << "a path and a query at the limit were refused where they were pushed: " << with_a_query.body;
+    EXPECT_TRUE(ServerThread::pump_until([&] { return with_a_query.count != 0; }, 5s));
+    EXPECT_EQ(with_a_query.body.find("cannot be sent"), std::string::npos) << with_a_query.body;
+    EXPECT_NE(with_a_query.status, qb::http::status::SERVICE_UNAVAILABLE) << "the client did not send it: " << with_a_query.body;
     EXPECT_EQ(held.count, 0) << held.body;
+    client->disconnect();
+    settle();
+}
+
+// ---- What a callback the loop brought throws is contained by the client, where it is called (Huly QB-1246) ----
+// One case an entry point of the loop. Before, the same exception was taken by qb-io's read dispatch, swallowed by the
+// protocol with the request behind left unsent, or ended the process, by the frame that happened to carry the answer.
+
+/// Runs the loop until @p done or for @p span; nothing leaves it into the case.
+template <typename Done>
+bool
+loop_until(Done &&done, std::chrono::milliseconds const span = 5s) {
+    for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until;) {
+        if (done())
+            return true;
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+    return done();
+}
+
+// Under a response. One stream allowed; A is in flight, B waits for A's stream, and A's callback throws -- a request's,
+// then a batch's. B is sent once A is answered, with no other push to run a pass. The exception left the handler before
+// its tail, and the protocol swallowed it: B stayed queued until something else ran a pass.
+TEST_F(Http2ClientTest, AResponseCallbackThatThrowsIsContainedAndTheRequestBehindItIsSent) {
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        Answer behind; // before the client, which answers what it still holds when it is destroyed
+        int    a      = 0;
+        bool   up     = false;
+        auto   client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        client->set_max_concurrent_streams(1);
+        if (form == "a request") {
+            ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+                ++a;
+                throw std::runtime_error("the response callback throws");
+            }));
+        } else {
+            std::vector<qb::http::Request> one;
+            one.push_back(reconnect::get_test());
+            ASSERT_TRUE(client->push_requests(std::move(one), [&](std::vector<qb::http::Response>) {
+                ++a;
+                throw std::runtime_error("the batch's callback throws");
+            }));
+        }
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(behind)));
+        EXPECT_TRUE(loop_until([&] { return behind.count != 0; }, 3s)) << "the request that waited for that stream was not sent";
+        EXPECT_EQ(a, 1);
+        EXPECT_EQ(behind.status, qb::http::status::OK) << behind.body;
+        EXPECT_TRUE(client->is_connected());
+        client->disconnect();
+        settle();
+        EXPECT_EQ(behind.count, 1);
+    }
+}
+
+// Under a RST_STREAM. The server resets the stream of a request (a query with an octet from 0x80 up, which a qb server
+// refuses), and the callback of that request throws; another is in flight. The process lives, the connection stays, the
+// other request is not failed and the next is served. The frame's handler is noexcept: the process ended.
+TEST_F(Http2ClientTest, ACallbackOfARequestTheServerResetsThatThrowsIsContained) {
+    Answer held, after; // before the client, which answers what it still holds when it is destroyed
+    int    reset  = 0;
+    bool   up     = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto before = _server->server().hang_routed();
+    ASSERT_TRUE(client->push_request(hang(), std::ref(held)));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
+    qb::http::Request refused_by_the_server;
+    refused_by_the_server.method() = qb::http::Method::GET;
+    refused_by_the_server.uri()    = qb::io::uri(std::string("/api/test?q=a\x80") + "z");
+    std::string why;
+    ASSERT_TRUE(client->push_request(std::move(refused_by_the_server), [&](qb::http::Response response) {
+        ++reset;
+        why = response.body().as<std::string>();
+        throw std::runtime_error("the callback of a request the server reset throws");
+    }));
+    ASSERT_TRUE(loop_until([&] { return reset != 0; }));
+    ASSERT_NE(why.find("RST_STREAM"), std::string::npos) << "the server did not reset the stream: the case proves nothing (" << why << ")";
+    settle(100ms);
+    EXPECT_TRUE(client->is_connected()) << "the connection did not outlive the throw";
+    EXPECT_EQ(held.count, 0) << "the request in flight was failed with it: " << held.body;
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(after)));
+    EXPECT_TRUE(loop_until([&] { return after.count != 0; }));
+    EXPECT_EQ(after.status, qb::http::status::OK) << after.body;
+    EXPECT_EQ(reset, 1);
+    client->disconnect();
+    settle();
+}
+
+// Under a GOAWAY frame read from the connection. The peer names stream 1 and answers nothing; the two requests on the
+// streams above it are failed by that GOAWAY, and the callback of the first of them called throws. The other hears, and
+// the process lives. The frame's handler is noexcept: the process ended.
+TEST_F(Http2ClientTest, AGoawayReadFromTheConnectionWhoseFirstFailureCallbackThrowsStillAnswersTheOtherRequest) {
+    int                              named = 0, above = 0; // before the client
+    std::string                      why;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::goaway_then_close, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++named; })); // stream 1
+    for (int i = 0; i < 2; ++i) {
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) { // streams 3 and 5
+            if (++above == 1) {
+                why = response.body().as<std::string>();
+                throw std::runtime_error("the first callback of a request the GOAWAY fails throws");
+            }
+        }));
+    }
+    ASSERT_TRUE(loop_until([&] { return above != 0; }));
+    ASSERT_EQ(named, 0) << "the request the GOAWAY names was failed with the others: the case proves nothing";
+    EXPECT_NE(why.find("GOAWAY"), std::string::npos) << why;
+    EXPECT_TRUE(loop_until([&] { return above == 2; }, 300ms)) << "the request behind the callback that threw was never answered";
+    client->disconnect();
+    settle();
+    EXPECT_EQ(above, 2) << "a request was answered twice";
+    EXPECT_EQ(named, 1);
+}
+
+// Under the handshake's event, a connection that comes up. The callback of the connect() throws: the request that
+// waited for the connection is sent and served. qb-io's handshake handler is noexcept: the process ended.
+TEST_F(Http2ClientTest, AConnectCallbackThatThrowsOnSuccessIsContainedAndWhatWaitedIsServed) {
+    Answer waiting; // before the client, which answers what it still holds when it is destroyed
+    int    told   = 0;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        ++told;
+        EXPECT_TRUE(ok);
+        throw std::runtime_error("the callback of a connect() that succeeded throws");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(waiting)));
+    EXPECT_TRUE(loop_until([&] { return waiting.count != 0; }));
+    EXPECT_EQ(told, 1);
+    EXPECT_EQ(waiting.status, qb::http::status::OK) << waiting.body;
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+}
+
+// Under the handshake's event, a handshake that fails: the server speaks no h2 over ALPN. The callback of the connect()
+// throws, and so does the callback of the first request that waited: the other request hears, and the transport of the
+// attempt is closed. The process ended there.
+TEST_F(Http2ClientTest, AFailedHandshakeWhoseCallbacksThrowStillAnswersWhatWaitedAndEndsItsTransport) {
+    int  told = 0, first = 0, second = 0; // before the client
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    client->set_connect_timeout(qb::duration::zero());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect([&](bool ok, const std::string &) {
+        ++told;
+        EXPECT_FALSE(ok);
+        throw std::runtime_error("the callback of the connect() throws");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        ++first;
+        throw std::runtime_error("the first failure callback throws");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++second; }));
+    ASSERT_TRUE(loop_until([&] { return told != 0; }));
+    EXPECT_TRUE(loop_until([&] { return second != 0 && !client->transport().is_open(); }, 1s));
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(second, 1) << "the request behind the callbacks that threw was not answered";
+    EXPECT_FALSE(client->transport().is_open()) << "the transport of the attempt that failed was left open";
+    EXPECT_FALSE(client->is_connecting());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(told + first + second, 3) << "a callback was called twice";
+}
+
+// Under the timer's pass, a connect timeout. TLS is up and the peer never sends its SETTINGS: the connect timeout fails
+// the attempt, and the callback of the first request that waited throws. The other request hears, and the transport of
+// that attempt is ended. qb-io's timer handler is noexcept: the process ended.
+TEST_F(Http2ClientTest, AnAttemptThatTimesOutUnderACallbackThatThrowsStillAnswersTheOthersAndEndsItsTransport) {
+    int                            first = 0, second = 0; // before the client
+    bool                           was_open = false;
+    qb::http::test::TlsClosingPeer silent(1, 0, std::vector<std::string>{"h2"}, 15s);
+    ASSERT_NE(silent.port(), 0);
+    auto client = reconnect::make_client_for(silent.port());
+    client->set_connect_timeout(1s);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+        ++first;
+        throw std::runtime_error("the first failure callback throws");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++second; }));
+    ASSERT_TRUE(loop_until([&] { return (was_open = was_open || client->transport().is_open()) && first != 0; }));
+    ASSERT_TRUE(was_open) << "TLS never came up: the case proves nothing";
+    EXPECT_TRUE(loop_until([&] { return second != 0 && !client->transport().is_open(); }, 500ms));
+    EXPECT_EQ(second, 1) << "the request behind the callback that threw was not answered";
+    EXPECT_FALSE(client->transport().is_open()) << "the transport of the attempt that failed was left open";
+    client->disconnect();
+    settle();
+    EXPECT_EQ(first + second, 2) << "a request was answered twice";
+}
+
+// Under the timer's pass, a request's timeout. Three requests are in flight and never answered; the callback of the
+// first whose timeout comes throws. The two others hear theirs, and the next request is served. The process ended.
+TEST_F(Http2ClientTest, ARequestTimeoutWhoseCallbackThrowsStillTimesOutTheOthers) {
+    Answer after; // before the client, which answers what it still holds when it is destroyed
+    int    timed_out = 0;
+    bool   up        = false;
+    auto   client    = make_test_client();
+    client->set_auto_reconnect(false);
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    client->set_request_timeout(300ms);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response response) {
+            EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT) << response.body().as<std::string>();
+            if (++timed_out == 1)
+                throw std::runtime_error("the first timeout callback throws");
+        }));
+    }
+    EXPECT_TRUE(loop_until([&] { return timed_out == 3; }, 3s)) << "a request behind the callback that threw never timed out";
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(after)));
+    EXPECT_TRUE(loop_until([&] { return after.count != 0; }));
+    EXPECT_EQ(after.status, qb::http::status::OK) << after.body;
+    client->disconnect();
+    settle();
+    EXPECT_EQ(timed_out, 3);
+}
+
+// The hook of a retry policy is the program's too, and the loop brings it. The server speaks no h2: each attempt fails
+// under the handshake's event, the failure callback pushes the request back, and the hook the policy calls before each
+// wait throws. The run goes on to its last attempt, as with a hook that returns. The process ended at the first call.
+TEST_F(Http2ClientTest, ARetryHookThatThrowsIsContainedAndTheRunGoesOn) {
+    int  hooks = 0, failures = 0; // before the client
+    bool exhausted  = false;
+    auto http1_only = reconnect::make_http1_only_server();
+    ASSERT_TRUE(http1_only->ready());
+    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    client->enable_auto_reconnect(
+        qb::http2::RetryPolicy{}.with_initial_delay(20ms).with_multiplier(1.0).with_jitter(false).with_max_attempts(3).with_on_retry(
+            [&](int, qb::duration) {
+                ++hooks;
+                throw std::runtime_error("the retry hook throws");
+            }));
+    std::function<void(qb::http::Response)> on_response;
+    on_response = [&](qb::http::Response response) {
+        ++failures;
+        if (response.body().as<std::string>().find("exhausted") != std::string::npos) {
+            exhausted = true;
+            return;
+        }
+        client->push_request(reconnect::get_test(), on_response);
+    };
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), on_response));
+    EXPECT_TRUE(loop_until([&] { return exhausted; }, 10s)) << "the run did not go on to its end";
+    EXPECT_EQ(hooks, 2) << "the hook is told before the waits of attempts 2 and 3";
+    EXPECT_EQ(failures, 5) << "the explicit auto-connect, three attempts, the verdict";
     client->disconnect();
     settle();
 }

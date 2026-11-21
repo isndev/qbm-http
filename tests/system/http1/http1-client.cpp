@@ -5483,6 +5483,18 @@ TEST(Http1ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheL
     // Sent: the answer is the server's, not one of the client's own.
     EXPECT_EQ(sent_body.find("cannot be sent"), std::string::npos) << sent_body;
     EXPECT_EQ(sent_body.find("serialization"), std::string::npos) << "the client did not send it: " << sent_body;
+    // One limit for the three clients, on one quantity: a path and a query of MAX_URL_LENGTH together -- the `?` between
+    // them is not counted -- are sent as well.
+    int         with_a_query = 0;
+    std::string query_body;
+    client->push_request(request(qb::http::method::GET, "/q?" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 2, 'a')),
+                         [&](qb::http::Response response) {
+                             ++with_a_query;
+                             query_body = response.body().as<std::string>();
+                         });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return with_a_query != 0; }));
+    EXPECT_EQ(query_body.find("cannot be sent"), std::string::npos) << query_body;
+    EXPECT_EQ(query_body.find("serialization"), std::string::npos) << "the client did not send it: " << query_body;
     client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++never; }); // in flight
     client->push_request(request(qb::http::method::GET, of(qb::http::protocol_limits::MAX_URL_LENGTH + 1)), [&](qb::http::Response response) {
         ++refused;

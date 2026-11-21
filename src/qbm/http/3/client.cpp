@@ -207,12 +207,28 @@ Client::answer_by_itself(std::function<void()> answer) {
 }
 
 void
+Client::escaped(from who) {
+    if (who == from::the_client) {
+        throw; // an answer the client gives by itself, inside a call of the program: what its callback throws reaches that call
+    }
+    // The loop brought this callback -- a response, a failure, a timeout, a close --: no caller of the program is there
+    // to hear what it throws. It is logged and goes no further, as qb-io's loop does at its own boundaries, and what
+    // the call was part of goes on. Under a response it went on into the engine's callback, which reports a failure:
+    // the connection ended, and the requests behind failed with it (Huly QB-1246).
+    qb::http::detail::escaped("HTTP/3");
+}
+
+void
 Client::tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who) {
     if (!callback) {
         return;
     }
     if (given_now(who)) {
-        call_now([&] { callback(ok, error); });
+        try {
+            call_now([&] { callback(ok, error); });
+        } catch (...) {
+            escaped(who);
+        }
         return;
     }
     owe([callback, ok, error] { callback(ok, error); });
@@ -221,7 +237,11 @@ Client::tell_connect(ConnectionCallback const &callback, bool ok, std::string co
 void
 Client::tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who) {
     if (given_now(who)) {
-        call_now([&] { callback(std::move(responses)); });
+        try {
+            call_now([&] { callback(std::move(responses)); });
+        } catch (...) {
+            escaped(who);
+        }
         return;
     }
     owe([callback = std::move(callback), responses = std::move(responses)]() mutable { callback(std::move(responses)); });
@@ -237,7 +257,11 @@ Client::give(RequestContext &ctx, qb::http::Response response, from who) {
         return;
     }
     if (given_now(who)) [[likely]] {
-        call_now([&] { ctx.callback(std::move(response)); });
+        try {
+            call_now([&] { ctx.callback(std::move(response)); });
+        } catch (...) {
+            escaped(who); // the loop's: contained; the program's own call: thrown on to it
+        }
         return;
     }
     // Behind what is owed: the request ends here, its callback and its answer wait for the client's turn.
@@ -384,7 +408,7 @@ Client::dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callba
                 self->close_failed_transport(error);
                 self->handle_connection_failure(error);
             },
-            "the failure of an attempt that could not start");
+            "failure of an attempt that could not start");
     });
     return true;
 }
@@ -1012,6 +1036,12 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
             ++_failed_requests;
             if (thrown_at_its_own_call) {
                 ctx.reset(); // unanswered: the exception is its outcome
+            } else if (who == from::the_loop) {
+                // A refusal is the client's own answer, given by its rule, but here the loop is who submits: no call of
+                // the program is there to hear what its callback throws. Contained, and the pass goes on to what waits
+                // behind (Huly QB-1246).
+                qb::http::detail::contained(
+                    "HTTP/3", [&] { refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why)); });
             } else {
                 refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why));
             }
@@ -1366,7 +1396,7 @@ Client::request_timed_out(std::uint64_t request_id) noexcept {
             }
             process_pending_requests();
         },
-        "the timeout of a request");
+        "timeout of a request");
 }
 
 qb::http::Response
@@ -1422,24 +1452,14 @@ Client::on_http3_stream_closed(std::uint64_t stream_id, std::uint64_t) {
 void
 Client::on_http3_shutdown(std::uint64_t, std::uint64_t) {
     _remote_shutdown = true;
-    // Every request that waited hears this refusal, whatever a callback throws: the first exception goes on once the
-    // last has been called. Thrown on at once, it left the others queued on a connection that takes nothing more, to
-    // be failed with it under another text (Huly QB-1246).
-    std::exception_ptr thrown;
+    // Every request that waited hears this refusal, whatever a callback throws: the loop brings it, and give() contains
+    // what one throws. Thrown on, it left the others queued on a connection that takes nothing more, to be failed with
+    // it under another text (Huly QB-1246).
     while (!_pending_requests.empty()) {
         auto ctx = std::move(_pending_requests.front());
         _pending_requests.pop_front();
         ++_failed_requests;
-        try {
-            give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
-        } catch (...) {
-            if (!thrown) {
-                thrown = std::current_exception();
-            }
-        }
-    }
-    if (thrown) {
-        std::rethrow_exception(thrown);
+        give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "HTTP/3 server is shutting down"));
     }
 }
 

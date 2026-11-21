@@ -288,7 +288,7 @@ Client::give(RequestContext &ctx, Make &&make, from who) noexcept {
     qb::http::detail::contained(
         "HTTP/1.1",
         [&] { owe([callback = std::move(ctx.callback), response = std::forward<Make>(make)()]() mutable { callback(std::move(response)); }); },
-        "an answer kept for its turn");
+        "answer kept for its turn");
 }
 
 Client::Client(std::string const &base_uri)
@@ -782,7 +782,7 @@ Client::tell_connect(ConnectionCallback const &callback, bool ok, std::string co
         call_now([&] { callback(ok, error); });
         return;
     }
-    qb::http::detail::contained("HTTP/1.1", [&] { owe([callback, ok, error] { callback(ok, error); }); }, "an answer kept for its turn");
+    qb::http::detail::contained("HTTP/1.1", [&] { owe([callback, ok, error] { callback(ok, error); }); }, "answer kept for its turn");
 }
 
 void
@@ -937,7 +937,7 @@ Client::pending_timed_out(std::uint64_t request_id) noexcept {
                 process_pending_requests();
             }
         },
-        "the timeout of a queued request");
+        "timeout of a queued request");
 }
 
 bool

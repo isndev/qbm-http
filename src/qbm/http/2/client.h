@@ -678,7 +678,7 @@ private:
     /// was taken does not answer.
     [[nodiscard]] DetachedRequests detach_requests();
     /// Answers what detach_requests() took, each with @p error_message. fail_all_requests() is the two, one after the other.
-    /// Every one of them is answered whatever a callback throws; the first exception goes on once the last has heard.
+    /// Every one is answered whatever a callback throws; under a call of the program the first exception goes on last.
     void fail_detached(DetachedRequests detached, const std::string &error_message, from who = from::the_loop);
     /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: the request
     /// @p request_id, or every member of the batch @p batch_id and the batch with its callback. Never throws.
@@ -692,6 +692,9 @@ private:
     void owe(std::function<void()> answer) noexcept;
     /// An answer the client gives by itself: now, or kept.
     void answer_by_itself(std::function<void()> answer);
+    /// In the handler of a `try` around a callback given at once: rethrows under a call of the program (@p who is the
+    /// client), logs and stops what the loop's callback threw otherwise.
+    void escaped(from who);
     /// The outcome of a connect(), told to @p callback: now, or kept.
     void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
     /// The answer of a batch, told to its callback: now, or kept.
