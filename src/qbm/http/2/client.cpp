@@ -1270,17 +1270,28 @@ Client::check_request_timeouts() {
     auto       now              = std::chrono::steady_clock::now();
     const auto timeout_duration = _request_timeout;
 
-    // Check active requests for timeouts
-    std::vector<uint32_t> timed_out_streams;
-
+    // The requests in flight that timed out, taken by their place in the registry -- a number no other request of this
+    // client holds -- and by the connection they were sent on, and each looked up again before it is answered. A 408
+    // callback is the program's: it may disconnect, connect again and run the loop until connected, and a new connection
+    // numbers its streams from 1 again. Taken by stream number, what the pass still held then named the new connection's
+    // requests, which were answered 408 and reset in their place (Huly QB-1246).
+    std::vector<uint32_t> timed_out_requests;
     for (const auto &entry : _active_requests) {
-        auto const &context = entry.second;
-        if (now - context->created_at >= timeout_duration) {
-            timed_out_streams.push_back(context->stream_id);
+        if (entry.second && now - entry.second->created_at >= timeout_duration) {
+            timed_out_requests.push_back(entry.first);
         }
     }
 
-    for (uint32_t stream_id : timed_out_streams) {
+    const auto sent_on = _transports_started;
+    for (const uint32_t key : timed_out_requests) {
+        if (_transports_started != sent_on) {
+            break; // that connection ended under a callback before this one: its close answered the rest
+        }
+        const auto held = _active_requests.find(key);
+        if (held == _active_requests.end() || !held->second) {
+            continue; // answered under a callback before this one: a response heard, a disconnect()
+        }
+        const uint32_t stream_id = held->second->stream_id;
         // Given up on the wire, as the HTTP/3 client does at a request's timeout, before it is answered: RST_STREAM(CANCEL),
         // which tells the server that nobody waits and frees the stream against its limit; the request is answered
         // below, so the protocol tells nothing of the reset. Left open, the stream still counted on both sides of the
@@ -1311,7 +1322,7 @@ Client::check_request_timeouts() {
     }
 
     _pending_requests = std::move(non_timed_out_requests);
-    if (!timed_out_streams.empty()) {
+    if (!timed_out_requests.empty()) {
         // What waited for the streams those timeouts freed is sent now, as after a response: nothing else ran a pass,
         // and a request queued behind one that timed out waited for the next push, or timed out in its turn (Huly
         // QB-1246).

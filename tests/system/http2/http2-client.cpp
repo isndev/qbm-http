@@ -8050,6 +8050,65 @@ TEST_F(Http2ClientTest, AValueLeavesWithoutTheWhitespaceAtItsEdgesAndAConnection
     settle();
 }
 
+// ---- The timeouts of a connection are answered on that connection, whatever a 408 callback does (Huly QB-1246) ----
+
+// Two requests the server never answers time out in one pass of the timer (the thread sleeps past both deadlines). The
+// first 408's callback disconnects -- the other request hears 503 --, connects again, runs the loop until connected,
+// raises the timeout to 10 s and pushes C and D, which take streams 1 and 3 of the new connection. The pass goes on with
+// what it had taken: nothing of it is on the new connection. It took stream numbers: it went on with one that named C's
+// or D's stream now, answered that request 408 at once, though its timeout was 10 s, and reset its stream.
+TEST_F(Http2ClientTest, TheTimeoutsOfAConnectionAreNeverAnsweredOnTheNextOne) {
+    Answer c, d; // before the client, which answers what it still holds when it is destroyed
+    int    timed_out = 0, refused = 0, other = 0;
+    bool   up = false, again = false, reconnected = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(300ms);
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto routed = _server->server().hang_routed(), cancelled = _server->server().hang_cancelled();
+    const auto first = [&](qb::http::Response response) {
+        if (response.status() == qb::http::status::REQUEST_TIMEOUT) {
+            ++timed_out;
+        } else if (response.status() == qb::http::status::SERVICE_UNAVAILABLE) {
+            ++refused;
+        } else {
+            ++other;
+        }
+        if (response.status() != qb::http::status::REQUEST_TIMEOUT || reconnected) {
+            return;
+        }
+        reconnected = true;
+        client->disconnect();
+        client->connect([&](bool ok, const std::string &) { again = ok; });
+        (void) loop_until([&] { return again; }, 3s);
+        client->set_request_timeout(10s);
+        (void) client->push_request(hang(), std::ref(c));
+        (void) client->push_request(hang(), std::ref(d));
+    };
+    ASSERT_TRUE(client->push_request(hang(), first));
+    ASSERT_TRUE(client->push_request(hang(), first));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == routed + 2; }));
+    std::this_thread::sleep_for(400ms); // the timer's pass comes late: both are past their deadline when it runs
+    ASSERT_TRUE(loop_until([&] { return timed_out + refused + other == 2; }, 3s));
+    ASSERT_TRUE(again) << "the callback did not connect again";
+    EXPECT_TRUE(loop_until([&] { return _server->server().hang_routed() == routed + 4; }, 3s)) << "C and D were not sent";
+    settle(500ms);
+    EXPECT_EQ(timed_out, 1);
+    EXPECT_EQ(refused, 1) << "the request behind is answered by the disconnect()";
+    EXPECT_EQ(other, 0);
+    EXPECT_EQ(c.count + d.count, 0) << "a request of the new connection was answered by the pass of the old one's timeouts: " << c.body
+                                    << d.body;
+    EXPECT_EQ(client->get_active_request_count(), 2u);
+    // A's stream reset, B's ended with its connection: two on the server, and none of the new connection's.
+    EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_cancelled() >= cancelled + 2; }));
+    settle(200ms);
+    EXPECT_EQ(_server->server().hang_cancelled(), cancelled + 2) << "a stream of the new connection was reset";
+    client->disconnect();
+    settle();
+    EXPECT_EQ(c.count + d.count, 2);
+}
+
 #ifdef QB_WITH_LOGGING
 // What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
 // started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says
