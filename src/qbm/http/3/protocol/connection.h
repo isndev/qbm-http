@@ -583,7 +583,7 @@ plan_trailers(Message const &msg) {
  * @param request Request to serialize.
  * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
  *        announcement added.
- * @return The field block, or @c std::nullopt if the target exceeds @c MAX_URL_LENGTH, @c :authority
+ * @return The field block, or @c std::nullopt if the path and the query exceed @c MAX_URL_LENGTH, @c :authority
  *         (qb::http::origin::authority, Huly QB-1064) @c MAX_HEADER_VALUE_LENGTH as a `host` field does -- a peer's
  *         nghttp3 closes the connection past 64 KiB --, the regular fields @c MAX_HEADERS_COUNT, the pseudo-headers
  *         aside as a server reads them (both Huly QB-1266), or @c trailers() carries a field a trailer section must
