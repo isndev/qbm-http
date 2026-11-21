@@ -1136,8 +1136,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   goes on. And a push takes back what it pushed wherever that has got to. A callback that pushes, then throws, runs a
   pass of its own, which takes the first push's request out of the queue before the exception reaches that push: sent,
   its response was heard after its push had thrown; refused there, its refusal was heard on the client's next turn, and
-  a batch's likewise. Such a request now stays in flight with its answer dropped when it comes, and an answer already
-  owed is never heard.
+  a batch's likewise. An answer already owed is now never heard, and a request in flight is given up on the wire as
+  well, as a cancellation is: `RST_STREAM(CANCEL)` on its stream on HTTP/2, a reset with `H3_REQUEST_CANCELLED` on
+  HTTP/3, the members of a batch in flight alike. That frees the stream for what waits and tells the server that
+  nobody does: left in flight with its answer dropped, the request held its stream for as long as the server took to
+  answer. An answer that still comes finds no request; and where no reset can be written, the connection ending, the
+  request hears nothing of the close that ends it. `ClientHttp2Protocol::cancel_request()` is the HTTP/2 protocol's
+  entry for it: it had none that gave up one request.
   While the client is destroyed nothing changes: what a callback throws is logged and goes no further.
   Two loops of the clients' own were cut short the same way, and are whole: a graceful GOAWAY on HTTP/2 fails every
   request above the stream it names, then looks at the drain's end -- the others were destroyed unheard, and a drained
@@ -1173,6 +1178,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   (three of the four were; a batch in flight already found no batch, a pin). On HTTP/3, a cancellation whose callback
   throws: the exception out of the call, the request that waited served with no other push, and as many stream states
   kept as with a callback that returns (4 against 3, and the request left queued).
+  What a push takes back while in flight, in both binaries: one stream allowed; a request the server never answers,
+  then a batch of two, sent on it by a pass under the callback that throws; and a request that waits for that stream.
+  The server sees the request cancelled on a connection that stays, the request that waited is sent on that stream by
+  the same push and served, and nothing is heard for what was taken back (the stream stayed taken, and what waited
+  was never sent). On HTTP/2 a peer that answers nothing reads the frame: one `RST_STREAM`, on stream 1, `CANCEL`. On
+  HTTP/3 the client's own reset is read with its code, `H3_REQUEST_CANCELLED`; and where a submission cut short ends
+  the connection under the push, what that push had in flight hears nothing of the close (it held before: a pin).
   The line logged is read by a case of `qbm-http-test-system-http2-client`, in a log of its own: the suites build with
   `QB_WITH_LOGGING`, and no case read it (it held before, a pin).
   Mutants, the whole binary each, the unmutated tree first and the restored tree last. The containments, one removed
@@ -1188,6 +1200,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   answer owed that does not say whose it is, the line logged changed; on HTTP/3 the reset, the pass and the exception
   of a cancellation each left out. The 21 mutants of this paragraph and the one on the engine's bound, planted again
   on that tree: 22 planted, 19 caught, the same three surviving.
+  The reset of what a push takes back while in flight: 9 planted, 7 caught -- no reset asked, a batch's members left
+  out, another code than the cancellation's, the HTTP/2 protocol refusing a request it holds. Two survive on HTTP/3, by
+  reading: the request left in the registry when its stream is reset -- the transport raises the stream's end inside
+  the reset, which retires the request there --, and a reset written though a close is under way, which changes
+  nothing that is heard. The 44 mutants of this paragraph planted again on that tree: 44 planted, 41 caught, the same
+  three surviving.
 
 - **An HTTP/3 submission that an exception cuts short gives its request one outcome and ends the connection (Huly
   QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
