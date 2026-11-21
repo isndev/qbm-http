@@ -313,9 +313,9 @@ public:
      *         starts, and the callback is never called.
      *
      * @note Asked from a callback of a close, of a failure or of a lost connection, the attempt starts once the
-     *       transport that ended is torn down, never under that callback; its connect timeout counts from the ask.
-     *       Where that teardown waits for the callback's return, a loop run there to wait hears false at that deadline
-     *       and nothing starts afterwards: return instead (the coroutine connect() answers false there, on its turn).
+     *       transport that ended is torn down, never under that callback; its connect timeout counts from the ask,
+     *       for that wait and the attempt together. Where the teardown waits for the callback's return, a loop run
+     *       there hears false at that deadline, and nothing starts afterwards (the coroutine form answers false).
      *
      * @note The default argument is intentionally removed (compared to pre-coroutine
      *       versions of this API) so that the coroutine overload `connect()` is

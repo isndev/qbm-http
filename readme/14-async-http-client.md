@@ -121,7 +121,7 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:1426-1432,1511-1521; qbm/http/src/qbm/http/1.1/client.cpp:149-174,455-480; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
-<!-- src: qbm/http/src/qbm/http/2/client.cpp:525-545,976-991; qbm/http/src/qbm/http/3/client.cpp:616-635,1404-1413; qbm/http/src/qbm/http/body.h:307-328 -->
+<!-- src: qbm/http/src/qbm/http/2/client.cpp:527-547,1012-1027; qbm/http/src/qbm/http/3/client.cpp:628-647,1447-1456; qbm/http/src/qbm/http/body.h:307-328 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
 <!-- src: qbm/http/src/qbm/http/1.1/http.h:1476-1483; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
@@ -394,7 +394,7 @@ notification or a reference to the retired stream.
 
 Like every persistent client, it is non-copyable, non-movable, and must be owned by a `shared_ptr` via `qb::http2::make_client`.
 
-<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,325-495,540-565,775 -->
+<!-- src: qbm/http/src/qbm/http/2/client.h:104-108,325-495,540-565,779 -->
 ```cpp
 namespace qb::http2 {
     struct ConnectResult {
@@ -479,7 +479,7 @@ For HPACK, streams, flow control, and GOAWAY handling, see [HTTP/2 protocol spec
 
 HTTP/3 runs over QUIC. The entire `qb::http3` slice is compile-time gated behind `QBM_HTTP_HAS_HTTP3` — including its header — so guard any HTTP/3 code with that macro. Only ALPN `h3` is accepted, the base URI must be `https`, and (as with HTTP/2) requests must be same-origin.
 
-<!-- src: qbm/http/src/qbm/http/3/client.h:141-145,268-276,311-356,358-394,558 -->
+<!-- src: qbm/http/src/qbm/http/3/client.h:141-145,269-277,312-357,359-395,564 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 namespace qb::http3 {
@@ -609,7 +609,7 @@ and say so on one line of stderr.
 - **One-shot sessions delete themselves.** The free-function HTTP/1.1 sessions are heap-allocated and self-deleting. Never `delete` the result or capture a pointer to one.
 - **HTTP/2 callback `connect` needs an explicit argument.** Write `connect(nullptr)` for fire-and-forget — there is no zero-argument callback overload, by design, so the coroutine `connect()` resolves unambiguously.
 - **Persistent clients are same-origin.** A cross-origin request is rejected with `400`, not silently re-pointed. Build a separate client per origin, or use the one-shot helpers for ad-hoc cross-origin calls.
-- **Percent-encode what a query carries.** `qb::io::uri` keeps a query as written. The three persistent clients refuse where it is pushed, `400`, a request whose query carries SP, a control byte or DEL, or whose URI failed to parse (such a byte in its path): "HTTP/2 request URI cannot be sent: the query carries SP, a control byte or DEL; percent-encode it". Nothing is written, the connection stays and the other requests are served (Huly QB-1246: such a query ended an HTTP/2 connection and every request on it, and reached the wire on HTTP/3).
+- **Percent-encode what a query carries.** `qb::io::uri` keeps a query as written. The three persistent clients refuse where it is pushed, `400`, a request whose query carries SP, a control byte or DEL, whose URI failed to parse (such a byte in its path), or whose path and query are longer together than `qb::http::protocol_limits::MAX_URL_LENGTH`: "HTTP/2 request URI cannot be sent: the query carries SP, a control byte or DEL; percent-encode it". Nothing is written, the connection stays and the other requests are served (Huly QB-1246: such a query ended an HTTP/2 connection and every request on it, and reached the wire on HTTP/3).
 - **Feature gates are real.** `qb::http2::Client` needs `QB_HAS_SSL`; `qb::http3::Client` needs `QBM_HTTP_HAS_HTTP3` (its header `#error`s otherwise). Guard HTTP/3 code paths accordingly.
 - **`verify_peer` defaults to `true`.** Disable it only for trusted or self-signed endpoints, and on the persistent clients set it before `connect()`.
 
