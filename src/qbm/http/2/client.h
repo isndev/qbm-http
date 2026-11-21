@@ -313,9 +313,9 @@ public:
      *         starts, and the callback is never called.
      *
      * @note Asked from a callback of a close, of a failure or of a lost connection, the attempt starts once the
-     *       transport that ended is torn down, never under that callback: its outcome comes after the callback has
-     *       returned -- do not run the loop there to wait for it (for that reason the coroutine connect() answers
-     *       false there, on the client's turn of the loop).
+     *       transport that ended is torn down, never under that callback; its connect timeout counts from the ask.
+     *       Where that teardown waits for the callback's return, a loop run there to wait hears false at that deadline
+     *       and nothing starts afterwards: return instead (the coroutine connect() answers false there, on its turn).
      *
      * @note The default argument is intentionally removed (compared to pre-coroutine
      *       versions of this API) so that the coroutine overload `connect()` is
@@ -390,8 +390,8 @@ public:
      *                 refusal is never called from inside its own push. Bound such a retry all the same, with a delay:
      *                 it spins otherwise.
      *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
-     *                 another one of the same client: the nesting is exactly one -- what a disconnect() called from
-     *                 a callback ends is heard on the client's turn too.
+     *                 another one of the same client: nesting is exactly one outside the destructor -- and what a
+     *                 disconnect() called from a callback ends is heard on the client's turn too.
      *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
      *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
      *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without

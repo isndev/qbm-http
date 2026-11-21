@@ -296,8 +296,8 @@ public:
      *                 owe its answers. A callback that pushes back at every refusal is never called from inside its
      *                 own push. Bound such a retry all the same, with a delay: it spins otherwise.
      *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
-     *                 another one of the same client: the nesting is exactly one -- what a disconnect() called from
-     *                 a callback ends is heard on the client's turn too.
+     *                 another one of the same client: nesting is exactly one outside the destructor -- and what a
+     *                 disconnect() called from a callback ends is heard on the client's turn too.
      *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
      *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
      *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without

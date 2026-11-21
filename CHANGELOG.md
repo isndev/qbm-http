@@ -610,10 +610,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
     end. It now reads: what the client answers by itself to a push made from one of its own callbacks is heard on the
     client's next turn of the loop, and while the client is destroyed a push made from inside the answer of a push is
     refused, `false`, its callback never called. Each of the three clients keeps one queue of the answers it owes,
-    oldest first. Two things hear it: the client's own turn of the loop, and its destructor. An answer the client gives by itself -- a refusal
-    known at once (another origin, the pending bound, a request that cannot be written or submitted, one the connection
-    cannot take on HTTP/2 -- the server's limit of concurrent streams --, no connection with automatic reconnection off
-    on HTTP/1.1, a `disconnect()` under way or a server's GOAWAY on HTTP/3, a batch whose members are all refused),
+    oldest first. Two things hear it: the client's own turn of the loop, and its destructor. An answer the client gives
+    by itself -- a refusal known at once (another origin, the pending bound, a target that cannot be sent, a request
+    that cannot be written or submitted, one the connection cannot take on HTTP/2 -- the server's limit of concurrent
+    streams --, no connection with automatic reconnection off on HTTP/1.1, a `disconnect()` under way or a server's
+    GOAWAY on HTTP/3, a batch whose members are all refused),
     `connect()` on a client that is connected, an empty batch, a cancellation on HTTP/3, a
     coroutine push completed at once, the `false` of a coroutine `connect()` awaited during a close, what a
     `disconnect()` the program calls ends (the requests it fails, the `connect()` it gives up), what a connection lost
@@ -624,10 +625,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
     at every failure is then called once a loop turn, never from inside its own push; in 3.3.0 each refusal was answered
     inside the push, one frame deeper each time. The rule is each client's own: a callback of one client that pushes to
     another gets that other's refusal inside the push. What follows from it. Every answer is heard exactly once, in the
-    order the client came to owe it, and a request has one outcome: its answer, or the exception its own push threw (the
-    entry on an HTTP/3 submission cut short, under Fixed). With callbacks that run no loop turn of their own, no
-    callback of a client is called inside another one of the same client: the
-    nesting is exactly one. A callback that runs the loop -- `qb::io::async::run()`,
+    order the client came to owe it, and a request has one outcome: its answer, or the exception that left its own
+    push before any answer, never both. On HTTP/2 and HTTP/3 a push lets through what the callback of another request
+    throws when that push answers it on its way, and on HTTP/3 what cuts its submission short (the two entries under
+    Fixed): what it was pushing is then taken back, unanswered. The HTTP/1.1 client logs what a callback throws. With
+    callbacks that run no loop turn of their own, no callback of a client is called inside another one of the same
+    client: nesting is exactly one outside the destructor. A callback that runs the loop -- `qb::io::async::run()`,
     `run_once()`, `run_until()`, `run_sync()` -- receives inside that loop whatever the client owes, its own refusals
     included: one that pushes a refused request back and then runs the loop recurses once per refusal. To relaunch
     without nesting, push back and return. That is how a coroutine awaited from a callback with `run_sync()` completes.
@@ -636,8 +639,9 @@ All notable changes to the qbm-http module are documented here. The format is ba
     While the client is destroyed no later turn exists. Its destructor hears what is still owed first, in order, each
     as a callback the destructor runs: a request pushed from one is answered inside that push, and one pushed from
     inside THAT answer returns `false` and is never answered (`push_requests()` likewise, an empty batch included). An
-    answer the loop brings meanwhile -- a callback the destructor runs ran the loop -- takes its place behind what is
-    still owed, as in ordinary operation; one the client gives by itself there is given inside the call. The coroutine
+    answer that comes meanwhile takes its place behind what is still owed, as in ordinary operation: one the loop brings
+    -- a callback the destructor runs ran the loop --, and one the client gives by itself -- such a callback called
+    `disconnect()`, whose failures were heard ahead of a refusal owed before them. The coroutine
     `push_request()` and `push_requests()` awaited from a callback of a close complete `503`, "... connection is
     closing", without waiting for a connection: an answer the client gives by itself, which the loop turn of a
     `run_sync()` hears. A `run_sync()` of one there waited for the request's timeout on HTTP/1.1 (`408`), for the
@@ -668,7 +672,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
     timed in flight, left in the queue and behind a connection, alone or in a batch; at the destruction three pushes get
     two answers on each client. On the three clients, while the destructor hears what is owed: a response the loop
     brings takes its place behind it (it went ahead of the second of two refusals), the failures of a `disconnect()`
-    its callback calls come inside that call, and an empty batch pushed back from its own callback ends at its second
+    its callback calls wait behind it too, and an empty batch pushed back from its own callback ends at its second
     push (a hundred calls, a hundred deep, where the case stops it); and the `false` of a coroutine `connect()` awaited
     during a close has its place in the order of the answers, behind the refusal owed before it (it came ahead).
     On HTTP/2, in `qbm-http-test-system-http2-client`, the same set, fifteen cases, eleven
@@ -693,11 +697,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
     the attempt by then); where a request is timed on HTTP/3, 4 planted, 3 caught -- the fourth is equivalent since a
     request's answer stops its timer first (a request timed where it is queued, and refused where it is submitted).
     On HTTP/2, the rule, each answer the client gives by itself, the destructor's level and the five holds: 33 planted,
-    32 caught -- the survivor is the protocol pass `process_pending_requests()` opens, which nothing reaches: the one
-    dispatch under `send_request()` is the HPACK encoder's refusal, and a request's fields are validated before it.
-    The destructor's order, its empty batch and the `false` of the coroutine `connect()`, five a client: 15 planted, 15
-    caught -- three of them, the client's own answer kept behind what the destructor still has to hear, by a case
-    written once they had survived.
+    32 caught -- the survivor is the protocol pass `process_pending_requests()` opens: the one dispatch a send raises
+    under it is the HPACK encoder's refusal, the last thing that send does, and nothing reads the protocol after it.
+    The destructor's order, its empty batch and the `false` of the coroutine `connect()`, five a client, planted on the
+    destructor's one rule: 15 planted, 15 caught -- three of them, the client's own answer given inside the call while
+    the destructor still has answers to hear, by the case of a `disconnect()` its callback calls.
   - **All three.** `false` from `connect()` now always means that nothing started and that the callback is never called,
     and `true` that the callback will hear the outcome, inside the call only when the client is already connected,
     with no callback of that client on the stack and nothing owed, by the bullet above; each client's bullet says what
@@ -960,7 +964,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   of them fail under AddressSanitizer (macOS arm64, Apple clang 21).
 
 - **An HTTP/2 client's close ends the connection it found and no other, and its callbacks may run the loop, ask
-  `connect()` and drop the client (Huly QB-1246).** Four defects of `qb::http2::Client`, each reached by a callback
+  `connect()` and drop the client (Huly QB-1246).** Seven defects of `qb::http2::Client`, each reached by a callback
   that does more than return.
   A close read "a transport to end" before it called the callbacks of what it ends, and ended "the transport the client
   holds" after them. A callback that ran the loop until the peer had ended the connection, then asked `connect()` and
@@ -968,8 +972,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   counts the transports it starts, and a close ends the one it owns only if it has not ended meanwhile -- in
   `disconnect()` of a connection whose TLS is up before its SETTINGS, at a connect deadline that expires there, and at
   the end of a graceful GOAWAY's drain a request's deadline ends. Under a read (a GOAWAY, a connection error, a failed
-  handshake) qb-io cannot tear the transport down under its own dispatch: a `connect()` asked there waits for the
-  callback to return, so do not run the loop there to wait for its answer.
+  handshake) qb-io cannot tear the transport down under its own dispatch: a `connect()` asked there starts once the
+  callback has returned.
   The handler of a transport's end runs while qb-io disposes of the connection, and stops the io's watcher once that
   handler returns. A `connect()` asked from a callback it calls -- the failure of a request the lost connection
   carried, a `connect()` that waited -- started its connector at once: a callback that then ran the loop saw the
@@ -977,6 +981,16 @@ All notable changes to the qbm-http module are documented here. The format is ba
   came up, was reported, and never read again; a build with assertions stops on qb-io's
   `io::start() from inside dispose()`. The handler now holds `connect()` back while its callbacks run and starts what
   was asked once they have returned.
+  A `connect()` held back until a transport has ended had no deadline of its own, only the one that whatever armed the
+  client's timer next gave it. A callback of a lost connection that asked `connect()` and ran the loop until the answer
+  waited for ever -- that transport is torn down once the callback returns --; with a request pushed after the
+  `connect()`, it heard `false` at the connect timeout. The deadline is now armed where the `connect()` is asked, and
+  counts from there: both hear `false`, "Connection timeout", at the connect timeout. Return instead of running the
+  loop there, and the attempt starts. Told `false`, such a `connect()` stayed marked as waiting: the client connected by
+  itself once the callback had returned, automatic reconnection off, an attempt nobody had asked for; nothing starts
+  now. And the failure of an attempt cleared the mark that keeps the queue through the end of the transport still
+  closing: a request pushed once that `connect()` had been told `false` was failed by that end, "Connection lost",
+  though it never rode that transport. It rides the next attempt.
   A request pushed from the callback of a `connect()` that failed, or that a close refused, was failed by the pass over
   the requests that followed those callbacks, with the error of an attempt it never rode. The requests are now taken
   out before any callback, as the HTTP/1.1 and HTTP/3 clients do.
@@ -987,9 +1001,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   callback of a failed `connect()` (automatic reconnection off and on), from one a failure inside that callback did not
   close the pass of, and from one a `disconnect()` refused; the three closes, each leaving open the connection its
   callback saw come up; a `connect()` asked from a callback of a lost connection that runs the loop; ten callers of a
-  callback that drops the last reference to a client owned apart from its control block. Mutants, the whole binary
+  callback that drops the last reference to a client owned apart from its control block; that `connect()` at its
+  deadline -- alone, with a request pushed after it, and with a server listening again before the callback returns:
+  `false` once, between 0.9 and 2.5 s for a connect timeout of one second, and no connection afterwards --; a request
+  pushed once a `connect()` held back has timed out, served by the next attempt. Mutants, the whole binary
   each, the unmutated tree first and the restored tree last: 16 planted, 16 caught -- the order of the passes, and for
-  each of the three closes "ends whatever the client holds" and "reads what it owns after its callbacks".
+  each of the three closes "ends whatever the client holds" and "reads what it owns after its callbacks" --, then 3
+  planted, 3 caught: no deadline at the ask, a `connect()` told `false` that still starts, the mark cleared.
 
 - **An answered request no longer leaves its timer armed (HTTP/1.1, HTTP/3; Huly QB-1246).** The timer of a request's
   timeout belonged to the loop: armed when the request was queued, and never stopped. An answered request left it
@@ -1034,40 +1052,103 @@ All notable changes to the qbm-http module are documented here. The format is ba
   restored tree last: 16 planted, 16 caught -- on each client `disconnect()` answering as the loop, and each kind of
   answer a close gives taken as the loop's whoever closes.
 
-- **An HTTP/3 submission that an exception cuts short gives its request one outcome and finishes the close it deferred
-  (Huly QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception
-  out of that -- an allocation, or what a hook of the transport throws under the send -- left the request destroyed
-  unheard: it was in no registry yet. And a close deferred to the end of that submission, the transport lost under it or
-  a `disconnect()` called there, was never run: the client stayed "connected" to a transport that was gone, every later
+- **A request whose target cannot be sent is refused where it is pushed, on the three persistent clients (Huly
+  QB-1246).** `qb::io::uri` keeps a query as written, and the HTTP/1.1 serializer refuses one that carries SP, a
+  control byte or DEL (QB-494). The HTTP/2 and HTTP/3 clients serialize nothing: the query went into `:path` as it was.
+  On `qb::http2::Client` the HPACK encoder refuses a control byte: the client sent its own GOAWAY from under the push,
+  "HPACK encoding failed for new request headers", and every request on the connection failed for the fault of one --
+  pushed from a callback, the five in flight heard their failures inside that push, two deep; a query with SP was sent.
+  `qb::http3::Client` wrote the byte: a qb server closed the connection, and the request in flight failed with it. And
+  a URI that failed to parse -- such a byte in its path -- was made absolute against the client's origin and sent, on
+  the three clients, as a request for another target, answered `200`. Each client now asks one helper, which is the
+  serializer's own check and no copy of it, before anything else: a URI that is invalid, or a query the request line
+  could not carry, is refused where it is pushed, `400`, "HTTP/2 request URI cannot be sent: the query carries SP, a
+  control byte or DEL; percent-encode it" -- an answer the client gives by itself, under the rule of the entry on
+  callbacks, under Changed. Nothing is written, the connection stays, and the other requests are served on it.
+  Witnesses, red on the code before, in `qbm-http-test-system-http1-client`, `-http2-client` and `-http3-loopback`: LF,
+  CR, 0x1F, DEL and SP, in the query and in the path, each refused where it is pushed and the next request served on
+  the same connection -- on HTTP/2 and HTTP/3 with a request in flight, which is not failed. Mutants, the whole binary
+  each, the unmutated tree first and the restored tree last: 5 planted, 5 caught -- the check left out of each
+  client, and each of its two halves.
+
+- **On HTTP/2 a callback that throws no longer costs another request its answer, nor a close its end (Huly
+  QB-1246).** Two defects of `qb::http2::Client`.
+  A close answered what it ends in one pass, and the first callback that threw left it: the requests behind were never
+  answered, and the close never ended its transport. The client stayed "closing": the next `connect()` waited for an
+  end of transport that never came. With TLS up and no SETTINGS, three requests waiting and a `disconnect()` whose
+  first callback throws: one callback heard, two never, and the next `connect()` unanswered after six seconds for a
+  connect timeout of one. An attempt that failed lost the requests that waited behind a `connect()` whose callback
+  threw, the same way. A close now answers every request and every `connect()` it ends, ends its transport, then
+  rethrows the first exception -- in `disconnect()`, at the failure of a connection or of an attempt, at the end of a
+  graceful GOAWAY's drain --, as the HTTP/3 client does. The HTTP/1.1 client logs what a callback throws and goes on:
+  it was not exposed, and a case pins it.
+  A push runs the pass that sends what waited before its own request, and the callback of a request the protocol
+  refuses there may throw. The exception left the push with its request still queued: the next pass sent it, and its
+  callback heard a `200` -- a request the program had been thrown at for, answered too. The push now takes back what it
+  pushed, a request or a batch, before the exception goes on: one outcome, as on HTTP/3.
+  Witnesses in `qbm-http-test-system-http2-client`, red on the code before: that `disconnect()`, its thrower the
+  callback of a request and the callback of a `connect()` that waits -- three answers, the exception out of the call,
+  the next `connect()` answered --; a failed attempt whose `connect()` callback throws, the two requests behind it
+  heard; an attempt that times out with TLS up, and the end of a graceful GOAWAY's drain, each under a callback that
+  throws -- the transport ended all the same --; a request and a batch pushed while the callback of a refused one
+  throws -- the exception out of the push, nothing heard for it, then or after the next push. Mutants, the whole binary
+  each, the unmutated tree first and the restored tree last: 9 planted, 8 caught. The survivor leaves the failure
+  of an attempt before the close of its transport, and nothing reads it: of the three places such a failure comes
+  from, the connector has no transport to close, and under the handshake's event and the timer's pass what a callback
+  throws ends the process.
+
+- **An HTTP/3 submission that an exception cuts short gives its request one outcome and ends the connection (Huly
+  QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
+  that -- an allocation, or what a hook of the transport throws under the send -- left the request destroyed unheard:
+  it was in no registry yet. And a close deferred to the end of that submission, the transport lost under it or a
+  `disconnect()` called there, was never run: the client stayed "connected" to a transport that was gone, every later
   request queued behind it, or kept every later `disconnect()` and `connect()` out. The submission now ends as a read
-  does: the close it deferred is run, and the exception goes on to whoever made the call. A request has exactly one
-  outcome, by the rule of Asio's `async_initiate`: an initiating call that throws never invokes its completion handler.
-  Thrown inside the program's own call for that request -- `push_request()`, `push_requests()`, the `co_await` of
-  either --, the exception is that outcome: what the call pushed is taken back from the client before the close runs
-  -- for a batch the members already submitted too, their streams reset where the connection stays --, no callback is
-  called and no awaiter completed, and a coroutine that catches the exception and awaits another request hears that
-  request's own answer. Thrown where the loop submits, or under a call the program makes for another request (a
-  `cancel_request()`), the request is answered `503`, once, as every refusal the client gives by itself -- inside that
-  call when no callback of this client is on the stack and nothing is owed, on the client's turn otherwise --, and the
-  exception goes on to that caller, logged where it is the loop. The refusal is given before the stream is reset, and
-  the reset has a guard of its own: a hook that throws a second time under it takes no answer away. The other requests a
-  close run there ends are answered once each, as answers the client gives by itself: inside a push the program makes
-  with no callback of this client on the stack and nothing owed, on the client's turn otherwise -- under a callback's
-  push they came inside it. With no close deferred the stream is abandoned and the connection kept. No close can be left
-  half done any more, so the line of the destructor that cleared one, and its witness, are gone.
+  does, by a close, and the exception goes on to whoever made the call. The close is the one the submission deferred
+  or, with none, the client's own: "HTTP/3 submission cut short by an exception". The engine hands its bytes to the
+  transport, then is told how many went, and an exception between the two makes it write them again. On the request's
+  own stream that is nothing, the stream is reset; the QPACK encoder's stream lives on, and a peer that advertises a
+  dynamic table reads an instruction twice -- it ends the connection, or keeps another table than the client's.
+  Nothing in the client knows whether the transport took the bytes, so the connection is not kept, as nghttp3 itself
+  treats the failure of a callback. Measured with the connection kept, against a server that advertises a table of
+  4096 octets: after one submission cut short, 26 of the next 30 requests failed, "HTTP/3 protocol read error (514)",
+  H3_QPACK_ENCODER_STREAM_ERROR; none read a wrong value. A qb server advertises no table.
+  A request has exactly one outcome, by the rule of Asio's `async_initiate`: an initiating call that throws never
+  invokes its completion handler. Thrown inside the program's own call for that request -- `push_request()`,
+  `push_requests()`, the `co_await` of either --, the exception is that outcome: what the call pushed is taken back
+  before the close runs -- a batch whole, the members already submitted ending unheard with the connection --, no
+  callback is called and no awaiter completed, and a coroutine that catches the exception and awaits another request
+  hears that request's own answer. Thrown where the loop submits, or under a call the program makes for another request
+  (a `cancel_request()`), the request is answered `503`, once, as every refusal the client gives by itself -- inside
+  that call when no callback of this client is on the stack and nothing is owed, on the client's turn otherwise --, and
+  the exception goes on to that caller, logged where it is the loop. The other requests the close ends are answered
+  once each, as answers the client gives by itself: inside a push the program makes with no callback of this client on
+  the stack and nothing owed, on the client's turn otherwise -- under a callback's push they came inside it.
+  The outcome is one, too, when the exception cuts no submission short: the pass a push runs submits what waited
+  before its own request, and the callback of one the engine refuses there may throw. The exception leaves the push
+  with its request still queued, and the push takes it back, a request or a batch; left there, it was sent by the next
+  pass and answered. The connection stays.
+  The reset of a stream the client abandons has a `try` of its own in each of the three places that write one. Where a
+  request is refused as it is submitted, the refusal is given first: a hook that throws under the reset takes no answer
+  away. In `cancel_request()` and at a request's timeout, a reset that threw skipped the pass behind it: the request
+  that waited for that stream stayed queued until the next push. No close can be left half done any more, so the line
+  of the destructor that cleared one, and its witness, are gone.
   Witnesses: a client derived in the test throws from the two hooks the QUIC endpoint runs inside a send -- at the end
-  of a send, once and again at the reset of the stream; at the close a send delivers when it loses its connection, with
+  of a send, once and again at the close that follows; at the close a send delivers when it loses its connection, with
   and without a `disconnect()` called there -- under a callback push, a batch (thrown at its first member and at its
   second) and a coroutine push whose next `co_await` hears its own answer: no callback called, the exception out of
-  the call, the next request served. Where a timer's pass and where the cancellation of another request submit, under
-  each of the same hooks: the request answered once, the close finished where the connection is lost, the next request
-  served. And a push whose submission loses the connection, made by the program and from a callback: the other
-  request's failure one deep and in order. No request was heard on these
-  paths before, and the client served nothing more. Mutants, the whole binary each, the unmutated tree first and the
-  restored tree last: 16 planted, 13 caught. Of the three that survive, two are the guard each push keeps around its
-  own pass -- the pass has taken back what the call pushed before an exception of a submission leaves it, so only an
-  allocation failing elsewhere reaches that guard with something left --, and one resets the streams of what is taken
-  back on a connection that is going as well.
+  the call, the connection ended, the next request served on a new one. Where a timer's pass and where the
+  cancellation of another request submit, under each of the same hooks: the request answered once, the connection
+  ended, the next request served. Against a test server that advertises a dynamic table: ten requests echoed, one
+  submission cut short, thirty more echoed right on one new connection. A push whose submission loses the connection,
+  made by the program and from a callback: the other request's failure one deep and in order. A request and a batch
+  pushed while the callback of a refused one throws: the exception out of the push, nothing heard for it, the next
+  request served. A cancellation and a timeout whose reset throws: what waited for the stream is submitted by that
+  call. A refusal whose reset throws: answered once, no exception out of the push. And a `disconnect()` whose first
+  callback throws, pinned: the two others hear, the exception leaves the call, the client connects again. No request
+  was heard on the cut-short paths before, and the client served nothing more. Mutants, the whole binary each, the
+  unmutated tree first and the restored tree last: 16 planted, 15 caught. The survivor resets the stream of a
+  request cut short under a read on a connection that is going as well: equivalent, the end of that read closes the
+  connection.
 
 
 - **A response callback of the HTTP/1.1 client that runs the loop, then drops the last reference, no longer destroys the

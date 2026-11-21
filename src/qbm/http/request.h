@@ -450,7 +450,7 @@ namespace qb::http::detail {
  * The checks the HTTP/1.1 serializer makes on a request's target, for the clients that never serialize one: a URI that
  * failed to parse names no target, and a query -- kept as written, where the path holds path characters only -- may not
  * carry SP, a control byte or DEL raw (RFC 9112 section 3.2; RFC 9113 section 8.3.1 and RFC 9114 section 4.3.1 take
- * `:path` from the same grammar). The HTTP/2 and HTTP/3 clients refuse such a request where it is pushed: sent, a
+ * `:path` from the same grammar). The three persistent clients refuse such a request where it is pushed: sent, a
  * control byte in `:path` is refused by the HPACK encoder, which ends the connection and every request on it.
  */
 [[nodiscard]] const char *unsendable_target(const qb::io::uri &uri) noexcept;
