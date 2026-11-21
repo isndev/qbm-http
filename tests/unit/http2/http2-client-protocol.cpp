@@ -2106,12 +2106,13 @@ TEST(HTTP2ClientProtocol, ARequestHostHeaderNeverLeavesAsAHostField) {
     }
 }
 
-// The regular fields a request sends are those the server accepts on receipt (append_sent_request_fields, Huly
-// QB-1191): a connection-specific field RFC 9113 section 8.2.2 names -- `http2-settings` left, and a qbm-http server
-// resets the stream that carries it --, a `te` other than the one value `trailers` (a list is what a sender must not
-// write, and nghttp2 refuses it), a `content-length` the client did not write from the body, a pseudo-header name, a
-// value HTTP/2 cannot carry are left out, whatever their case; the fields kept leave lowercase (section 8.2.1). Each
-// request then crosses a qbm-http server and is served.
+// The regular fields a request sends, under the clients' rule (append_sendable_request_fields, Huly QB-1191): a
+// connection-specific field RFC 9113 section 8.2.2 names -- `http2-settings` left, and a qbm-http server resets the
+// stream that carries it --, a `te` other than the one value `trailers` (a list is what a sender must not write, and
+// nghttp2 refuses it), a `content-length` the client did not write from the body are left out, whatever their case;
+// the fields kept leave lowercase (section 8.2.1). Each request then crosses a qbm-http server and is served. A value
+// leaves without the SP and HTAB at its edges -- it was left out --, and a field HTTP/1.1 cannot write refuses the
+// request (below).
 TEST(HTTP2ClientProtocol, ARequestSendsOnlyTheFieldsTheServerAccepts) {
     const std::vector<std::pair<std::string, std::string>> left_out = {
         {"HTTP2-Settings", "AAMAAABkAAQAAP__"},
@@ -2124,13 +2125,7 @@ TEST(HTTP2ClientProtocol, ARequestSendsOnlyTheFieldsTheServerAccepts) {
         {"TE", "gzip"},
         {"TE", "trailers, trailers"},
         {"TE", "trailers,"},
-        {"TE", " trailers"},
         {"Content-Length", "99"},
-        {":protocol", "websocket"},
-        {"x-bad", "a\rb"},
-        // A value with SP or HTAB at an end (RFC 9113 section 8.2.1; Huly QB-1191: it was sent).
-        {"x-edge", " a"},
-        {"x-edge", "a\t"},
     };
     for (const auto &[name, value] : left_out) {
         Http2ClientFakeIO                          client_io;
@@ -2157,6 +2152,58 @@ TEST(HTTP2ClientProtocol, ARequestSendsOnlyTheFieldsTheServerAccepts) {
         pump(server, server_io, client_io);
         EXPECT_TRUE(server.ok()) << name;
         EXPECT_EQ(server_io.request_count, 1) << name << ": the server refused the request";
+    }
+
+    // A value with SP or HTAB at an end leaves without them (RFC 9110 section 5.5, RFC 9113 section 8.2.1): they are not
+    // part of it, an HTTP/1.1 receiver strips them, and a value that is nothing else leaves empty. It was left out.
+    const std::vector<std::tuple<std::string, std::string, std::string>> trimmed = {
+        {"x-edge", " a", "a"}, {"x-edge", "a\t", "a"}, {"x-edge", " \t a b \t", "a b"}, {"x-blank", "  ", ""}, {"TE", " trailers", "trailers"},
+    };
+    for (const auto &[name, value, sent] : trimmed) {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        Http2PeerFakeIO                            server_io;
+        h2::ServerHttp2Protocol<Http2PeerFakeIO>   server(server_io);
+        const std::size_t                          before = client_io.output.size();
+        qb::http::Request                          req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/r");
+        req.set_header(name, value);
+        ASSERT_TRUE(client.send_request(std::move(req), 1)) << name;
+        const auto blocks = sent_header_blocks(client_io.output, 1, before);
+        ASSERT_EQ(blocks.size(), 1u) << name;
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](char c) { return qb::http::utility::ascii_to_lower(c); });
+        ASSERT_EQ(blocks[0].count(lower), 1u) << name << " [" << value << "]";
+        EXPECT_EQ(blocks[0].value(lower), sent) << name << " [" << value << "]";
+        pump(server, server_io, client_io);
+        EXPECT_TRUE(server.ok()) << name;
+        EXPECT_EQ(server_io.request_count, 1) << name;
+    }
+
+    // A field HTTP/1.1 cannot write -- a name that is not a token, a pseudo-header's among them; CR, LF, NUL, another
+    // control byte or DEL in a value -- refuses the request: false, the field named, and nothing written (Huly
+    // QB-1191). It was left out, and the request sent without it.
+    const std::vector<std::tuple<std::string, std::string, std::string>> refused = {
+        {":protocol", "websocket", "`:protocol`"},
+        {"x-bad", "a\rb", "carries CR"},
+        {"x-bad", std::string("a\0b", 3), "carries NUL"},
+        {"x bad", "v", "carries SP"},
+    };
+    for (const auto &[name, value, said] : refused) {
+        Http2ClientFakeIO                          client_io;
+        h2::ClientHttp2Protocol<Http2ClientFakeIO> client(client_io);
+        const std::size_t                          before = client_io.output.size();
+        qb::http::Request                          req;
+        req.method() = qb::http::method::GET;
+        req.uri()    = qb::io::uri("https://example.test/r");
+        req.set_header(name, value);
+        std::string why;
+        EXPECT_FALSE(client.send_request(std::move(req), 1, &why)) << name;
+        EXPECT_NE(why.find(said), std::string::npos) << why;
+        EXPECT_NE(why.find("cannot be sent"), std::string::npos) << why;
+        EXPECT_EQ(client_io.output.size(), before) << name << ": something was written for a request refused";
+        EXPECT_TRUE(client.ok());
     }
 
     // A field the `connection` header names is connection-specific with it (RFC 9110 section 7.6.1): left out, whatever

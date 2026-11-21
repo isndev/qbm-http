@@ -1071,22 +1071,30 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
         bool               submitted     = false;
         const auto         attempt_epoch = _connect_epoch;
         std::exception_ptr cut_short;
+        std::string        field_refusal; // a field HTTP/1.1 cannot write: no stream is opened for the request (Huly QB-1191)
         try {
-            auto stream    = open_bidirectional_stream(0);
-            ctx->stream_id = stream.id();
-            stream_id      = ctx->stream_id;
-            opened         = true;
-            struct SubmitGuard {
-                int &depth;
-                explicit SubmitGuard(int &value) noexcept
-                    : depth(value) {
-                    ++depth;
-                }
-                ~SubmitGuard() noexcept {
-                    --depth;
-                }
-            } guard(_submit_depth);
-            submitted = _h3->submit_request(stream_id, ctx->request);
+            // Its sections first, then its stream: a request refused for a field opens none, so that nothing of it is
+            // written. Such a field was dropped, and the request sent without it.
+            auto prepared = _h3->prepare_request(ctx->request);
+            if (prepared.field_refusal.empty()) [[likely]] {
+                auto stream    = open_bidirectional_stream(0);
+                ctx->stream_id = stream.id();
+                stream_id      = ctx->stream_id;
+                opened         = true;
+                struct SubmitGuard {
+                    int &depth;
+                    explicit SubmitGuard(int &value) noexcept
+                        : depth(value) {
+                        ++depth;
+                    }
+                    ~SubmitGuard() noexcept {
+                        --depth;
+                    }
+                } guard(_submit_depth);
+                submitted = _h3->submit_prepared(stream_id, ctx->request, std::move(prepared));
+            } else {
+                field_refusal = std::move(prepared.field_refusal);
+            }
         } catch (...) {
             cut_short = std::current_exception();
         }
@@ -1116,8 +1124,10 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
                 return;
             }
             // The answer is the client's own, made before any containment: what it fails to allocate is not something
-            // a callback threw, and is not logged as one.
-            auto refusal = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why);
+            // a callback threw, and is not logged as one. A field HTTP/1.1 cannot write is the request's own fault: 400,
+            // naming it, as the two other clients answer; any other refusal is the connection's, 503 (Huly QB-1191).
+            auto refusal = field_refusal.empty() ? create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why)
+                                                 : create_error_response(qb::http::status::BAD_REQUEST, "HTTP/3 " + field_refusal);
             if (who == from::the_loop) {
                 // A refusal is the client's own answer, given by its rule, but here the loop is who submits: no call of
                 // the program is there to hear what its callback throws. Contained, and the pass goes on to what waits
@@ -1170,7 +1180,7 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
             // The engine refused the request, or an exception cut its submission short under a read, whose end closes the
             // connection. Settled first, then -- on a connection that stays -- its stream abandoned the way the client
             // cancels any request (RFC 9114 section 4.1), in a try of its own: sharing one with the refusal, a reset that
-            // threw left the request unanswered (Huly QB-1246).
+            // threw left the request unanswered (Huly QB-1246). A request refused for a field had no stream opened.
             std::exception_ptr heard_error; // what the callback of the refusal throws reaches the caller of the push, as before
             try {
                 settle("Failed to submit HTTP/3 request");

@@ -1804,7 +1804,10 @@ TEST_F(Http3LoopbackTest, ClientRejectsOversizedOutgoingHeader) {
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    // A value past the bound is one HTTP/1.1 cannot write: the request is refused 400, naming the field (Huly QB-1191:
+    // 503, naming none).
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_NE(response.body().as<std::string>().find("`x-too-large`"), std::string::npos) << response.body().as<std::string>();
     EXPECT_EQ(server_requests.load(), 0);
 
     auto [total, successful, failed] = client->get_stats();
@@ -1816,9 +1819,9 @@ TEST_F(Http3LoopbackTest, ClientRejectsOversizedOutgoingHeader) {
     server->close();
 }
 
-// A field HTTP/3 cannot carry never leaves the client: it is left out and the request served, as the HTTP/2 client
-// leaves it out (Huly QB-1191; the request was failed with 503). Nothing of it reaches the server.
-TEST_F(Http3LoopbackTest, ClientLeavesOutAnInvalidOutgoingHeaderField) {
+// A field HTTP/1.1 cannot write never leaves the client: its request is refused 400, naming the field, as on the two
+// other clients (Huly QB-1191: it was failed with 503, then left out). Nothing of it reaches the server.
+TEST_F(Http3LoopbackTest, ClientRefusesARequestWithAnInvalidOutgoingHeaderField) {
     const auto       port   = next_port();
     auto             server = qb::http3::make_server();
     std::atomic<int> server_requests{0};
@@ -1840,9 +1843,9 @@ TEST_F(Http3LoopbackTest, ClientLeavesOutAnInvalidOutgoingHeaderField) {
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::OK);
-    EXPECT_EQ(server_requests.load(), 1);
-    EXPECT_EQ(response.body().as<std::string>(), "|");
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(server_requests.load(), 0);
+    EXPECT_EQ(response.body().as<std::string>(), "HTTP/3 request header field `x-injected` cannot be sent: its value carries CR");
 
     client->disconnect();
     server->close();
@@ -8466,4 +8469,128 @@ TEST_F(Http3LoopbackTest, ACancellationWhoseCallbackThrowsStillResetsItsStreamAn
         server->close();
     }
     EXPECT_EQ(kept[1], kept[0]) << "the stream of the cancelled request was not reset: its state stayed";
+}
+
+// ---- A request field that cannot be sent refuses its request, the same way on the three clients (Huly QB-1191) ----
+
+namespace http3_client_fields_test {
+/// Requests that carry a field HTTP/1.1 cannot write: LF, NUL and CR in a value, SP in a name, CR in a cookie, LF in a
+/// trailer field.
+struct UnsendableField {
+    std::string_view what;
+    std::string      name;
+    std::string      value;
+    bool             trailer;
+};
+inline const UnsendableField k_unsendable_fields[] = {
+    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+};
+
+inline qb::http::Request
+carrying(const UnsendableField &field) {
+    qb::http::Request request{qb::io::uri("/stall")};
+    if (field.trailer) {
+        request.trailers().set_header(field.name, field.value);
+    } else {
+        request.set_header(field.name, field.value);
+    }
+    return request;
+}
+} // namespace http3_client_fields_test
+
+// Each is refused where the client builds its fields, 400, with a reason that names the field, as the HTTP/1.1 client
+// refuses it: no stream is opened for it -- no reset, nothing reaches the server --, the connection stays, and the
+// request behind it is served on it. Such a field was dropped and the request sent without it; a trailer field that
+// HTTP/3 cannot carry refused it 503 "Failed to submit HTTP/3 request", a stream opened and reset for it.
+TEST_F(Http3LoopbackTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndTheConnectionServesOn) {
+    using namespace http3_client_fields_test;
+    for (const auto &field : k_unsendable_fields) {
+        SCOPED_TRACE(field.what);
+        int              refused = 0, behind = 0, stalled = 0; // before the client: its callbacks count here
+        qb::http::status status = qb::http::status::OK;
+        std::string      body;
+        const auto       port   = next_port();
+        auto             server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/stall", [&](auto) { ++stalled; });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = std::make_shared<http3_reset_code_test::ResetRecordingClient>(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        const auto attempts = qb::http3::ClientTestPeer::attempts(*client);
+        client->push_request(carrying(field), [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        });
+        client->push_request(qb::http::Request{qb::io::uri("/ok")},
+                             [&](qb::http::Response response) { behind += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(pump([&] { return refused == 1 && behind == 1; }, 3s));
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        for (const auto until = std::chrono::steady_clock::now() + 100ms; std::chrono::steady_clock::now() < until;)
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        EXPECT_EQ(stalled, 0) << "the request refused reached the server";
+        EXPECT_TRUE(client->codes.empty()) << "a stream was opened and reset for the request refused";
+        EXPECT_TRUE(client->is_connected()) << "the refusal cost the connection";
+        EXPECT_EQ(qb::http3::ClientTestPeer::attempts(*client), attempts);
+        client->disconnect();
+        server->close();
+        EXPECT_EQ(refused + behind, 2);
+    }
+}
+
+// A value leaves without the SP and HTAB at its edges, which are not part of it (RFC 9110 section 5.5, RFC 9114
+// section 4.2): " v " arrives "v", a value of whitespace alone arrives empty, whitespace inside a value is part of it.
+// Such a value was dropped, and the field with it. A connection-specific field is still left out (RFC 9114 section
+// 4.2): `connection: close`, `te: gzip` (pins).
+TEST_F(Http3LoopbackTest, AValueLeavesWithoutTheWhitespaceAtItsEdgesAndAConnectionFieldIsStillLeftOut) {
+    std::string edges, hop; // before the client: its callbacks write here
+    const auto  port   = next_port();
+    auto        server = qb::http3::make_server();
+    const auto  shown  = [](auto const &request, const char *name) {
+        return request.has_header(name) ? "[" + std::string(request.header(name)) + "]" : std::string("absent");
+    };
+    server->router().get("/fields", [&shown](auto ctx) {
+        auto const &request = ctx->request();
+        ctx->text("x-edge=" + shown(request, "x-edge") + " x-blank=" + shown(request, "x-blank") + " x-inside=" + shown(request, "x-inside")
+                  + " connection=" + shown(request, "connection") + " te=" + shown(request, "te") + " x-kept=" + shown(request, "x-kept")
+                  + " x-sum=" + shown(request.trailers(), "x-sum"));
+    });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    qb::http::Request first{qb::io::uri("/fields")};
+    first.set_header("x-edge", " v ");
+    first.set_header("x-blank", "  ");
+    first.set_header("x-inside", "a \t b");
+    client->push_request(std::move(first), [&](qb::http::Response response) { edges = response.body().as<std::string>(); });
+    qb::http::Request second{qb::io::uri("/fields")};
+    second.set_header("connection", "close");
+    second.set_header("te", "gzip");
+    second.set_header("x-kept", "1");
+    client->push_request(std::move(second), [&](qb::http::Response response) { hop = response.body().as<std::string>(); });
+    std::string       trailed; // a trailer field's value, likewise
+    qb::http::Request third{qb::io::uri("/fields")};
+    third.trailers().set_header("x-sum", " v ");
+    client->push_request(std::move(third), [&](qb::http::Response response) { trailed = response.body().as<std::string>(); });
+    EXPECT_TRUE(pump([&] { return !edges.empty() && !hop.empty() && !trailed.empty(); }, 3s));
+    EXPECT_EQ(edges, "x-edge=[v] x-blank=[] x-inside=[a \t b] connection=absent te=absent x-kept=absent x-sum=absent");
+    EXPECT_EQ(hop, "x-edge=absent x-blank=absent x-inside=absent connection=absent te=absent x-kept=[1] x-sum=absent");
+    EXPECT_EQ(trailed, "x-edge=absent x-blank=absent x-inside=absent connection=absent te=absent x-kept=absent x-sum=[v]");
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    server->close();
 }

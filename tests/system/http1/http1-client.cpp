@@ -135,6 +135,17 @@ public:
     std::atomic<std::uint16_t> redirect_peer_port{0};
 
     Http1ClientTestServer() {
+        // The fields a request carried, as the server read them (Huly QB-1191).
+        router().get("/fields", [this](auto ctx) {
+            ++request_count;
+            const auto shown = [&](const char *name) {
+                return ctx->request().has_header(name) ? "[" + std::string(ctx->request().header(name)) + "]" : std::string("absent");
+            };
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "x-edge=" + shown("x-edge") + " x-blank=" + shown("x-blank") + " x-inside=" + shown("x-inside");
+            ctx->complete();
+        });
+
         router().get("/ping", [this](auto ctx) {
             ++request_count;
             ctx->response().status() = qb::http::status::OK;
@@ -5508,4 +5519,80 @@ TEST(Http1ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheL
     EXPECT_EQ(never, 0);
     client->disconnect();
     EXPECT_EQ(refused, 1) << "the request was answered twice";
+}
+
+namespace http1_client_fields_test {
+/// Requests that carry a field the serializer cannot write: LF, NUL and CR in a value, SP in a name, CR in a cookie, LF in
+/// a trailer field (a chunked body's).
+struct UnsendableField {
+    std::string_view what;
+    std::string      name;
+    std::string      value;
+    bool             trailer;
+};
+inline const UnsendableField k_unsendable_fields[] = {
+    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+};
+} // namespace http1_client_fields_test
+
+// The HTTP/1.1 serializer refuses such a field before it writes a byte of the request: the request hears 400, and now
+// with a reason that names the field, as the two other clients answer (Huly QB-1191: it read "header value exceeds
+// MAX_HEADER_VALUE_LENGTH" for a LF, and named no field). The connection stays, and the request behind is served on it.
+TEST(Http1ClientTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndNamesTheField) {
+    for (const auto &field : http1_client_fields_test::k_unsendable_fields) {
+        SCOPED_TRACE(field.what);
+        LoopbackHttp1Server server;
+        int                 refused = 0, served = 0; // before the client: its callbacks count here
+        bool                connected = false;
+        qb::http::status    status    = qb::http::status::OK;
+        std::string         body;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+        const auto requests = server.request_count();
+        auto       bad      = request(qb::http::method::POST, "/echo");
+        if (field.trailer) {
+            bad.set_header("Transfer-Encoding", "chunked");
+            bad.body() = "x";
+            bad.trailers().set_header(field.name, field.value);
+        } else {
+            bad.set_header(field.name, field.value);
+        }
+        client->push_request(std::move(bad), [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        });
+        client->push_request(request(qb::http::method::GET, "/ping"),
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return refused == 1 && served == 1; }));
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_EQ(server.connection_count(), 1) << "the refusal cost the connection";
+        EXPECT_EQ(server.request_count(), requests + 1) << "the server was sent the request that was refused";
+        client->disconnect();
+    }
+}
+
+// HTTP/1.1 writes a value as it is, the SP and HTAB at its edges included, and the receiver strips them (RFC 9110
+// section 5.5): " v " arrives "v", a value of whitespace alone arrives empty -- what the two other clients now send. A
+// pin: it held before.
+TEST(Http1ClientTest, AValueArrivesWithoutTheWhitespaceAtItsEdges) {
+    LoopbackHttp1Server server;
+    std::string         fields; // before the client: its callback writes here
+    bool                connected = false;
+    auto                client    = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    auto req = request(qb::http::method::GET, "/fields");
+    req.set_header("x-edge", " v ");
+    req.set_header("x-blank", "  ");
+    req.set_header("x-inside", "a \t b");
+    client->push_request(std::move(req), [&](qb::http::Response response) { fields = response.body().as<std::string>(); });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return !fields.empty(); }));
+    EXPECT_EQ(fields, "x-edge=[v] x-blank=[] x-inside=[a \t b]");
+    client->disconnect();
 }

@@ -925,6 +925,7 @@ Client::send_pending(from who, bool a_throw_is_kept) {
     // Process pending requests up to concurrent limit
     // A failed send calls user code below. It can disconnect and queue fresh work,
     // so every iteration must recheck the connection whose protocol we use.
+    std::string field_refusal; // set by the protocol when it refuses a request for a field (send_request(), Huly QB-1191)
     while (is_connected() && _h2_protocol && !_received_graceful_goaway && !_pending_requests.empty()
            && _active_requests.size() < _max_concurrent_streams) {
         if (_h2_protocol->stream_ids_exhausted()) [[unlikely]] {
@@ -946,7 +947,7 @@ Client::send_pending(from who, bool a_throw_is_kept) {
         static std::atomic<uint32_t> next_request_id{1};
         uint32_t                     app_request_id = next_request_id.fetch_add(1, std::memory_order_relaxed);
 
-        if (_h2_protocol->send_request(std::move(context->request), app_request_id)) {
+        if (_h2_protocol->send_request(std::move(context->request), app_request_id, &field_refusal)) [[likely]] {
             context->stream_id = _h2_protocol->last_initiated_stream_id();
             // Store context with app_request_id as key (will be mapped to stream_id)
             _active_requests[app_request_id] = std::move(context);
@@ -955,9 +956,14 @@ Client::send_pending(from who, bool a_throw_is_kept) {
         } else {
             LOG_HTTP_ERROR_PA(_client_id, "Failed to send request");
 
-            // A refusal: the client's own answer when a push brought us here, the loop's otherwise
+            // A refusal: the client's own answer when a push brought us here, the loop's otherwise. A field HTTP/1.1
+            // cannot write is the request's own fault: 400, naming it, as the two other clients answer -- nothing was
+            // encoded or sent for it, and the connection serves on. Any other refusal is the connection's: 503 (Huly
+            // QB-1191: such a field was dropped, and the request sent without it).
             _failed_requests++;
-            auto refusal = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to send HTTP/2 request");
+            auto refusal = field_refusal.empty()
+                               ? create_error_response(qb::http::status::SERVICE_UNAVAILABLE, "Failed to send HTTP/2 request")
+                               : create_error_response(qb::http::status::BAD_REQUEST, "HTTP/2 " + std::exchange(field_refusal, std::string{}));
             try {
                 give(*context, std::move(refusal), who);
             } catch (...) {

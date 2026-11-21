@@ -7908,6 +7908,148 @@ TEST_F(Http2ClientTest, WhatAPushTakesBackIsTakenBackFromTheAnswersOfACloseMadeU
     }
 }
 
+// ---- A request field that cannot be sent refuses its request, the same way on the three clients (Huly QB-1191) ----
+
+/// Requests that carry a field HTTP/1.1 cannot write, and the name the refusal says: LF, NUL and CR in a value, SP in a
+/// name, CR in a cookie, LF in a trailer field. Their target is a route the server counts and never answers.
+struct UnsendableField {
+    std::string_view what;
+    std::string      name;
+    std::string      value;
+    bool             trailer;
+};
+inline const UnsendableField k_unsendable_fields[] = {
+    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+};
+
+/// A request to @p target carrying @p field.
+inline qb::http::Request
+carrying(const UnsendableField &field, const char *target = "/api/hang") {
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri(target);
+    if (field.trailer) {
+        request.trailers().set_header(field.name, field.value);
+    } else {
+        request.set_header(field.name, field.value);
+    }
+    return request;
+}
+
+// Each is refused where the client writes its fields, 400, with a reason that names the field, as the HTTP/1.1 client
+// refuses it: nothing of it reaches the server, the connection stays, and the request behind it is served. Such a field
+// was dropped and the request sent without it -- a dropped `authorization` sent the request unauthenticated, without a
+// word; a trailer field that HTTP/2 cannot carry refused the request 503, "Failed to send HTTP/2 request".
+TEST_F(Http2ClientTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndTheConnectionServesOn) {
+    for (const auto &field : k_unsendable_fields) {
+        SCOPED_TRACE(field.what);
+        Answer refused, behind; // before the client, which answers what it still holds when it is destroyed
+        bool   up     = false;
+        auto   client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        const auto routed = _server->server().hang_routed();
+        ASSERT_TRUE(client->push_request(carrying(field), std::ref(refused)));
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(behind)));
+        EXPECT_TRUE(loop_until([&] { return refused.count != 0 && behind.count != 0; }, 3s));
+        EXPECT_EQ(refused.status, qb::http::status::BAD_REQUEST) << refused.body;
+        EXPECT_NE(refused.body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << refused.body;
+        EXPECT_NE(refused.body.find("cannot be sent"), std::string::npos) << refused.body;
+        EXPECT_EQ(behind.status, qb::http::status::OK) << behind.body;
+        settle(100ms);
+        EXPECT_EQ(_server->server().hang_routed(), routed) << "the request refused reached the server";
+        EXPECT_TRUE(client->is_connected()) << "the refusal cost the connection";
+        client->disconnect();
+        settle();
+        EXPECT_EQ(refused.count + behind.count, 2);
+    }
+}
+
+// Nothing of a request refused for a field is written: a peer that answers nothing reads the HEADERS of the request
+// behind them alone, on stream 1 -- the refused requests spent no stream identifier. They went out with the field dropped,
+// one HEADERS each.
+TEST_F(Http2ClientTest, ARequestRefusedForAFieldWritesNothing) {
+    int                              heard = 0; // before the client
+    bool                             up    = false;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::no_answer, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    for (const auto &field : k_unsendable_fields) {
+        ASSERT_TRUE(client->push_request(
+            carrying(field), [&](qb::http::Response response) { heard += response.status() == qb::http::status::BAD_REQUEST ? 1 : 0; }));
+    }
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), [](qb::http::Response) {}));
+    EXPECT_TRUE(loop_until([&] { return !peer.requests().empty() && heard == static_cast<int>(std::size(k_unsendable_fields)); }, 3s));
+    settle(200ms);
+    const auto requests = peer.requests();
+    ASSERT_EQ(requests.size(), 1u) << "a request refused for a field was written";
+    EXPECT_EQ(requests[0], 1u);
+    bool test_path = false;
+    for (const auto &[name, value] : peer.fields_of(1)) {
+        test_path = test_path || (name == ":path" && value == "/api/test");
+    }
+    EXPECT_TRUE(test_path) << "stream 1 is not the request behind the refused ones";
+    EXPECT_EQ(heard, static_cast<int>(std::size(k_unsendable_fields)));
+    client->disconnect();
+    settle();
+}
+
+// A value leaves without the SP and HTAB at its edges, which are not part of it (RFC 9110 section 5.5, RFC 9113
+// section 8.2.1): " v " is sent "v", and a value of whitespace alone is sent empty -- an HTTP/1.1 receiver reads the
+// same. Whitespace inside a value is part of it. Such a value was dropped, and the field with it. A connection-specific
+// field is still left out, as a translating intermediary must (RFC 9113 section 8.2.2): `connection: close`, `te: gzip`
+// (pins).
+TEST_F(Http2ClientTest, AValueLeavesWithoutTheWhitespaceAtItsEdgesAndAConnectionFieldIsStillLeftOut) {
+    bool                             up = false; // before the client
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::no_answer, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    qb::http::Request edges = reconnect::get_test();
+    edges.set_header("x-edge", " v ");
+    edges.set_header("x-blank", "  ");
+    edges.set_header("x-inside", "a \t b");
+    ASSERT_TRUE(client->push_request(std::move(edges), [](qb::http::Response) {}));
+    qb::http::Request hop = reconnect::get_test();
+    hop.set_header("connection", "close");
+    hop.set_header("te", "gzip");
+    hop.set_header("x-kept", "1");
+    ASSERT_TRUE(client->push_request(std::move(hop), [](qb::http::Response) {}));
+    qb::http::Request trailed = reconnect::get_test(); // a trailer field's value, likewise (its trailer section's HEADERS)
+    trailed.trailers().set_header("x-sum", " v ");
+    ASSERT_TRUE(client->push_request(std::move(trailed), [](qb::http::Response) {}));
+    EXPECT_TRUE(loop_until([&] { return peer.requests().size() == 4; }, 3s)) << "three header sections and one trailer section";
+    settle(100ms);
+    const auto field = [&](uint32_t stream, std::string_view name) -> std::optional<std::string> {
+        for (const auto &[n, v] : peer.fields_of(stream)) {
+            if (n == name) {
+                return v;
+            }
+        }
+        return std::nullopt;
+    };
+    EXPECT_EQ(field(1, "x-edge"), std::optional<std::string>("v")) << "the value was not sent trimmed";
+    EXPECT_EQ(field(1, "x-blank"), std::optional<std::string>("")) << "a value of whitespace alone was not sent empty";
+    EXPECT_EQ(field(1, "x-inside"), std::optional<std::string>("a \t b"));
+    EXPECT_EQ(field(3, "connection"), std::nullopt);
+    EXPECT_EQ(field(3, "te"), std::nullopt);
+    EXPECT_EQ(field(3, "x-kept"), std::optional<std::string>("1"));
+    EXPECT_EQ(field(5, "x-sum"), std::optional<std::string>("v")) << "the trailer field's value was not sent trimmed";
+    client->disconnect();
+    settle();
+}
+
 #ifdef QB_WITH_LOGGING
 // What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
 // started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says

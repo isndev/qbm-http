@@ -137,6 +137,19 @@ public:
         std::lock_guard lock(_mutex);
         return _resets;
     }
+    /// The streams the client opened a request on, by the HEADERS read, in order.
+    [[nodiscard]] std::vector<uint32_t>
+    requests() const {
+        std::lock_guard lock(_mutex);
+        return _requests;
+    }
+    /// The fields of the request HEADERS read on @p stream_id, as the client sent them (a block in one frame), decoded.
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>>
+    fields_of(uint32_t stream_id) const {
+        std::lock_guard lock(_mutex);
+        const auto      it = _fields.find(stream_id);
+        return it == _fields.end() ? std::vector<std::pair<std::string, std::string>>{} : it->second;
+    }
 
 private:
     static void
@@ -234,7 +247,18 @@ private:
                 }
                 _answered = true;
             } else if (type == 0x1) {
+                std::lock_guard lock(_mutex);
                 _requests.push_back(stream_id);
+                if ((flags & 0x4) != 0 && (flags & 0x28) == 0) { // END_HEADERS, neither PADDED nor PRIORITY: a block in one frame
+                    std::vector<qb::protocol::hpack::HeaderField> decoded;
+                    bool                                          incomplete = false;
+                    if (_decoder.decode(std::vector<uint8_t>(payload, payload + length), decoded, incomplete) && !incomplete) {
+                        auto &fields = _fields[stream_id];
+                        for (auto &field : decoded) {
+                            fields.emplace_back(std::move(field.name), std::move(field.value));
+                        }
+                    }
+                }
             } else if (type == 0x8 && length == 4) {
                 const auto increment = static_cast<int64_t>(be32(payload) & 0x7FFFFFFFu);
                 (stream_id == 0 ? _connection_window : window(stream_id)) += increment;
@@ -481,27 +505,29 @@ private:
         _sock.close();
     }
 
-    Plan                                       _plan;
-    std::chrono::seconds                       _budget;
-    qb::io::tcp::ssl::listener                 _listener;
-    qb::io::tcp::ssl::socket                   _sock;
-    uint16_t                                   _port = 0;
-    std::chrono::steady_clock::time_point      _deadline{};
-    std::vector<uint8_t>                       _in;
-    bool                                       _preface_seen = false;
-    bool                                       _answered     = false;
-    std::vector<uint32_t>                      _requests;
-    int64_t                                    _connection_window = 65535;
-    std::map<uint32_t, int64_t>                _windows;
-    std::atomic<bool>                          _release{false};
-    std::atomic<bool>                          _eof{false};
-    std::atomic<bool>                          _goaway{false};
-    std::size_t                                _pongs = 0;
-    mutable std::mutex                         _mutex;
-    uint32_t                                   _goaway_code = 0;
-    std::string                                _goaway_debug;
-    std::vector<std::pair<uint32_t, uint32_t>> _resets;
-    std::thread                                _thread;
+    Plan                                                                 _plan;
+    std::chrono::seconds                                                 _budget;
+    qb::io::tcp::ssl::listener                                           _listener;
+    qb::io::tcp::ssl::socket                                             _sock;
+    uint16_t                                                             _port = 0;
+    std::chrono::steady_clock::time_point                                _deadline{};
+    std::vector<uint8_t>                                                 _in;
+    bool                                                                 _preface_seen = false;
+    bool                                                                 _answered     = false;
+    std::vector<uint32_t>                                                _requests;
+    qb::protocol::hpack::Decoder                                         _decoder; // the server's: one for the connection
+    std::map<uint32_t, std::vector<std::pair<std::string, std::string>>> _fields;
+    int64_t                                                              _connection_window = 65535;
+    std::map<uint32_t, int64_t>                                          _windows;
+    std::atomic<bool>                                                    _release{false};
+    std::atomic<bool>                                                    _eof{false};
+    std::atomic<bool>                                                    _goaway{false};
+    std::size_t                                                          _pongs = 0;
+    mutable std::mutex                                                   _mutex;
+    uint32_t                                                             _goaway_code = 0;
+    std::string                                                          _goaway_debug;
+    std::vector<std::pair<uint32_t, uint32_t>>                           _resets;
+    std::thread                                                          _thread;
 };
 
 } // namespace qb::http::test

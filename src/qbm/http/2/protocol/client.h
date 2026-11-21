@@ -1246,10 +1246,13 @@ public:
      * @brief Send an HTTP/2 request
      * @param http_request The HTTP request to send
      * @param app_request_id Application-specific request ID
+     * @param field_refusal Set, when given, when the request is refused for a field HTTP/1.1 cannot write -- in its
+     *        header section or its trailers(): the field named, and why (append_sendable_request_fields(), Huly
+     *        QB-1191). Nothing is encoded or sent for it, and the connection is untouched. Left as it was otherwise.
      * @return true if request was successfully initiated, false on error
      */
     [[nodiscard]] bool
-    send_request(qb::http::Request http_request, uint64_t app_request_id = 0) noexcept {
+    send_request(qb::http::Request http_request, uint64_t app_request_id = 0, std::string *field_refusal = nullptr) noexcept {
         LOG_HTTP_DEBUG_PA(0, "Client: send_request called for app_id " << app_request_id);
 
         if (!this->ok() || !_connection_active || _received_goaway) {
@@ -1293,7 +1296,7 @@ public:
 
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
-        if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
+        if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj, field_refusal)) [[unlikely]] {
             release_unsent_stream_id(stream_id, initiated_before); // nothing sent (QB-1073 trailers, QB-1274 bound)
             LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
             _client_streams.erase(iter);
@@ -1379,7 +1382,7 @@ public:
         if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
             && !stream_obj.queued_trailer_fields) {
             bool planned        = false;
-            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send, &planned);
+            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send, &planned, true);
             if (planned || !_explicit_request_trailers) {
                 // The stream may be closed and erased past this call: nothing below touches it.
                 (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
@@ -1922,12 +1925,13 @@ private:
      * @param http_request The HTTP request
      * @param out_hf_vector Output vector for header fields
      * @param stream_context Stream context
+     * @param field_refusal Set, when given, when the request is refused for a field HTTP/1.1 cannot write (send_request()).
      * @return nullptr when the block is ready; otherwise why the request is refused (its trailers()
-     *         carries a field a trailer section cannot, Huly QB-1073).
+     *         carries a field a trailer section cannot, Huly QB-1073; a field HTTP/1.1 cannot write, QB-1191).
      */
     [[nodiscard]] const char *
     prepare_request_headers(const qb::http::Request &http_request, std::vector<hpack::HeaderField> &out_hf_vector,
-                            Http2ClientStream &stream_context) {
+                            Http2ClientStream &stream_context, std::string *field_refusal = nullptr) {
         // Add pseudo-headers first (required order)
         out_hf_vector.emplace_back(":method", http_request.method());
 
@@ -1962,12 +1966,14 @@ private:
         }
         out_hf_vector.emplace_back(":path", path);
 
-        // The regular fields, as the server's rules accept them on receipt: a connection-specific field --
-        // `http2-settings` was missing from this loop's own list -- or one the `connection` header names, a `te` other
-        // than `trailers`, `host` (folded into :authority) and `content-length` (written below) are left out
-        // (append_sent_request_fields, shared with PUSH_PROMISE, Huly QB-1191). A name is lowercase already: the
-        // headers map stores it folded.
-        append_sent_request_fields(http_request, out_hf_vector);
+        // The regular fields, under the clients' rule (append_sendable_request_fields, Huly QB-1191): a field HTTP/1.1
+        // cannot write refuses the request, before anything of it is encoded; a connection-specific field -- or one
+        // the `connection` header names, a `te` other than `trailers`, `host` (folded into :authority) and
+        // `content-length` (written below) -- is left out; a value leaves without the SP and HTAB at its edges. A name
+        // is lowercase already: the headers map stores it folded.
+        if (!append_sendable_request_fields(http_request, out_hf_vector, field_refusal)) [[unlikely]] {
+            return "a header field cannot be sent";
+        }
         // A trailer announcement: the stream ends with a trailer section
         if (const auto trailer = http_request.headers().find("trailer"); trailer != http_request.headers().end() && !trailer->second.empty()) {
             stream_context.client_will_send_trailers = true;
@@ -1981,7 +1987,7 @@ private:
             stream_context.client_will_send_trailers = true;
         }
         if (stream_context.client_will_send_trailers) {
-            if (const char *refused = prepare_trailed_header_block(out_hf_vector, http_request)) {
+            if (const char *refused = prepare_trailed_header_block(out_hf_vector, http_request, true, field_refusal)) {
                 return refused;
             }
         }
@@ -2865,7 +2871,7 @@ private:
                 trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
             } else {
                 bool planned           = false;
-                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send, &planned);
+                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send, &planned, true);
                 if (!planned && _explicit_request_trailers) {
                     return;
                 }
@@ -2953,8 +2959,9 @@ private:
      * @return nullptr, or why the request is refused.
      */
     [[nodiscard]] const char *
-    prepare_bounded_request_headers(const qb::http::Request &request, std::vector<hpack::HeaderField> &fields, Http2ClientStream &stream) {
-        if (const char *refused = prepare_request_headers(request, fields, stream)) {
+    prepare_bounded_request_headers(const qb::http::Request &request, std::vector<hpack::HeaderField> &fields, Http2ClientStream &stream,
+                                    std::string *field_refusal = nullptr) {
+        if (const char *refused = prepare_request_headers(request, fields, stream, field_refusal)) {
             return refused;
         }
         if (_peer_max_header_list_size >= DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
@@ -2963,7 +2970,7 @@ private:
         if (!fits_peer_header_list(stream.id, fields)) {
             return "header list past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
         }
-        if (stream.client_will_send_trailers && !fits_peer_header_list(stream.id, outgoing_trailer_fields(request))) {
+        if (stream.client_will_send_trailers && !fits_peer_header_list(stream.id, outgoing_trailer_fields(request, nullptr, true))) {
             return "trailer section past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
         }
         return nullptr;
