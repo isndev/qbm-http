@@ -297,6 +297,50 @@ All notable changes to the qbm-http module are documented here. The format is ba
 
 ### Changed
 
+- **A request field that cannot be sent refuses its request, the same way on the three clients: `400`, with a reason
+  that names the field (a change of the clients' contract; Huly QB-1191).** The same request meant one thing or another
+  by protocol. HTTP/1.1's serializer refused a field whose name is not a token, or whose value carries CR, LF, NUL,
+  another control byte but HTAB, or DEL -- `400`, but "header value exceeds MAX_HEADER_VALUE_LENGTH" whatever the
+  fault, and naming no field. In 3.3.0 the HTTP/2 client dropped such a field and sent the request without it, without
+  a word -- a dropped `authorization` sent it unauthenticated --, and the HTTP/3 client refused the request `503`.
+  QB-1191's earlier policy, below under Fixed, made HTTP/3 drop it too, and dropped a
+  value with SP or HTAB at its edges on both. The rule is now one, HTTP/1.1's, applied where each client already reads
+  the fields, and nowhere else:
+  - **A field HTTP/1.1 cannot write** -- by `qb::http::detail::sendable_field_name()` and `sendable_field_value()`,
+    the serializer's own predicates, which the three clients share (a name past `MAX_HEADER_NAME_LENGTH`, a value past
+    `MAX_HEADER_VALUE_LENGTH`, included) -- **refuses the request**, in its header section or its `trailers()`:
+    `400`, "HTTP/2 request header field `x-probe` cannot be sent: its value carries LF" (`qb::http::detail::
+    unsendable_field()`), an answer the client gives by itself, through its one queue. Nothing of the request is
+    written -- on HTTP/2 nothing is encoded, and no stream identifier is spent; on HTTP/3 no stream is opened, and
+    nghttp3 never sees it --; the connection stays, and the other requests are served. Any other refusal of a request
+    is still `503`.
+  - **A connection-specific field is still dropped**, as a translating intermediary must (RFC 9113 §8.2.2, RFC 9114
+    §4.2): `connection` and the fields it names, `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`,
+    `http2-settings`, a `te` other than `trailers`, `host` (folded into `:authority`), `content-length` (written from
+    the body).
+  - **A value with SP or HTAB at its edges is sent without them** on HTTP/2 and HTTP/3, which is what HTTP/1.1 means:
+    they are not part of the value (RFC 9110 §5.5), and an HTTP/1.1 receiver strips them. A value of whitespace alone
+    is sent empty. Whitespace inside a value is part of it.
+  `ClientHttp2Protocol::send_request()` takes a `std::string *field_refusal` that says which field refused the request;
+  the HTTP/3 adapter builds a request's sections with `prepare_request()` before a stream is opened for it, and
+  submits them with `submit_prepared()` (`submit_request()` is the two). The field loop reads each name and each value
+  once, as before, with the predicate that refuses it; the trim reads a value's edges and copies nothing more than
+  before. The server's fields, and the promised request of a `PUSH_PROMISE`, are unchanged.
+  Witnesses, each red on the base of this change but the pins: on the three clients a value with LF, with NUL, with
+  CR, a name with SP, a `cookie` with CR, and a trailer with LF each refuse their request `400`, the reason naming
+  the field, the connection kept and the request behind it served; a raw HTTP/2 peer reads one HEADERS, the request
+  behind on stream 1; the HTTP/3 client resets no stream; `" v "` arrives as `v`, `"  "` arrives empty, and
+  `connection: close` and `te: gzip` are still left out and their request served (pins).
+  Mutants, the whole binary each, the unmutated tree first and the restored tree last: 16 planted, 16 caught -- a value
+  that carries any byte, a name that carries SP, a reason that names no field; HTTP/1.1's serializer writing such a
+  value, or such a trailer value; on HTTP/2 and on HTTP/3, such a value dropped and the request sent (QB-1191's earlier
+  policy), a value sent with its edges, the refusal answered `503`, a trailer field under the protocol's own rule; on
+  HTTP/2, a connection-specific field sent, a trailer value sent with its edges; on HTTP/3, a stream opened for a
+  request refused for a field. The HTTP/3 drop is caught by the field block's own case
+  (`qbm-http-test-unit-http3-validation`): the client reads the refusal the pass names before it returns, so the
+  loopback cases alone do not tell it. The 63 mutants that stand from the rounds before, planted again on this tree: 59
+  caught, the same four surviving.
+
 - **An HTTPS or `wss` connection qb ends now ends its TLS stream with a `close_notify`: an OpenSSL peer reads a
   clean end of stream where it read an unexpected EOF (qb 3.4, Huly QB-1270).** qb-io sends the alert before the
   TCP FIN whenever this side ends a TLS connection and has written everything it queued, and every TLS connection
@@ -1240,6 +1284,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `503` "Failed to send HTTP/2 request"); against a qb server too, one stream allowed by the client, a request that
   times out and one that waits for its stream -- answered `200` before its own deadline (`408` "Request timeout while
   pending" at it).
+  The timer's pass takes the requests that timed out by their place in the client's registry and by the connection
+  they were sent on, never by stream number, and looks each up again before it answers it. A `408` callback is the
+  program's: one that disconnects, connects again and runs the loop until connected left the pass naming the new
+  connection's streams by the numbers it held -- a request pushed there with a 10 s timeout was answered `408` at once,
+  by the old connection's pass, and its stream reset. A case: two requests time out in one pass, and the first `408`'s
+  callback reconnects and pushes two more -- neither is answered, and no stream of the new connection is reset (red on
+  the code before). The other passes that take first and answer later were read: GOAWAY's and the closes' own what they
+  answer; `withdraw()` runs none of the program's callbacks between one reset and the next; the timeouts of the queue
+  are a prefix of it, so every `408` callback runs before anything is set aside; the HTTP/3 client times each request
+  by its own number.
+  Mutants: 3 planted, 1 caught -- the pass taking stream numbers again. The connection check dropped survives,
+  equivalent today: every end of a connection takes its requests out of the registry, and a request sent again takes a
+  new number. The reset's guard without the connection's flag survives as before: a callback's close ends the pass
+  before it.
   Mutants, the whole binary each, the unmutated tree first and the restored tree last: 5 planted, 4 caught -- no reset
   at the timeout, the reset told to the handler (the request failed a second time, 502), no pass after the timeouts,
   the protocol telling the handler of a reset it was asked to keep quiet. The survivor drops the connection's flag
@@ -2742,11 +2800,13 @@ All notable changes to the qbm-http module are documented here. The format is ba
   body contradicted it refused. `submit_request()` (`detail::make_request_headers()`) now applies the HTTP/2 client's
   rule (RFC 9114 §4.2, RFC 9113 §8.2.2) and writes the body's `content-length`, a declared one left out, as the HTTP/2
   client does; a field past `MAX_HEADER_NAME_LENGTH` or `MAX_HEADER_VALUE_LENGTH`, or more than `MAX_HEADERS_COUNT`,
-  still refuses the request (a peer's nghttp3 takes a field past its own bound for a connection error). Responses are
-  unchanged: a connection-specific field, a `te` or an invalid field refuses one on both protocols. Tests: each
-  left-out field and each field a `connection` header names, through the field block, the direct client/server pair
-  and the loopback client, the request served without it; the body's length over a contradicting declared one and one
-  with whitespace around it; a field past the bounds refused.
+  still refuses the request (a peer's nghttp3 takes a field past its own bound for a connection error). Since then a
+  field HTTP/1.1 cannot write, one past its length bound included, refuses the request on the three clients, `400`,
+  naming it, rather than being dropped (the entry under Changed); more than `MAX_HEADERS_COUNT` is still `503`.
+  Responses are unchanged: a connection-specific field, a `te` or an invalid field refuses one on both protocols.
+  Tests: each left-out field and each field a `connection` header names, through the field block, the direct
+  client/server pair and the loopback client, the request served without it; the body's length over a contradicting
+  declared one and one with whitespace around it; a field past the bounds refused.
 
 - **A field value that starts or ends with SP or HTAB is malformed on HTTP/2 and never sent on HTTP/2 or HTTP/3
   (Huly QB-1191).** RFC 9113 §8.2.1 makes such a value malformed, and RFC 9114 §4.2 holds an HTTP/3 one to RFC 9110
@@ -2754,8 +2814,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   HTTP/2 server accepted it in a request's header or trailer section, the HTTP/2 client in a response's, and both
   clients and both servers sent it. `HeaderValidator::is_valid_header_value()` and HTTP/3's
   `detail::is_valid_header_field()` / `is_valid_incoming_header_field()` now refuse it: received over HTTP/2, the
-  stream is reset `PROTOCOL_ERROR`, the connection kept; sent, a request leaves without the field (the rule both
-  clients follow) and a response is refused -- one rule for every field neither protocol can carry. Received over
+  stream is reset `PROTOCOL_ERROR`, the connection kept; sent, a response is refused, and a request's value now
+  leaves without the SP and HTAB at its edges (the entry under Changed: it left without the field). Received over
   HTTP/3, nghttp3 (1.18.0) removes such a field before this module sees it, the message delivered without it; the
   module's own check holds for a nghttp3 that delivers one. HTTP/1.1 is unchanged: the parser reads a field value
   without the OWS around it (RFC 9112 §5). Whitespace inside a value is part of it. Tests: every edge shape on the
