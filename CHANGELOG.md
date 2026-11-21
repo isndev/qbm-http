@@ -1207,6 +1207,33 @@ All notable changes to the qbm-http module are documented here. The format is ba
   nothing that is heard. The 44 mutants of this paragraph planted again on that tree: 44 planted, 41 caught, the same
   three surviving.
 
+- **An HTTP/2 request that times out gives its stream back, and what waited for it is sent (Huly QB-1246).** A request
+  of `qb::http2::Client` in flight past its request timeout was answered `408` and left the client's registry, and
+  nothing was written: its stream stayed open on the server, which went on working for nobody, and in the client's
+  protocol, which counts the streams it holds against the server's `SETTINGS_MAX_CONCURRENT_STREAMS`. Once as many
+  requests had timed out as the server allows streams -- 50 for a qb server --, every later request on that
+  connection was refused where it was sent, `503` "Failed to send HTTP/2 request", for as long as the connection
+  lived; and a late answer still arrived, for a request no longer there. The stream is now reset with `CANCEL` --
+  the request is given up (RFC 9113 section 7), as the HTTP/3 client gives it up at its timeout --, before the
+  request hears its `408`; what the server sent on it before it read the reset is discarded. The members of a batch
+  that time out alike, each on its stream. And what waited for those streams is sent at once: the timer's pass ran
+  none, and a request queued behind one that timed out waited for the next push, or timed out in its turn.
+  `ClientHttp2Protocol::cancel_request()` takes `tell_the_handler`, false for a request the application answers
+  itself. The other ways a request of this client leaves its registry with its stream open were read, none left
+  open: what the protocol refuses -- a body past the client's limit or its `content-length`, a malformed response
+  -- it resets itself; what a server reset or a GOAWAY ended, the server ended; a close ends the connection.
+  Witnesses, red on the code before, in `qbm-http-test-system-http2-client`: one stream allowed on both sides (a peer
+  that advertises one, and answers only the second request), a request that times out and one that waits -- the peer
+  reads `RST_STREAM` on stream 1 with `CANCEL`, and the request that waited is answered `200` before its own deadline
+  (it timed out while pending, and nothing was reset); a batch of two that times out -- two resets, streams 1 and 3,
+  both `CANCEL` (none); 50 requests a qb server never answers, timed out, then one more -- served, and the server sees
+  its 50 requests cancelled (`503` "Failed to send HTTP/2 request", none cancelled).
+  Mutants, the whole binary each, the unmutated tree first and the restored tree last: 5 planted, 4 caught -- no reset
+  at the timeout, the reset told to the handler (the request failed a second time, 502), no pass after the timeouts,
+  the protocol telling the handler of a reset it was asked to keep quiet. The survivor drops the connection's flag
+  from the guard of the reset, which every close clears with the protocol: the same guard. The 27 mutants of the
+  HTTP/2 client planted again on that tree: 26 caught, the same one surviving.
+
 - **An HTTP/3 submission that an exception cuts short gives its request one outcome and ends the connection (Huly
   QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
   that -- an allocation, or what a hook of the transport throws under the send -- left the request destroyed unheard:
