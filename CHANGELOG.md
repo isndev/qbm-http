@@ -1126,7 +1126,7 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the pass, the request was looked up in a client that a callback under the pass had just destroyed -- one that drops
   the last reference and throws, or, on HTTP/3, the failure callback of another request when a submission cut short
   ends the connection: a heap-use-after-free.
-  **And that call first finishes what it was doing for the others**, as `disconnect()` does. The pass of a push stopped
+  **And it reaches that call once it has finished for the others**, as under `disconnect()`. The pass of a push stopped
   at the callback that threw: a request that waited behind the refused one was not sent -- three seconds later it
   still waited --, and went out with the next push. The pass now runs again, to its end, once what the push itself
   pushed has been taken back, so that it is not sent; what one more callback throws under it is dropped, and the first
@@ -1200,12 +1200,21 @@ All notable changes to the qbm-http module are documented here. The format is ba
   answer owed that does not say whose it is, the line logged changed; on HTTP/3 the reset, the pass and the exception
   of a cancellation each left out. The 21 mutants of this paragraph and the one on the engine's bound, planted again
   on that tree: 22 planted, 19 caught, the same three surviving.
-  The reset of what a push takes back while in flight: 9 planted, 7 caught -- no reset asked, a batch's members left
-  out, another code than the cancellation's, the HTTP/2 protocol refusing a request it holds. Two survive on HTTP/3, by
-  reading: the request left in the registry when its stream is reset -- the transport raises the stream's end inside
-  the reset, which retires the request there --, and a reset written though a close is under way, which changes
-  nothing that is heard. The 44 mutants of this paragraph planted again on that tree: 44 planted, 41 caught, the same
-  three surviving.
+  The reset of what a push takes back while in flight: 9 planted, 8 caught -- no reset asked, a batch's members left
+  out, another code than the cancellation's, the HTTP/2 protocol refusing a request it holds, and on HTTP/3 the
+  request left in the registry when its stream is reset: the transport raises the stream's end inside the reset,
+  which retires the request a second time and counts it failed twice (`get_stats()`). That one was first counted a
+  survivor, by reading what is heard; the case now reads the counters, and catches it, as it catches the count left
+  out. One survives, on HTTP/3: a reset written though a close is under way, which changes nothing that is heard and
+  nothing counted. The 44 mutants of this paragraph planted again on that tree: 44 planted, 41 caught, the same three
+  surviving.
+  What a push takes back is taken back by its own number, and nothing else is, on both clients: a request and a batch
+  can carry the same number, as the client counts them apart on HTTP/2, and a Request object pushed twice is two
+  requests. Cases now read it: the same object pushed as the request taken back and as another; a request and a batch
+  of its number, each way on HTTP/2, one way on HTTP/3 (which numbers a batch's members with its requests); and a
+  close made under the callback that throws, whose answers are owed -- what the push pushed, a request or a batch,
+  never heard; the other request answered once; the client connects again. Mutants of what an answer owed is tagged
+  with, and of what the take-back matches: 5 planted, 5 caught, each caught before by a probe alone.
 
 - **An HTTP/2 request that times out gives its stream back, and what waited for it is sent (Huly QB-1246).** A request
   of `qb::http2::Client` in flight past its request timeout was answered `408` and left the client's registry, and
@@ -1226,8 +1235,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   that advertises one, and answers only the second request), a request that times out and one that waits -- the peer
   reads `RST_STREAM` on stream 1 with `CANCEL`, and the request that waited is answered `200` before its own deadline
   (it timed out while pending, and nothing was reset); a batch of two that times out -- two resets, streams 1 and 3,
-  both `CANCEL` (none); 50 requests a qb server never answers, timed out, then one more -- served, and the server sees
-  its 50 requests cancelled (`503` "Failed to send HTTP/2 request", none cancelled).
+  both `CANCEL` (none); 60 requests a qb server never answers, timed out in two waves of 30, then one more -- served,
+  and the server sees its 60 requests cancelled (the last ten of the second wave and the one after them refused,
+  `503` "Failed to send HTTP/2 request"); against a qb server too, one stream allowed by the client, a request that
+  times out and one that waits for its stream -- answered `200` before its own deadline (`408` "Request timeout while
+  pending" at it).
   Mutants, the whole binary each, the unmutated tree first and the restored tree last: 5 planted, 4 caught -- no reset
   at the timeout, the reset told to the handler (the request failed a second time, 502), no pass after the timeouts,
   the protocol telling the handler of a reset it was asked to keep quiet. The survivor drops the connection's flag
