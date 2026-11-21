@@ -801,17 +801,33 @@ Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
         _active_batches.erase(batch_id); // with its callback, unheard
     }
     // It may have left the queue before the exception: a pass took it -- one a callback ran by pushing, before that
-    // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw. Sent,
-    // it stays in flight and its answer is dropped when it comes; refused or failed there, its answer was kept for the
-    // client's turn, and is never heard. Either was heard after the push had thrown: thrown at AND answered (Huly
-    // QB-1246).
-    if (request_id != 0) {
-        for (auto &[key, context] : _active_requests) {
-            (void) key;
-            if (context && context->id == request_id) {
+    // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw. Refused
+    // or failed there, its answer was kept for the client's turn, and is never heard (below). Sent, it is given up on
+    // the wire as well: RST_STREAM(CANCEL) on its stream (ClientHttp2Protocol::cancel_request()), which frees that
+    // stream for what waits and tells the server that nobody does; the protocol reports the reset, and fail_request()
+    // retires the request -- to a callback that hears nothing, set first, which also drops an answer that comes
+    // where no reset can be written. Left in flight, it was answered after its push had thrown, and held its stream
+    // until the server answered (Huly QB-1246).
+    std::vector<std::uint32_t> sent; // their streams, taken first: each reset changes the registry
+    for (auto &[key, context] : _active_requests) {
+        (void) key;
+        if (context && ((request_id != 0 && context->id == request_id) || (batch_id != 0 && context->batch_id == batch_id))) {
+            if (context->batch_id == 0) {
                 context->callback = &dropped;
             }
+            try {
+                sent.push_back(context->stream_id);
+            } catch (...) {
+                // no room to name it (an allocation): it stays in flight, and its answer is dropped
+            }
         }
+    }
+    for (const auto stream_id : sent) {
+        if (!_h2_protocol || !is_connected()) {
+            break; // the connection ended under a reset before this one: its close ends the streams
+        }
+        const auto pass = this->protocol_pass(); // a member function of the protocol, outside the read loop (send_pending())
+        (void) _h2_protocol->cancel_request(stream_id);
     }
     for (auto &kept : _owed) {
         if ((request_id != 0 && kept.request == request_id) || (batch_id != 0 && kept.batch == batch_id)) {

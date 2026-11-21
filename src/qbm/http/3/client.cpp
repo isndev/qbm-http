@@ -966,16 +966,38 @@ Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
         _active_batches.erase(batch_id); // with its callback, unheard
     }
     // It may have left the queue before the exception: a pass took it -- one a callback ran by pushing, before that
-    // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw.
-    // Submitted, it stays in flight and its answer is dropped when it comes; refused or failed there, its answer was
-    // kept for the client's turn, and is never heard. Either was heard after the push had thrown: thrown at AND
-    // answered (Huly QB-1246).
-    if (request_id != 0) {
-        for (auto &[stream, ctx] : _active_requests) {
-            (void) stream;
-            if (ctx && ctx->request_id == request_id) {
+    // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw. Refused
+    // or failed there, its answer was kept for the client's turn, and is never heard (below). Submitted, it is given
+    // up on the wire as well, as a cancellation is: it leaves the registry and its stream is reset with
+    // H3_REQUEST_CANCELLED (RFC 9114 section 4.1), which frees that stream for what waits and tells the server that
+    // nobody does. Where no reset can be written -- a close is under way -- it stays, with a callback that hears
+    // nothing, and that close ends it. Left in flight, it was answered after its push had thrown, and held its stream
+    // until the server answered (Huly QB-1246).
+    std::vector<std::uint64_t> submitted; // their streams, taken first: a reset may end the connection and the registry
+    for (auto &[stream, ctx] : _active_requests) {
+        if (ctx && ((request_id != 0 && ctx->request_id == request_id) || (batch_id != 0 && ctx->batch_id == batch_id))) {
+            if (ctx->batch_id == 0) {
                 ctx->callback = &dropped;
             }
+            try {
+                submitted.push_back(stream);
+            } catch (...) {
+                // no room to name it (an allocation): it stays in flight, and its answer is dropped
+            }
+        }
+    }
+    for (const auto stream : submitted) {
+        if (!_h3 || !is_connected() || _deferred_close) {
+            break;
+        }
+        if (_active_requests.erase(stream) == 0) {
+            continue; // ended under a reset before this one
+        }
+        ++_failed_requests;
+        try {
+            reset_stream(0, stream, NGHTTP3_H3_REQUEST_CANCELLED);
+        } catch (...) {
+            // the reset could not be written: the stream ends with its connection
         }
     }
     for (auto &kept : _owed) {

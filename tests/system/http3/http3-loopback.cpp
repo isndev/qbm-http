@@ -8147,6 +8147,126 @@ TEST_F(Http3LoopbackTest, WhatAPassUnderTheCallbackTookIsNeverHeardOnceItsPushHa
     }
 }
 
+// What a push takes back while it is in flight is given up on the wire too: its stream is reset with
+// H3_REQUEST_CANCELLED, which frees it for what waits. Nothing is submitted while the limit is 0: B waits, a request the
+// engine refuses where it is submitted, whose callback pushes W, then throws. The limit is set to one stream and R is
+// pushed -- a request the server never answers, then a batch of two of them. The pass of W's push submits R on the one
+// stream, and W waits for it; the exception reaches push(R); R's stream is reset, and W is submitted on the stream R
+// held, by that same push. Two streams are reset with that code: B's, where it was refused, and R's. R's answer was
+// dropped and nothing else was done: its stream stayed taken until the server answered, which it never does, and W
+// waited behind it without end.
+TEST_F(Http3LoopbackTest, WhatAPushTakesBackWhileInFlightIsResetAndItsStreamGoesToWhatWaits) {
+    using namespace http3_client_submit_test;
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        int        b = 0, r = 0, w = 0; // before the client: its callbacks count here
+        const auto port   = next_port();
+        auto       server = qb::http3::make_server();
+        server->router().get("/ok", [](auto ctx) { ctx->text("ok"); });
+        server->router().get("/stall", [](auto) {});
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = std::make_shared<http3_reset_code_test::ResetRecordingClient>(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        client->set_max_concurrent_streams(0);
+        client->push_request(unsendable(), [&](qb::http::Response) {
+            ++b;
+            client->push_request(qb::http::Request{qb::io::uri("/ok")}, // its pass submits R on the one stream: W waits for it
+                                 [&](qb::http::Response response) { w += response.status() == qb::http::status::OK ? 1 : 0; });
+            throw std::runtime_error("the callback throws, once a pass under it has submitted the request of the push");
+        });
+        ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+        client->set_max_concurrent_streams(1);
+        bool threw = false;
+        try {
+            if (form == "a request") {
+                client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.emplace_back(qb::io::uri("/stall"));
+                two.emplace_back(qb::io::uri("/stall"));
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        EXPECT_EQ(client->get_active_request_count(), 1u) << "one stream: W's, once R's is given up";
+        EXPECT_TRUE(pump([&] { return w == 1; }, 3s)) << "what waited was not submitted on the stream the push gave up";
+        EXPECT_TRUE(pump([&] { return client->codes.size() >= 2; }, 3s)) << "the stream of the request taken back was not reset";
+        ASSERT_EQ(client->codes.size(), 2u) << "B's stream, where it was refused, and R's";
+        EXPECT_EQ(client->codes[0], static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
+        EXPECT_EQ(client->codes[1], static_cast<std::uint64_t>(NGHTTP3_H3_REQUEST_CANCELLED));
+        EXPECT_TRUE(client->is_connected()) << "the reset is of one stream: the connection stays";
+        for (const auto until = std::chrono::steady_clock::now() + 200ms; std::chrono::steady_clock::now() < until;)
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+        client->disconnect();
+        server->close();
+        EXPECT_EQ(r, 0);
+    }
+}
+
+// The same where no reset can be written: the connection is ending. R is in flight -- the pass of a push B's callback
+// made submitted it -- when the submission of D, queued behind it, is cut short under push(R). That ends the
+// connection: the exception leaves push(R), the close fails what the connection carried, D hears its 503 once, and R
+// hears nothing -- taken back before the close could answer it. (Held before: a pin of the callback that hears nothing.)
+TEST_F(Http3LoopbackTest, WhatAPushTakesBackWhileInFlightHearsNothingOfTheCloseThatEndsItsConnection) {
+    using namespace http3_client_submit_test;
+    int              b = 0, d = 0, r = 0; // before the client: its callbacks count here
+    qb::http::status d_status = qb::http::status::OK;
+    const auto       port     = next_port();
+    auto             server   = qb::http3::make_server();
+    server->router().get("/stall", [](auto) {});
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = std::make_shared<CutShort>(qb::io::uri(https_origin(port)));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    client->set_max_concurrent_streams(0);
+    auto *const raw = client.get();
+    client->push_request(unsendable(), [&, raw](qb::http::Response) {
+        ++b;
+        raw->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response response) { // D: its pass submits R
+            ++d;
+            d_status = response.status();
+        });
+        raw->set_max_concurrent_streams(2); // the pass of push(R) goes on to D once this callback has returned
+        raw->throws = CutShort::at::the_end_of_a_send;
+        raw->times  = 1;
+        raw->skip   = 1; // the reset of B's stream goes through: the next send is D's submission
+    });
+    ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+    client->set_max_concurrent_streams(1);
+    bool threw = false;
+    try {
+        client->push_request(qb::http::Request{qb::io::uri("/stall")}, [&](qb::http::Response) { ++r; });
+    } catch (std::runtime_error const &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+    EXPECT_EQ(b, 1);
+    EXPECT_EQ(client->thrown, 1);
+    EXPECT_EQ(client->in_flight_when_thrown, 1u) << "R was not in flight when the submission behind it was cut short";
+    EXPECT_TRUE(pump([&] { return d == 1 && !client->is_connected(); }, 3s)) << "the request whose submission was cut short was not answered";
+    EXPECT_EQ(d_status, qb::http::status::SERVICE_UNAVAILABLE);
+    for (const auto until = std::chrono::steady_clock::now() + 200ms; std::chrono::steady_clock::now() < until;)
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    EXPECT_EQ(r, 0) << "the push threw, and the close that ended its connection answered what it pushed: two outcomes";
+    EXPECT_EQ(d, 1);
+    client->disconnect();
+    server->close();
+    EXPECT_EQ(r, 0);
+}
+
 // A cancellation is whole, whatever the callback of the request it cancels throws: the stream is reset, the request
 // that waited for it is submitted by that same call, and then the exception reaches the caller. A is in flight on the
 // one stream allowed and B waits; the program cancels A, whose callback returns, then throws. The exception left the

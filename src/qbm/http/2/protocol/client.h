@@ -1458,6 +1458,26 @@ public:
     }
 
     /**
+     * @brief Give up a request this client sent and still holds: RST_STREAM(CANCEL) on its stream -- the stream is no
+     *        longer needed (RFC 9113 §7) --, which is retired at once, so that it no longer counts against the server's
+     *        limit; what the server sent on it before it read the reset is discarded (send_rst_stream()). The io
+     *        handler is told with Http2StreamErrorEvent when the response had not been dispatched, as for every reset
+     *        this client sends. For an application that takes a request back, as qb::http2::Client does with what a
+     *        push that throws had already sent (Huly QB-1246).
+     * @param stream_id The stream of the request, one this client opened.
+     * @return true if the reset was written; false when the connection is no longer live, or this client holds no
+     *         request on that stream.
+     */
+    bool
+    cancel_request(uint32_t stream_id) noexcept {
+        if (!this->ok() || (stream_id & 1u) == 0u || _client_streams.find(stream_id) == _client_streams.end()) {
+            return false;
+        }
+        send_rst_stream(stream_id, ErrorCode::CANCEL, "request given up by the client");
+        return true;
+    }
+
+    /**
      * @brief Send trailer headers for a request
      * @details The request must have announced a trailer section (a "Trailer" header): otherwise
      *          the stream is reset with PROTOCOL_ERROR. The trailer block carries the stream's

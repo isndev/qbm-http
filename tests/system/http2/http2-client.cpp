@@ -7515,6 +7515,108 @@ TEST_F(Http2ClientTest, WhatAPassUnderTheCallbackTookIsNeverHeardOnceItsPushHasT
     }
 }
 
+// What a push takes back while it is in flight is given up on the wire too: RST_STREAM(CANCEL) on its stream, which
+// frees it for what waits. Nothing is sent while the limit is 0: B waits, a request the protocol refuses where it is
+// sent, whose callback pushes W, then throws. The limit is set to one stream and R is pushed -- a request the server
+// never answers, then a batch of two of them. The pass of W's push sends R on the one stream, and W waits for it; the
+// exception reaches push(R); R is reset -- the server sees its request cancelled, on a connection that stays --, and W
+// is sent on the stream R held, by that same push. R's answer was dropped and nothing else was done: its stream
+// stayed taken until the server answered, which it never does, and W waited behind it without end.
+TEST_F(Http2ClientTest, WhatAPushTakesBackWhileInFlightIsResetAndItsStreamGoesToWhatWaits) {
+    for (const std::string_view form : {"a request", "a batch"}) {
+        SCOPED_TRACE(form);
+        Answer w; // before the client, which answers what it still holds when it is destroyed
+        int    b = 0, r = 0;
+        bool   up     = false;
+        auto   client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        client->set_max_concurrent_streams(0);
+        const auto routed = _server->server().hang_routed(), cancelled = _server->server().hang_cancelled();
+        ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+            ++b;
+            client->push_request(reconnect::get_test(), std::ref(w)); // its pass sends R on the one stream: W waits for it
+            throw std::runtime_error("the callback throws, once a pass under it has sent the request of the push");
+        }));
+        ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+        client->set_max_concurrent_streams(1);
+        bool threw = false;
+        try {
+            if (form == "a request") {
+                client->push_request(hang(), [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.push_back(hang());
+                two.push_back(hang());
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        EXPECT_EQ(client->get_active_request_count(), 1u) << "one stream: W's, once R's is given up";
+        EXPECT_TRUE(loop_until([&] { return w.count != 0; }, 3s)) << "what waited was not sent on the stream the push gave up";
+        EXPECT_EQ(w.status, qb::http::status::OK) << w.body;
+        EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_cancelled() == cancelled + 1; }, 3s))
+            << "the server was not told that nobody waits for the request: " << _server->server().hang_cancelled() - cancelled;
+        EXPECT_EQ(_server->server().hang_routed(), routed + 1) << "one request of the push reached the server, and no more";
+        EXPECT_TRUE(client->is_connected()) << "the reset is of one stream: the connection stays";
+        settle(200ms);
+        EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+        client->disconnect();
+        settle();
+        EXPECT_EQ(r, 0);
+        EXPECT_EQ(w.count, 1);
+    }
+}
+
+// The frame that gives it up, read by a peer that answers nothing: RST_STREAM on the stream of the request taken back,
+// with CANCEL (0x8) -- the stream is no longer needed (RFC 9113 section 7) --, and no other. B is refused before
+// anything of it is written, so R is stream 1; W, sent behind the reset on the one stream allowed, is stream 3.
+TEST_F(Http2ClientTest, WhatAPushTakesBackWhileInFlightIsResetWithCancel) {
+    int                              b = 0, r = 0, w = 0; // before the client
+    bool                             up = false;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::no_answer, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    client->set_max_concurrent_streams(0);
+    ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+        ++b;
+        client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++w; }); // its pass sends R: W waits for its stream
+        throw std::runtime_error("the callback throws, once a pass under it has sent the request of the push");
+    }));
+    client->set_max_concurrent_streams(1);
+    bool threw = false;
+    try {
+        client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++r; });
+    } catch (std::runtime_error const &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+    EXPECT_EQ(b, 1);
+    EXPECT_TRUE(loop_until([&] { return !peer.resets().empty(); }, 3s)) << "no RST_STREAM reached the peer";
+    settle(200ms);
+    const auto resets = peer.resets();
+    ASSERT_EQ(resets.size(), 1u) << "one stream is given up, and only that one";
+    EXPECT_EQ(resets[0].first, 1u) << "the stream of the request the push took back";
+    EXPECT_EQ(resets[0].second, 0x8u) << "CANCEL";
+    EXPECT_EQ(client->get_active_request_count(), 1u) << "W, on the stream given up";
+    EXPECT_FALSE(peer.goaway());
+    EXPECT_TRUE(client->is_connected());
+    EXPECT_EQ(r + w, 0);
+    client->disconnect();
+    settle();
+    EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+    EXPECT_EQ(w, 1) << "the request in flight when the client disconnects hears it";
+}
+
 #ifdef QB_WITH_LOGGING
 // What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
 // started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says

@@ -84,6 +84,8 @@ public:
         goaways_lowered,
         /// A GOAWAY(NO_ERROR) naming stream 1, no answer to stream 1, and 500 ms later the connection ended, read or not.
         goaway_then_close,
+        /// Nothing: no request is answered. It reads on, and records what the client sends.
+        no_answer,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -445,6 +447,8 @@ private:
                     for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
                          !_release && std::chrono::steady_clock::now() < until;)
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                } else if (_plan == Plan::no_answer) {
+                    // nothing is sent: the loop below reads on
                 } else {
                     append_frame(frame, 0x1, 0x4, 1, {0x88});
                     for (int chunk = 0; chunk < 200; ++chunk) {
