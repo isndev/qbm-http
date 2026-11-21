@@ -86,6 +86,9 @@ public:
         goaway_then_close,
         /// Nothing: no request is answered. It reads on, and records what the client sends.
         no_answer,
+        /// SETTINGS_MAX_CONCURRENT_STREAMS of 1; the first request is never answered, the second gets a 200 that ends
+        /// its stream.
+        one_stream_the_second_answered,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -222,8 +225,10 @@ private:
             const uint8_t *payload   = head + 9;
             if (type == 0x4 && (flags & 0x1) == 0 && !_answered) {
                 std::vector<uint8_t> reply;
-                append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
-                append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
+                append_frame(reply, 0x4, 0, 0,
+                             _plan == Plan::one_stream_the_second_answered ? std::vector<uint8_t>{0, 3, 0, 0, 0, 1} // MAX_CONCURRENT_STREAMS 1
+                                                                           : std::vector<uint8_t>{});               // our SETTINGS
+                append_frame(reply, 0x4, 0x1, 0, {});                                                               // the ACK of the client's
                 if (!send(reply)) {
                     return false;
                 }
@@ -449,6 +454,12 @@ private:
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 } else if (_plan == Plan::no_answer) {
                     // nothing is sent: the loop below reads on
+                } else if (_plan == Plan::one_stream_the_second_answered) {
+                    while (_requests.size() < 2 && read_some()) {
+                    }
+                    if (_requests.size() >= 2) {
+                        append_frame(frame, 0x1, 0x5, _requests[1], {0x88}); // HEADERS, END_STREAM | END_HEADERS: `:status: 200`
+                    }
                 } else {
                     append_frame(frame, 0x1, 0x4, 1, {0x88});
                     for (int chunk = 0; chunk < 200; ++chunk) {

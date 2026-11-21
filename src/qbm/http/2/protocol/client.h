@@ -1460,20 +1460,22 @@ public:
     /**
      * @brief Give up a request this client sent and still holds: RST_STREAM(CANCEL) on its stream -- the stream is no
      *        longer needed (RFC 9113 §7) --, which is retired at once, so that it no longer counts against the server's
-     *        limit; what the server sent on it before it read the reset is discarded (send_rst_stream()). The io
-     *        handler is told with Http2StreamErrorEvent when the response had not been dispatched, as for every reset
-     *        this client sends. For an application that takes a request back, as qb::http2::Client does with what a
-     *        push that throws had already sent (Huly QB-1246).
+     *        limit; what the server sent on it before it read the reset is discarded (send_rst_stream()). For an
+     *        application that takes a request back, as qb::http2::Client does with what a push that throws had already
+     *        sent, or that answers it itself, as at the request's timeout (Huly QB-1246).
      * @param stream_id The stream of the request, one this client opened.
+     * @param tell_the_handler true (the default): the io handler is told with Http2StreamErrorEvent when the response
+     *        had not been dispatched, as for every reset this client sends. false: for an application that has answered
+     *        the request already, and would hear a second end for it.
      * @return true if the reset was written; false when the connection is no longer live, or this client holds no
      *         request on that stream.
      */
     bool
-    cancel_request(uint32_t stream_id) noexcept {
+    cancel_request(uint32_t stream_id, bool tell_the_handler = true) noexcept {
         if (!this->ok() || (stream_id & 1u) == 0u || _client_streams.find(stream_id) == _client_streams.end()) {
             return false;
         }
-        send_rst_stream(stream_id, ErrorCode::CANCEL, "request given up by the client");
+        send_rst_stream(stream_id, ErrorCode::CANCEL, "request given up by the client", tell_the_handler);
         return true;
     }
 
@@ -2111,9 +2113,10 @@ private:
      * @param stream_id Stream ID
      * @param error_code Error code
      * @param debug_message Optional debug message
+     * @param tell_the_handler false: the io handler is not told of the reset (cancel_request())
      */
     void
-    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &debug_message = "") noexcept {
+    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &debug_message = "", bool tell_the_handler = true) noexcept {
         if (!this->ok() || stream_id == 0)
             return;
 
@@ -2139,7 +2142,7 @@ private:
         // Keeping this node through the callback both permits duplicate notification and
         // leaves a dangling iterator if that callback erases it. Touch no stream afterwards.
         if (it != _client_streams.end()) {
-            const bool notify_error = !it->second.response_dispatched;
+            const bool notify_error = tell_the_handler && !it->second.response_dispatched;
             // A stream the server could still send on -- it has not ended it: what it sent before it read the reset is
             // discarded (on(DataFrame), on(HeadersFrame)). After its END_STREAM nothing is in flight, and a frame there
             // stays the error it is (RFC 9113 §5.1).

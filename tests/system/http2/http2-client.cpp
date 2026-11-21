@@ -7617,6 +7617,117 @@ TEST_F(Http2ClientTest, WhatAPushTakesBackWhileInFlightIsResetWithCancel) {
     EXPECT_EQ(w, 1) << "the request in flight when the client disconnects hears it";
 }
 
+// ---- A request that times out gives its stream back (Huly QB-1246) ----
+
+// One stream, on both sides: the peer allows one (SETTINGS_MAX_CONCURRENT_STREAMS 1) and never answers the first
+// request, the client allows one too. A is sent and times out; B, pushed while A is in flight, waits for its stream. At
+// A's timeout the client resets A's stream -- RST_STREAM(CANCEL), which the peer reads -- and sends B on the stream that
+// freed, at once, before B's own deadline; the peer answers B. A's stream was left open: the client's protocol counted
+// it against the server's limit, so B was refused where it was sent, once something ran a pass -- and nothing did on
+// the timer's path: B waited for the next push, or timed out in its turn.
+TEST_F(Http2ClientTest, ARequestThatTimesOutIsResetAndWhatWaitsIsSentOnTheStreamItFreed) {
+    Answer                           a, b; // before the client, which answers what it still holds when it is destroyed
+    bool                             up = false;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::one_stream_the_second_answered, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    client->set_max_concurrent_streams(1);
+    client->set_request_timeout(400ms);
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(a))); // stream 1
+    settle(150ms);
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(b))); // waits for A's stream; its deadline is 150 ms after A's
+    ASSERT_EQ(a.count + b.count, 0) << "an answer came before the timeout: the case proves nothing";
+    EXPECT_TRUE(loop_until([&] { return a.count != 0; }, 3s));
+    EXPECT_EQ(a.status, qb::http::status::REQUEST_TIMEOUT) << a.body;
+    EXPECT_TRUE(loop_until([&] { return b.count != 0; }, 3s));
+    EXPECT_EQ(b.status, qb::http::status::OK) << "what waited was not sent on the stream the timeout freed: " << b.body;
+    const auto resets = peer.resets();
+    ASSERT_EQ(resets.size(), 1u) << "the stream of the request that timed out is reset, and no other";
+    EXPECT_EQ(resets[0].first, 1u);
+    EXPECT_EQ(resets[0].second, 0x8u) << "CANCEL";
+    EXPECT_FALSE(peer.goaway());
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(a.count, 1) << "the request that timed out was answered twice";
+    EXPECT_EQ(b.count, 1);
+}
+
+// The members of a batch that time out are reset too, each on its stream, and the batch hears its 408s once.
+TEST_F(Http2ClientTest, TheMembersOfABatchThatTimeOutAreResetEachOnItsStream) {
+    int                              heard = 0; // before the client
+    std::vector<qb::http::Response>  responses;
+    bool                             up = false;
+    qb::http::test::Http2PlannedPeer peer(qb::http::test::Http2PlannedPeer::Plan::no_answer, 30s);
+    ASSERT_NE(peer.port(), 0);
+    auto client = reconnect::make_client_for(peer.port());
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    client->set_request_timeout(300ms);
+    std::vector<qb::http::Request> two;
+    two.push_back(reconnect::get_test());
+    two.push_back(reconnect::get_test());
+    ASSERT_TRUE(client->push_requests(std::move(two), [&](std::vector<qb::http::Response> r) {
+        ++heard;
+        responses = std::move(r);
+    }));
+    EXPECT_TRUE(loop_until([&] { return heard != 0; }, 3s));
+    ASSERT_EQ(responses.size(), 2u);
+    EXPECT_EQ(responses[0].status(), qb::http::status::REQUEST_TIMEOUT);
+    EXPECT_EQ(responses[1].status(), qb::http::status::REQUEST_TIMEOUT);
+    EXPECT_TRUE(loop_until([&] { return peer.resets().size() >= 2; }, 1s));
+    settle(100ms);
+    auto resets = peer.resets();
+    std::sort(resets.begin(), resets.end());
+    ASSERT_EQ(resets.size(), 2u);
+    EXPECT_EQ(resets[0], std::make_pair(1u, 0x8u));
+    EXPECT_EQ(resets[1], std::make_pair(3u, 0x8u));
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(heard, 1);
+}
+
+// Against a qb server, which allows 50 streams: 50 requests it never answers time out, then a request is pushed and
+// served. The 50 streams stayed open in the client's protocol, which refused every later request on that connection
+// where it was sent, 503 "Failed to send HTTP/2 request" -- for as long as the connection lived. The server is told of
+// each: it sees its 50 requests cancelled.
+TEST_F(Http2ClientTest, RequestsThatTimeOutDoNotUseUpTheStreamsTheServerAllows) {
+    Answer after; // before the client, which answers what it still holds when it is destroyed
+    int    timed_out = 0;
+    bool   up        = false;
+    auto   client    = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto routed = _server->server().hang_routed(), cancelled = _server->server().hang_cancelled();
+    client->set_request_timeout(500ms);
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(client->push_request(
+            hang(), [&](qb::http::Response response) { timed_out += response.status() == qb::http::status::REQUEST_TIMEOUT ? 1 : 0; }));
+    }
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == routed + 50; }, 5s))
+        << "the server did not take the 50 requests: the case proves nothing";
+    EXPECT_TRUE(loop_until([&] { return timed_out == 50; }, 5s)) << timed_out;
+    client->set_request_timeout(qb::duration::zero());
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(after)));
+    EXPECT_TRUE(loop_until([&] { return after.count != 0; }));
+    EXPECT_EQ(after.status, qb::http::status::OK) << "the streams that timed out were still counted: " << after.body;
+    EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_cancelled() == cancelled + 50; }, 5s))
+        << "the server was not told: " << _server->server().hang_cancelled() - cancelled << " of 50";
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(timed_out, 50);
+}
+
 #ifdef QB_WITH_LOGGING
 // What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
 // started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says

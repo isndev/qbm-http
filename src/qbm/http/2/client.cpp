@@ -1275,6 +1275,15 @@ Client::check_request_timeouts() {
     }
 
     for (uint32_t stream_id : timed_out_streams) {
+        // Given up on the wire, as the HTTP/3 client does at a request's timeout, before it is answered: RST_STREAM(CANCEL),
+        // which tells the server that nobody waits and frees the stream against its limit; the request is answered
+        // below, so the protocol tells nothing of the reset. Left open, the stream still counted on both sides of the
+        // protocol: once as many requests had timed out as the server allows streams (50 for a qb server), every later
+        // request on that connection was refused where it was sent, 503 (Huly QB-1246).
+        if (_h2_protocol && is_connected()) {
+            const auto pass = this->protocol_pass(); // a member function of the protocol, outside the read loop (send_pending())
+            (void) _h2_protocol->cancel_request(stream_id, false);
+        }
         fail_request(stream_id, "Request timeout", qb::http::status::REQUEST_TIMEOUT);
     }
 
@@ -1296,6 +1305,12 @@ Client::check_request_timeouts() {
     }
 
     _pending_requests = std::move(non_timed_out_requests);
+    if (!timed_out_streams.empty()) {
+        // What waited for the streams those timeouts freed is sent now, as after a response: nothing else ran a pass,
+        // and a request queued behind one that timed out waited for the next push, or timed out in its turn (Huly
+        // QB-1246).
+        process_pending_requests();
+    }
     arm_request_timeout();
 }
 
