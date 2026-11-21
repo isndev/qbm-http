@@ -907,7 +907,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   Connected, such a client ended the process on `free(): corrupted unsorted chunks`, `corrupted double-linked list`
   or a segmentation fault in a g++ 14 Release build, and on a heap-use-after-free under AddressSanitizer: the QUIC
   endpoint it is built on armed its timer on the freed loop while closing. That is fixed in qb-io (`close()` no longer
-  arms its timer). The client's own destructor also failed its requests BEFORE it stopped accepting: a callback that pushed the
+  arms its timer). The client's own destructor also failed its requests BEFORE it stopped accepting: a callback that
+  pushed the
   request again, the retry pattern, had it queued, a deadline armed for it and a connection started for it from the
   destructor -- after the loop, the first of those stops the process on qb-io's named line. The destructor now accepts
   nothing from its first callback on: a request pushed again is answered at once with `503`
@@ -943,9 +944,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   its judge chose and print the judge's line and nothing else; the judge, an `atexit` handler registered before the
   client, asserts that the client was destroyed after the loop -- the client itself, not only a pointer to it; where
   `exit()` is called inside its own dispatch, that it was left alive --, reads the end of the peer's stream (a clean
-  EOF, never a reset) and asks LeakSanitizer. On the code as it was, 19 of the 65 cases it then had failed under AddressSanitizer
+  EOF, never a reset) and asks LeakSanitizer. On the code as it was, 19 of the 65 cases it then had failed under
+  AddressSanitizer
   and 17 in a g++ 14 Release build, where a write into freed memory does not always stop the process; the
-  HTTP/1.1 client and the WebSocket clients passed every state but the retry pattern. What a client in static storage does at exit is written in
+  HTTP/1.1 client and the WebSocket clients passed every state but the retry pattern. What a client in static storage
+  does at exit is written in
   `readme/14-async-http-client.md` and in the `llm/` reference. The HTTP/2 client has a binary of its own, in the
   entry below.
 
@@ -1247,7 +1250,8 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qbm-http-test-system-http1-client` -- on the three clients, a callback that would push four times: the push its
   first failure makes seen answered before it returns, a deadline asked on the way, the push made from inside that
   answer seen refused and never answered, alone and as a batch (on HTTP/2 each of the four was answered inside its
-  push, and the batch form went three batches deep, until its client took the same rule); a waiting `connect()` whose callback connects again, in the connect and in the handshake (TLS for HTTP/1.1 and HTTP/2, QUIC for
+  push, and the batch form went three batches deep, until its client took the same rule); a waiting `connect()` whose
+  callback connects again, in the connect and in the handshake (TLS for HTTP/1.1 and HTTP/2, QUIC for
   HTTP/3: the peer has read the first flight and answers nothing); callbacks that throw (a request's, a batch's, a
   `connect()`'s, and that of a request or a batch pushed from one); a callback that disconnects; and, on HTTP/2, a
   waiting `connect()` whose transport the peer ends once its TLS handshake is complete, whose callback connects again.
