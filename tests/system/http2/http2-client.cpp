@@ -7402,4 +7402,150 @@ TEST_F(Http2ClientTest, ARetryHookThatThrowsIsContainedAndTheRunGoesOn) {
     settle();
 }
 
+// ---- A callback that throws under a push costs no other request its turn, and its push one outcome (Huly QB-1246) ----
+
+// Under a push, the pass goes on. A is in flight on the one stream the client allows. Behind it wait B, a request the
+// protocol refuses where it is sent and whose callback throws; C, which the server routes and never answers; B2, as B;
+// D, valid. The limit is raised and R is pushed: the exception of B's callback reaches push(R) -- the first, not B2's
+// --, R is taken back before the pass can send it, and C and D are sent by that same pass: no other push runs one, and
+// no response comes that would (A and C are never answered). The exception left the pass at B: C and D waited for the
+// next push.
+TEST_F(Http2ClientTest, ACallbackThatThrowsUnderAPushCostsNoRequestBehindItItsTurn) {
+    Answer d; // before the client, which answers what it still holds when it is destroyed
+    int    a = 0, b = 0, c = 0, b2 = 0, r = 0;
+    bool   up     = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    client->set_max_concurrent_streams(1);
+    const auto before = _server->server().hang_routed();
+    ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response) { ++a; }));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
+    ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+        ++b;
+        throw std::runtime_error("the first");
+    }));
+    ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response) { ++c; }));
+    ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+        ++b2;
+        throw std::runtime_error("the second");
+    }));
+    ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(d)));
+    ASSERT_EQ(b + b2 + c + d.count, 0) << "what waits was answered already: the case proves nothing";
+    client->set_max_concurrent_streams(10);
+    std::string thrown;
+    try {
+        client->push_request(hang(), [&](qb::http::Response) { ++r; }); // a request the server counts, were it sent
+    } catch (std::runtime_error const &e) {
+        thrown = e.what();
+    }
+    EXPECT_EQ(thrown, "the first") << "the exception that reaches the push is the first one thrown";
+    EXPECT_EQ(b, 1);
+    EXPECT_EQ(b2, 1) << "the pass did not go on to the second request the protocol refuses";
+    EXPECT_TRUE(loop_until([&] { return d.count != 0; }, 3s)) << "what waited behind the second was not sent by that pass";
+    EXPECT_EQ(d.status, qb::http::status::OK) << d.body;
+    EXPECT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() >= before + 2; }, 3s))
+        << "what waited behind the first was not sent by that pass";
+    settle(200ms);
+    EXPECT_EQ(_server->server().hang_routed(), before + 2) << "A and C, and not the request of the push that threw";
+    EXPECT_EQ(r, 0);
+    EXPECT_EQ(a + c, 0);
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    settle();
+    EXPECT_EQ(a + c, 2);
+    EXPECT_EQ(r, 0) << "the push threw, and its request was answered: two outcomes";
+    EXPECT_EQ(d.count, 1);
+}
+
+// One outcome, whatever a pass under the callback did first. B's callback pushes X, then throws: the push of X runs a
+// pass of its own under that callback, and that pass takes R from the queue before the exception reaches push(R) --
+// sends it, or, R being one the protocol refuses, answers it, with that answer kept for the client's turn. push(R)
+// throws, and R is never heard. It was: a request in flight by its response, one refused on the client's next turn, a
+// batch refused likewise. (A batch in flight was not: its answers found no batch. A pin.)
+TEST_F(Http2ClientTest, WhatAPassUnderTheCallbackTookIsNeverHeardOnceItsPushHasThrown) {
+    for (const std::string_view form : {"a request, sent", "a batch, sent", "a request, refused", "a batch, refused"}) {
+        SCOPED_TRACE(form);
+        Answer x; // before the client, which answers what it still holds when it is destroyed
+        int    a = 0, b = 0, r = 0;
+        bool   up     = false;
+        auto   client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        client->set_max_concurrent_streams(1);
+        const auto before = _server->server().hang_routed();
+        ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response) { ++a; }));
+        ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
+        ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+            ++b;
+            client->push_request(reconnect::get_test(), std::ref(x)); // its pass takes what waits: R, then X
+            throw std::runtime_error("the callback throws, once a pass under it has taken the request of the push");
+        }));
+        client->set_max_concurrent_streams(10);
+        const bool sent  = form.find("sent") != std::string_view::npos;
+        bool       threw = false;
+        try {
+            if (form.find("a request") == 0) {
+                client->push_request(sent ? reconnect::get_test() : unsendable(), [&](qb::http::Response) { ++r; });
+            } else {
+                std::vector<qb::http::Request> two;
+                two.push_back(sent ? reconnect::get_test() : unsendable());
+                two.push_back(sent ? reconnect::get_test() : unsendable());
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+            }
+        } catch (std::runtime_error const &) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+        EXPECT_EQ(b, 1);
+        EXPECT_EQ(r, 0);
+        EXPECT_TRUE(loop_until([&] { return x.count != 0; }, 3s)) << "the request pushed from the callback was not served";
+        EXPECT_EQ(x.status, qb::http::status::OK) << x.body;
+        settle(200ms); // the response of a request sent, the client's turn for one refused
+        EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+        EXPECT_TRUE(client->is_connected());
+        client->disconnect();
+        settle();
+        EXPECT_EQ(a, 1);
+        EXPECT_EQ(r, 0);
+    }
+}
+
+#ifdef QB_WITH_LOGGING
+// What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
+// started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says
+// nothing. One line a callback: the client, what was called, what it threw.
+TEST_F(Http2ClientTest, WhatTheClientContainsIsLoggedAtWarnInABuildWithALogger) {
+    Answer            behind; // before the client, which answers what it still holds when it is destroyed
+    int               a   = 0;
+    const std::string log = http2_client_crossing_test::log_of([&] {
+        bool up     = false;
+        auto client = make_test_client();
+        client->set_auto_reconnect(false);
+        client->set_request_timeout(qb::duration::zero());
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+        client->set_max_concurrent_streams(1);
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) {
+            ++a;
+            throw std::runtime_error("the response callback throws");
+        }));
+        ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(behind)));
+        EXPECT_TRUE(loop_until([&] { return behind.count != 0; }, 3s));
+        client->disconnect();
+        settle();
+    });
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(behind.status, qb::http::status::OK) << behind.body;
+    EXPECT_EQ(
+        http2_client_crossing_test::occurrences(log, "exception escaped an HTTP/2 client callback; contained: the response callback throws"),
+        1u)
+        << log;
+}
+#endif // QB_WITH_LOGGING
+
 } // namespace http2_client_callbacks_test

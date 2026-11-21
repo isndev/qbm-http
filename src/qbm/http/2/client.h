@@ -266,13 +266,20 @@ private:
     // -- a response, a timeout, a failure, a close -- is given at once when nothing is owed. Otherwise it is kept here.
     // What is kept is heard in two places only: the client's turn (a task in the loop's deferred queue, one a loop turn
     // at most), and its destructor. So the order is total, and what a callback pushes is never answered inside that push.
-    std::deque<std::function<void()>> _owed;
-    std::uint64_t                     _owed_heard      = 0;     ///< How many of them were heard: a turn hears those owed as it starts
-    bool                              _turn_asked      = false; ///< The client's turn is in the loop's queue
-    int                               _callback_depth  = 0;     ///< Callbacks of this client on the stack
-    int                               _destroy_answers = 0;     ///< Pushes the destructor's callbacks made, being answered inside themselves
-    struct CallbackScope;                                       ///< Counts one callback while it runs
-    enum class from : bool { the_client, the_loop };            ///< Who gives an answer: the client by itself, or the loop that brings it
+    /// One answer kept, and whose it is: the request (RequestContext::id) or the batch it answers, 0 for neither. What a
+    /// push takes back by when an exception leaves it (withdraw()).
+    struct Owed {
+        std::function<void()> answer;
+        std::uint64_t         request = 0;
+        std::uint64_t         batch   = 0;
+    };
+    std::deque<Owed> _owed;
+    std::uint64_t    _owed_heard      = 0;           ///< How many of them were heard: a turn hears those owed as it starts
+    bool             _turn_asked      = false;       ///< The client's turn is in the loop's queue
+    int              _callback_depth  = 0;           ///< Callbacks of this client on the stack
+    int              _destroy_answers = 0;           ///< Pushes the destructor's callbacks made, being answered inside themselves
+    struct CallbackScope;                            ///< Counts one callback while it runs
+    enum class from : bool { the_client, the_loop }; ///< Who gives an answer: the client by itself, or the loop that brings it
 
     // Statistics
     uint64_t _total_requests{0};
@@ -625,10 +632,12 @@ private:
 
     /// Send what waits, up to the concurrency limit. @p who brought the pass here: a call of the program, or the loop.
     /// @p own_request / @p own_batch name what that call is itself pushing, 0 for none: taken back, under the pass's own
-    /// hold on the client, when an exception leaves the pass.
+    /// hold on the client, when an exception leaves the pass -- the callback of a request refused there, under a call of
+    /// the program. The pass then runs again for the others, and the first exception goes on once that is done.
     void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
-    /// The pass itself (process_pending_requests() holds the client around it).
-    void send_pending(from who);
+    /// The pass itself (process_pending_requests() holds the client around it). With @p a_throw_is_kept, the pass that
+    /// runs again: what the callback of a request refused here throws is dropped, and the pass goes on.
+    void send_pending(from who, bool a_throw_is_kept = false);
 
     /// Handle successful connection
     void handle_connection_success();
@@ -681,15 +690,16 @@ private:
     /// Every one is answered whatever a callback throws; under a call of the program the first exception goes on last.
     void fail_detached(DetachedRequests detached, const std::string &error_message, from who = from::the_loop);
     /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: the request
-    /// @p request_id, or every member of the batch @p batch_id and the batch with its callback. Never throws.
+    /// @p request_id, or every member of the batch @p batch_id and the batch with its callback -- queued, in flight (its
+    /// answer is dropped when it comes) or answered already with that answer still owed. Never throws.
     void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
     /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
     [[nodiscard]] bool given_now(from who) const noexcept;
     /// Calls @p fn, a callback of the program, now: counted while it runs. What @p fn throws goes on to the caller.
     template <typename Fn>
     void call_now(Fn &&fn);
-    /// Keeps @p answer for the client's turn, which is asked.
-    void owe(std::function<void()> answer) noexcept;
+    /// Keeps @p answer for the client's turn, which is asked. @p request / @p batch: whose answer it is, 0 for neither.
+    void owe(std::function<void()> answer, std::uint64_t request = 0, std::uint64_t batch = 0) noexcept;
     /// An answer the client gives by itself: now, or kept.
     void answer_by_itself(std::function<void()> answer);
     /// In the handler of a `try` around a callback given at once: rethrows under a call of the program (@p who is the
@@ -697,8 +707,8 @@ private:
     void escaped(from who);
     /// The outcome of a connect(), told to @p callback: now, or kept.
     void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
-    /// The answer of a batch, told to its callback: now, or kept.
-    void tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who);
+    /// The answer of the batch @p batch_id, told to its callback: now, or kept.
+    void tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who, std::uint64_t batch_id);
     /// The answer of one request -- its response, a failure, a refusal --: a member of a batch is recorded in its batch at
     /// once (the batch's callback is the answer); a request's own callback is called now, or kept behind what is owed.
     /// Every answer of a request goes through here.

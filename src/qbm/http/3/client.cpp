@@ -55,6 +55,14 @@ struct FailureScope {
         --depth;
     }
 };
+
+/// In place of the callback of a request taken back while in flight: its answer, when it comes, is dropped.
+void
+dropped(qb::http::Response) noexcept {}
+
+/// In place of an answer kept for the client's turn that is taken back: its turn comes, and nothing is heard.
+void
+unheard() noexcept {}
 } // namespace
 
 Client::Client(std::string const &base_uri)
@@ -76,7 +84,7 @@ Client::~Client() {
     // What is still owed its turn is heard here, once, in order and before this end: each entry at the same level, so a
     // push its callback makes is answered inside that push, as from any callback the destructor runs.
     while (!_owed.empty()) {
-        auto answer = std::move(_owed.front());
+        auto answer = std::move(_owed.front().answer);
         _owed.pop_front();
         ++_owed_heard;
         qb::http::detail::contained("HTTP/3", [&] { call_now(answer); });
@@ -147,9 +155,12 @@ Client::given_now(from who) const noexcept {
 }
 
 void
-Client::owe(std::function<void()> answer) noexcept {
+Client::owe(std::function<void()> answer, std::uint64_t request, std::uint64_t batch) noexcept {
     try {
-        _owed.push_back(std::move(answer));
+        auto &kept   = _owed.emplace_back(); // moved in once there is room: with none, it is still here to be heard below
+        kept.answer  = std::move(answer);
+        kept.request = request;
+        kept.batch   = batch;
     } catch (...) {
         qb::http::detail::contained("HTTP/3", [&] { call_now(answer); }); // no room to keep it (an allocation): heard now, never lost
         return;
@@ -182,7 +193,7 @@ Client::run_turn() noexcept {
     // loop turn its callback runs -- hears the rest, and this one then finds its count reached. The caller holds the
     // client: an answer may drop the last reference.
     for (const auto end = _owed_heard + _owed.size(); _owed_heard < end && !_owed.empty();) {
-        auto answer = std::move(_owed.front());
+        auto answer = std::move(_owed.front().answer);
         _owed.pop_front();
         ++_owed_heard;
         qb::http::detail::contained("HTTP/3", [&] { call_now(answer); }); // no caller is left to hear what it throws
@@ -235,7 +246,7 @@ Client::tell_connect(ConnectionCallback const &callback, bool ok, std::string co
 }
 
 void
-Client::tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who) {
+Client::tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who, std::uint64_t batch_id) {
     if (given_now(who)) {
         try {
             call_now([&] { callback(std::move(responses)); });
@@ -244,7 +255,7 @@ Client::tell_batch(BatchResponseCallback callback, std::vector<qb::http::Respons
         }
         return;
     }
-    owe([callback = std::move(callback), responses = std::move(responses)]() mutable { callback(std::move(responses)); });
+    owe([callback = std::move(callback), responses = std::move(responses)]() mutable { callback(std::move(responses)); }, 0, batch_id);
 }
 
 void
@@ -265,7 +276,7 @@ Client::give(RequestContext &ctx, qb::http::Response response, from who) {
         return;
     }
     // Behind what is owed: the request ends here, its callback and its answer wait for the client's turn.
-    owe([callback = std::move(ctx.callback), response = std::move(response)]() mutable { callback(std::move(response)); });
+    owe([callback = std::move(ctx.callback), response = std::move(response)]() mutable { callback(std::move(response)); }, ctx.request_id);
 }
 
 void
@@ -281,7 +292,7 @@ Client::batch_member_answered(std::uint64_t batch_id, std::size_t index, qb::htt
         auto done      = std::move(batch.callback);
         auto responses = std::move(batch.responses);
         _active_batches.erase(it);
-        tell_batch(std::move(done), std::move(responses), who);
+        tell_batch(std::move(done), std::move(responses), who, batch_id);
     }
 }
 
@@ -786,14 +797,32 @@ Client::cancel_request(request_id id, std::string const &reason) {
         return false;
     }
     const auto stream_id = active->first; // the client is kept through the callback and the RFC 9114 §4.1 stream reset (above)
-    fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST, from::the_client);
+    // What the callback of the cancelled request throws reaches this call, once the cancellation is whole: the stream
+    // reset, then the pass for what waited for it -- the form of disconnect(). Thrown on at once, it left the stream
+    // unreset, its state kept by the client, and a request that waited for it queued until the next push (Huly
+    // QB-1246).
+    std::exception_ptr thrown;
+    try {
+        fail_request(stream_id, reason, qb::http::status::CLIENT_CLOSED_REQUEST, from::the_client);
+    } catch (...) {
+        thrown = std::current_exception();
+    }
     try {
         reset_stream(0, stream_id, NGHTTP3_H3_REQUEST_CANCELLED);
     } catch (...) {
         // the reset could not be written: the stream ends with its connection. Thrown on, it left the pass below unrun:
         // a request that waited for this stream stayed queued until the next push (Huly QB-1246)
     }
-    process_pending_requests(from::the_client);
+    try {
+        process_pending_requests(from::the_client);
+    } catch (...) {
+        if (!thrown) {
+            thrown = std::current_exception();
+        }
+    }
+    if (thrown) {
+        std::rethrow_exception(thrown);
+    }
     return true;
 }
 
@@ -885,7 +914,7 @@ Client::push_requests(std::vector<qb::http::Request> requests, BatchResponseCall
         // single request's is: inside this push, or on the client's turn when a callback of this client is on the stack
         // or an answer is owed, where a callback that pushes its batch back was called without end (Huly QB-1246).
         // Through the batch's own callback: `callback` was moved into it above, and is empty here.
-        tell_batch(std::move(batch->callback), std::move(batch->responses), from::the_client);
+        tell_batch(std::move(batch->callback), std::move(batch->responses), from::the_client, batch_id);
         return admitted_all;
     }
 
@@ -923,9 +952,8 @@ Client::time_pending() noexcept {
 
 void
 Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
-    // Out of the queue, and the batch with its callback. A member already in flight needs nothing here: an exception
-    // leaves a push with one in flight only when a submission of that push was cut short, which ends the connection,
-    // and that close answers a member through its batch alone -- gone below.
+    // Out of the queue, and the batch with its callback. A member already in flight needs nothing here: its answer
+    // finds no batch, and is dropped (batch_member_answered()).
     for (auto queued = _pending_requests.begin(); queued != _pending_requests.end();) {
         if (*queued && ((request_id != 0 && (*queued)->request_id == request_id) || (batch_id != 0 && (*queued)->batch_id == batch_id))) {
             ++_failed_requests;
@@ -936,6 +964,24 @@ Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
     }
     if (batch_id != 0) {
         _active_batches.erase(batch_id); // with its callback, unheard
+    }
+    // It may have left the queue before the exception: a pass took it -- one a callback ran by pushing, before that
+    // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw.
+    // Submitted, it stays in flight and its answer is dropped when it comes; refused or failed there, its answer was
+    // kept for the client's turn, and is never heard. Either was heard after the push had thrown: thrown at AND
+    // answered (Huly QB-1246).
+    if (request_id != 0) {
+        for (auto &[stream, ctx] : _active_requests) {
+            (void) stream;
+            if (ctx && ctx->request_id == request_id) {
+                ctx->callback = &dropped;
+            }
+        }
+    }
+    for (auto &kept : _owed) {
+        if ((request_id != 0 && kept.request == request_id) || (batch_id != 0 && kept.batch == batch_id)) {
+            kept.answer = &unheard; // its place is kept: a turn counts what it hears
+        }
     }
 }
 
@@ -957,12 +1003,21 @@ Client::process_pending_requests(from who, std::uint64_t own_request, std::uint6
         // the pass had destroyed as the pass let go of it -- the failure callback of another request, when a cut
         // submission ends the connection, or one that drops the last reference and throws (Huly QB-1246).
         withdraw(own_request, own_batch);
+        // The others the pass carried go on: it runs again, to its end, whatever one more callback throws, and the
+        // first exception goes on to the call once that is done -- the form of disconnect(). Thrown on at once, it
+        // left the request behind the one whose callback threw unsubmitted until the next push (Huly QB-1246). After
+        // a submission cut short there is nothing to go on with: the connection is ending.
+        try {
+            submit_pending(who, 0, 0, true);
+        } catch (...) {
+            // what the client itself failed at (a submission cut short): the first exception is still the outcome
+        }
         throw;
     }
 }
 
 void
-Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_batch) {
+Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_batch, bool a_throw_is_kept) {
     if (!_h3 || !is_connected() || _remote_shutdown) {
         return;
     }
@@ -1036,14 +1091,18 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
             ++_failed_requests;
             if (thrown_at_its_own_call) {
                 ctx.reset(); // unanswered: the exception is its outcome
-            } else if (who == from::the_loop) {
+                return;
+            }
+            // The answer is the client's own, made before any containment: what it fails to allocate is not something
+            // a callback threw, and is not logged as one.
+            auto refusal = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why);
+            if (who == from::the_loop) {
                 // A refusal is the client's own answer, given by its rule, but here the loop is who submits: no call of
                 // the program is there to hear what its callback throws. Contained, and the pass goes on to what waits
                 // behind (Huly QB-1246).
-                qb::http::detail::contained(
-                    "HTTP/3", [&] { refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why)); });
+                qb::http::detail::contained("HTTP/3", [&] { refuse_request(std::move(ctx), std::move(refusal)); });
             } else {
-                refuse_request(std::move(ctx), create_error_response(qb::http::status::SERVICE_UNAVAILABLE, why));
+                refuse_request(std::move(ctx), std::move(refusal));
             }
         };
         std::exception_ptr transition_error     = cut_short; // the submission's own exception is the one that goes on
@@ -1106,7 +1165,10 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
             if (cut_short) {
                 std::rethrow_exception(cut_short);
             }
-            if (heard_error) {
+            if (heard_error && !a_throw_is_kept) {
+                // The callback of this refusal threw, under a call of the program -- under the loop it is contained
+                // above. The first one leaves the pass: process_pending_requests() takes back what that call pushed,
+                // then runs the pass again for the others, where what one more callback throws is dropped.
                 std::rethrow_exception(heard_error);
             }
             continue;
@@ -1253,7 +1315,6 @@ Client::fail_all_requests(std::string const &error, from who) {
         capture([&] { give(*ctx, create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error), who); });
     }
     for (auto &[id, batch] : batches) {
-        (void) id;
         capture([&] {
             for (std::size_t i = 0; i < batch->responses.size(); ++i) {
                 if (i >= batch->completed.size() || !batch->completed[i]) {
@@ -1261,7 +1322,7 @@ Client::fail_all_requests(std::string const &error, from who) {
                     batch->responses[i] = create_error_response(qb::http::status::SERVICE_UNAVAILABLE, error);
                 }
             }
-            tell_batch(std::move(batch->callback), std::move(batch->responses), who);
+            tell_batch(std::move(batch->callback), std::move(batch->responses), who, id);
         });
     }
     return callback_error;
