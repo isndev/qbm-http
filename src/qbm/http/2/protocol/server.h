@@ -31,6 +31,7 @@
 #include <cstddef>     // std::size_t: the length of the literal detail::name_is compares with (Huly QB-1270)
 #include <cstring>     // std::memcpy: a streamed body's piece into its stream's buffer (Huly QB-86); std::memcmp: name_is
 #include <concepts>    // std::convertible_to: counts_appended_output (Huly QB-1212)
+#include <limits>      // std::numeric_limits: a newcomer's place among the turns, a turn with no cap (Huly QB-1248)
 #include <string_view> // detail::name_is
 
 #include <qb/utility/branch_hints.h> // QB_GNU_ALWAYS_INLINE: detail::name_is (Huly QB-1270)
@@ -87,6 +88,16 @@ namespace qb::protocol::http2 {
 template <typename IO>
 concept counts_appended_output = requires(IO const &io) {
     { io.appended_total() } -> std::convertible_to<std::uint64_t>;
+};
+
+/// Whether the io also counts what its socket took of that output (`drained_total()`, on the same count: the HTTP/2
+/// session's). The idle sweep then reads a response's progress there -- on what the socket TAKES of the stream's
+/// frames, not on what the protocol queued: a download that flows slowly is not idle, a frame queued behind a socket
+/// that takes nothing is no progress (Huly QB-1248). A handler without it, such as the unit tests' plain fake, keeps
+/// the older reading: a response frame written is progress.
+template <typename IO>
+concept counts_drained_output = counts_appended_output<IO> && requires(IO &io) {
+    { io.drained_total() } -> std::convertible_to<std::uint64_t>;
 };
 
 namespace detail {
@@ -184,6 +195,7 @@ private:
     /// the order they were answered: send_waiting_push_responses() sends them (Huly QB-1202).
     std::vector<uint32_t> _waiting_push_responses;
     bool                  _sending_waiting_push_responses = false;
+    bool                  _serving_turns                  = false; ///< resume_waiting_streams() is serving a round of turns
     /// The promised stream send_waiting_push_responses() is sending: it alone passes the responses waiting behind it.
     uint32_t _push_response_leaving = 0;
     /// A GOAWAY received: no promised stream opens any more (RFC 9113 §6.8, Huly QB-1202).
@@ -313,6 +325,10 @@ public:
         _peer_goaway_received  = false;
 
         _streams_wait_for_socket = false; // the streams that waited for the socket's room are gone (Huly QB-86)
+        // What the sweep and the turns keep from one call to the next, and the header block a reset left to be
+        // dropped: the first block of the connection that follows was dropped as the rest of it (Huly QB-1248).
+        _progress                = {};
+        _discarding_header_block = false;
 
         _hpack_decoder.reset();
         _hpack_encoder.reset();
@@ -536,7 +552,7 @@ public:
             return;
         }
 
-        // Send WINDOW_UPDATE for stream if necessary
+        request_progress(stream, data_event.payload.data_payload.size()); // its octets (QB-1248); then its WINDOW_UPDATE, if due
         stream.processed_bytes_for_window_update += data_payload_size;
         if (stream.processed_bytes_for_window_update >= stream.window_update_threshold
             && stream.window_update_threshold > 0) { // only if threshold > 0
@@ -609,12 +625,12 @@ public:
                 this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
                 return;
             }
-
             LOG_HTTP_DEBUG_PA(stream_id, "Server: Creating new stream for client request");
             Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
             auto              emp_res = _server_streams.emplace(stream_id, std::move(new_stream));
             stream_ptr                = &emp_res.first->second;
             _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_highest_client_stream_id, stream_id);
+            request_progress(); // a request's first HEADERS: its header block has the whole timeout from here (Huly QB-1248)
         } else {
             stream_ptr = &it->second;
         }
@@ -858,6 +874,10 @@ public:
                     break;
 
                 case Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE:
+                    // The window lets waiting streams send (resume_waiting_streams()): a turn that reset its stream may
+                    // have had its observer clear the io's protocols. That reset saw this protocol retired and ended
+                    // its part (retired()): the entries that follow in this frame write nothing through it, and its
+                    // ACK does not leave (Huly QB-1248).
                     this->update_initial_peer_window_size(value);
                     break;
 
@@ -894,9 +914,15 @@ public:
             return;
         }
         LOG_HTTP_DEBUG_PA(0, "Server: Processed SETTINGS frame from client. Sending ACK.");
-        // A SETTINGS_MAX_CONCURRENT_STREAMS raised makes room for a promised response that waits (Huly QB-1202).
+        // A SETTINGS_MAX_CONCURRENT_STREAMS raised makes room for a promised response that waits (Huly QB-1202) -- for
+        // several at once, which share the connection's window as every stream that waits does: their heads leave
+        // here, their DATA in turns. Sent one after the other as far as the windows went, the first took the whole of
+        // the connection's window and the others none (the sixth independent review, Huly QB-1248).
         if (!_waiting_push_responses.empty()) [[unlikely]] {
+            const bool nested = std::exchange(_serving_turns, true);
             send_waiting_push_responses();
+            _serving_turns = nested;
+            resume_waiting_streams();
         }
     }
 
@@ -960,6 +986,8 @@ public:
                     // Application observers cannot escape this noexcept frame
                     // handler. The native reset still closes the stream below.
                 }
+                // Not retired(), which reads this object: outside a read pass a clear the observer makes destroys this
+                // protocol at once, under its own handler -- nothing of it is read past the observer but its address.
                 if constexpr (requires(IO_Handler &io, ServerHttp2Protocol *active) { io.protocol() == active; }) {
                     if (io_handler.protocol() != this)
                         return;
@@ -1106,26 +1134,7 @@ public:
                 return;
             }
             this->_connection_send_window += window_increment;
-            // Snapshot candidate stream ids first: try_send_pending_data_for_stream
-            // may flush a stream to CLOSED and erase it from _server_streams, which
-            // would invalidate a live iterator into the map mid-loop (UAF).
-            std::vector<uint32_t> pending_ids;
-            pending_ids.reserve(_server_streams.size());
-            for (auto &pair : _server_streams) {
-                if (pair.second.has_pending_data_to_send)
-                    pending_ids.push_back(pair.first);
-            }
-            for (uint32_t pending_id : pending_ids) {
-                auto it = _server_streams.find(pending_id);
-                if (it == _server_streams.end())
-                    continue; // erased by an earlier flush in this loop
-                if (it->second.has_pending_data_to_send) {
-                    try_send_pending_data_for_stream(it->first, it->second);
-                    if (!this->_connection_active)
-                        break;
-                }
-            }
-
+            resume_waiting_streams(); // the credit is every waiting stream's: in turns (Huly QB-1248)
         } else {
             auto it = _server_streams.find(stream_id);
             if (it == _server_streams.end()) {
@@ -1159,7 +1168,11 @@ public:
             }
 
             stream.peer_window_size += window_increment;
-            stream.progressed_since_idle_sweep = true; // the client is reading this stream
+            // No progress of its own on an io that counts its output: the DATA it lets out is, once the socket takes it
+            // (cleanup_idle_streams()). On one that does not, it is the sign that the client reads a response -- once the
+            // request is dispatched, and not before: until then it acknowledges nothing of the request (Huly QB-1248).
+            if constexpr (!counts_drained_output<IO_Handler>)
+                stream.progressed_since_idle_sweep = stream.progressed_since_idle_sweep || stream.request_dispatched;
 
             if (stream.has_pending_data_to_send) {
                 // QB_LOG_TRACE_PA(this->getName(), "Server: Stream " << stream_id << " has pending data. Attempting to send.");
@@ -1260,6 +1273,7 @@ public:
             return false; // Or send RST_STREAM(STREAM_CLOSED) if appropriate
         }
         Http2ServerStream &stream = it->second;
+        handler_hands_over(stream);
 
         if (stream.state == Http2StreamConcreteState::IDLE) {
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send response on stream in IDLE state");
@@ -1377,7 +1391,7 @@ public:
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send response HEADERS");
             return false;
         }
-        stream.progressed_since_idle_sweep = true;
+        response_frame_written(stream);
 
         // Update stream state AFTER successful send of HEADERS frame
         if (header_flags & FLAG_END_STREAM) {
@@ -1446,7 +1460,8 @@ public:
             LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to begin a streamed response on a stream that cannot take one");
             return false;
         }
-        Http2ServerStream                             &stream    = it->second;
+        Http2ServerStream &stream = it->second;
+        handler_hands_over(stream);
         std::vector<qb::protocol::hpack::HeaderField> &hf_vector = _response_header_fields;
         const ClearedOnExit                            response_fields_cleared{hf_vector};
         std::optional<std::uint64_t>                   declared_content_length;
@@ -1475,8 +1490,8 @@ public:
             LOG_HTTP_ERROR_PA(stream_id, "ServerHttp2Protocol: Failed to send streamed response HEADERS");
             return false;
         }
-        stream.progressed_since_idle_sweep = true;
-        stream.response_sent               = true;
+        response_frame_written(stream);
+        stream.response_sent = true;
         if (head_only) {
             // The response to HEAD carries no content (RFC 9110 §9.3.2): its HEADERS end the stream (Huly QB-527).
             stream.end_stream_sent = true;
@@ -1511,6 +1526,7 @@ public:
         }
         Http2ServerStream &stream = it->second;
         if (!bytes.empty()) {
+            handler_hands_over(stream);
             std::memcpy(stream.streamed->buffer.allocate_back(bytes.size()), bytes.data(), bytes.size());
         }
         flush_streamed_response(stream_id, stream); // `stream` may dangle past it: a last piece can close the stream
@@ -1536,7 +1552,8 @@ public:
             || !_connection_active) {
             return false; // a connection that is closing takes no end either: nothing may leave after its GOAWAY (Huly QB-86)
         }
-        Http2ServerStream        &stream = it->second;
+        Http2ServerStream &stream = it->second;
+        handler_hands_over(stream);
         qb::http::Response const &source = final_response ? *final_response : stream.response_to_send;
         if (source.has_trailers() || source.has_header(qb::http::well_known::TRAILER_SV)) {
             const auto plan = qb::http::detail::plan_outgoing_trailers(source, source.has_trailers() ? &source.trailers() : nullptr);
@@ -1635,18 +1652,86 @@ public:
             return;
         }
         _streams_wait_for_socket = false;
-        std::vector<uint32_t> ids;
-        for (const auto &[stream_id, stream] : _server_streams) {
-            if (stream.streaming && stream.has_pending_data_to_send && !stream.is_closed()) {
-                ids.push_back(stream_id);
+        resume_waiting_streams(); // the room is every waiting stream's: in turns (Huly QB-1248)
+    }
+
+    /**
+     * @brief Let the streams that wait send, in turns (Huly QB-1248): one DATA frame a stream, of 16 KiB at most
+     *        (`turn_octets`), the least recently served first, round after round until none can send. Credit the
+     *        connection received, stream windows a SETTINGS reopened together, room the socket made: each is shared by
+     *        the streams it can serve. Served in the table's order, the first took everything every time. Each round
+     *        finds its streams again: a turn can close and erase its stream, others with it, and DATA handed in while
+     *        the turns are served -- a pushed response the turn that ended its neighbour lets out, a response or a
+     *        streamed piece an observer writes from inside a turn -- waits for the next round, at the place its stream
+     *        takes there and then (waits_for_a_turn()). A stream the turns find waiting for the first time takes its
+     *        place behind those already waiting, by its id among the newcomers: served "from the one after the last
+     *        served" by id, a download was passed over for ever by newer streams pending at each credit. A stream alone
+     *        sends everything its windows allow -- and, a streamed response, the socket's room --, as before.
+     */
+    void
+    resume_waiting_streams() noexcept {
+        if (!this->ok() || !_connection_active) {
+            return;
+        }
+        // The streams that wait, by the place each has -- the least recently served first --, each found again by its
+        // id: a turn can close and erase its stream, and others with it. A newcomer takes its place here.
+        std::vector<std::pair<std::uint64_t, uint32_t>> order;
+        const auto                                      waiting = [this, &order] {
+            constexpr auto newcomer = std::numeric_limits<std::uint64_t>::max();
+            order.clear();
+            for (const auto &[stream_id, stream] : _server_streams) {
+                if (stream.has_pending_data_to_send && !stream.is_closed()) {
+                    order.emplace_back(stream.turn != 0 ? stream.turn : newcomer, stream_id);
+                }
+            }
+            std::sort(order.begin(), order.end());
+            for (const auto &[place, stream_id] : order) {
+                if (place == newcomer) {
+                    _server_streams.find(stream_id)->second.turn = ++_progress.turns;
+                }
+            }
+        };
+        waiting();
+        if (order.empty()) {
+            return;
+        }
+        if (order.size() == 1) {
+            const auto it = _server_streams.find(order.front().second);
+            try_send_pending_data_for_stream(it->first, it->second); // `it` may be erased past it
+            return;
+        }
+        const bool nested = std::exchange(_serving_turns, true);
+        for (bool sent = true; sent; waiting()) {
+            sent                        = false;
+            const std::uint32_t awaited = _progress.turns_awaited;
+            for (const auto &[place, stream_id] : order) {
+                const auto it = _server_streams.find(stream_id);
+                if (it == _server_streams.end() || !it->second.has_pending_data_to_send || it->second.is_closed()) {
+                    continue;
+                }
+                const std::uint32_t written = _progress.frames_written;
+                try_send_pending_data_for_stream(stream_id, it->second, true); // one frame; `it` may be erased past it
+                // A turn can refuse its stream's trailer section and reset it: the connection may have ended there -- as
+                // it has, for this protocol, when the reset's observer retired it (retired()).
+                if (!this->ok() || !_connection_active) {
+                    _serving_turns = nested;
+                    return;
+                }
+                if (_progress.frames_written != written) {
+                    sent = true;
+                    if (const auto served = _server_streams.find(stream_id); served != _server_streams.end()) {
+                        served->second.turn = ++_progress.turns; // served: behind every stream that waits
+                    }
+                }
+            }
+            // DATA handed in during the round waits for a turn (waits_for_a_turn()): another round, whatever this one
+            // sent -- handed in by the observer of a turn that reset its stream and sent nothing, it waited for a
+            // credit the connection already had.
+            if (_progress.turns_awaited != awaited) {
+                sent = true;
             }
         }
-        for (const uint32_t stream_id : ids) {
-            const auto it = _server_streams.find(stream_id);
-            if (it != _server_streams.end() && it->second.streaming && it->second.has_pending_data_to_send && !it->second.is_closed()) {
-                flush_streamed_response(stream_id, it->second); // `it` may be erased past it
-            }
-        }
+        _serving_turns = nested;
     }
 
     /// Whether `stream_id` carries a streamed response whose END_STREAM has not left (Huly QB-86).
@@ -1787,25 +1872,62 @@ public:
     }
 
     /**
-     * @brief Cleanup idle streams to prevent DDoS attacks
+     * @brief Reset the streams that have made no progress for too long (the idle sweep)
      *
-     * Removes streams that have been idle for too long or incomplete for too long.
-     * This prevents resource exhaustion from malicious clients opening many streams.
+     * A stream is bounded by the time since its last progress, by a bound that depends on whose turn it is:
+     * - a request not yet complete, by @p max_incomplete (and by @p max_idle): its own frames move the clock -- the
+     *   stream's opening, then each DATA that brings octets --, so a stalled upload cannot hold a stream and a flowing
+     *   one is never cut;
+     * - a response its peer has not taken -- DATA a flow-control window or the socket's room holds back, frames still
+     *   queued for the socket, a pushed response waiting for room under the client's concurrency limit --, by
+     *   @p max_idle: the clock starts when the application hands the stream something at a moment its peer owed it
+     *   nothing (handler_hands_over()), and on an io that counts its output (`counts_drained_output`) it moves when
+     *   the socket takes octets while the stream has frames queued for it -- its own or those in front of them --, so
+     *   a download that flows slowly is not idle, a frame queued behind a socket that takes nothing, or written after
+     *   its last drain, is no progress, and a WINDOW_UPDATE counts by the DATA it lets out, once taken; on an io that
+     *   does not count, when a response frame is written or a stream WINDOW_UPDATE arrives. And a response that waits
+     *   on what the connection shares -- DATA its own window does not hold back: the connection's window, the socket's
+     *   room, its turn (resume_waiting_streams()) -- moves with the connection's DATA, any stream's, read the same way:
+     *   the peer that takes it is taking the connection, and the turns bring each stream its share;
+     * - a dispatched request with nothing waiting for its peer -- its handler has not answered, or not finished --,
+     *   by @p max_unanswered: the clock moves at the dispatch, then with the response as above. The bound holds as
+     *   it is handed in: one its caller lowered applies at once to a request that has been its handler's for longer.
      *
-     * A stream's idle time runs from its last real progress -- response HEADERS or DATA sent, a
-     * stream WINDOW_UPDATE received -- as seen by the sweep that observed it (the frame path only
-     * marks the stream, the sweep stamps the time): a response still progressing is not idle
-     * (Huly QB-531). A request not yet complete is also bounded by its age since the stream
-     * opened, whatever happened on it, so a slow upload cannot hold a stream indefinitely.
+     * The frame path only marks, and the time is the sweep's (@p now, handed in: the caller's clock): a bound is met
+     * within two sweeps of its expiry. A stream reset while its header block is still arriving leaves the block to be
+     * read and dropped (send_rst_stream()); a refused block left open -- that one, or one refused at its HEADERS -- for
+     * @p max_incomplete (and @p max_idle) from the sweep that first sees it ends the connection,
+     * GOAWAY(ENHANCE_YOUR_CALM). The reset's observer may retire this protocol -- the sweep stops there --, so the
+     * caller holds its io's `protocol_pass()` unless it runs inside the read dispatch (Huly QB-1248).
      *
-     * @param max_idle Maximum idle time before cleanup (default: 30s)
-     * @param max_incomplete Maximum age of a stream whose request is not complete (default: 10s)
-     * @return Number of streams cleaned up
+     * @param now The time of this sweep, on the clock of the streams' `created_at` (the steady clock)
+     * @param max_idle Longest time without progress of a response its peer has not taken
+     * @param max_incomplete Longest time without progress of a request not yet complete
+     * @param max_unanswered Longest time without progress of a dispatched request with nothing waiting for its peer
+     * @return Number of streams reset
      */
     uint32_t
-    cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
-        uint32_t   cleaned_count = 0;
-        const auto now           = std::chrono::steady_clock::now();
+    cleanup_idle_streams(std::chrono::steady_clock::time_point now, qb::duration max_idle, qb::duration max_incomplete,
+                         qb::duration max_unanswered) noexcept {
+        // A connection that has ended has nothing to reset: no frame leaves it (send_rst_stream()), so a stream past
+        // its bound was erased without its RST_STREAM and without its observer, and counted -- under a session that
+        // outlives its protocol for a delivery (the drain's last GOAWAY), a handler that answered later found no
+        // stream, and the response it never sent was reported as sent (the eighth independent review).
+        if (!this->ok()) {
+            return 0;
+        }
+        uint32_t cleaned_count = 0;
+        // What the socket took of the connection's output since the last sweep is the progress of every stream that had
+        // frames in it by then: the drain is in order, so each octet taken brings every frame behind it nearer.
+        const std::uint64_t swept   = _progress.swept;
+        std::uint64_t       drained = swept;
+        if constexpr (counts_drained_output<IO_Handler>)
+            drained = this->_io.drained_total();
+        _progress.swept = drained;
+        // The connection's DATA, read the same way: the progress of the responses that wait on what the connection
+        // shares (waits_on_the_connection()).
+        const bool data_flowed = _progress.data_flowed || taken_since(_progress.data_mark, _progress.data_queued_from, swept, drained);
+        _progress.data_flowed  = false;
 
         // The ids first, each found again: a stream reset below closes, and its close can send a promised response that
         // waits (send_waiting_push_responses), whose stream may end and be erased at once -- the stream an iterator held
@@ -1814,6 +1936,11 @@ public:
         stream_ids.reserve(_server_streams.size());
         for (const auto &pair : _server_streams)
             stream_ids.push_back(pair.first);
+        // What the resets let out -- pushed responses that waited for the room the reset streams held, a response or a
+        // piece their observers write -- takes turns once the walk is over, as what a SETTINGS frame lets out together
+        // does: two pushed streams reset by one sweep let two responses out, and the first, sent as far as the windows
+        // went, took the whole of the connection's window (the seventh independent review).
+        const bool nested = std::exchange(_serving_turns, true);
         for (const uint32_t stream_id : stream_ids) {
             const auto it = _server_streams.find(stream_id);
             // Skip already closed streams
@@ -1821,41 +1948,76 @@ public:
                 continue;
             auto &stream = it->second;
 
-            if (stream.progressed_since_idle_sweep) {
+            // The socket took octets while its frames were queued; or it waits on what the connection shares, and the
+            // connection's DATA flowed.
+            if (stream.progressed_since_idle_sweep || taken_since(stream.output_mark, stream.queued_from, swept, drained)
+                || (data_flowed && waits_on_the_connection(stream))) {
                 stream.progressed_since_idle_sweep = false;
                 stream.last_activity               = now;
             }
-            const auto idle_time         = now - stream.last_activity;
+
+            // Whose turn it is: the client's (its request is not complete), the peer's (it has not taken what the
+            // response has for it), or the handler's.
+            const bool is_incomplete = !stream.request_dispatched
+                                       && (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::OPEN);
+            const auto bound     = is_incomplete ? std::min(max_incomplete, max_idle) : peer_owes(stream, drained) ? max_idle : max_unanswered;
+            const auto idle_time = now - stream.last_activity;
             const auto idle_time_seconds = std::chrono::duration_cast<std::chrono::seconds>(idle_time).count();
-
-            // Check for incomplete streams (not dispatched yet)
-            bool is_incomplete = !stream.request_dispatched
-                                 && (stream.state == Http2StreamConcreteState::IDLE || stream.state == Http2StreamConcreteState::OPEN);
-
-            // Check for idle timeout
-            bool should_cleanup = false;
-            if (is_incomplete && now - stream.created_at > max_incomplete) {
+            if (idle_time <= bound)
+                continue;
+            if (is_incomplete) {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up incomplete stream (idle for " << idle_time_seconds << "s)");
-                should_cleanup = true;
-            } else if (idle_time > max_idle) {
+            } else {
                 LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Cleaning up idle stream (idle for " << idle_time_seconds << "s)");
-                should_cleanup = true;
             }
 
-            if (should_cleanup) {
-                // send_rst_stream() (close_context defaults to true) closes and ERASES this
-                // stream's context: `stream` dangles past it.
-                this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
-                _server_streams.erase(stream_id); // idempotent safety net (reclaims if send_rst_stream didn't, e.g. !ok())
-                cleaned_count++;
+            // send_rst_stream() (close_context defaults to true) closes and ERASES this
+            // stream's context: `stream` dangles past it.
+            this->send_rst_stream(stream_id, ErrorCode::CANCEL, "Stream idle timeout (" + std::to_string(idle_time_seconds) + "s)");
+            _server_streams.erase(stream_id); // idempotent safety net (reclaims if send_rst_stream didn't, e.g. !ok())
+            cleaned_count++;
+            // The reset's observer cancelled a context: a hook of it may have cleared the io's protocols. This one is
+            // then retired -- alive until its caller's pass ends -- and sends nothing more.
+            if (retired())
+                break;
+        }
+        _serving_turns = nested;
+
+        // A refused header block left open -- refused at its HEADERS, or the rest of a block whose stream was reset
+        // while it arrived, by this sweep too -- is its client's to end, and has that client's bound from the sweep
+        // that first sees it; its CONTINUATION frames move nothing. No stream is left to bound it by, and the session's
+        // timeout, which the server's own writes on another stream restart, bounded neither the block nor what it
+        // holds -- up to MAX_HEADER_BLOCK_SIZE, on a connection that may send nothing else while the block is open
+        // (RFC 9113 section 6.10) -- for as long as an event stream the client had opened first kept writing.
+        if (_discarding_header_block) [[unlikely]] {
+            if (!std::exchange(_progress.refused_block_seen, true)) {
+                _progress.refused_block_since = now;
+            } else if (now - _progress.refused_block_since > std::min(max_incomplete, max_idle)) {
+                this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Refused header block left open past its bound");
             }
         }
 
         if (cleaned_count > 0) {
             LOG_HTTP_INFO("ServerHttp2Protocol: Cleaned up " << cleaned_count << " idle/incomplete streams");
+            resume_waiting_streams(); // what the resets let out, in turns: nothing on a connection that ended above
         }
 
         return cleaned_count;
+    }
+
+    /// The sweep at the steady clock's time, with one bound for every dispatched request (@p max_idle), as it was before
+    /// a response its peer has not taken and a request its handler has not answered were told apart.
+    uint32_t
+    cleanup_idle_streams(qb::duration max_idle = std::chrono::seconds(30), qb::duration max_incomplete = std::chrono::seconds(10)) noexcept {
+        return cleanup_idle_streams(std::chrono::steady_clock::now(), max_idle, max_incomplete, max_idle);
+    }
+
+    /// Whether the connection has something the sweep may have to end -- a stream, or a refused header block left
+    /// open, which has none: the session sweeps while it has (Huly QB-1248). A connection that has ended has nothing
+    /// of the kind, whatever its table still holds.
+    [[nodiscard]] bool
+    has_streams() const noexcept {
+        return this->ok() && (!_server_streams.empty() || _discarding_header_block);
     }
 
     /**
@@ -1897,6 +2059,11 @@ public:
             it->second.state           = Http2StreamConcreteState::CLOSED; // RST_STREAM immediately closes the stream
             it->second.rst_stream_sent = true;
             it->second.error_code      = error_code;
+            // Its header block is still arriving -- a reset from outside the frame flow, the idle sweep's: the block's
+            // CONTINUATION frames are read for the HPACK table and dropped, as a refused block's are. They met an
+            // unknown stream, a connection error of the server's own making (Huly QB-1248).
+            if (_current_header_stream_id == stream_id)
+                _discarding_header_block = true;
             LOG_HTTP_DEBUG_PA(stream_id, "ServerHttp2Protocol: Stream marked as CLOSED due to sent RST_STREAM");
 
             // Notify IO_Handler if request wasn't dispatched or response wasn't fully sent
@@ -1904,6 +2071,12 @@ public:
                 Http2StreamErrorEvent stream_error_event{stream_id, error_code, "RST_STREAM sent by server: " + context_msg};
                 if constexpr (qb::has_on<IO_Handler, Http2StreamErrorEvent>) {
                     this->get_io_handler().on(stream_error_event);
+                }
+                // The observer cancelled a context, and a hook of it may have cleared the io's protocols: this one
+                // is then retired, and closing the stream's context would let a pushed response that waits for its
+                // room out through it. The RST_STREAM handler returns at the same point (Huly QB-1248).
+                if (retired()) [[unlikely]] {
+                    return;
                 }
             }
             // close_context is false when RST is sent from deep inside a frame
@@ -2047,8 +2220,9 @@ private:
     void
     clear_header_assembly_state() noexcept {
         _current_header_block_fragment.clear();
-        _current_header_stream_id = 0;
-        _discarding_header_block  = false;
+        _current_header_stream_id    = 0;
+        _discarding_header_block     = false;
+        _progress.refused_block_seen = false; // the next refused block has a clock of its own (cleanup_idle_streams())
     }
 
     /**
@@ -2071,6 +2245,14 @@ private:
         _discarding_header_block  = true;
         _continuation_frame_count = 0;
         this->append_discarded_header_fragment(fragment, end_headers);
+        // Left open, it has no stream, and the sweep is what bounds it (cleanup_idle_streams()): the io is told, through
+        // its `http2_refused_block_open()` when it has one, found as `http2_request_progress()` is. A session whose
+        // last stream had ended sweeps no more -- its tick found nothing and armed no other --, and the block, on a
+        // session with no timeout, was held for ever (the seventh independent review, Huly QB-1248).
+        if (_discarding_header_block) {
+            if constexpr (requires(IO_Handler &io) { io.http2_refused_block_open(); })
+                this->_io.http2_refused_block_open();
+        }
     }
 
     /**
@@ -2408,6 +2590,13 @@ private:
 
         // stream.is_trailers was set by send_response(): the response has a trailer section.
 
+        // A response sent while the waiting streams take their turns -- a pushed one the turn that ended its
+        // neighbour lets out, one an observer answers from inside a turn -- takes its own: its DATA waits for the next
+        // round. Sent here as far as the windows went, it took the round's credit inside a turn that was not its own
+        // (the fourth independent review, Huly QB-1248).
+        if (stream.send_buffer_offset < body_size && waits_for_a_turn(stream)) {
+            return true;
+        }
         while (stream.send_buffer_offset < body_size) {
             if (stream.peer_window_size <= 0 || _connection_send_window <= 0) {
                 stream.has_pending_data_to_send = true; // Mark that body data remains unsent
@@ -2470,7 +2659,7 @@ private:
                 return false;                            // Indicate send failure
             }
 
-            stream.progressed_since_idle_sweep = true;
+            response_data_written(stream);
             if (header_to_send.flags & FLAG_END_STREAM) {
                 stream.end_stream_sent = true;
                 stream.state           = Http2StreamConcreteState::HALF_CLOSED_LOCAL;
@@ -2561,8 +2750,9 @@ private:
             }
 
             // CRITICAL: dispatched BEFORE _io.on(), which may answer and close the stream, the reference dying with it.
-            stream.request_dispatched = true;
-            ++_client_streams_opened; // a request the application serves, which the Rapid Reset guard weighs (Huly QB-1244)
+            stream.request_dispatched          = true;
+            stream.progressed_since_idle_sweep = true; // its handler's turn begins: the sweep's clock for it (Huly QB-1248)
+            ++_client_streams_opened;                  // a request the application serves, which the Rapid Reset guard weighs (Huly QB-1244)
 
             // _io.on() runs the application layer (router, middleware, sync
             // handlers) synchronously. It is reached from the noexcept frame
@@ -2804,10 +2994,11 @@ private:
         for (auto &pair : _server_streams)
             stream_ids.push_back(pair.first);
 
+        bool reopened = false; // a stream that waited has a window again
         for (uint32_t sid : stream_ids) {
             auto it = _server_streams.find(sid);
             if (it == _server_streams.end())
-                continue; // erased by an earlier flush in this loop
+                continue; // erased by the reset of an earlier one
             Http2ServerStream &stream = it->second;
             // RFC 9113 §6.9.2 adjusts EVERY stream window the endpoint maintains, and the one that
             // matters most is the stream answering a request that has already ended:
@@ -2841,9 +3032,14 @@ private:
                 // WINDOW_UPDATE brings it back positive. The client side (client.h) has always got
                 // this right; this brings the server in line with it and with the RFC.
                 if (old_stream_peer_window <= 0 && stream.peer_window_size > 0 && stream.has_pending_data_to_send) {
-                    this->try_send_pending_data_for_stream(stream.id, stream);
+                    reopened = true;
                 }
             }
+        }
+        // Every window first, then the turns: the streams the setting reopened together share the connection's window
+        // (Huly QB-1248). Served one after the other as each window changed, the first took all of it.
+        if (reopened) {
+            resume_waiting_streams();
         }
     }
 
@@ -2855,9 +3051,10 @@ private:
      *
      * @param stream_id_param Stream identifier
      * @param stream Stream context with pending data
+     * @param one_frame A turn of resume_waiting_streams(): one DATA frame at most, the rest stays pending
      */
     void
-    try_send_pending_data_for_stream(uint32_t stream_id_param, Http2ServerStream &stream) noexcept {
+    try_send_pending_data_for_stream(uint32_t stream_id_param, Http2ServerStream &stream, bool one_frame = false) noexcept {
         if (!this->ok() || !_connection_active) {
             // QB_LOG_WARN_PA(this->getName(), "Server Stream " << stream_id_param << ": Connection not OK or inactive in
             // try_send_pending_data.");
@@ -2871,7 +3068,8 @@ private:
         }
 
         if (stream.streaming) {
-            flush_streamed_response(stream_id_param, stream); // a streamed response: its pieces, then END_STREAM once ended (Huly QB-86)
+            // a streamed response: its pieces, then END_STREAM once ended (Huly QB-86)
+            flush_streamed_response(stream_id_param, stream, one_frame);
             return;
         }
 
@@ -2893,7 +3091,7 @@ private:
 
                 uint32_t max_chunk_size = std::min(
                     {static_cast<uint32_t>(stream.peer_window_size), static_cast<uint32_t>(this->_connection_send_window),
-                     this->FramerBase::get_peer_max_frame_size()});
+                     this->FramerBase::get_peer_max_frame_size(), one_frame ? turn_octets : std::numeric_limits<uint32_t>::max()});
                 if (max_chunk_size == 0) {
                     // QB_LOG_DEBUG_PA(this->getName(), "Server Stream " << stream_id_param << ": Max chunk size is 0 for pending body, cannot
                     // send.");
@@ -2958,7 +3156,7 @@ private:
                 // Decrement flow control windows by actual data chunk size
                 stream.peer_window_size -= current_chunk_size;
                 this->_connection_send_window -= current_chunk_size;
-                stream.progressed_since_idle_sweep = true;
+                response_data_written(stream);
                 // REVERTED PADDING LOGIC (flow control decrement)
 
                 if (data_frame_event.header.flags & FLAG_END_STREAM) {
@@ -2966,6 +3164,10 @@ private:
                     stream.end_stream_sent          = true;
                     stream.has_pending_data_to_send = false;
                     break;
+                }
+                if (one_frame && stream.send_buffer_offset < total_body_size) {
+                    stream.has_pending_data_to_send = true; // its turn is over: the rest at the next (resume_waiting_streams())
+                    return;
                 }
             } // end while for sending body data
 
@@ -3105,8 +3307,14 @@ private:
      *        reclaimed): callers read nothing through it afterwards.
      */
     void
-    flush_streamed_response(uint32_t stream_id, Http2ServerStream &stream) noexcept {
+    flush_streamed_response(uint32_t stream_id, Http2ServerStream &stream, bool one_frame = false) noexcept {
         auto &buffer = stream.streamed->buffer; // begin_streamed_response() allocated it: `streaming` says so
+        // A piece written while the waiting streams take their turns -- by an observer, from inside a turn -- waits
+        // for its own, as a buffered response's DATA does (send_response_body()): flushed here, it took what the
+        // windows left of the round's credit. An end that carries no DATA waits for nothing.
+        if (!one_frame && buffer.size() > 0 && waits_for_a_turn(stream)) {
+            return;
+        }
         while (buffer.size() > 0) {
             if (stream.peer_window_size <= 0 || _connection_send_window <= 0) {
                 stream.has_pending_data_to_send = true; // the next WINDOW_UPDATE comes back here
@@ -3125,7 +3333,7 @@ private:
             const uint32_t room   = std::min<uint32_t>(
                 {static_cast<uint32_t>(std::min<int64_t>(window, 0x7FFFFFFF)), this->FramerBase::get_peer_max_frame_size(),
                  static_cast<uint32_t>(std::min<std::size_t>(socket_room - FRAME_HEADER_SIZE, 0x7FFFFFFF))});
-            const uint32_t chunk = static_cast<uint32_t>(std::min<std::size_t>(buffer.size(), room));
+            const uint32_t chunk = static_cast<uint32_t>(std::min<std::size_t>(buffer.size(), one_frame ? std::min(room, turn_octets) : room));
             if (chunk == 0) {
                 stream.has_pending_data_to_send = true;
                 return;
@@ -3146,7 +3354,7 @@ private:
             buffer.free_front(chunk);
             stream.peer_window_size -= chunk;
             _connection_send_window -= chunk;
-            stream.progressed_since_idle_sweep = true;
+            response_data_written(stream);
             if (last) {
                 buffer.reset();
                 stream.has_pending_data_to_send = false;
@@ -3154,6 +3362,10 @@ private:
                 stream.streaming                = false;
                 stream.state = stream.end_stream_received ? Http2StreamConcreteState::CLOSED : Http2StreamConcreteState::HALF_CLOSED_LOCAL;
                 try_close_stream_context(stream_id); // `stream` dangles past it
+                return;
+            }
+            if (one_frame && buffer.size() > 0) {
+                stream.has_pending_data_to_send = true; // its turn is over: the rest at the next (resume_waiting_streams())
                 return;
             }
         }
@@ -3207,10 +3419,10 @@ private:
                 return;
             }
         }
-        stream.progressed_since_idle_sweep = true;
-        stream.end_stream_sent             = true;
-        stream.streaming                   = false;
-        stream.state = stream.end_stream_received ? Http2StreamConcreteState::CLOSED : Http2StreamConcreteState::HALF_CLOSED_LOCAL;
+        response_frame_written(stream);
+        stream.end_stream_sent = true;
+        stream.streaming       = false;
+        stream.state           = stream.end_stream_received ? Http2StreamConcreteState::CLOSED : Http2StreamConcreteState::HALF_CLOSED_LOCAL;
         try_close_stream_context(stream_id); // `stream` dangles past it
     }
 
@@ -3598,6 +3810,200 @@ private:
     /// The resets admit_solicited_reset() let go since the client last opened a stream (_client_streams_opened, as it was).
     std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
 
+    /// What the idle sweep and the turns keep from one call to the next (Huly QB-1248): one value, which reset()
+    /// returns to its initial conditions whole.
+    struct ResponseProgress {
+        /// The io's `drained_total()` at the last idle sweep (0 on an io that does not count its output).
+        std::uint64_t swept = 0;
+        /// The connection's DATA in the output, kept as a stream's frames are (Http2ServerStream::output_mark,
+        /// queued_from, progressed_since_idle_sweep): where the last DATA frame of any stream ends, where the drain
+        /// stood when DATA began to queue, and whether DATA the socket took whole since the last sweep was followed
+        /// by more. What the responses that wait on the connection progress with (waits_on_the_connection()).
+        std::uint64_t data_mark = 0, data_queued_from = 0;
+        bool          data_flowed = false;
+        /// The response frames written, ever (response_frame_written(); it wraps): whether a turn sent one.
+        std::uint32_t frames_written = 0;
+        /// The places taken in the order of the turns, ever: a stream's `turn` is this count when it was last served,
+        /// when the turns first found it waiting (resume_waiting_streams()), or when DATA handed to it during a round
+        /// began to wait for a turn (waits_for_a_turn()).
+        std::uint64_t turns = 0;
+        /// The times DATA handed in while the turns were served was left to wait for one, ever (waits_for_a_turn(); it
+        /// wraps): whether a round is followed by another, read as `frames_written` is.
+        std::uint32_t turns_awaited = 0;
+        /// A sweep saw the refused header block that is open (`_discarding_header_block`), and when it first did: the
+        /// block's clock (cleanup_idle_streams()). Lowered when the block ends (clear_header_assembly_state()).
+        bool                                  refused_block_seen = false;
+        std::chrono::steady_clock::time_point refused_block_since{};
+    } _progress;
+    /// A turn's DATA at most: the smallest frame size a peer may allow (RFC 9113 section 4.2), whatever larger one it
+    /// does -- with frames of 1 MiB allowed, the first turn took the whole of an increment three streams waited for.
+    static constexpr uint32_t turn_octets = 16384;
+
+    /// Whether the io runs another protocol, or none, by now: an observer of this one -- a reset's, which cancels a
+    /// context and runs its hooks -- cleared the io's protocols. Under its caller's pass, or the read dispatch, this
+    /// object is retired, alive until that ends; nothing more is its to send. Seen retired, it is neither active nor ok
+    /// any more: whatever its caller still does -- a frame, a GOAWAY, an event for the io -- is refused where every
+    /// write already asks (write_frame(), send_goaway_and_close()). A reset returned at once, and its callers wrote
+    /// on: a GOAWAY past the Rapid Reset ceiling, a connection WINDOW_UPDATE, a GOAWAY for a window overflow (the
+    /// fourth independent review, Huly QB-1248). `false` on an io that names no protocol.
+    [[nodiscard]] bool
+    retired() noexcept {
+        if constexpr (requires(IO_Handler &io, ServerHttp2Protocol const *active) { io.protocol() == active; }) {
+            if (this->_io.protocol() == this) [[likely]] {
+                return false;
+            }
+            _connection_active = false;
+            this->FramerBase::not_ok();
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /// Whether @p stream has something its peer has not taken: DATA a window or the socket's room holds back, a frame
+    /// the socket has not taken yet (@p drained, the io's `drained_total()`), a pushed response that waits for room
+    /// under the client's SETTINGS_MAX_CONCURRENT_STREAMS. Its peer's turn; its handler's otherwise.
+    [[nodiscard]] bool
+    peer_owes(Http2ServerStream const &stream, std::uint64_t drained) const noexcept {
+        return stream.has_pending_data_to_send || stream.output_mark > drained || waits_for_the_clients_room(stream);
+    }
+
+    /// Whether @p stream is a pushed response answered and not yet begun: it waits for room under the client's
+    /// SETTINGS_MAX_CONCURRENT_STREAMS (send_waiting_push_responses()).
+    [[nodiscard]] bool
+    waits_for_the_clients_room(Http2ServerStream const &stream) const noexcept {
+        return !_waiting_push_responses.empty()
+               && std::find(_waiting_push_responses.begin(), _waiting_push_responses.end(), stream.id) != _waiting_push_responses.end();
+    }
+
+    /// The application hands @p stream something for its peer -- a response, a streamed head, a piece, the end -- at a
+    /// moment its peer owed it nothing: its handler's turn ends there and its peer's begins, on a clock of its own
+    /// (Huly QB-1248). Without it the peer's bound was judged on the handler's time: a handler that answered within its
+    /// own bound but past the peer's had its response reset by the next sweep, a piece a window held back at once.
+    /// What is handed over while the peer already owes moves nothing: a peer that takes nothing ends its bound after
+    /// the hand-over, whatever the application queues behind. Nor does the pushed response that waited for room and
+    /// leaves now (send_waiting_push_responses()): it was handed over when it was answered, and the room may be the
+    /// sweep's own doing -- the reset of the stream that held it --, not its peer's.
+    void
+    handler_hands_over(Http2ServerStream &stream) noexcept {
+        if (stream.id == _push_response_leaving) [[unlikely]] {
+            return;
+        }
+        std::uint64_t drained = 0;
+        if constexpr (counts_drained_output<IO_Handler>)
+            drained = this->_io.drained_total();
+        if (!peer_owes(stream, drained))
+            stream.progressed_since_idle_sweep = true;
+    }
+
+    /// Whether @p stream's response waits on what the connection shares: DATA its own window does not hold back --
+    /// the connection's window, the socket's room, its turn (resume_waiting_streams()). Such a response progresses
+    /// with the connection's DATA, any stream's: a peer that takes it is taking the connection, and the turns bring
+    /// this stream its share. Judged on its own frames alone, a response among many was reset as one its peer did not
+    /// take whenever a round of turns outlasted the idle bound -- fifty downloads behind a connection window a slow
+    /// reader reopens a frame at a time (Huly QB-1248). One its own window holds waits on its peer, whatever the
+    /// connection moves; its own window holds DATA alone -- a streamed response's end, an empty END_STREAM or a
+    /// trailer section, needs none. And a pushed response that waits for the client's room waits on the pushed
+    /// streams that hold it, which the peer takes with the connection's DATA: reset 30 s after it was answered, it
+    /// went while the push that held its room was still leaving (the fifth independent review). While the client's
+    /// limit gives a place to wait for: under a limit the client lowered to 0 after the promise nothing the
+    /// connection sends lets the response out -- no pushed stream is open, or the one that is frees no place by
+    /// ending -- and it waits on its peer. Credited with any stream's DATA, a download beside it, or a pushed stream
+    /// its peer took an octet at a time, kept it and the body it holds for the life of the connection (the sixth and
+    /// seventh independent reviews). Above 0 a response waits only while the pushed streams open fill the limit: each
+    /// place freed lets one out (send_waiting_push_responses()). The pushed streams open are not counted here: a
+    /// sweep run by the observer of the reset that frees the place -- before the drain -- found none, and reset the
+    /// response that place was for (the eighth independent review).
+    [[nodiscard]] bool
+    waits_on_the_connection(Http2ServerStream const &stream) const noexcept {
+        if (!stream.has_pending_data_to_send)
+            return waits_for_the_clients_room(stream) && _peer_max_concurrent_streams > 0;
+        return stream.peer_window_size > 0 || (stream.streamed && stream.streamed->buffer.size() == 0);
+    }
+
+    /// Whether DATA handed to @p stream now waits for a turn: the waiting streams are taking theirs
+    /// (resume_waiting_streams()), or what an event lets out together is about to (a SETTINGS frame, the sweep). The
+    /// stream then waits with them, at the place it takes here when it has none -- behind the streams that wait
+    /// already, and before those served from here on are served again; one that has a place keeps it, as a stream that
+    /// waits again does: served a moment ago, it does not pass the others by being handed more --, and a round under
+    /// way is followed by another, whatever its turns sent: the DATA that waits here was handed in after the round
+    /// found its streams.
+    [[nodiscard]] bool
+    waits_for_a_turn(Http2ServerStream &stream) noexcept {
+        if (!_serving_turns)
+            return false;
+        stream.has_pending_data_to_send = true;
+        if (stream.turn == 0)
+            stream.turn = ++_progress.turns;
+        ++_progress.turns_awaited;
+        return true;
+    }
+
+    /// Whether the socket took octets since the last sweep while frames were queued for it -- frames that end at
+    /// @p mark and queue from @p queued_from on (frames_queued()), @p swept and @p drained the io's `drained_total()`
+    /// at the last sweep and now: they were in the output past the last sweep's drain, and the socket took octets
+    /// since they began to queue, and since that sweep. A drain that came before them is none of theirs.
+    [[nodiscard]] static constexpr bool
+    taken_since(std::uint64_t mark, std::uint64_t queued_from, std::uint64_t swept, std::uint64_t drained) noexcept {
+        return mark > swept && drained > std::max(swept, queued_from);
+    }
+
+    /// Frames were handed to an io that counts its output: @p mark moves to their end. When none of the earlier ones
+    /// was left in the output -- the drain had reached @p mark -- these queue from where the drain stands
+    /// (@p queued_from); and the earlier ones were taken whole, since the last sweep when they end past that sweep's
+    /// drain: progress the sweep, which reads the frames queued now, would no longer see (@p taken).
+    void
+    frames_queued(std::uint64_t &mark, std::uint64_t &queued_from, bool &taken) noexcept {
+        if (const std::uint64_t drained = this->_io.drained_total(); mark <= drained) {
+            if (mark > _progress.swept)
+                taken = true;
+            queued_from = drained;
+        }
+        mark = this->_io.appended_total();
+    }
+
+    /// A frame of @p stream's response was handed to the io -- HEADERS, DATA, a streamed response's trailer section
+    /// (Huly QB-1248). A buffered response's trailer section is not marked: the request it answers is complete, so
+    /// those HEADERS close the stream. On an io that counts its output the stream's mark moves to the frame's end, and
+    /// the sweep reads the stream's progress on what the socket takes of it; on one that does not, writing the frame
+    /// is the progress, as it was.
+    void
+    response_frame_written(Http2ServerStream &stream) noexcept {
+        ++_progress.frames_written;
+        if constexpr (counts_drained_output<IO_Handler>)
+            frames_queued(stream.output_mark, stream.queued_from, stream.progressed_since_idle_sweep);
+        else
+            stream.progressed_since_idle_sweep = true;
+    }
+
+    /// A DATA frame of @p stream's response that carries octets: a response frame, and the connection's DATA -- what
+    /// its window and the socket's room are spent on, and what the responses that wait on them progress with.
+    void
+    response_data_written(Http2ServerStream &stream) noexcept {
+        response_frame_written(stream);
+        if constexpr (counts_drained_output<IO_Handler>)
+            frames_queued(_progress.data_mark, _progress.data_queued_from, _progress.data_flowed);
+        else
+            _progress.data_flowed = true;
+    }
+
+    /// A frame of a request not yet complete arrived -- its first HEADERS, a DATA (Huly QB-1248): the session's inactivity
+    /// timeout restarts, through its `http2_request_progress()`, found by a requires-expression as `http_request_limits()` is.
+    void
+    request_progress() noexcept {
+        if constexpr (requires(IO_Handler &io) { io.http2_request_progress(); })
+            this->_io.http2_request_progress();
+    }
+
+    /// A DATA of a request not yet complete that brought @p octets of its body: when it brought some, the stream progressed
+    /// too, which the sweep reads (cleanup_idle_streams()). An empty one makes no progress, as the frame layer counts it.
+    void
+    request_progress(Http2ServerStream &stream, std::size_t octets) noexcept {
+        if (octets == 0)
+            return;
+        stream.progressed_since_idle_sweep = true;
+        request_progress();
+    }
 }; // class ServerHttp2Protocol
 
 } // namespace qb::protocol::http2

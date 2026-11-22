@@ -34,8 +34,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `INTERNAL_ERROR`, `H3_REQUEST_CANCELLED` -- never the connection, which serves its other streams and the next
   request; a trailer section the stream cannot carry at `end()` resets it and cancels the context on both. A HEAD's
   response is its HEADERS with END_STREAM, the producer counted. A streamed stream holds its concurrency slot
-  (`SETTINGS_MAX_CONCURRENT_STREAMS`), is seen by the idle sweep (a stream that sends no frame for 30 s is reset
-  `CANCEL`, whatever its window: an event stream's heartbeat is for that) and by the Rapid Reset accounting of QB-1244
+  (`SETTINGS_MAX_CONCURRENT_STREAMS`), is seen by the stream sweep (one that writes nothing for the session's
+  inactivity timeout beside streams that keep its connection busy, or whose peer takes nothing of it for 30 s, is
+  reset `CANCEL`; alone on its connection it ends with it: an event stream's heartbeat is for that) and by the Rapid
+  Reset accounting of QB-1244
   as any open stream is, until its END_STREAM or a reset; the session's inactivity timeout ends a producer whose peer
   never updates its window. `POST_RESPONSE_SEND` runs once per streamed response on HTTP/3 as on the others (the
   context is not adopted while it is being routed). The HTTP/1.1 path is byte-identical (its suite is the oracle); the HTTP/1.1
@@ -265,6 +267,35 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the way past it; the HTTP/3 client's `set_max_body_size` takes 0 for none too, now written. Witnesses in the entry
   "The HTTP/1.1 clients read a body of exactly their limit" below.
 
+- **`qb::http2::Client::set_max_body_size(std::size_t)` and `max_body_size()` (Huly QB-1248).** The persistent HTTP/2
+  client takes the largest response body it accepts, as the HTTP/1.1 client does: `qb::http::protocol_limits::MAX_BODY_SIZE`
+  (100 MiB) by default, 0 for none. A response that declares a `content-length` past it is refused at its header block,
+  one that delivers more at the `DATA` frame that passes it: its stream is reset (`ENHANCE_YOUR_CALM`) and its request
+  fails with a 502 whose error names the limit -- "HTTP/2 response body exceeds the client's limit of N bytes", where it
+  read "exceeds configured limit" with no number. It had no setting: the constant was every response's bound. Only the
+  stream ends, the connection serving its other requests on, so the rule of the HTTP/1.1 client -- a connection a bound
+  cut is closed at once -- has no counterpart here. Witnesses: `qbm-http-test-system-http2-client` (past a limit of
+  1024, a declared and a streamed body each failing with the limit named while the other requests of the connection are
+  answered, 1024 itself delivered; the default read back; 0 delivering what 1024 refused),
+  `qbm-http-test-unit-http2-client-protocol` (the limit read from the io: past it, declared or delivered, the stream
+  reset `ENHANCE_YOUR_CALM` with the limit named; exactly it delivered; a declaration past the default accepted under 0;
+  the constant for an io without the setting) and `qbm-http-test-system-http2-client-huge-body` (under a limit of none,
+  a body past the default delivered, nothing reset; past the default, the error names 104857600 bytes).
+
+- **`http2_sweep_streams(now)` on the HTTP/2 server session, and `cleanup_idle_streams(now, max_idle,
+  max_incomplete, max_unanswered)` and `has_streams()` on its protocol (Huly QB-1248).** The sweep of a connection's
+  streams, handed its time. The session's own timer runs `http2_sweep_streams(std::chrono::steady_clock::now())` while
+  the connection has streams, or a refused header block left open (`has_streams()`; the Fixed entry "The streams of an
+  HTTP/2 connection are swept from a timer of the session's own"), and goes on whoever else calls it: the member is
+  public for a test, which steps the time instead of sleeping, and for an application that wants a sweep before the
+  next tick -- not to replace the schedule. `now` is the steady clock's time, or a test's stepped from it, never
+  earlier than a previous call's: the streams' clocks are stamped with it. It holds the io's `protocol_pass()` and
+  returns the number of streams it reset: 0 on a session that does not run HTTP/2, and on one whose connection ended
+  or left it (a disconnection, an extraction). The protocol's sweep takes the time and the three bounds; its
+  two-argument form remains. An io that offers `protocol()` answers there the protocol it runs: a server protocol that
+  reads another one there holds itself retired, and writes nothing. An io that offers `http2_refused_block_open()` is
+  told when a `HEADERS` the server refuses leaves its block open: the session arms its sweep there.
+
 - **An HTTP/2 IO handler may keep the clock the bucket of the frames that make no progress reads (Huly QB-1270).**
   `qb::protocol::http2::keeps_no_progress_clock`: a handler with `std::int64_t no_progress_clock_seconds() const` is
   read by `Http2Protocol::refuse_no_progress_frame()` instead of `std::chrono::steady_clock`, a clock that reads earlier
@@ -281,6 +312,33 @@ All notable changes to the qbm-http module are documented here. The format is ba
   member: rebuild what includes it (qb promises no binary compatibility between versions).
 
 ### Changed
+
+- **The name `inactivity_timer_t` is reserved in an HTTP/1.1 or HTTP/2 server session type (Huly QB-1248).** Each
+  server session names its inactivity timer so, for qb-io's `extractSession()`, which stops that timer (Fixed: "An
+  HTTP/1.1 or HTTP/2 server session keeps the first reason it ended with"). A session type that declares an
+  `inactivity_timer_t` of its own no longer compiles, and inside a class deriving from a server session an unqualified
+  `inactivity_timer_t` names the session's alias, not one at namespace scope (in a class template, whose base is
+  dependent, the unqualified name is still the namespace's).
+- **The HTTP/2 server bounds a stream by whose turn it is, on every connection (Huly QB-1248).** What an application
+  written against the last release sees, each from a Fixed entry below. A request its handler has not answered, or not
+  finished, within the session's inactivity timeout (60 s by default) is reset `RST_STREAM(CANCEL)` and its context
+  cancelled, on a connection its other streams keep busy too -- where a silent stream was reset after 30 s when a
+  sweep ran, and never on a connection that did not write: a long poll or an event stream that stays silent past the
+  timeout writes a heartbeat or raises the session's timeout, as on HTTP/1.1 -- the timeout is the connection's, so
+  every request of an HTTP/2 connection has the one in force at the sweep, whichever handler set it last. The bound is
+  the session's timeout whatever its value: a session that set one under 30 s gives a handler that timeout on a busy
+  connection too, where a dispatched stream had 30 s -- a server whose handlers take longer than its timeout raises it
+  --, and one lowered at run time holds at the next sweep for the requests in progress. The bounds of a request that
+  is not complete (10 s without an octet of its body) and of a response its peer does not take (30 s) apply on every
+  connection, where they needed a write that left bytes queued; a download that flows slowly is no longer reset, and a
+  `WINDOW_UPDATE` alone keeps nothing. Responses that wait for the same credit are served a DATA frame each, in turns,
+  where the first took all of it: their frames interleave. `reset_stream()` returns `false`, and a response is
+  dropped, on a session whose protocols the application cleared or whose connection left it (an extraction), and the
+  server's drain no longer waits for a session that cleared them. A client that leaves a refused header block open
+  for more than 10 s has its connection closed. A promised stream never
+  answered has the session's timeout too, where it had 30 s. `ServerHttp2Protocol::cleanup_idle_streams(max_idle,
+  max_incomplete)`, for a caller that sweeps by itself, counts a dispatched request's idle time from the sweep that
+  sees its dispatch.
 
 - **An HTTPS or `wss` connection qb ends now ends its TLS stream with a `close_notify`: an OpenSSL peer reads a
   clean end of stream where it read an unexpected EOF (qb 3.4, Huly QB-1270).** qb-io sends the alert before the
@@ -811,6 +869,244 @@ All notable changes to the qbm-http module are documented here. The format is ba
   section dribbled from its first byte ends a timeout after it, a stalled body a timeout after its last read, an idle
   connection a timeout after its last response) and `qbm-http-test-system-http2-client` (the same body over the ALPN
   http/1.1 fallback is served).
+
+- **The HTTP/2 server's inactivity timeout restarts at a request's first `HEADERS` frame and at each `DATA` frame of
+  its body (Huly QB-1248).** It restarted on the server's writes and at a request's dispatch: a request had to arrive
+  whole within the timeout -- 60 s by default -- of the connection's last write. Measured: a body sent one `DATA` byte
+  every 5 s was cut at 60.0 s with no answer, and a request begun late had what was left of the timeout. And the
+  sweep's bound on a stream whose request is not complete, `STREAM_INCOMPLETE_TIMEOUT` (10 s), was an age, counted from
+  the stream's opening whatever happened on it, as readme/17 said: a sweep 10 s into an upload still arriving reset it
+  (`CANCEL`). Both now move on what the client sends of the request, and on nothing else. A header block has the whole
+  timeout from its first `HEADERS` frame -- the stream is created there, and its clock starts there -- and its
+  `CONTINUATION` frames restart nothing, so a header block dribbled is still cut. A `DATA` frame that brings octets of
+  the body restarts the timeout and moves the stream's clock: a body sent slowly but steadily is served, and one whose
+  octets stop arriving is cut a timeout after its last frame, its stream reset by a sweep once the incomplete bound
+  has passed. A body that drips an octet within each bound keeps its stream and its connection, as on nginx: what it
+  holds stays under the body limit a stream and the concurrency limit a connection, every octet of it one the client
+  sent. An empty `DATA` restarts nothing and moves nothing, by design: the frame layer counts it among the frames
+  that make no progress, and a peer that could restart the timeout with it would hold a connection, and an incomplete
+  request, for free -- no octet ever counted against the body limit. A stream `WINDOW_UPDATE` moves nothing of a
+  request not yet complete, by design: it acknowledges nothing of the request, and a peer must not keep an incomplete
+  request alive by acknowledging the server's window (what it does for a response is the next entry's). The sweep that
+  enforces the bound runs from a timer of the session's own (the next entry): it ran on write activity alone. The
+  protocol tells the session through a hook found by a requires-expression, as the HTTP/1.1
+  protocol does: `http2_request_progress()`. Witnesses: `qbm-http-test-system-http2-client` (at a 1 s session timeout:
+  a body sent over 3 s is served; a request begun 0.75 s after a response, its header block sent over 0.5 s, is served;
+  a body that stalls ends a timeout after its last `DATA`, cut on the base before it stalled; empty `DATA` frames a
+  quarter of the timeout apart end the connection a timeout after its `HEADERS`; the controls: a header block dribbled
+  in `CONTINUATION` frames ends a timeout after its first `HEADERS`, an idle connection a timeout after its last
+  response) and `qbm-http-test-unit-http2-server-protocol` (the hook called at a request's first `HEADERS` and at each
+  `DATA` that brings octets, never at a `CONTINUATION`, an empty `DATA`, the frame that completes the request or a
+  `WINDOW_UPDATE`; the sweep sparing an incomplete request whose body arrives past the bound, resetting it once its
+  octets stop -- an empty `DATA` saves nothing -- and resetting one whose only frames since its last `DATA` are stream
+  `WINDOW_UPDATE`s).
+
+- **The streams of an HTTP/2 connection are swept from a timer of the session's own, each bounded by whose turn it is
+  (Huly QB-1248).** The sweep ran from `on(pending_write)` alone -- a write that leaves bytes queued: a connection that
+  only read, as an upload's, or whose writes always drained was never swept, and once the inactivity timeout restarted
+  on what a request brings (the entry above) nothing bounded the connection's other streams. Fifty streams, forty-nine
+  filled close to the body limit then left there, the fiftieth dripping an octet under the timeout: some 4.9 GiB at the
+  default limits, held for as long as the client wished. The session now arms a timer at a connection's first stream
+  and for as long as it has streams -- an idle connection has no tick --, every half of the smallest bound: 5 s by
+  default, less under a shorter session timeout, 50 ms at least. And a stream is bounded by the time since its last
+  progress, by a bound that depends on whose turn it is. Its client's, while its request is not complete:
+  `STREAM_INCOMPLETE_TIMEOUT` (10 s), as above. Its peer's, while it has not taken what the response has for it -- DATA
+  a window or the socket's room holds back, frames the socket has not taken, a pushed response waiting for room under
+  the client's concurrency limit: `STREAM_IDLE_TIMEOUT` (30 s). Its handler's, while it has not answered, or not
+  finished: the session's own inactivity timeout (60 s by default, none when the session has none), what an HTTP/1.1
+  exchange has. It was one bound, 30 s, for every dispatched stream. The peer's clock starts when the application hands
+  the stream something its peer did not already owe -- a handler that answered within its own bound is not judged on
+  the time it took --, and it moves on what the SOCKET takes of the stream's frames, no longer on what the protocol
+  queued: a download that flowed slowly was reset 30 s after its last DATA frame was written, however the socket
+  drained, and DATA queued behind a socket that took nothing counted as progress each time a `WINDOW_UPDATE` let some
+  out. What counts is an octet the socket takes while the stream has frames queued for it, its own or those in front
+  of them: a frame written after the socket's last drain is credited with nothing, and a stream that writes again
+  keeps what the socket took of its earlier frames. A response that waits on what the connection shares -- DATA its
+  own window does not hold back: the connection's window, the socket's room, its turn; a pushed response's room under
+  the client's concurrency limit, while that limit is above 0 -- moves with the connection's DATA, any stream's,
+  read the same way: fifty downloads behind a connection window a slow reader reopens a frame at a time are each
+  served once in fifty frames, and none of them is a response its peer does not take; one its own window holds waits
+  on its peer, whatever the connection moves, and so does a pushed response under a limit the client lowered to 0
+  after the promise, whatever pushed stream is still open: nothing the connection sends lets it out. A stream
+  `WINDOW_UPDATE` is no progress of its own. The handler's bound is the session's timeout as it is at the sweep, on
+  the request's own clock. A peer that takes an octet within each bound keeps its response, and one octet of the
+  connection's DATA keeps every response that waits on the connection -- as under nginx's `send_timeout` and Go's
+  `WriteByteTimeout`, which is the connection's: no rate is asked of a peer, and a streamed response is held to one
+  by its own `set_min_rate()`. The stall watch a stream may set (`set_idle_deadline()`, the 60 s of a streamed static
+  file) stays that stream's own: it ends a stream none of whose bytes left for that long, whatever its neighbours
+  send -- so a stream among N that share a slow connection, served a turn in N, needs its turn within its deadline:
+  at 60 s and with turns of 16 KiB, the largest, some 273 octets a second for each of them at most (derived from the
+  two figures, not measured; smaller credits make smaller turns, and ask less). `cleanup_idle_streams()` is handed
+  the time of the sweep and the three bounds, `cleanup_idle_streams(now, max_idle, max_incomplete, max_unanswered)`;
+  its two-argument form remains, with one bound for every dispatched stream. A connection that has ended is not
+  swept, and has nothing for the sweep to go on for (`has_streams()`): no frame leaves it, so a stream past its bound
+  was erased without its RST_STREAM and without its observer.
+  Witnesses: `qbm-http-test-unit-http2-server-protocol` (the clock stepped by hand, no sleep: each of the three turns
+  reset at its own bound and at no other; a session with no timeout leaving a handler unbounded; a response the socket
+  takes slowly kept for a minute, then reset 30 s after the last of it left; DATA queued behind a socket that takes
+  nothing; a frame written after the socket's last drain; what the socket took of a stream before it wrote again; what
+  the socket takes of another stream; a head the socket has not taken, and one it took; a stream `WINDOW_UPDATE`; the
+  dispatch starting its handler's clock; a piece, a response, a streamed head and a streamed end written 40 s into a
+  handler's turn each having the peer's whole bound, and what is written to a peer that already owes, or an empty
+  piece, moving nothing; a pushed response waiting on the client's limit, and one the sweep's own reset lets out,
+  neither handed over again nor credited with a drain that came before its frame, in either order of the table; five
+  responses behind the connection's window, served a frame every 20 s in turns, kept for five minutes then reset 30 s
+  after the connection's DATA stops, and three for two minutes on an io that does not count; one its own window
+  holds, the answers to a peer's PINGs and a neighbour's HEADERS keeping nothing; a streamed end waiting for the
+  socket's room with its window spent; DATA taken whole then followed by more before the sweep; a pushed response
+  waiting for the client's room kept while the push in front of it leaves, and reset at the peer's bound once the
+  client's limit is 0, a download flowing beside it or a pushed stream still open and read a frame at a time, and
+  kept by a sweep run while the place it waits for is being freed; a connection that has ended, left as it is; the
+  drain's last delivery -- the protocol not ok, its connection still active --, not swept, a late response refused
+  and its stream left open; a graceful shutdown in progress, still swept, ended by the reset of its last stream; a
+  protocol reset forgetting the block it was discarding and the last connection's DATA) and
+  `qbm-http-test-system-http2-client` (at a 1 s session timeout, a request its handler never answers reset between one
+  and two timeouts beside an upload that drips, on a connection the server writes nothing to -- never, on the code as
+  it was --, the connection serving on; the same beside a response the server streams, nothing arriving from the
+  client; a session extracted under the sweep, which no later tick touches and the public sweep leaves alone; and, the
+  time stepped by hand, a session with no timeout leaving a request to its handler however long, then the timeout it
+  is given bounding the request from its dispatch; the session asserted to count its output, without
+  which the sweep reads a response on the frames written).
+
+- **Streams that wait share what lets them send, in turns (Huly QB-1248).** On a connection `WINDOW_UPDATE`, on a
+  `SETTINGS_INITIAL_WINDOW_SIZE` that reopens stream windows together, on a `SETTINGS_MAX_CONCURRENT_STREAMS` or a
+  sweep that lets several pushed responses out together and when the socket makes room, the streams that waited were
+  served in the order of the server's table -- the pushed responses in the order they were answered --, each as far
+  as the windows went: the first took everything, every time, and the others waited for it to finish. They send one
+  DATA frame each, of 16 KiB at most whatever frame size the peer allows, the least recently served first, round
+  after round, until none can send (`resume_waiting_streams()`); a stream that begins to wait takes its place behind
+  those that already do, so that a download is not passed over by the requests that come after it, and DATA handed in
+  while the turns are served -- a pushed response the turn that ended its neighbour lets out, a response or a
+  streamed piece an observer writes from inside a turn -- waits for a turn of its own, at the place its stream takes
+  there and then, or the one it has; a stream alone is served everything at once, as before. Witnesses, red on the
+  code as it was: `qbm-http-test-unit-http2-server-protocol` (three responses behind the connection's window: credit
+  for three frames serves each one frame, then credit a frame at a time a different stream each time; a setting that
+  reopens three stream windows; two streamed responses sharing the socket's room; a pushed response let out in
+  another stream's turn, served before the stream served after it began to wait; three pushed responses the client's
+  limit releases together, and two that one sweep lets out; a streamed piece an observer writes inside a turn; a peer
+  that allows frames of 1 MiB, buffered and streamed responses; a download beside twenty-four requests that each
+  arrive before a credit; a stream alone), and, held by their mutants, the round that follows one whose turns sent
+  nothing and the place a stream keeps when it is handed more during a round.
+
+- **A stream the HTTP/2 server resets while its header block is still arriving no longer ends the connection (Huly
+  QB-1248).** The sweep resets a request that is not complete; one whose header block -- or trailer block -- was still
+  arriving left its `CONTINUATION` frames to meet an unknown stream: `GOAWAY(PROTOCOL_ERROR)`, a connection error of
+  the server's own making. They are read for the HPACK table and dropped, as a refused block's are
+  (`send_rst_stream()`), under the same size and count limits. And a refused block left open -- that one, or a block
+  refused at its `HEADERS` -- has a bound, an incomplete request's: 10 s (`STREAM_INCOMPLETE_TIMEOUT`) from the sweep
+  that first sees it refused, whatever `CONTINUATION` frames it receives, then the connection ends,
+  `GOAWAY(ENHANCE_YOUR_CALM)`; a block whose stream the sweep reset has had that stream's own bound first. Nothing
+  bounded it: no stream is left for it, and the session's timeout restarts on the server's own writes, so a client
+  that had opened an event stream first held the block -- up to the header block limit, on a connection that may
+  send nothing else meanwhile -- for as long as the stream wrote. The sweep goes on while such a block is open
+  (`has_streams()`), and the session arms it for one (`http2_refused_block_open()`, which the protocol calls, on an
+  io that has it, when a `HEADERS` it refuses leaves its block open): on a connection whose last stream had ended no
+  tick was due, and a session with no timeout held the block for ever. The session is released at once, as for
+  every error it ends a connection with: sent from the sweep's timer, outside the read dispatch, the GOAWAY frame is
+  dropped with it, and the client reads the end of its connection -- delivering it would keep a session whose
+  protocol has ended, with its contexts and its output, for as long as the client took to read. Witnesses:
+  `qbm-http-test-unit-http2-server-protocol` (red on the code as it was: a block cut in two and in three, a trailer
+  block -- the connection serves on, and the next request names the dropped block's entry by its index; a block left
+  open after the sweep reset its stream, ended 11 s after the sweep that saw it, an octet of `CONTINUATION` changing
+  nothing; a block refused at its `HEADERS`, one that ends in time leaving its clock to no other; the io told of a
+  block left open, and of no other) and `qbm-http-test-system-http2-client` (a refused block on a connection whose
+  sweep had lapsed: the session's own tick sees it, and the connection ends at the block's bound -- the session
+  disconnected when that sweep returns, and gone from the server a dispatch later).
+
+- **A reset the HTTP/2 server makes outside the read dispatch no longer runs its protocol under an observer that
+  cleared it (Huly QB-1248).** A reset's observer cancels the stream's context, and a hook of that context may clear
+  the session's protocols. Inside the read dispatch they are retired (qb, Huly QB-1278); outside it they were destroyed
+  at once, under the function that was running them: `reset_stream()` called from a timer or a coroutine resumed
+  later, a streamed response aborted -- the stall watch's timer -- or ended with a trailer section the protocol
+  refuses, the write pass that resumes a streamed response, the sweep (ASan: heap-use-after-free in
+  `send_rst_stream()`). The session holds qb's `protocol_pass()` at every such entry, and a protocol its reset's
+  observer retired is neither active nor ok any more: the reset itself lets no waiting pushed response out, its caller
+  writes nothing after it -- no `GOAWAY` past the Rapid Reset ceiling or for a window overflow, told to the io, no
+  connection `WINDOW_UPDATE` --, the sweep and the turns stop there, and a SETTINGS frame whose turns ended that way is
+  not acknowledged, its later entries writing nothing. And the session
+  read `_http2_protocol` bare, a pointer it never lowers: a second reset, or a response sent late, ran the freed
+  object. It reads it through the io and through the lifetime of the object it installed (`live_http2_protocol()`; the
+  HTTP/1.1 fallback's the same way, and the TLS handshake's pointer is lowered once the session replaced it): once the
+  protocols were cleared `reset_stream()` returns `false` and a response is dropped, and a protocol installed later at
+  the same address is not taken for the one that is gone -- by a reset, nor by the server's drain, which counted such
+  a session as one that still spoke HTTP and waited for it until its deadline. Nor is the protocol live to a session
+  its connection left: an extraction leaves it installed and the session "connected", and a reset, a response or a
+  sweep acted on streams whose connection another owner had. Witnesses:
+  `qbm-http-test-system-http2-client` (a reset, an abort and an end with a refused trailer section, each made outside
+  the read dispatch with a hook that clears the protocols -- heap-use-after-free on the code as it was --; the hook
+  under the sweep's reset ending its own connection alone, the server serving the next; a protocol as large as the
+  session's own installed after the clear, where the HTTP/2 one was and where the fallback's was, out of a reset and
+  out of the drain -- skipped where the allocator does not hand the block back, a sanitizer's; neither the sweep nor a
+  reset acting on a session the server extracted) and `qbm-http-test-unit-http2-server-protocol` (the sweep and the
+  turns stopping at the reset whose observer retired the protocol: no frame written after it, no waiting pushed
+  response let out, no SETTINGS ACK, nothing written for the entries that follow in the same SETTINGS frame; no `GOAWAY`
+  from a provoked reset past the ceiling nor from a window overflow, no `WINDOW_UPDATE` from the frame handler of a
+  provoked reset).
+
+- **The last delivery of an HTTP/2 server's drain has its bound whatever the client takes (Huly QB-91, found by the
+  reviews of QB-1248).** At the drain's deadline a connection that never answered the `PING` is sent its final
+  `GOAWAY` and closes once that is delivered, "within qb-io's linger bound". The bound was the session's inactivity
+  timeout, set to the linger -- and that timeout restarts at every write that leaves octets queued: a client whose
+  reading made the server write within each linger kept its session, with its contexts and its output, for as long
+  as it wished (measured by the ninth independent review: still up 9 s after the deadline under the default linger
+  of 2 s, the client reading 5 ms every 300 ms; it is the server's writes that restarted it, not the client's
+  reads -- with megabytes waiting in the kernel the server writes once in a while, and the timeout could lapse,
+  the tenth review measured). The delivery has a one-shot timer of the session's own, counted from the deadline,
+  which nothing restarts. At the bound a session whose output is not delivered is aborted with what
+  is left of it (`DisconnectedReason::ServerDraining`, what the enum says of a session aborted at the deadline; a
+  client that read nothing was reported `ByTimeout`); one that is delivered is in qb-io's lingering close, which
+  waits for its peer for the linger bound again, and is left to it -- cut there, its socket would close under a
+  client that may not have read what it was just sent. The session's inactivity timeout is over from the deadline:
+  the delivery has that one bound, whole, whatever the timeout was (a session whose timeout was shorter than its
+  linger had the linger, as before). A session extracted during the delivery has no bound left: its connection is
+  its next owner's. A `set_linger()` of zero or less aborts at once, as before, and so does a loop that refuses the
+  timer. A session something else ended first keeps the reason it ended with (the entry below). The `deadline`
+  report still comes right after the final `GOAWAY`s are queued, before their delivery: those connections end
+  within two lingers of it, and a server destroyed on the report cuts them. Witnesses:
+  `qbm-http-test-system-server-drain-h2` (32 MiB queued behind a send buffer of 16 KiB asked -- Linux grants twice
+  that --, so that the server writes again whenever its client's reading makes room, every few tens of
+  milliseconds, and a client taking 256 KiB every quarter of a second: aborted a linger
+  after the deadline, `ServerDraining`, not before and less than a linger late -- on the code as it was the
+  session outlived the case's three seconds, 20 runs of 20 under g++ 14 Release and 20 of 20 under ASan --; a
+  delivery completed 150 ms after the deadline, the session ending a linger after the delivery, by itself -- a
+  linger after the deadline on the code as it was --; a session extracted in the pass of the deadline, read past
+  the bound as the extraction left it; a session disconnected in the pass of the bound, keeping its reason).
+
+- **An HTTP/1.1 or HTTP/2 server session keeps the first reason it ended with (Huly QB-1248, found by its reviews).**
+  qb-io's `disconnect()` updates the reason at each call; a session something ends in a pass of the loop is released
+  a dispatch later -- after the timers and the deferred completions of that pass when the poll had made its watcher
+  pending (output queued, or input arrived), before them otherwise -- and, held by a capture after its release, still
+  takes the ticks of its timers. A later disconnection of the session's own reported its reason over the cause: the
+  inactivity timeout's `ByTimeout`; the drain deadline's `ServerDraining` (HTTP/1.1, a bare session of the HTTP/1.1
+  server, and HTTP/2 wherever its deadline aborts at once: a linger of zero, the HTTP/1.1 fallback, a session still
+  in its TLS handshake or whose protocol has ended); a response or a streamed response completed from a callback.
+  Every disconnection of the session's own now goes through one check, and the HTTP/1.1 session's timeout does
+  nothing for a session that has ended: a session type's own `on(event::timeout)` is no longer called there -- it
+  was, and its disconnection was reported over the cause before the release when the session had output queued, and
+  read after the release when it had none. Neither session's inactivity timeout acts on a session in qb-io's
+  lingering close any more -- a response delivered with `Connection: close`, an HTTP/2 connection that ended
+  gracefully, waiting for its peer --, a session type's own `on(event::timeout)` included: the linger has its own
+  bound, and the timeout ended the session `ByTimeout`, its socket closed under a peer that may not have read what
+  was just delivered. A session whose close is under way, its output not delivered yet, does not linger: its
+  timeout still ends it (but for the HTTP/2 drain's last delivery, which its own bound ends, the timeout over). Each
+  server session names its inactivity timer for qb-io (`inactivity_timer_t`), and an extraction stops that one: a
+  timer a session type keeps of its own -- a `use<S>::timeout`, a `with_timeout` base of its own type -- is left to
+  tick (the first was stopped in its place, the second left the inactivity timer armed beside it, and a session held
+  past its extraction was timed out). The name is reserved: a session type that declares an `inactivity_timer_t` of
+  its own does not compile (it hid the session's, and the extraction stopped another timer), and inside a class
+  deriving from a server session an unqualified `inactivity_timer_t` names the session's (in a class template, whose
+  base is dependent, it does not: `typename MySession::inactivity_timer_t` does). A `disconnect()` the application
+  makes itself is qb-io's, unchanged. Witnesses: `qbm-http-test-system-http1-loopback-basic` and
+  `qbm-http-test-system-http2-client` (a session disconnected by a callback in the pass of its inactivity timeout,
+  its response queued, and with nothing queued -- released first, its timer ticking after the release --; a session
+  type's own timeout handler, not called; a disconnection, and a timeout, in the pass of the drain's deadline, a
+  bare session's too; each reading the reason at the release and after it; a lingering session whose client keeps
+  its end open a second, under a timeout of 150 ms; a `Connection: close` response not yet written when its timeout
+  runs, timed out; a session held past its extraction, with and without a timeout handler of its own, running no
+  timeout -- qb's `extractSession()` stops the timer --, and with a timer of its own of either shape, which ticks)
+  and `qbm-http-test-system-server-drain-h2` (a session disconnected in the pass of the last delivery's bound; a
+  session lingering after a graceful drain, under a timeout of 150 ms); refused at build, a session type that
+  declares an `inactivity_timer_t` of its own: `qbm-http-test-unit-inactivity-timer-name-h1` and `-h2`.
 
 - **The HTTP/1.1 clients read a body of exactly their limit, and name the limit when a body passes it (Huly
   QB-1248).** Neither the persistent client nor the one-shot verbs read a response whose body is exactly the 100 MiB
@@ -1532,9 +1828,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   second response on the stream). It is judged first, as any response is: a field HTTP/2 cannot carry, a list past
   the client's `SETTINGS_MAX_HEADER_LIST_SIZE`, refuse it at once; and judged again when it leaves, by the bounds then
   in force. One answered from an observer of the stream whose close makes room waits behind those already waiting.
-  One that waits as long as the idle sweep's `max_idle` (`cleanup_idle_streams()`, 30 s by default, counted from the
-  promise) is cancelled as an idle stream is. A client's NO_ERROR `GOAWAY` cancels every promised stream still
-  reserved, its response waiting or not given yet, one answered from an observer of the GOAWAY included --
+  One that waits as long as the idle sweep's `max_idle` without progress (`cleanup_idle_streams()`, 30 s by default,
+  counted from its answer, then from the connection's DATA its peer takes while the client's limit is above 0, Huly
+  QB-1248) is cancelled as a response its peer does not take is. A client's NO_ERROR `GOAWAY` cancels every promised
+  stream still reserved, its response waiting or not given yet, one answered from an observer of the GOAWAY included --
   `RST_STREAM(CANCEL)` at or below its last-stream-id, dropped without a frame above it as the pushes it names
   unprocessed are; an error GOAWAY ends every stream without one: its HEADERS would open a stream, and "Receivers of a
   GOAWAY frame MUST NOT open additional streams" (§6.8). A promised stream at or below the last-stream-id was

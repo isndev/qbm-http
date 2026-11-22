@@ -44,7 +44,7 @@ for informational responses.
 
 The legacy one-shot APIs (callback and coroutine) yield a `qb::http::async::Reply`, which pairs the request snapshot for that attempt with the server response. Normal preparation may add headers or compress the body; a failure may occur before transmission. The opt-in redirect overloads below return a separate `async::RedirectReply`.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1343-1346 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1375-1378 -->
 ```cpp
 namespace qb::http::async {
     struct Reply {
@@ -67,7 +67,7 @@ co_await qb::http::GET(std::move(req), 5s);   // 5-second socket timeout
 co_await qb::http::GET(std::move(req));        // qb::duration::zero() -> no timeout
 ```
 
-The persistent clients carry their own defaults: a 30-second connect timeout and a 60-second request timeout, both adjustable via `set_connect_timeout(qb::duration)` and `set_request_timeout(qb::duration)`. The persistent HTTP/1.1 client also takes the largest response body it accepts, `set_max_body_size(std::size_t)` (100 MiB by default, `qb::http::protocol_limits::MAX_BODY_SIZE`; 0 = none; Huly QB-1248): a response past it fails with a 502 whose error names the limit, a body that declares its length before a byte of it is read. The one-shot verbs read under the default, and fail past it the same way; the persistent client is the way past it. A response is held in the connection's input buffer until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever the limit, and a response it cut -- under a limit of none, or one raised past it -- fails with a 502 that names that cap, not the limit. The HTTP/2 client reads under the 100 MiB constant, with no setting; the HTTP/3 client's `set_max_body_size` takes 0 for none too.
+The persistent clients carry their own defaults: a 30-second connect timeout and a 60-second request timeout, both adjustable via `set_connect_timeout(qb::duration)` and `set_request_timeout(qb::duration)`. The persistent HTTP/1.1 client also takes the largest response body it accepts, `set_max_body_size(std::size_t)` (100 MiB by default, `qb::http::protocol_limits::MAX_BODY_SIZE`; 0 = none; Huly QB-1248): a response past it fails with a 502 whose error names the limit, a body that declares its length before a byte of it is read. The one-shot verbs read under the default, and fail past it the same way; the persistent client is the way past it. A response is held in the connection's input buffer until it completes, so qb-io's read cap (`QB_MAX_READ_BUFFER_SIZE`, 200 MiB) bounds it whatever the limit, and a response it cut -- under a limit of none, or one raised past it -- fails with a 502 that names that cap, not the limit. The HTTP/2 client takes the same setting, `set_max_body_size()` (100 MiB by default, 0 = none): a response past it has its stream reset and its request fails with a 502 whose error names the limit, the connection serving its other requests on (a stream reset, nothing to close). The HTTP/3 client's `set_max_body_size` takes 0 for none too.
 
 ### `verify_peer` — TLS certificate verification
 
@@ -118,19 +118,19 @@ The HTTP/1.1 one-shot and persistent clients fill in these standard headers for 
 - **User-Agent** — defaults to `qb::http::default_user_agent` (`qb/<framework version>`, derived at compile time) if you do not set one.
 - **Accept-Encoding** — populated with supported codecs when compression is compiled in (`QB_HAS_COMPRESSION`); these HTTP/1.1 clients decompress `Content-Encoding` responses transparently.
 - **Content-Length** — computed from the body for requests that carry one.
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1426-1432,1511-1521; qbm/http/src/qbm/http/1.1/client.cpp:149-174,393-411; qbm/http/src/qbm/http/headers.cpp:320-325 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1458-1464,1543-1553; qbm/http/src/qbm/http/1.1/client.cpp:149-174,393-411; qbm/http/src/qbm/http/headers.cpp:320-325 -->
 
 The HTTP/2 and HTTP/3 clients do not add `Accept-Encoding` or decode `Content-Encoding` responses for you. Set the negotiation header yourself, and decode a response explicitly when your application needs its plaintext body (`Body::uncompress` requires `QB_HAS_COMPRESSION`).
 <!-- src: qbm/http/src/qbm/http/2/client.cpp:249-262,605-620; qbm/http/src/qbm/http/3/client.cpp:198-210,767-776; qbm/http/src/qbm/http/body.h:307-328 -->
 
 For an HTTP/1.1 one-shot or persistent client built with `QB_HAS_COMPRESSION`, assign the **uncompressed** body and set `Content-Encoding: gzip`; the client compresses it once before sending. Do not call `request.body().compress("gzip")` first: that would add a second gzip layer while declaring only one. Without `QB_HAS_COMPRESSION`, these HTTP/1.1 clients remove `Content-Encoding` and send the body unchanged; do not rely on this path to send a precompressed request. For an HTTP/2 or HTTP/3 request, which does not have that HTTP/1.1 client compression step, compress the body yourself (when `QB_HAS_COMPRESSION` is available) before setting its `Content-Encoding`. See [Request and Response bodies](./02-body-deep-dive.md).
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1476-1483; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1508-1515; qbm/http/src/qbm/http/1.1/client.cpp:122-135 -->
 
 ## One-shot callback client (HTTP/1.1)
 
 The callback form is the native non-blocking API. You provide a callable taking `qb::http::async::Reply&&`. Network responses and failures invoke it on the I/O thread; a locally rejected scheme or missing SSL capability invokes it on the calling thread before the helper returns.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1502-1522,1607-1622,1657-1662 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1534-1554,1639-1654,1689-1694 -->
 ```cpp
 template <typename _Func>
 std::enable_if_t<std::is_invocable_v<_Func, async::Reply&&>, void>
@@ -174,7 +174,7 @@ For `REQUEST`, set `request.method()` yourself; the verb-named functions set it 
 
 Every verb is also overloaded to return an awaiter. These overloads are thin wrappers over the callback API — they allocate no extra thread or event loop, they only bridge the callback into `co_await`. Overload resolution distinguishes them by arity: the 3-argument form (`request, func, timeout`) is callback-style; the 2-argument form (`request, timeout`) is coroutine-style.
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1793-1798 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1825-1830 -->
 ```cpp
 namespace qb::http {
     [[nodiscard]] async::awaiter<async::Reply>
@@ -227,7 +227,7 @@ int main() {
 
 To skip TLS verification for a self-signed endpoint, pass the third argument:
 
-<!-- src: qbm/http/src/qbm/http/1.1/http.h:1793-1798 -->
+<!-- src: qbm/http/src/qbm/http/1.1/http.h:1825-1830 -->
 ```cpp
 auto reply = qb::http::run_sync(
     qb::http::GET(std::move(req), qb::duration::zero(), /*verify_peer=*/false));
@@ -304,7 +304,7 @@ The three persistent clients share the connect / `push_request` / `push_requests
 | `set_max_concurrent_streams` | — | ✓ (default 100) | ✓ (default 100) |
 | `set_max_pending_requests` | ✓ | ✓ | ✓ (default 10000) |
 | `push_request_with_id` / `cancel_request` | — | — | ✓ |
-| `set_max_body_size` | ✓ (default 100 MiB, 0 = none) | — (100 MiB) | ✓ (default 64 MiB, 0 = none) |
+| `set_max_body_size` | ✓ (default 100 MiB, 0 = none) | ✓ (default 100 MiB, 0 = none) | ✓ (default 64 MiB, 0 = none) |
 | `set_auto_reconnect` | ✓ (default true) | ✓ (default true) | ✓ (default true) |
 | `enable_auto_reconnect(RetryPolicy)` — backoff, cap, `on_retry` | — (immediate) | ✓ | — (immediate) |
 | Connect / request timeout | 30s / 60s | 30s / 60s | 30s / 60s |
@@ -426,6 +426,8 @@ namespace qb::http2 {
         [[nodiscard]] bool is_reconnecting() const noexcept;
         [[nodiscard]] int  reconnect_attempts() const noexcept;
         void set_verify_peer(bool value) noexcept;             // default true
+        void set_max_body_size(std::size_t value) noexcept;    // default 100 MiB; 0 = none
+        [[nodiscard]] std::size_t max_body_size() const noexcept;
     };
 
     std::shared_ptr<Client> make_client(const std::string& base_uri);

@@ -76,7 +76,8 @@ TEST(Http2ClientHugeBody, ADataCrossingTheResetOfABodyPastTheLimitLeavesTheOther
         << "neither the responses nor the end of the connection came";
     ASSERT_TRUE(large.has_value()) << "the response past the limit was not refused";
     EXPECT_NE(large->status(), qb::http::status::OK);
-    EXPECT_NE(large->body().as<std::string>().find("exceeds configured limit"), std::string::npos) << large->body().as<std::string>();
+    EXPECT_NE(large->body().as<std::string>().find("exceeds the client's limit of 104857600 bytes"), std::string::npos)
+        << large->body().as<std::string>();
     ASSERT_TRUE(other.has_value()) << "the connection ended before the other request was answered";
     EXPECT_EQ(other->status(), qb::http::status::OK) << other->body().as<std::string>();
     EXPECT_EQ(other->body().as<std::string>(), "three");
@@ -92,6 +93,44 @@ TEST(Http2ClientHugeBody, ADataCrossingTheResetOfABodyPastTheLimitLeavesTheOther
     ASSERT_TRUE(peer.goaway());
     const auto [code, debug] = peer.first_goaway();
     EXPECT_EQ(code, 0u) << "the client closed the connection: " << debug;
+}
+
+// The same body under a limit of none (Huly QB-1248): `set_max_body_size(0)` reads all of it -- the 100 MiB, the frame
+// past them and the DATA behind it, then its trailers -- and the request on stream 3 is answered; the client resets nothing.
+TEST(Http2ClientHugeBody, UnderALimitOfNoneABodyPastTheDefaultIsDelivered) {
+    ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+    qb::io::async::init();
+    Http2PlannedPeer peer(Http2PlannedPeer::Plan::body_past_the_limit, std::chrono::seconds(90));
+    ASSERT_NE(peer.port(), 0);
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+    client->set_request_timeout(90s);
+    client->disable_auto_reconnect();
+    client->set_max_body_size(0);
+    bool connected = false;
+    client->connect([&](bool ok, const std::string &) { connected = ok; });
+    ASSERT_TRUE(pump_until([&] { return connected; }, 10s)) << "the client did not connect";
+
+    std::optional<qb::http::Response> large, other;
+    qb::http::Request                 first, second;
+    first.method()  = qb::http::Method::GET;
+    first.uri()     = qb::io::uri("/large");
+    second.method() = qb::http::Method::GET;
+    second.uri()    = qb::io::uri("/other");
+    ASSERT_TRUE(client->push_request(first, [&](qb::http::Response r) { large = std::move(r); }));
+    ASSERT_TRUE(client->push_request(second, [&](qb::http::Response r) { other = std::move(r); }));
+    ASSERT_TRUE(pump_until([&] { return (large.has_value() && other.has_value()) || peer.eof(); }, 75s))
+        << "neither the responses nor the end of the connection came";
+    ASSERT_TRUE(large.has_value());
+    EXPECT_EQ(large->status(), qb::http::status::OK) << large->body().as<std::string>().substr(0, 200);
+    EXPECT_EQ(large->body().size(), qb::http::protocol_limits::MAX_BODY_SIZE + 16384 + 8192);
+    ASSERT_TRUE(other.has_value());
+    EXPECT_EQ(other->status(), qb::http::status::OK);
+    EXPECT_EQ(other->body().as<std::string>(), "three");
+    client->disconnect();
+    ASSERT_TRUE(pump_until([&] { return peer.eof(); }, 10s)) << "the peer did not see the connection end";
+    EXPECT_TRUE(peer.resets().empty()) << "the client reset a stream under a limit of none";
 }
 
 } // namespace http2_client_huge_body_test

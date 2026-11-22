@@ -121,6 +121,10 @@ class session
 public:
     using Protocol    = TProtocol<session<Derived, Transport, TProtocol, Handler>>;
     using string_type = typename Protocol::string_type;
+    /// The session's inactivity timer (`setTimeout()`), named for qb-io: `io_handler::extractSession()` stops this one,
+    /// so that a `use<S>::timeout` a session type keeps of its own is not taken for it -- that one was stopped, and this
+    /// one left to time out a session held past its extraction (the fourteenth independent review of Huly QB-1248).
+    using inactivity_timer_t = qb::io::async::with_timeout<session<Derived, Transport, TProtocol, Handler>>;
 
 private:
     friend qb::io::async::io<session>;
@@ -256,10 +260,10 @@ private:
                 close_after_response();
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw: " << e.what());
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
         } catch (...) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 response send threw an unknown exception");
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
         }
     }
 
@@ -279,7 +283,7 @@ private:
             auto context = this->server().router().route(this->shared_from_this(), std::move(request));
             if (!context) {
                 LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 request not routed, disconnecting.");
-                this->disconnect(DisconnectedReason::Undefined);
+                end_session(DisconnectedReason::Undefined);
                 return;
             }
 
@@ -287,10 +291,10 @@ private:
             drain_ready_response();
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 request handling threw: " << e.what());
-            this->disconnect(DisconnectedReason::Undefined);
+            end_session(DisconnectedReason::Undefined);
         } catch (...) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 request handling threw an unknown exception");
-            this->disconnect(DisconnectedReason::Undefined);
+            end_session(DisconnectedReason::Undefined);
         }
     }
 
@@ -311,10 +315,10 @@ private:
             close_after_response();
         } catch (const std::exception &e) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 refusal send threw: " << e.what());
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
         } catch (...) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 refusal send threw an unknown exception");
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
         }
     }
 
@@ -347,7 +351,7 @@ private:
         if (_context) {
             if (_pending_requests.size() >= _max_pipelined_requests) {
                 LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 pipelined request queue limit reached.");
-                this->disconnect(DisconnectedReason::ByProtocolError);
+                end_session(DisconnectedReason::ByProtocolError);
                 return;
             }
             _pending_requests.emplace_back(std::move(request));
@@ -368,9 +372,19 @@ private:
      *
      * Timeouts are used to prevent idle connections from consuming
      * server resources indefinitely.
+     *
+     * Nothing for a session that has ended (end_session()), a session type's own handler included: one ended earlier
+     * in this pass of the loop, released a dispatch later, or held by a capture after its release, whose timer still
+     * ticks -- it keeps the reason it ended with (the twelfth independent review of Huly QB-1248; the handler ran there,
+     * and its disconnection, or the session's ByTimeout, was reported over that reason). Nor for one in qb-io's
+     * lingering close -- a response delivered with `Connection: close`, waiting for its peer: the linger has its own
+     * bound, and the timeout cut it, the socket closed under a peer that may not have read the response (the
+     * thirteenth).
      */
     void
     on([[maybe_unused]] qb::io::async::event::timeout const &) { // handler-access: with_timeout (a friend) calls it
+        if (!this->is_connected() || this->lingering())
+            return;
         LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 session timed out.");
 
         // disconnect session on timeout
@@ -382,13 +396,25 @@ private:
                 static_cast<Derived &>(*this).on(event::timeout{});
             } catch (const std::exception &e) {
                 LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 user timeout handler threw: " << e.what());
-                this->disconnect(DisconnectedReason::ByTimeout);
+                end_session(DisconnectedReason::ByTimeout);
             } catch (...) {
                 LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 user timeout handler threw an unknown exception");
-                this->disconnect(DisconnectedReason::ByTimeout);
+                end_session(DisconnectedReason::ByTimeout);
             }
         } else
-            this->disconnect(DisconnectedReason::ByTimeout);
+            end_session(DisconnectedReason::ByTimeout);
+    }
+
+    /// Ends the session for @p reason -- unless something ended it first: it keeps the reason it ended with. qb-io's
+    /// disconnect() updates the reason at each call; a session ended in a pass of the loop is released a dispatch
+    /// later -- after the timers and the deferred completions of that pass when the poll had made its watcher pending
+    /// (output queued, or input arrived), before them otherwise -- and, held by a capture after its release, still
+    /// takes the ticks of its timers: a later disconnection reported its reason over the cause (the eleventh to
+    /// thirteenth independent reviews of Huly QB-1248). Every disconnection of the session's own goes through here.
+    void
+    end_session(DisconnectedReason reason) noexcept {
+        if (this->is_connected())
+            this->disconnect(reason);
     }
 
     /**
@@ -447,7 +473,7 @@ private:
             // The io closes after this delivery (close_after_response()); a response that did not go through it
             // still closes here, at once, as before.
             if (!_closing)
-                this->disconnect(DisconnectedReason::ResponseTransmitted);
+                end_session(DisconnectedReason::ResponseTransmitted);
             return;
         }
         start_next_request_if_possible();
@@ -547,6 +573,12 @@ public:
      */
     explicit session(Handler &server)
         : qb::io::async::tcp::client<session<Derived, Transport, TProtocol, Handler>, Transport, Handler>(server) {
+        // The name qb-io reads for the timer an extraction stops is this session's (inactivity_timer_t): a session type
+        // that declared one of its own hid it, and the extraction stopped another timer (the fifteenth independent
+        // review of Huly QB-1248).
+        static_assert(std::is_same_v<typename Derived::inactivity_timer_t, inactivity_timer_t>,
+                      "inactivity_timer_t is the HTTP session's name for its inactivity timer: a session type cannot declare "
+                      "one of its own");
         LOG_HTTP_DEBUG_PA(this->id(), "HTTP/1.1 session created with 60s timeout.");
         this->setTimeout(std::chrono::seconds(60));
         // The HTTP/1.1 protocol bounds every request itself -- its header limits, the server's body cap --
@@ -625,7 +657,7 @@ public:
     /// Server hook (Huly QB-167): the drain's deadline came: the session is aborted.
     void
     http1_abort_drain() noexcept {
-        this->disconnect(DisconnectedReason::ServerDraining);
+        end_session(DisconnectedReason::ServerDraining);
     }
 
     /**
@@ -728,7 +760,7 @@ public:
     [[nodiscard]] bool
     stream_head(ContextType &ctx, std::shared_ptr<ResponseStream<Derived>> const &stream) {
         if (!stream_can_answer(ctx)) {
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
             return false;
         }
         if (!_context)
@@ -751,7 +783,7 @@ public:
         } catch (...) {
             LOG_HTTP_ERROR_PA(this->id(), "HTTP/1.1 streamed response head threw an unknown exception");
         }
-        this->disconnect(DisconnectedReason::ServerError);
+        end_session(DisconnectedReason::ServerError);
         return false;
     }
 
@@ -832,7 +864,7 @@ public:
         _stream.reset();
         if (_context && !_context->is_completed())
             _context->cancel("the streamed response was aborted");
-        this->disconnect(DisconnectedReason::ServerError);
+        end_session(DisconnectedReason::ServerError);
     }
 
     void
@@ -841,7 +873,7 @@ public:
             return; // its head left at begin_stream() and its body through the stream (Huly QB-86)
         if (_context && _context.get() != &ctx) {
             LOG_HTTP_WARN_PA(this->id(), "HTTP/1.1 response completed for a non-active context; closing session.");
-            this->disconnect(DisconnectedReason::ServerError);
+            end_session(DisconnectedReason::ServerError);
             return;
         }
         _ready_response = ctx.response();
@@ -1063,7 +1095,7 @@ class server
             if constexpr (drainable_sessions) {
                 if (session && participates_in_drain(*session))
                     session->http1_abort_drain();
-            } else if (session) {
+            } else if (session && session->is_connected()) { // one already ended keeps its reason, as end_session() does
                 session->disconnect(qb::http::DisconnectedReason::ServerDraining);
             }
         }

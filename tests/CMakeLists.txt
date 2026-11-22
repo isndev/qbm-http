@@ -68,8 +68,8 @@ qhttp_test(unit http1-serialize-limits unit/http1/http1-serialize-limits.cpp EXT
 # non-vacuous. Without them an env var that failed to propagate, or a `--gtest_filter` that matched
 # nothing, would exit 0 and read as coverage — which is exactly how this path came to have none.
 if (TARGET qbm-http-test-unit-http1-serialize-limits)
-    # WORKING_DIRECTORY, like every qb_add_test() entry: this is the ONE test in the tree
-    # registered by a hand-written add_test(), and the omission was invisible until a Windows
+    # WORKING_DIRECTORY, like every qb_add_test() entry: this is the one test in the tree that runs
+    # a test executable from a hand-written add_test(), and the omission was invisible until a Windows
     # multi-config build, where it hung in the DLL loader for its full 300 s TIMEOUT while its
     # 350 siblings ran. Kept even though the deployer now puts the DLLs beside the executable --
     # the point is that this entry should not differ from the others in the first place.
@@ -82,6 +82,20 @@ if (TARGET qbm-http-test-unit-http1-serialize-limits)
             PASS_REGULAR_EXPRESSION "\\[  PASSED  \\] 2 tests"
             FAIL_REGULAR_EXPRESSION "\\[  FAILED  \\]|SKIPPED"
             TIMEOUT 300)
+endif ()
+# Build contracts (Huly QB-1248; qb_add_build_contract(), qb's cmake/qbBuildContract.cmake): an HTTP/1.1 or HTTP/2
+# server session type that declares an `inactivity_timer_t` of its own does not compile -- its constructor's
+# static_assert: the name is the one qb-io's extractSession() reads for the timer it stops. Each unit beside its control,
+# the same unit without the declaration, the target of the entry's name. Registered by hand, as the entry above is: such
+# an entry runs a build, not a test executable.
+function(qhttp_build_contract NAME SOURCE)
+    qb_add_build_contract(MODULE qbm-http NAME ${NAME} SOURCE ${SOURCE} LINK qbm-http
+                          CONTROL_DEFINITION QBM_HTTP_CONTRACT_CONTROL
+                          MESSAGE "a session type cannot declare one of its own")
+endfunction()
+qhttp_build_contract(inactivity-timer-name-h1 unit/build-contracts/inactivity-timer-name/reserved-h1.cpp)
+if (QB_HAS_SSL) # the HTTP/2 server session runs over TLS
+    qhttp_build_contract(inactivity-timer-name-h2 unit/build-contracts/inactivity-timer-name/reserved-h2.cpp)
 endif ()
 qhttp_test(unit http1-parse-limits     unit/http1/http1-parse-limits.cpp     EXTRA_LABELS http1)
 qhttp_test(unit http1-request-smuggling unit/http1/http1-request-smuggling.cpp EXTRA_LABELS http1)

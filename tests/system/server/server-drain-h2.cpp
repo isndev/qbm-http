@@ -12,6 +12,10 @@
  * HTTP/2 frame by frame -- what goes over the wire is what is asserted, and a raw client can leave a PING
  * unanswered; one case runs the module's own HTTP/2 client against the drain.
  *
+ * The last delivery -- the final GOAWAY the deadline sends -- has qb-io's linger bound, counted from the deadline
+ * (Huly QB-1248): the cases at the end of the file hold a client that takes a little at a time to it, leave a delivery
+ * completed within it its lingering close, extract a session during it, and end one in the pass of the bound.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -35,6 +39,7 @@
 #include <qbm/http/http.h>
 
 #include "../../shared/http2_fake_io.h"
+#include "../../shared/http2_raw_client.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
@@ -512,4 +517,387 @@ TEST(Http2ServerDrain, TheModuleClientsRequestsAreAllAnswered) {
     ASSERT_TRUE(H2ServerThread::pump_until([&] { return g_reports.load() == 1; }, 10s));
     EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));
     client->disconnect();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The drain's last delivery and its bound (Huly QB-91, QB-1248).
+//
+// At the drain's deadline a connection that never answered the PING is sent its final GOAWAY and closes once that is
+// delivered, within qb-io's linger bound. That bound was the session's inactivity timeout, set to the linger: it
+// restarts at every write that leaves octets queued, so a client whose reading made the server write within each
+// linger kept the session -- its contexts, its output -- for as long as it wished (the ninth independent review of
+// QB-1248 measured one still up nine seconds after the deadline, under a linger of two). It is a timer of the
+// session's own, counted from the deadline.
+//
+// Each case starts the drain on the server's thread and watches the session from that thread, every 20 ms. What a
+// case needs done in the very pass of the deadline -- an extraction, a hold-up of the thread such as a report handler
+// that takes its time makes -- the drain's report does: it runs on the server's thread right after the deadline
+// aborted the sessions, before the loop writes anything.
+namespace server_drain_h2_delivery_test {
+
+using Raw   = qb::http::test::Http2RawClient;
+using Clock = std::chrono::steady_clock;
+
+/// The session's inactivity timeout from the watch's first run -- the default until then, so that nothing hurries the
+/// connection's first exchange: the watch holds it off until the drain.
+constexpr auto kSessionTimeout = 150ms;
+constexpr auto kDrainDeadline  = 40ms; ///< under that timeout: the deadline comes first, whatever holds the thread up
+/// The send buffer asked for the session's socket (Linux grants twice that): small, so that what the session has to
+/// write stays in its output, and the server writes again whenever its client's reading makes room -- some 32 KiB every
+/// 43 ms, the largest gap 50 ms, as the eleventh independent review measured, against a linger of 800 ms. With the
+/// system's own, megabytes wait in the kernel and the server writes once in a while, whatever the client reads (the
+/// tenth review measured its writes 600 ms apart under a client taking 240 KiB every 250 ms).
+constexpr int kSendBuffer = 16 * 1024;
+
+[[nodiscard]] Clock::rep
+ticks(Clock::time_point at) {
+    return at.time_since_epoch().count();
+}
+
+[[nodiscard]] std::chrono::milliseconds
+between(Clock::rep from, Clock::rep to) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::duration(to - from));
+}
+
+/// What the test asks of the server's thread, and what that thread saw: the run's own. The times are steady-clock
+/// ticks, 0 until the thing happened.
+struct Asked {
+    std::atomic<bool> drain{false};   ///< start the drain
+    std::atomic<bool> extract{false}; ///< in the pass of the deadline: extract the session
+    std::atomic<int>  end_with{0};    ///< in the pass of the deadline: leave a callback that disconnects it, this reason
+    std::atomic<int>  hold_ms{0};     ///< in the pass of the deadline: hold the server's thread this long
+    std::atomic<int>  deadline_ms{static_cast<int>(kDrainDeadline.count())}; ///< the drain's deadline
+    std::atomic<bool> arm_at_linger{false}; ///< past the drain's start, the timeout held off until the session lingers
+
+    std::atomic<bool>        queued{false}; ///< /large's response is in the session's output
+    std::atomic<bool>        send_buffer_set{false};
+    std::atomic<bool>        extracted{false};
+    std::atomic<bool>        observed{false}; ///< the extracted session was read, past the bound its delivery had
+    std::atomic<bool>        up_past_the_bound{false};
+    std::atomic<std::size_t> queued_at_deadline{0}; ///< the session's output when the report ran
+    std::atomic<int>         outcome{-1};           ///< the drain's report
+    std::atomic<int>         reason{-1};            ///< the session's disconnection reason, as last read
+    std::atomic<Clock::rep>  drain_at{0};
+    std::atomic<Clock::rep>  deadline_at{0};  ///< the drain's report began: the sessions are aborted
+    std::atomic<Clock::rep>  lingering_at{0}; ///< the session was first seen closing after its peer
+    std::atomic<Clock::rep>  released_at{0};  ///< the session was first seen ended
+};
+
+class DeliveryServer;
+class DeliverySession : public qb::http2::use<DeliverySession>::session<DeliveryServer> {
+public:
+    explicit DeliverySession(DeliveryServer &server);
+    /// What the server's thread reads and does of its session, by name.
+    [[nodiscard]] bool
+    up() noexcept {
+        return this->is_connected();
+    }
+    [[nodiscard]] bool
+    closing_after_its_peer() noexcept {
+        return this->lingering();
+    }
+    [[nodiscard]] int
+    ended_for() noexcept {
+        return this->disconnection_reason();
+    }
+    [[nodiscard]] std::size_t
+    queued() noexcept {
+        return this->out().size();
+    }
+    [[nodiscard]] bool
+    small_send_buffer() noexcept {
+        return this->transport().set_optval(SOL_SOCKET, SO_SNDBUF, kSendBuffer) == 0;
+    }
+    /// Set again, not only restarted: the timer is armed afresh, past the next run of the watch that calls this, so
+    /// that the timeout never comes first out of a hold-up of the server's thread.
+    void
+    hold_timeout() noexcept {
+        this->setTimeout(kSessionTimeout);
+    }
+};
+class DeliveryServer : public qb::http2::use<DeliveryServer>::server<DeliverySession> {
+public:
+    Asked       *asked = nullptr; ///< the run's, set before start()
+    qb::duration linger{2s};      ///< each session's linger bound
+    std::size_t  large = 0;       ///< the octets of /large's body
+    /// An extracted session's transport: it ends with the server.
+    std::optional<DeliverySession::transport_io_type> taken;
+
+    DeliveryServer() {
+        router().get("/first", [this](auto ctx) {
+            _watched               = ctx->session();
+            asked->send_buffer_set = ctx->session()->small_send_buffer();
+            watch(ctx->session(), this);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().get("/large", [this](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(large, 'l');
+            ctx->complete();
+            asked->queued = true;
+        });
+        router().compile();
+    }
+
+private:
+    std::weak_ptr<DeliverySession> _watched; ///< the session /first came on
+
+    /// The drain's report, on the server's thread in the pass of the deadline: the sessions are aborted -- the final
+    /// GOAWAY queued, the bound of its delivery armed -- and nothing is written yet. What the case asked for.
+    void
+    at_the_deadline() {
+        const auto session = _watched.lock();
+        if (!session)
+            return;
+        asked->queued_at_deadline = session->queued();
+        if (asked->extract.load()) {
+            auto transfer    = extractSession(session->id());
+            asked->extracted = transfer.second;
+            taken.emplace(std::move(transfer.first));
+            qb::io::async::callback(
+                [session, seen = asked] {
+                    seen->reason            = session->ended_for();
+                    seen->up_past_the_bound = session->up();
+                    seen->observed          = true;
+                },
+                linger + 300ms);
+        }
+        if (const int reason = asked->end_with.load(); reason != 0)
+            qb::io::async::callback([session, reason] { session->disconnect(reason); }, 30ms);
+        if (const int hold = asked->hold_ms.load(); hold > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+    }
+
+    /// Every 20 ms on the server's thread, while @p session is connected and this server's: until the drain its
+    /// timeout is held off; the drain the test asked for starts; and what the session reads of itself is recorded.
+    static void
+    watch(std::shared_ptr<DeliverySession> session, DeliveryServer *server) {
+        Asked *const asked = server->asked;
+        const auto   now   = Clock::now();
+        if (!session->up()) {
+            asked->reason      = session->ended_for(); // before the time, which is what the test waits for
+            asked->released_at = ticks(now);
+            return;
+        }
+        if (asked->extracted.load())
+            return; // read once more by the callback its extraction left
+        const bool holding            = asked->drain_at.load() == 0;
+        const bool not_seen_lingering = asked->lingering_at.load() == 0;
+        if (holding && asked->drain.exchange(false)) {
+            asked->drain_at = ticks(now);
+            (void) server->drain(std::chrono::milliseconds(asked->deadline_ms.load()), [asked, server](qb::http::drain_outcome outcome) {
+                asked->deadline_at = ticks(Clock::now());
+                if (outcome == qb::http::drain_outcome::deadline)
+                    server->at_the_deadline();
+                asked->outcome = static_cast<int>(outcome); // last: the test's thread waits for it
+            });
+        }
+        if (not_seen_lingering && session->closing_after_its_peer())
+            asked->lingering_at = ticks(now);
+        // Held off until the drain -- or, asked, until the session is first seen lingering, that run included: a slow
+        // pass between the drain and the linger must not time it out before it lingers (the fourteenth independent
+        // review of Huly QB-1248).
+        const bool             hold_off = holding || (asked->arm_at_linger.load() && not_seen_lingering);
+        DeliverySession *const held     = hold_off ? session.get() : nullptr; // the next run's callback keeps it alive
+        qb::io::async::callback([session = std::move(session), server]() mutable { watch(std::move(session), server); }, 20ms);
+        if (held)
+            held->hold_timeout(); // the run's last act, the next run armed: the timeout always expires after that run
+    }
+};
+DeliverySession::DeliverySession(DeliveryServer &server)
+    : session(server) {
+    this->set_linger(server.linger);
+}
+
+class Http2ServerDrainDelivery : public ::testing::Test {
+protected:
+    Asked                                                         asked; // declared before the server's thread: it outlives it
+    std::unique_ptr<qb::http::test::ServerThread<DeliveryServer>> thread;
+    Raw                                                           raw;
+    std::uint32_t                                                 first = 0; ///< /first's stream
+    std::uint32_t                                                 large = 0; ///< /large's stream
+
+    template <typename Pred>
+    [[nodiscard]] static bool
+    wait_until(Pred &&pred, std::chrono::milliseconds budget) {
+        const auto deadline = Clock::now() + budget;
+        while (!pred() && Clock::now() < deadline)
+            std::this_thread::sleep_for(2ms);
+        return pred();
+    }
+
+    /// A server whose sessions have @p linger; a client whose windows take a response whole; /first answered -- the
+    /// watch runs from there. With @p octets, /large is then queued in the session's output; either way the client
+    /// reads nothing from there, so that the PING of the drain's notice is never answered.
+    void
+    connect(std::chrono::milliseconds linger, std::size_t octets = 0) {
+        ASSERT_TRUE(qb::http::test::certs_available());
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread = std::make_unique<qb::http::test::ServerThread<DeliveryServer>>([cert, key, linger, octets, this](DeliveryServer &srv) -> bool {
+            srv.asked  = &asked;
+            srv.linger = linger;
+            srv.large  = octets;
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        raw.keep_frames = false;
+        ASSERT_TRUE(raw.connect(thread->port(), {{Raw::SETTINGS_INITIAL_WINDOW_SIZE, 0x7FFFFFFFu}}));
+        ASSERT_TRUE(raw.window_update(0, 0x7FFF0000u));
+        ASSERT_TRUE(raw.read_until([this] { return raw.settings_acked; }, 3s));
+        first = raw.request("/first");
+        ASSERT_NE(first, 0u);
+        raw.read_until([this] { return raw.streams[first].end_stream || raw.eof; }, 3s);
+        ASSERT_TRUE(raw.streams[first].end_stream) << "the first request was not answered";
+        ASSERT_TRUE(asked.send_buffer_set.load()) << "the session's socket refused its send buffer";
+        if (octets == 0)
+            return;
+        large = raw.request("/large");
+        ASSERT_NE(large, 0u);
+        ASSERT_TRUE(wait_until([this] { return asked.queued.load(); }, 10s)) << "/large was not answered";
+    }
+
+    /// The drain, to its deadline's report (which a case may have asked to take its time).
+    void
+    drain_to_the_deadline() {
+        asked.drain = true;
+        ASSERT_TRUE(wait_until([this] { return asked.outcome.load() >= 0; }, 5s)) << "the drain did not report";
+        ASSERT_EQ(asked.outcome.load(), static_cast<int>(qb::http::drain_outcome::deadline));
+    }
+};
+
+} // namespace server_drain_h2_delivery_test
+
+using server_drain_h2_delivery_test::Http2ServerDrainDelivery;
+
+// A client that takes a little of the output at a time does not keep the session past the bound of its last delivery.
+// It takes 256 KiB every quarter of a second, well within each linger, and each amount makes the server write again
+// (the session's socket has a small send buffer): on the code as it was every such write restarted the bound, and the
+// session outlived the three seconds of the case -- and any number, while output was left. It is aborted a linger
+// after the deadline: not before, the delivery has its bound whole; not long after, the bound is the linger; and it
+// says what ended it.
+TEST_F(Http2ServerDrainDelivery, AClientThatTakesALittleAtATimeIsAbortedAtTheBound) {
+    using namespace server_drain_h2_delivery_test;
+    constexpr auto        kLinger = 800ms;
+    constexpr auto        kLate   = 660ms; // what a hold-up of the server's thread may add; two lingers are past it
+    constexpr std::size_t kLarge  = std::size_t{32} << 20;
+    constexpr std::size_t kTake   = std::size_t{256} << 10;
+    ASSERT_NO_FATAL_FAILURE(connect(kLinger, kLarge));
+    ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
+    const auto end = Clock::now() + 3s;
+    while (asked.released_at.load() == 0 && Clock::now() < end) {
+        raw.read_octets(kTake, 100ms);
+        std::this_thread::sleep_for(250ms);
+    }
+    ASSERT_NE(asked.released_at.load(), 0) << "the session outlived the bound of its last delivery: each write restarted it";
+    EXPECT_LT(raw.streams[large].data_bytes, kLarge) << "the client took the whole response: the case proves nothing";
+    const auto ended = between(asked.drain_at.load(), asked.released_at.load());
+    EXPECT_GE(ended, kLinger) << "the delivery did not have its bound: the session ended " << ended.count() << " ms after the drain began";
+    EXPECT_LT(ended, kDrainDeadline + kLinger + kLate)
+        << "the delivery's bound is not the linger: the session ended " << ended.count() << " ms after the drain began";
+    EXPECT_EQ(asked.reason.load(), static_cast<int>(qb::http::DisconnectedReason::ServerDraining))
+        << "a session the drain's deadline aborted reports another reason";
+}
+
+// A delivery that completes within the bound is not cut by it. The session is then in qb-io's lingering close -- its
+// sending side shut down, what the client still sends read and dropped -- which waits for the client for the linger
+// bound again, counted from the delivery: ended at the delivery's own bound, the socket would close under a client
+// that may not have read what it was just sent. The drain's report takes 150 ms -- nothing is written meanwhile --,
+// so the final GOAWAY is delivered 150 ms after the deadline; the client reads it and keeps its side open. The
+// session ends a linger after the delivery, by itself, not at the bound.
+TEST_F(Http2ServerDrainDelivery, ADeliveryCompletedWithinTheBoundHasItsLingeringCloseWhole) {
+    using namespace server_drain_h2_delivery_test;
+    constexpr auto kLinger = 400ms;
+    constexpr auto kHold   = 150ms;
+    ASSERT_NO_FATAL_FAILURE(connect(kLinger));
+    asked.hold_ms = static_cast<int>(kHold.count());
+    ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
+    raw.read_until([this] { return raw.eof; }, 5s);
+    EXPECT_TRUE(raw.eof) << "the server did not end its side after the delivery";
+    EXPECT_TRUE(raw.goaway_seen);
+    EXPECT_EQ(raw.goaway_code, kNoError);
+    EXPECT_EQ(raw.goaway_last_stream, first) << "the final GOAWAY names the last stream the client opened";
+    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, kLinger + 3s)) << "the session never ended";
+    EXPECT_NE(asked.lingering_at.load(), 0) << "the session was never seen closing after its peer";
+    EXPECT_NE(asked.reason.load(), static_cast<int>(qb::http::DisconnectedReason::ServerDraining))
+        << "the delivery's bound ended a session that was delivered: its lingering close ends by itself";
+    const auto ended = between(asked.deadline_at.load(), asked.released_at.load());
+    EXPECT_GE(ended, kHold + kLinger - 20ms) << "the delivery's bound cut the lingering close: the session ended " << ended.count()
+                                             << " ms after the deadline, the delivery " << kHold.count() << " ms after it";
+}
+
+// A session extracted during its last delivery has no bound left: its connection is its next owner's, and the timer
+// stops with the connection's leaving, as the sweep's does. The drain's report extracts the session in the pass of
+// the deadline -- its final GOAWAY queued, nothing written; read a linger and 300 ms later, it is as the extraction
+// left it.
+TEST_F(Http2ServerDrainDelivery, NoBoundRunsOnASessionExtractedDuringItsLastDelivery) {
+    using namespace server_drain_h2_delivery_test;
+    constexpr auto kLinger = 300ms;
+    ASSERT_NO_FATAL_FAILURE(connect(kLinger));
+    asked.extract = true;
+    ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
+    ASSERT_TRUE(wait_until([this] { return asked.observed.load(); }, 5s)) << "the extracted session was not read";
+    ASSERT_TRUE(asked.extracted.load()) << "no session was extracted: the case proves nothing";
+    EXPECT_TRUE(asked.up_past_the_bound.load()) << "a timer of the session disconnected it after its connection had left it, with the reason "
+                                                << asked.reason.load() << " (ServerDraining, "
+                                                << static_cast<int>(qb::http::DisconnectedReason::ServerDraining)
+                                                << ": the bound of its last delivery; ByTimeout, "
+                                                << static_cast<int>(qb::http::DisconnectedReason::ByTimeout) << ": its inactivity timeout)";
+}
+
+// A session that something else ended in the pass of the bound keeps the reason it ended with. The drain's report
+// leaves a callback that disconnects the session 30 ms later, then holds the server's thread past the bound. Coming
+// out of the hold-up the loop polls -- the session's watcher is made pending there: its final frames are queued, and
+// its socket, with nothing else in it, takes them -- then runs the expired timers, the callback first (the earlier
+// expiry), then the bound's; the session's release comes last, from the watcher the poll made pending, which the
+// callback's disconnection joined. The bound found the session ended, and left it. The order needs that condition
+// (the eleventh independent review): with the watcher not pending, the disconnection is handled at once, before the
+// bound, whose stop clears its tick, and the case proves nothing -- so with nothing queued, or with more queued than
+// the socket takes. What the report saw queued is asserted: the final frames, and nothing behind them.
+TEST_F(Http2ServerDrainDelivery, ASessionAlreadyEndedKeepsItsReasonAtTheBound) {
+    using namespace server_drain_h2_delivery_test;
+    constexpr auto kLinger = 200ms;
+    const int      kReason = static_cast<int>(qb::http::DisconnectedReason::Undefined);
+    ASSERT_NO_FATAL_FAILURE(connect(kLinger));
+    asked.end_with = kReason;
+    asked.hold_ms  = static_cast<int>((kLinger + 100ms).count());
+    ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
+    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
+    ASSERT_GT(asked.queued_at_deadline.load(), 0u) << "nothing queued at the deadline: its watcher is not pending, the case proves nothing";
+    ASSERT_LT(asked.queued_at_deadline.load(), 4096u) << "more than the final frames queued at the deadline: the case proves nothing";
+    EXPECT_EQ(asked.lingering_at.load(), 0) << "the session was delivered before the bound: the case proves nothing";
+    EXPECT_EQ(asked.reason.load(), kReason) << "the bound of the last delivery ended again a session that had ended, under its own reason";
+}
+
+// A session in qb-io's lingering close is not cut by its inactivity timeout (the thirteenth independent review of Huly
+// QB-1248): the linger has its own bound. The drain ends gracefully -- the client answers the notice's PING, the final
+// GOAWAY ends a connection with no stream left, and the session, delivered, closes after its client --, and the client
+// keeps its end open a second, under the watch's timeout of 150 ms (held off until the session is first seen
+// lingering, then left to run: a slow pass before the linger does not time it out first) and a linger of 2 s: the
+// session ends at the client's close, not by its timeout.
+TEST_F(Http2ServerDrainDelivery, ALingeringSessionIsNotCutByItsInactivityTimeout) {
+    using namespace server_drain_h2_delivery_test;
+    constexpr auto kLinger = 2000ms;
+    ASSERT_NO_FATAL_FAILURE(connect(kLinger));
+    asked.deadline_ms   = 5000; // the client answers the PING long before: a graceful end
+    asked.arm_at_linger = true;
+    asked.drain         = true;
+    ASSERT_TRUE(raw.read_until([this] { return raw.eof; }, 3s)) << "the server did not end its side after its final GOAWAY";
+    const auto eof_at = Clock::now();
+    EXPECT_TRUE(raw.goaway_seen);
+    EXPECT_EQ(raw.goaway_code, kNoError);
+    ASSERT_TRUE(wait_until([this] { return asked.lingering_at.load() != 0 || asked.released_at.load() != 0; }, 1s));
+    EXPECT_NE(asked.lingering_at.load(), 0) << "the session was never seen closing after its peer";
+    std::this_thread::sleep_for(1000ms); // the client keeps its end open
+    raw.close();
+    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
+    EXPECT_NE(asked.reason.load(), static_cast<int>(qb::http::DisconnectedReason::ByTimeout))
+        << "the lingering session was ended by its inactivity timeout";
+    const auto ended = between(ticks(eof_at), asked.released_at.load());
+    EXPECT_GE(ended, 900ms) << "the session ended " << ended.count() << " ms after its end of stream, before its client closed";
 }

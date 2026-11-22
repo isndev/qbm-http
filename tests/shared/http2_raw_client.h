@@ -110,6 +110,12 @@ public:
     /// How long one write may take before it gives up. A client that floods a server sets it far past what a loaded
     /// host can stall for: its writes then stop only when the connection is broken.
     std::chrono::milliseconds write_budget = std::chrono::seconds(2);
+    /// How long a read that brought nothing waits before the next one. Zero: the client polls without sleeping, for a
+    /// test that must take a large response as fast as the socket gives it -- a sleep lasts as long as the platform's
+    /// timer makes it, some 15 ms on Windows, and one is paid at each refill of the receive buffer: 24 MiB took from
+    /// 0.3 to 1.1 s under MSVC with the sleep (Huly QB-1248).
+    std::chrono::milliseconds idle_wait   = std::chrono::milliseconds(1);
+    std::size_t               octets_read = 0; ///< every octet the socket gave, TLS opened (`read_octets()`)
 
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
@@ -153,6 +159,23 @@ public:
         std::vector<uint8_t> out;
         append_frame(out, HEADERS, END_STREAM | END_HEADERS, stream_id, block);
         return write_all(out) ? stream_id : 0;
+    }
+
+    /// A request's header block, encoded by this client's HPACK encoder, and the stream id it is for (1, 3, 5, ...), sent by
+    /// the test as it likes: a HEADERS without END_STREAM, a block cut into CONTINUATION frames (Huly QB-1248).
+    std::pair<std::uint32_t, std::vector<uint8_t>>
+    next_header_block(std::string_view path, std::string_view method = "POST",
+                      std::vector<std::pair<std::string, std::string>> const &extra = {}) {
+        const std::uint32_t stream_id = _next_stream_id;
+        _next_stream_id += 2;
+        std::vector<qb::protocol::hpack::HeaderField> fields = {
+            {":method", std::string(method)}, {":scheme", "https"}, {":authority", "localhost"}, {":path", std::string(path)}
+        };
+        for (auto const &[name, value] : extra)
+            fields.emplace_back(name, value);
+        std::vector<uint8_t> block;
+        static_cast<void>(_encoder.encode(fields, block));
+        return {stream_id, std::move(block)};
     }
 
     /// What `solicit()` sends: each frame draws one reply of the server -- a PONG, a SETTINGS ACK, or the RST_STREAM
@@ -253,7 +276,7 @@ public:
             if (eof || std::chrono::steady_clock::now() >= deadline)
                 return pred();
             if (!read_some())
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                idle();
         }
         return true;
     }
@@ -264,7 +287,20 @@ public:
         const auto deadline = std::chrono::steady_clock::now() + window;
         while (!eof && std::chrono::steady_clock::now() < deadline) {
             if (!read_some())
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                idle();
+        }
+    }
+
+    /// Read until `octets` more came from the socket, the connection ends, or `window` elapses: a client that takes a
+    /// set amount at a time, whatever the host's speed -- `read_for()` takes what the host reads in its window, from
+    /// 0.2 to 8 MiB in 5 ms as measured (Huly QB-1248). A read brings 64 KiB at most: the amount is met within that.
+    void
+    read_octets(std::size_t octets, std::chrono::milliseconds window) {
+        const auto        deadline = std::chrono::steady_clock::now() + window;
+        const std::size_t goal     = octets_read + octets;
+        while (!eof && octets_read < goal && std::chrono::steady_clock::now() < deadline) {
+            if (!read_some())
+                idle();
         }
     }
 
@@ -279,6 +315,15 @@ public:
     }
 
 private:
+    /// Between two reads that brought nothing (`idle_wait`).
+    void
+    idle() const {
+        if (idle_wait.count() > 0)
+            std::this_thread::sleep_for(idle_wait);
+        else
+            std::this_thread::yield();
+    }
+
     static void
     append_frame(std::vector<uint8_t> &out, std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id,
                  std::vector<uint8_t> const &payload) {
@@ -327,6 +372,7 @@ private:
         }
         if (n == 0)
             return false;
+        octets_read += static_cast<std::size_t>(n);
         _in.insert(_in.end(), tmp, tmp + n);
         std::size_t at = 0; // one erase a read, not one a frame: a read of a flood's replies holds thousands of frames
         while (_in.size() - at >= 9) {

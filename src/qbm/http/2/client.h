@@ -528,6 +528,18 @@ public:
         return _base_uri;
     }
 
+    /// Set the largest response body this client accepts, in bytes; 0 = none (Huly QB-1248). 100 MiB by default: a response past it
+    /// has its stream reset and its request fails, 502, the error naming the limit; the connection and its other streams go on.
+    void
+    set_max_body_size(std::size_t value) noexcept {
+        _max_body_size = value;
+    }
+    /// The largest response body this client accepts, in bytes; 0 = none.
+    [[nodiscard]] std::size_t
+    max_body_size() const noexcept {
+        return _max_body_size;
+    }
+
     // Event handlers for qb-io framework
     void on(qb::io::async::event::handshake &&);
     void on(qb::http::Response response, uint64_t app_request_id);
@@ -540,35 +552,23 @@ public:
     void on(qb::io::async::event::dispose const &);
 
 private:
-    /**
-     * @brief Initialize client from URI
-     * @param uri URI to parse
-     */
+    std::size_t _max_body_size = qb::http::protocol_limits::MAX_BODY_SIZE; ///< set_max_body_size(); 0: none (QB-1248)
+    /// Initialize the client from @p uri
     void initialize_from_uri(const qb::io::uri &uri);
 
-    /**
-     * @brief Start connection attempt
-     */
+    /// Start connection attempt
     void start_connection();
 
-    /**
-     * @brief Normalize relative request URI against the client's HTTPS base URI.
-     */
+    /// Normalize relative request URI against the client's HTTPS base URI.
     void ensure_absolute_uri(qb::http::Request &request);
 
-    /**
-     * @brief Normalize and validate a request before it can be queued.
-     */
+    /// Normalize and validate a request before it can be queued.
     [[nodiscard]] std::optional<qb::http::Response> prepare_request(qb::http::Request &request);
 
-    /**
-     * @brief Process pending requests queue
-     */
+    /// Process pending requests queue
     void process_pending_requests();
 
-    /**
-     * @brief Handle successful connection
-     */
+    /// Handle successful connection
     void handle_connection_success();
 
     /**

@@ -26,13 +26,12 @@
  *     (fails loud on timeout) instead of ad-hoc deadline/`sleep_for` spins.
  *   - `std::cout`/`std::cerr` debug noise and the file-local `main()` are stripped.
  *
- * New coverage added per spec: GOAWAY-adjacent graceful drain on disconnect,
- * the previously-dead `/api/large` route, and a bad-ALPN negative case (server
- * offers only `http/1.1`, so the `h2` client connect must fail observably).
- * The automatic reconnection (Huly QB-103) has its own section at the end: the
- * backoff run through `RetryPolicy`, its cap, its end on a connection that
- * comes up, a disconnect while connecting, and the retry pattern -- a request
- * pushed back from a failure callback -- queuing behind the scheduled attempt.
+ * New coverage added per spec: GOAWAY-adjacent graceful drain on disconnect, the previously-dead `/api/large` route,
+ * and a bad-ALPN negative case (server offers only `http/1.1`, so the `h2` client connect must fail observably). The
+ * automatic reconnection (Huly QB-103) has its own section: the backoff run through `RetryPolicy`, its cap, its end on a
+ * connection that comes up, a disconnect while connecting, and the retry pattern -- a request pushed back from a failure
+ * callback -- queuing behind the scheduled attempt. So do the server's inactivity timeout, driven by the raw client of
+ * `shared/http2_raw_client.h`, and the client's body limit (Huly QB-1248).
  *
  * REQUIRES: ssl + live. This TU stays inside the `if(QB_HAS_SSL)` block.
  *
@@ -73,6 +72,7 @@
 #include <qb/io/tcp/ssl/listener.h>
 
 #include "../../shared/http2_planned_peer.h"
+#include "../../shared/http2_raw_client.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 
@@ -2444,6 +2444,331 @@ TEST(Http2ServerLifecycle, NeutralResetObserverCanClearTheActiveProtocol) {
     ServerThread::pump_until([&] { return !client->is_connected(); });
 }
 
+// The same observer, reached from a reset the SERVER makes outside the read dispatch -- an application's
+// reset_stream() from a timer, or from a coroutine resumed later (Huly QB-1248). The read path above re-checks the io's
+// protocol after its observer; send_rst_stream() went on into the protocol the hook had destroyed (ASan: use after
+// free). The session holds the io's protocol_pass() around the reset, and afterwards reads its protocol through the io:
+// `_http2_protocol` is never lowered, and a second reset or a late response went through the freed object.
+TEST(Http2ServerLifecycle, AResetMadeOutsideTheReadDispatchLetsItsObserverClearTheProtocols) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             cancellations   = 0;
+    int                             protocol_clears = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    auto                            group = server.router().group("/reset-out");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled()
+            || context.request().uri().path() != "/reset-out/hold")
+            return;
+        auto session = context.session();
+        ASSERT_NE(session, nullptr);
+        context.suppress_response();
+        session->clear_protocols();
+        ++protocol_clears;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/reset-out/hold")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    const auto stream_id = static_cast<std::uint32_t>(held->request().stream_id);
+
+    ASSERT_TRUE(session->reset_stream(stream_id)); // its observer cancels the context, whose hook clears the protocols
+    EXPECT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_EQ(protocol_clears, 1);
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_TRUE(held->is_cancelled());
+
+    // Nothing answers on this connection any more, and nothing reads the protocol that is gone.
+    EXPECT_FALSE(session->reset_stream(stream_id));
+    const auto         queued = session->appended_total(); // what the session's output ever took
+    qb::http::Response late;
+    late.status()  = qb::http::status::OK;
+    late.stream_id = stream_id;
+    late.body()    = "late";
+    *session << late;
+    EXPECT_EQ(session->appended_total(), queued) << "a response written once the protocols were cleared";
+    EXPECT_EQ(protocol_clears, 1);
+
+    held.reset();
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// A protocol installed later is not the one the session negotiated, even at the address of the one that was cleared:
+// the session reads the lifetime of the object it installed, not the pointer alone -- for a reset, and for the server's
+// drain, which a session switched to another protocol is out of (it counted such a session, waited for it and aborted
+// it at its deadline). The replacement is as large as the session's own, the protocol and a lifetime, so an allocator
+// that hands blocks back at once hands back that one. One that does not -- a sanitizer's quarantine -- leaves nothing to
+// tell apart: the case says SKIPPED there, rather than pass on nothing.
+TEST(Http2ServerLifecycle, AProtocolInstalledWhereTheSessionsWasIsNotTakenForIt) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             cancellations = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    auto                            group = server.router().group("/replaced");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point == qb::http::HookPoint::POST_HANDLER_EXECUTION && context.is_cancelled())
+            context.suppress_response();
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/replaced/hold")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    const auto        stream_id = static_cast<std::uint32_t>(held->request().stream_id);
+    const void *const cleared   = static_cast<const void *>(static_cast<H2Session::Http2Protocol *>(session->protocol()));
+    ASSERT_TRUE(session->http2_speaks_http());
+
+    session->clear_protocols(); // outside the read dispatch: destroyed at once, its block free
+    ASSERT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_FALSE(session->http2_speaks_http()) << "no protocol at all";
+    struct AsLargeAsTheSessionsOwn final : H2Session::Http2Protocol {
+        using H2Session::Http2Protocol::Http2Protocol;
+        std::shared_ptr<void> lifetime;
+    };
+    auto *const replacement = session->template switch_protocol<AsLargeAsTheSessionsOwn>(*session);
+    ASSERT_NE(replacement, nullptr);
+    if (static_cast<const void *>(static_cast<H2Session::Http2Protocol *>(replacement)) != cleared) {
+        GTEST_SKIP() << "the allocator did not hand the cleared protocol's block back: nothing to tell apart";
+    }
+    EXPECT_FALSE(session->reset_stream(stream_id)) << "the session ran a protocol it did not install";
+    EXPECT_FALSE(session->http2_speaks_http()) << "the replacement is taken for the protocol the session negotiated";
+    std::optional<qb::http::drain_outcome> outcome;
+    ASSERT_TRUE(server.drain(qb::duration::zero(), [&](qb::http::drain_outcome o) { outcome = o; }));
+    ASSERT_TRUE(outcome.has_value());
+    EXPECT_TRUE(*outcome == qb::http::drain_outcome::drained) << "the drain waited for a session that no longer speaks HTTP";
+
+    held.reset();
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// The public sweep does nothing on a session the server extracted (the third independent review's finding): the
+// extraction leaves the protocol in place and the session "connected", and a caller's sweep reset a stream there and
+// wrote its RST_STREAM into a session whose transport had left. Two sweeps: the first would only see the dispatch.
+TEST(Http2ServerLifecycle, NeitherTheSweepNorAResetActsOnASessionTheServerExtracted) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>                    held;
+    std::optional<H2Session::transport_io_type> extracted;
+    int                                         cancellations = 0;
+    int                                         suppressed    = 0;
+    H2Server                                    server;
+    ClearSessionsBeforeObservations             cleanup{server, held};
+    auto                                        group = server.router().group("/sweep-extracted");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    // A cancelled context answers nothing (its 503 would close the stream): the protocol keeps the stream the
+    // extraction left behind, the one a later sweep could reach.
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled())
+            return;
+        context.suppress_response();
+        ++suppressed;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/sweep-extracted/hold")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    const auto t0        = std::chrono::steady_clock::now();
+    const auto stream_id = static_cast<std::uint32_t>(held->request().stream_id);
+
+    auto transfer = server.extractSession(session->id());
+    ASSERT_TRUE(transfer.second);
+    extracted.emplace(std::move(transfer.first));
+    ASSERT_TRUE(held->is_cancelled()) << "the extraction did not cancel the context: the case proves nothing";
+    ASSERT_EQ(suppressed, 1) << "the cancelled context answered, its stream is gone: the case proves nothing";
+    const auto before = session->appended_total();
+    EXPECT_EQ(session->http2_sweep_streams(t0), 0u);
+    EXPECT_EQ(session->http2_sweep_streams(t0 + 1h), 0u) << "the public sweep reset a stream of a session the server extracted";
+    EXPECT_EQ(session->appended_total(), before) << "the public sweep wrote into an extracted session";
+    // Nor does a reset (the fourth independent review's witness): it returned true, and wrote its RST_STREAM.
+    EXPECT_FALSE(session->reset_stream(stream_id)) << "reset_stream() acted on a session the server extracted";
+    EXPECT_EQ(session->appended_total(), before) << "reset_stream() wrote into an extracted session";
+
+    session->stop();
+    held.reset();
+    client->disconnect();
+    extracted->close();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// The session's sweep, stepped by hand (http2_sweep_streams(now)): a request its handler has not answered has the
+// session's own timeout as it is at the sweep -- none when the session has none, however long it takes, and the new
+// one as soon as the session is given one. (Handed the raw 0, the sweep reset every dispatched request at its second
+// look.)
+TEST(Http2ServerLifecycle, ARequestItsHandlerHasNotAnsweredHasTheSessionsTimeoutAsItIsAtTheSweep) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    int                             cancellations = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    auto                            group = server.router().group("/sweep-out");
+    group->use(std::make_shared<PendingMiddleware>(held, cancellations));
+    group->get("/hold", [](auto context) { context->text("late handler must not run"); });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/sweep-out/hold")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    const auto t0 = std::chrono::steady_clock::now();
+
+    session->setTimeout(qb::duration::zero());       // no timeout: no bound for a handler
+    EXPECT_EQ(session->http2_sweep_streams(t0), 0u); // the sweep that sees the dispatch
+    EXPECT_EQ(session->http2_sweep_streams(t0 + 24h), 0u) << "reset on a session with no timeout";
+    EXPECT_FALSE(held->is_cancelled());
+
+    // A timeout: the bound, read at the sweep and counted on the request's own clock -- from its dispatch, a day ago.
+    session->setTimeout(48h);
+    EXPECT_EQ(session->http2_sweep_streams(t0 + 47h), 0u);
+    EXPECT_FALSE(held->is_cancelled());
+    EXPECT_EQ(session->http2_sweep_streams(t0 + 49h), 1u);
+    EXPECT_TRUE(held->is_cancelled());
+    EXPECT_EQ(cancellations, 1);
+    EXPECT_EQ(session->http2_sweep_streams(t0 + 72h), 0u);
+
+    held.reset();
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// And from a streamed response the application aborts outside the read dispatch -- what the stall watch's timer does
+// (Huly QB-1212): the abort resets the stream, the reset's observer cancels the context, the hook clears the protocols.
+TEST(Http2ServerLifecycle, AStreamAbortedOutsideTheReadDispatchLetsItsObserverClearTheProtocols) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    std::function<void()>           abort_stream;
+    int                             protocol_clears = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    server.router().get("/abort-out/stream", [&](std::shared_ptr<Context> context) {
+        context->response().status() = qb::http::status::OK;
+        auto stream                  = context->begin_stream();
+        (void) stream->write("a first piece");
+        abort_stream = [stream] {
+            stream->abort();
+        };
+        held = std::move(context);
+    });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled()
+            || context.request().uri().path() != "/abort-out/stream")
+            return;
+        auto session = context.session();
+        ASSERT_NE(session, nullptr);
+        session->clear_protocols();
+        ++protocol_clears;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/abort-out/stream")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    ASSERT_TRUE(abort_stream);
+
+    abort_stream();
+    EXPECT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_EQ(protocol_clears, 1);
+    EXPECT_TRUE(held->is_cancelled());
+
+    abort_stream = nullptr;
+    held.reset();
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
+// And from a streamed response ended, outside the read dispatch, with a trailer section the protocol refuses -- a
+// framing field in it: the refusal resets the stream, and the hook clears the protocols under end_streamed_response().
+TEST(Http2ServerLifecycle, AStreamEndedWithARefusedTrailerSectionOutsideTheReadDispatchLetsItsObserverClearTheProtocols) {
+    using namespace http2_server_lifecycle_test;
+    qb::io::async::init();
+    std::shared_ptr<Context>        held;
+    std::function<void()>           end_stream;
+    int                             protocol_clears = 0;
+    H2Server                        server;
+    ClearSessionsBeforeObservations cleanup{server, held};
+    server.router().get("/end-out/stream", [&](std::shared_ptr<Context> context) {
+        context->response().status() = qb::http::status::OK;
+        auto stream                  = context->begin_stream();
+        (void) stream->write("a first piece");
+        end_stream = [stream, raw = context.get()] {
+            raw->response().trailers().set_header("content-length", "13"); // never in a trailer section
+            stream->end();
+        };
+        held = std::move(context);
+    });
+    server.router().add_lifecycle_hook([&](auto &context, qb::http::HookPoint point) {
+        if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled()
+            || context.request().uri().path() != "/end-out/stream")
+            return;
+        auto session = context.session();
+        ASSERT_NE(session, nullptr);
+        session->clear_protocols();
+        ++protocol_clears;
+    });
+    server.router().compile();
+    ASSERT_TRUE(configure_owner_loop(server));
+    auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
+    client->set_verify_peer(false);
+    client->set_request_timeout(5s);
+    ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/end-out/stream")}, [](auto) {}));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return held != nullptr; }));
+    auto session = held->session();
+    ASSERT_NE(session, nullptr);
+    session->stop();
+    ASSERT_TRUE(end_stream);
+
+    end_stream();
+    EXPECT_EQ(session->protocol(), qb::io::async::no_protocol());
+    EXPECT_EQ(protocol_clears, 1);
+    EXPECT_TRUE(held->is_cancelled());
+
+    end_stream = nullptr;
+    held.reset();
+    session->disconnect();
+    client->disconnect();
+    ServerThread::pump_until([&] { return !client->is_connected(); });
+}
+
 TEST(Http2ServerLifecycle, DrainHookCanExtractItsSessionWithoutRetainingMapIterators) {
     using namespace http2_server_lifecycle_test;
     qb::io::async::init();
@@ -4045,3 +4370,1189 @@ TEST_F(Http2ClientCrossingTest, AServersGoawaysAreLoggedOnceByTheClient) {
 #endif // QB_WITH_LOGGING
 
 } // namespace http2_client_crossing_test
+
+// ===========================================================================
+// The HTTP/2 server's inactivity timeout restarts at what the client sends of a request (Huly QB-1248): a request's first
+// HEADERS -- its header block has the whole timeout from there, its CONTINUATION frames restart nothing -- and each DATA
+// of a request not yet complete. It restarted on the server's writes and at a request's dispatch only: a request had to
+// arrive whole within the timeout of the connection's last write. The server is the fallback's above, its session's
+// timeout 1 s; the client the raw one of shared/http2_raw_client.h. Every wait is a read for the connection's end, so
+// nothing is written to a connection that ended; each end a control measures falls within 0.8 to 1.4 timeouts.
+// ===========================================================================
+namespace http2_native_timeout_test {
+using http2_fallback_timeout_test::kTimeout;
+using http2_fallback_timeout_test::Server;
+using Raw   = qb::http::test::Http2RawClient;
+using Clock = std::chrono::steady_clock;
+
+[[nodiscard]] std::vector<uint8_t>
+slice(std::vector<uint8_t> const &block, std::size_t from, std::size_t to) {
+    return {block.begin() + static_cast<std::ptrdiff_t>(from), block.begin() + static_cast<std::ptrdiff_t>(to)};
+}
+
+class Http2NativeTimeout : public ::testing::Test {
+protected:
+    std::unique_ptr<qb::http::test::ServerThread<Server>> thread;
+    Raw                                                   raw;
+
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread                 = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key](Server &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        ASSERT_TRUE(raw.connect(thread->port()));
+        ASSERT_TRUE(raw.read_until([this] { return raw.settings_acked; }, std::chrono::seconds(3)));
+    }
+
+    /// Reads what comes for at most @p window; true once the connection ended (a GOAWAY, or its close).
+    bool
+    ended_within(std::chrono::milliseconds window) {
+        return raw.read_until([this] { return raw.eof || raw.goaway_seen; }, window);
+    }
+
+    /// Reads until stream @p id is answered whole or reset, or the connection ends; the answer's status, 0 for none.
+    int
+    answer(std::uint32_t id) {
+        raw.read_until([this, id] { return raw.streams[id].end_stream || raw.streams[id].reset; }, std::chrono::seconds(3));
+        return raw.streams[id].end_stream ? raw.streams[id].status() : 0;
+    }
+
+    /// The connection ends within 0.8 to 1.4 timeouts of @p since.
+    void
+    expect_ended_a_timeout_after(Clock::time_point since, const char *what) {
+        ASSERT_TRUE(ended_within(kTimeout * 3)) << what << ": the connection did not end";
+        const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since);
+        EXPECT_GE(after, kTimeout * 8 / 10) << what;
+        EXPECT_LE(after, kTimeout * 14 / 10) << what;
+    }
+};
+} // namespace http2_native_timeout_test
+
+using http2_native_timeout_test::Http2NativeTimeout;
+
+TEST_F(Http2NativeTimeout, ABodySentSlowlyButSteadilyIsServed) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int piece = 0; piece < 12; ++piece) { // a quarter of the timeout apart: three timeouts in all
+        ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after " << piece << " pieces";
+        ASSERT_TRUE(raw.frame(Raw::DATA, piece == 11 ? Raw::END_STREAM : 0, block.first, std::vector<uint8_t>(1, 'x')));
+    }
+    EXPECT_EQ(answer(block.first), 200);
+    EXPECT_EQ(raw.streams[block.first].body(), "12");
+}
+
+TEST_F(Http2NativeTimeout, ARequestBegunJustBeforeTheTimeoutHasItsWholeHeaderBlock) {
+    using namespace http2_native_timeout_test;
+    ASSERT_EQ(answer(raw.request("/up", "POST")), 200);
+    ASSERT_FALSE(ended_within(kTimeout * 3 / 4)) << "the connection ended before the second request began";
+    const auto block = raw.next_header_block("/up");
+    ASSERT_GE(block.second.size(), 3u);
+    const std::size_t third = block.second.size() / 3;
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, slice(block.second, 0, third))); // the timeout restarts
+    ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after the header block's first frame";
+    ASSERT_TRUE(raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, third, 2 * third)));
+    ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut before the header block's last frame";
+    ASSERT_TRUE(raw.frame(Raw::CONTINUATION, Raw::END_HEADERS, block.first, slice(block.second, 2 * third, block.second.size())));
+    EXPECT_EQ(answer(block.first), 200);
+}
+
+TEST_F(Http2NativeTimeout, AHeaderBlockSentSlowlyStillEndsATimeoutAfterItsFirstHeaders) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up", "POST", {{"x-padding", std::string(48, 'p')}});
+    ASSERT_GE(block.second.size(), 16u) << "too short a block to dribble past the timeout";
+    const auto first = Clock::now();
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, slice(block.second, 0, 1)));
+    std::size_t at = 1;
+    while (at + 1 < block.second.size() && !ended_within(kTimeout / 4) // one octet a quarter of the timeout apart, never the last
+           && raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
+        ++at;
+    expect_ended_a_timeout_after(first, "a header block dribbled in CONTINUATION frames");
+}
+
+TEST_F(Http2NativeTimeout, ABodyThatStallsEndsATimeoutAfterItsLastData) {
+    using namespace http2_native_timeout_test;
+    const auto block = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int piece = 0; piece < 6; ++piece) { // a timeout and a half of steady pieces, then nothing
+        ASSERT_FALSE(ended_within(kTimeout / 4)) << "cut after " << piece << " pieces";
+        ASSERT_TRUE(raw.frame(Raw::DATA, 0, block.first, std::vector<uint8_t>(1, 'x')));
+    }
+    expect_ended_a_timeout_after(Clock::now(), "a body that stalled");
+}
+
+// An empty DATA restarts nothing, by design: the frame layer counts it among the frames that make no progress, and a peer
+// that could restart the timeout with it would hold a connection for free.
+TEST_F(Http2NativeTimeout, EmptyDataFramesDoNotHoldTheConnection) {
+    using namespace http2_native_timeout_test;
+    const auto block   = raw.next_header_block("/up");
+    const auto headers = Clock::now();
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
+    for (int frame = 0; frame < 12 && !ended_within(kTimeout / 4) && raw.frame(Raw::DATA, 0, block.first, {}); ++frame) {
+    } // a quarter of the timeout apart, three timeouts at most, nothing in them
+    expect_ended_a_timeout_after(headers, "empty DATA frames");
+}
+
+TEST_F(Http2NativeTimeout, AnIdleConnectionStillEndsATimeoutAfterItsLastResponse) {
+    using namespace http2_native_timeout_test;
+    ASSERT_EQ(answer(raw.request("/up", "POST")), 200);
+    expect_ended_a_timeout_after(Clock::now(), "an idle connection");
+}
+
+// ===========================================================================
+// The streams of an HTTP/2 connection are swept from a timer of the session's own (Huly QB-1248). The sweep ran from
+// on(pending_write) alone -- a write that leaves bytes queued: on a connection that only reads, as an upload's, it never
+// ran, and with the session's timeout now restarting on what a request brings, nothing bounded the connection's other
+// streams. The witness is a request its handler never answers beside an upload that drips: the handler's bound is the
+// session's timeout, 1 s here, so the stream is reset between one and two of them (the sweep's period is half the
+// smallest bound) while the connection serves on. The raw client reads; nothing here is written by the server.
+// ===========================================================================
+namespace http2_stream_sweep_test {
+using http2_fallback_timeout_test::kTimeout;
+using Raw   = qb::http::test::Http2RawClient;
+using Clock = std::chrono::steady_clock;
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    std::vector<std::shared_ptr<qb::http::Context<Session>>> held;                      ///< the requests no handler answers
+    std::atomic<int>                                        *cancelled       = nullptr; ///< the contexts cancelled, counted
+    bool                                                     clear_on_cancel = false;   ///< the hook clears the protocols
+    Server() {
+        router().post("/up", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::to_string(ctx->request().body().size());
+            ctx->complete();
+        });
+        router().get("/never", [this](auto ctx) { held.push_back(std::move(ctx)); });
+        // A response the server streams by itself: a piece a quarter of the timeout apart, for five timeouts.
+        router().get("/ticker", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            tick(ctx->begin_stream(), 0);
+        });
+        router().add_lifecycle_hook([this](auto &context, qb::http::HookPoint point) {
+            if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled())
+                return;
+            if (cancelled)
+                ++*cancelled;
+            if (clear_on_cancel) {
+                auto session = context.session();
+                context.suppress_response();
+                session->clear_protocols(); // under the sweep's reset: retired by the session's pass, ended after the sweep
+                session->disconnect();
+            }
+        });
+        router().compile();
+    }
+
+private:
+    template <typename Stream>
+    static void
+    tick(Stream stream, int piece) {
+        using S = typename Stream::element_type;
+        if (!stream || piece == 20 || stream->write(".") == S::write_result::closed) {
+            if (stream)
+                stream->end();
+            return;
+        }
+        qb::io::async::callback([stream = std::move(stream), piece]() mutable { tick(std::move(stream), piece + 1); }, kTimeout / 4);
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    this->setTimeout(kTimeout);
+}
+
+// The sweep reads a response's progress on what the socket takes only on an io that counts its output, and falls back
+// to "a frame written is progress" on any other, silently: the session is held to be one.
+static_assert(qb::protocol::http2::counts_drained_output<qb::http2::use<Session>::session<Server>>,
+              "the HTTP/2 server session no longer counts its output: the sweep would judge a response on the frames written");
+
+class Http2StreamSweep : public ::testing::Test {
+protected:
+    std::atomic<int>                                      cancelled{0};
+    std::unique_ptr<qb::http::test::ServerThread<Server>> thread;
+    Raw                                                   raw;
+
+    void
+    start(bool clear_on_cancel) {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key, clear_on_cancel, this](Server &srv) -> bool {
+            srv.cancelled       = &cancelled;
+            srv.clear_on_cancel = clear_on_cancel;
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        ASSERT_TRUE(connected(raw));
+    }
+    [[nodiscard]] bool
+    connected(Raw &client) {
+        return client.connect(thread->port()) && client.read_until([&client] { return client.settings_acked; }, std::chrono::seconds(3));
+    }
+    [[nodiscard]] static bool
+    ended(Raw const &client) {
+        return client.eof || client.goaway_seen;
+    }
+};
+} // namespace http2_stream_sweep_test
+
+using http2_stream_sweep_test::Http2StreamSweep;
+
+TEST_F(Http2StreamSweep, ARequestItsHandlerDoesNotAnswerIsResetOnAConnectionThatWritesNothing) {
+    using namespace http2_stream_sweep_test;
+    start(/*clear_on_cancel=*/false);
+    const auto never  = raw.request("/never");
+    const auto begun  = Clock::now();
+    const auto upload = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
+    // An octet of the upload a quarter of the timeout apart: the session's timeout keeps restarting, the server has
+    // nothing to write. Five timeouts at most: the reset is due between one and two.
+    for (int piece = 0; piece < 20; ++piece) {
+        if (raw.read_until([&] { return raw.streams[never].reset || ended(raw); }, kTimeout / 4))
+            break;
+        ASSERT_TRUE(raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')));
+    }
+    const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begun);
+    ASSERT_FALSE(ended(raw)) << "the connection ended";
+    ASSERT_TRUE(raw.streams[never].reset) << "a connection that writes nothing was never swept";
+    EXPECT_EQ(raw.streams[never].reset_code, 8u) << "CANCEL";
+    EXPECT_GE(after, kTimeout) << "reset before its handler had the session's timeout";
+    EXPECT_EQ(cancelled.load(), 1) << "the handler's context is told";
+
+    // The connection serves on: the upload ends, and is answered.
+    ASSERT_TRUE(raw.frame(Raw::DATA, Raw::END_STREAM, upload.first, std::vector<uint8_t>(1, 'x')));
+    raw.read_until([&] { return raw.streams[upload.first].end_stream || raw.streams[upload.first].reset || ended(raw); },
+                   std::chrono::seconds(3));
+    ASSERT_TRUE(raw.streams[upload.first].end_stream);
+    EXPECT_EQ(raw.streams[upload.first].status(), 200);
+}
+
+// The sweep goes on by itself: nothing arrives from the client after its two requests -- no frame re-arms the timer --
+// while the server's own writes keep the session's timeout restarting. The tick arms the next one while streams remain.
+TEST_F(Http2StreamSweep, TheSweepGoesOnWhileStreamsRemainWithNothingArrivingFromTheClient) {
+    using namespace http2_stream_sweep_test;
+    start(/*clear_on_cancel=*/false);
+    const auto never  = raw.request("/never");
+    const auto begun  = Clock::now();
+    const auto ticker = raw.request("/ticker");
+    ASSERT_TRUE(raw.read_until([&] { return raw.streams[never].reset || ended(raw); }, kTimeout * 4)) << "the first tick armed no second one";
+    const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begun);
+    ASSERT_FALSE(ended(raw)) << "the connection ended";
+    EXPECT_EQ(raw.streams[never].reset_code, 8u) << "CANCEL";
+    EXPECT_GE(after, kTimeout);
+    EXPECT_FALSE(raw.streams[ticker].reset) << "a response that flows was reset";
+    EXPECT_FALSE(raw.streams[ticker].body().empty());
+}
+
+// The reset's observer cancels the handler's context, and a hook of it clears the session's protocols: the sweep runs
+// from a timer, outside the read dispatch, where a clear destroyed the protocol at once -- under the sweep that was
+// running it (ASan: use after free, without the session's protocol_pass()). Only that connection ends: the server
+// accepts and serves the next one.
+TEST_F(Http2StreamSweep, AHookThatClearsTheProtocolsUnderTheSweepsResetEndsOnlyItsConnection) {
+    using namespace http2_stream_sweep_test;
+    start(/*clear_on_cancel=*/true);
+    (void) raw.request("/never");
+    // The upload drips as above: the session's own timeout keeps restarting, so it is the sweep that cancels the request
+    // -- not the end of the connection -- and the hook runs under the sweep's reset.
+    const auto upload = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
+    for (int piece = 0; piece < 20 && !raw.read_until([&] { return raw.eof; }, kTimeout / 4); ++piece) {
+        if (!raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')))
+            break; // the connection ended under the write
+    }
+    ASSERT_TRUE(raw.eof || raw.read_until([&] { return raw.eof; }, kTimeout)) << "the swept request's hook did not end its connection";
+    EXPECT_EQ(cancelled.load(), 1);
+
+    Raw next;
+    ASSERT_TRUE(connected(next));
+    const auto id = next.request("/up", "POST");
+    next.read_until([&] { return next.streams[id].end_stream || next.streams[id].reset || ended(next); }, std::chrono::seconds(3));
+    ASSERT_TRUE(next.streams[id].end_stream);
+    EXPECT_EQ(next.streams[id].status(), 200);
+}
+
+// A hook of a context the sweep's reset cancels extracts its session (as an ownership transfer does): on(extracted)
+// stops the sweep, and it stays stopped. The tick under which the extraction happened armed the next one -- an
+// extraction leaves the protocol in place and the session "connected" -- and that tick reset a stream of the session
+// the extraction had left behind, writing into it. The first independent review's witness: observed on the server's
+// thread, the session's appended_total() 100 ms after the extraction and 1.5 s after (a period is 1 s here; the
+// session's own 2 s timeout cannot end it before).
+namespace http2_stream_sweep_extract_test {
+constexpr std::chrono::milliseconds kExtractTimeout{2000};
+using Raw = qb::http::test::Http2RawClient;
+
+/// What one run observes, on the server's thread: the run's own (a second run in the same process starts afresh).
+struct Seen {
+    std::atomic<bool>          extracted{false};
+    std::atomic<bool>          done{false};
+    std::atomic<std::uint64_t> mark{0};
+    std::atomic<std::uint64_t> later{0};
+    std::atomic<int>           cancelled{0};
+};
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    std::vector<std::shared_ptr<qb::http::Context<Session>>> held;
+    std::optional<Session::transport_io_type>                taken;
+    bool                                                     extract_once = true;
+    Seen                                                    *seen         = nullptr; ///< the run's, set before start()
+    Server() {
+        router().post("/up", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().get("/never", [this](auto ctx) { held.push_back(std::move(ctx)); });
+        router().add_lifecycle_hook([this](auto &context, qb::http::HookPoint point) {
+            if (point != qb::http::HookPoint::POST_HANDLER_EXECUTION || !context.is_cancelled())
+                return;
+            context.suppress_response();
+            ++seen->cancelled;
+            if (!extract_once || context.request().uri().path() != "/never")
+                return;
+            extract_once    = false;
+            auto session    = context.session();
+            auto transfer   = extractSession(session->id());
+            seen->extracted = transfer.second;
+            taken.emplace(std::move(transfer.first));
+            qb::io::async::callback([session, observed = seen] { observed->mark = session->appended_total(); }, std::chrono::milliseconds(100));
+            qb::io::async::callback(
+                [session, observed = seen] {
+                    observed->later = session->appended_total();
+                    observed->done  = true;
+                },
+                std::chrono::milliseconds(1500));
+        });
+        router().compile();
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    this->setTimeout(kExtractTimeout);
+}
+} // namespace http2_stream_sweep_extract_test
+
+TEST(Http2StreamSweepExtraction, NoTickRunsOnASessionExtractedUnderTheSweep) {
+    using namespace http2_stream_sweep_extract_test;
+    using Clock = std::chrono::steady_clock;
+    ASSERT_TRUE(qb::http::test::certs_available());
+    const std::string                    cert = qb::http::test::ssl_cert_path().string();
+    const std::string                    key  = qb::http::test::ssl_key_path().string();
+    Seen                                 seen; // declared before the server's thread: it outlives it
+    qb::http::test::ServerThread<Server> thread([cert, key, &seen](Server &srv) -> bool {
+        srv.seen = &seen;
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    Raw raw;
+    ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
+    const auto begun = Clock::now();
+    ASSERT_NE(raw.request("/never"), 0u); // two requests the first tick stamps: reset together, the hook extracting at the first
+    ASSERT_NE(raw.request("/never"), 0u);
+    const auto upload = raw.next_header_block("/up");
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
+    bool third = false;
+    while (!seen.done.load() && Clock::now() - begun < std::chrono::seconds(12)) {
+        if (!third && Clock::now() - begun > std::chrono::milliseconds(1400)) {
+            third = raw.request("/never") != 0; // a third, stamped a tick later: it outlives the sweep that extracts
+        }
+        (void) raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')); // the session's timeout keeps restarting
+        raw.read_for(std::chrono::milliseconds(250));
+    }
+    ASSERT_TRUE(third);
+    ASSERT_TRUE(seen.extracted.load()) << "no session was extracted under the sweep: the case proves nothing";
+    ASSERT_TRUE(seen.done.load()) << "the observations did not run";
+    // The third request was dispatched before the extraction -- its context cancelled with the two others --: it is
+    // the stream a later tick would have reset. Sent after, the case would pass whatever the sweep did.
+    ASSERT_GE(seen.cancelled.load(), 3) << "the third request came after the extraction: the case proves nothing";
+    EXPECT_EQ(seen.later.load(), seen.mark.load())
+        << "a tick ran on the extracted session and wrote " << (seen.later.load() - seen.mark.load()) << " octets into it";
+}
+
+// A refused header block left open on a connection whose sweep had lapsed (the seventh independent review's finding):
+// the session arms its sweep for the block. Its last stream had ended, a tick had found nothing and armed no other,
+// and on a session with no timeout the block was held for ever.
+//
+// The block's bound is ten seconds from the sweep that first sees it. Here that sweep is the armed tick's, a period
+// (200 ms) after the block; the case then asks the server's thread for ONE sweep eleven seconds ahead, which ends the
+// connection. A session whose sweep was not armed sees the block at that sweep for the first time, stamps it, and
+// keeps its connection: the server's thread restarts the session's timeout for the whole case, as the server's own
+// writes on another stream would.
+namespace http2_refused_block_test {
+constexpr std::chrono::milliseconds kBlockTimeout{400}; // the sweep's period is half of it
+using Raw = qb::http::test::Http2RawClient;
+
+/// What the test asks of the server's thread, and what that thread did: the run's own.
+struct Asked {
+    std::atomic<bool> sweep{false}; ///< run one sweep, eleven seconds ahead
+    std::atomic<bool> swept{false};
+    std::atomic<bool> up_after_the_sweep{true}; ///< the session, when that sweep returned
+    std::atomic<int>  sessions_left{-1};        ///< the server's sessions at the watch's run that found it ended
+};
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+    /// What the server's thread reads and does of its session, by name.
+    [[nodiscard]] bool
+    up() noexcept {
+        return this->is_connected();
+    }
+    /// The timeout set again, not only restarted (updateTimeout() records a time and leaves the timer armed as it was):
+    /// its timer is armed afresh, past the next run of the watch -- which calls this as its last act, once that next
+    /// run is armed, so that a hold-up anywhere in its own run comes before it. Coming out of a hold-up of the server's
+    /// thread the watch then runs first, and the timeout does not end the session (the ninth independent review
+    /// measured one hold-up past the timeout in twenty or so ending it; the tenth, one placed after this call).
+    void
+    hold_timeout() noexcept {
+        this->setTimeout(kBlockTimeout);
+    }
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Asked *asked = nullptr; ///< the run's, set before start()
+    Server() {
+        router().get("/first", [this](auto ctx) {
+            watch(ctx->session(), this);
+            ctx->response().status() = qb::http::status::OK;
+            ctx->complete();
+        });
+        router().compile();
+    }
+
+private:
+    /// Every 20 ms on the server's thread, while @p session is connected: its timeout is held off, and the sweep the
+    /// test asked for runs, once.
+    static void
+    watch(std::shared_ptr<Session> session, Server *server) {
+        Asked *const asked = server->asked;
+        if (!session->up()) {
+            asked->sessions_left = static_cast<int>(server->sessions().size());
+            return;
+        }
+        if (asked->sweep.exchange(false)) {
+            (void) session->http2_sweep_streams(std::chrono::steady_clock::now() + std::chrono::seconds(11));
+            asked->up_after_the_sweep = session->up();
+            asked->swept              = true;
+        }
+        Session *const held = session.get(); // the next run's callback keeps it alive
+        qb::io::async::callback([session = std::move(session), server]() mutable { watch(std::move(session), server); },
+                                std::chrono::milliseconds(20));
+        held->hold_timeout(); // the run's last act, the next run armed: the timeout always expires after that run
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    this->setTimeout(kBlockTimeout);
+}
+} // namespace http2_refused_block_test
+
+TEST(Http2RefusedBlock, TheSessionArmsItsSweepForARefusedBlockLeftOpen) {
+    using namespace http2_refused_block_test;
+    ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+    const std::string                    cert = qb::http::test::ssl_cert_path().string();
+    const std::string                    key  = qb::http::test::ssl_key_path().string();
+    Asked                                asked; // declared before the server's thread: it outlives it
+    qb::http::test::ServerThread<Server> thread([cert, key, &asked](Server &srv) -> bool {
+        srv.asked = &asked;
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    Raw raw;
+    ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
+    const auto ended = [&raw] {
+        return raw.eof || raw.goaway_seen;
+    };
+    const auto first = raw.request("/first"); // answered: the server's thread watches its session from there
+    ASSERT_NE(first, 0u);
+    raw.read_until([&] { return raw.streams[first].end_stream || raw.streams[first].reset || ended(); }, std::chrono::seconds(3));
+    ASSERT_TRUE(raw.streams[first].end_stream) << "the first request was not answered";
+    // The tick that request armed finds no stream and arms no other: five of its periods.
+    raw.read_for(kBlockTimeout / 2 * 5);
+    ASSERT_FALSE(ended()) << "the connection ended before the block";
+
+    // A HEADERS on the answered stream, without END_HEADERS: refused (STREAM_CLOSED), its block left open.
+    const auto block = raw.next_header_block("/late", "GET", {{"x-padding", std::string(32, 'p')}});
+    ASSERT_GT(block.second.size(), 4u);
+    ASSERT_TRUE(raw.frame(Raw::HEADERS, 0, first, std::vector<uint8_t>(block.second.begin(), block.second.begin() + 2)));
+    // The session's sweep, armed for the block, sees it at its tick, a period later; ten are waited for, so that a
+    // server thread held up for less than nine of them changes nothing (the session's timeout is held off by the
+    // watch, hold_timeout()).
+    raw.read_for(kBlockTimeout / 2 * 10);
+    ASSERT_FALSE(ended()) << "the connection ended before the block's bound";
+
+    asked.sweep = true; // one sweep, eleven seconds ahead: past the bound of a block a tick has seen
+    ASSERT_TRUE(raw.read_until(ended, std::chrono::seconds(3)))
+        << "the block was first seen by the sweep the case asked for: the session's own was not armed for it";
+    EXPECT_TRUE(asked.swept.load());
+    // At that GOAWAY the session is released as at every error GOAWAY: disconnected when the sweep returns, gone from
+    // the server a dispatch later. A session that stayed to deliver the frame kept its contexts and its output for as
+    // long as its client took to read (the eighth independent review; delivering it was written, and withdrawn).
+    EXPECT_FALSE(asked.up_after_the_sweep.load()) << "the session outlived the sweep's GOAWAY: it stayed to deliver it";
+    const auto released = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (asked.sessions_left.load() < 0 && std::chrono::steady_clock::now() < released)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_EQ(asked.sessions_left.load(), 0) << "the server still holds the session";
+}
+
+// An HTTP/2 session keeps the first reason it ended with (Huly QB-1248; the eleventh and twelfth independent reviews).
+// qb-io's disconnect() updates the reason at each call: a session that something ended in a pass of the loop, and that
+// a later disconnection of the session's own ended again, reported the later reason -- its inactivity timeout's
+// ByTimeout, the drain deadline's ServerDraining. Each case holds a request, answers it from a callback outside the read
+// dispatch (nothing is written before the loop's next pass), sets in motion what ends the session, and holds the
+// server's thread past what expires; the reason is read twice: at the session's release (the server's disconnected()
+// hook: the session is still in its map) and 100 ms after the hold-up. With output queued the session's watcher is made
+// pending by the poll that follows the hold-up and its release comes after the expired timers; with nothing queued it
+// is released first, and its timer -- the capture of the case keeps the session -- ticks after its release: the two
+// readings see the two orders.
+namespace http2_reason_test {
+using std::chrono::milliseconds;
+using Raw = qb::http::test::Http2RawClient;
+
+/// What a case sets in motion from the callback, once the request is answered (or not).
+enum class Plan : int {
+    disconnect_then_timeout,                  ///< a disconnection 30 ms later; the session's 150 ms timeout
+    nothing_queued_then_timeout,              ///< the same, the request never answered: nothing queued
+    disconnect_then_drain_deadline,           ///< a disconnection 30 ms later; the server drains, its deadline 40 ms away
+    disconnect_then_drain_deadline_lingering, ///< the same, the session's linger 200 ms: the deadline arms the delivery's bound
+    timeout_then_drain_deadline,              ///< the session's 30 ms timeout; the server drains, its deadline 60 ms away
+};
+
+/// What the server's thread saw: the run's own.
+struct Seen {
+    std::atomic<std::size_t> queued{0};    ///< the session's output when the thread was held
+    std::atomic<int>         reported{-1}; ///< the session's reason at its release
+    std::atomic<int>         reason{-1};   ///< the session's reason, read 100 ms after the hold-up
+    std::atomic<bool>        done{false};
+};
+inline Seen *g_seen = nullptr; ///< the run's, set before its server's thread starts, cleared once that thread is joined
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+    /// What the server's thread reads of its session, by name.
+    [[nodiscard]] std::size_t
+    queued() noexcept {
+        return this->out().size();
+    }
+    [[nodiscard]] int
+    ended_for() noexcept {
+        return this->disconnection_reason();
+    }
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Plan plan = Plan::disconnect_then_timeout;
+    Server() {
+        router().get("/held", [this](auto ctx) {
+            Seen *const observed = g_seen;
+            const Plan  how      = plan;
+            Server     *server   = this;
+            qb::io::async::callback(
+                [ctx, observed, how, server] {
+                    const auto session   = ctx->session();
+                    const int  undefined = static_cast<int>(qb::http::DisconnectedReason::Undefined);
+                    const auto record    = [](qb::http::drain_outcome) {
+                    };
+                    if (how != Plan::nothing_queued_then_timeout) {
+                        ctx->response().status() = qb::http::status::OK;
+                        ctx->complete();
+                    }
+                    observed->queued = session->queued();
+                    switch (how) {
+                        case Plan::disconnect_then_timeout:
+                        case Plan::nothing_queued_then_timeout:
+                            // The disconnection's timer first: it expires before the timeout whatever holds the thread between.
+                            qb::io::async::callback([session, reason = undefined] { session->disconnect(reason); }, milliseconds(30));
+                            session->setTimeout(milliseconds(150)); // armed afresh from here
+                            std::this_thread::sleep_for(milliseconds(300));
+                            break;
+                        case Plan::disconnect_then_drain_deadline:
+                        case Plan::disconnect_then_drain_deadline_lingering:
+                            qb::io::async::callback([session, reason = undefined] { session->disconnect(reason); }, milliseconds(30));
+                            (void) server->drain(milliseconds(40), record);
+                            std::this_thread::sleep_for(milliseconds(100));
+                            break;
+                        case Plan::timeout_then_drain_deadline:
+                            session->setTimeout(milliseconds(30));
+                            (void) server->drain(milliseconds(60), record);
+                            std::this_thread::sleep_for(milliseconds(150));
+                            break;
+                    }
+                    qb::io::async::callback(
+                        [session, observed] {
+                            observed->reason = session->ended_for();
+                            observed->done   = true;
+                        },
+                        milliseconds(100));
+                },
+                milliseconds(20));
+        });
+        router().compile();
+    }
+    /// The session is still in the map, its on(disconnected) has run.
+    void
+    disconnected(qb::uuid id) {
+        auto const &all = this->sessions();
+        if (auto it = all.find(id); it != all.end() && it->second && g_seen)
+            g_seen->reported = it->second->ended_for();
+        qb::http2::use<Server>::server<Session>::disconnected(id);
+    }
+};
+Session::Session(Server &server)
+    : session(server) {
+    // The deadline aborts at once with a linger of zero; with one, it arms the bound of the last delivery.
+    this->set_linger(server.plan == Plan::disconnect_then_drain_deadline_lingering ? qb::duration(milliseconds(200)) : qb::duration::zero());
+}
+
+/// Runs @p plan, and returns what was seen once the server's thread is joined.
+inline void
+run(Plan plan, Seen &seen) {
+    ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+    g_seen                 = &seen;
+    {
+        qb::http::test::ServerThread<Server> thread([cert, key, plan](Server &srv) -> bool {
+            srv.plan = plan;
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread.ready());
+        Raw raw;
+        ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
+        ASSERT_NE(raw.request("/held"), 0u);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(milliseconds(5));
+    }
+    g_seen = nullptr;
+    ASSERT_TRUE(seen.done.load()) << "the session was not read after its release";
+}
+
+[[nodiscard]] constexpr int
+reason(qb::http::DisconnectedReason r) {
+    return static_cast<int>(r);
+}
+} // namespace http2_reason_test
+
+// Ended by a callback in the pass of its timeout, its response queued: the timeout's tick ran before the release, and
+// disconnected it again.
+TEST(Http2SessionReason, ADisconnectionInThePassOfTheTimeoutKeepsItsReason) {
+    using namespace http2_reason_test;
+    Seen seen;
+    ASSERT_NO_FATAL_FAILURE(run(Plan::disconnect_then_timeout, seen));
+    ASSERT_GT(seen.queued.load(), 0u) << "nothing queued: the case is the next one";
+    EXPECT_EQ(seen.reported.load(), reason(qb::http::DisconnectedReason::Undefined)) << "reported at the release";
+    EXPECT_EQ(seen.reason.load(), reason(qb::http::DisconnectedReason::Undefined)) << "read after the hold-up";
+}
+
+// The same with nothing queued: released first, its timer ticked after the release, the capture holding the session.
+TEST(Http2SessionReason, AReleasedSessionKeepsItsReasonAtItsTimeout) {
+    using namespace http2_reason_test;
+    Seen seen;
+    ASSERT_NO_FATAL_FAILURE(run(Plan::nothing_queued_then_timeout, seen));
+    ASSERT_EQ(seen.queued.load(), 0u);
+    EXPECT_EQ(seen.reported.load(), reason(qb::http::DisconnectedReason::Undefined)) << "reported at the release";
+    EXPECT_EQ(seen.reason.load(), reason(qb::http::DisconnectedReason::Undefined)) << "read after the hold-up";
+}
+
+// Ended by a callback in the pass of the drain's deadline: the deadline aborted it again, ServerDraining over the
+// cause -- at once with a linger of zero; with one, the deadline arms the bound of the last delivery, which leaves a
+// session that has ended (the control).
+TEST(Http2SessionReason, ADisconnectionInThePassOfTheDrainDeadlineKeepsItsReason) {
+    using namespace http2_reason_test;
+    for (const Plan plan : {Plan::disconnect_then_drain_deadline, Plan::disconnect_then_drain_deadline_lingering}) {
+        Seen seen;
+        ASSERT_NO_FATAL_FAILURE(run(plan, seen));
+        ASSERT_GT(seen.queued.load(), 0u) << "nothing queued: its watcher is not pending, the case proves nothing";
+        EXPECT_EQ(seen.reported.load(), reason(qb::http::DisconnectedReason::Undefined)) << "reported at the release";
+        EXPECT_EQ(seen.reason.load(), reason(qb::http::DisconnectedReason::Undefined)) << "read after the hold-up";
+    }
+}
+
+// Ended by its own timeout in the pass of the drain's deadline: it reports the timeout, the first cause.
+TEST(Http2SessionReason, ATimeoutInThePassOfTheDrainDeadlineKeepsItsReason) {
+    using namespace http2_reason_test;
+    Seen seen;
+    ASSERT_NO_FATAL_FAILURE(run(Plan::timeout_then_drain_deadline, seen));
+    ASSERT_GT(seen.queued.load(), 0u) << "nothing queued: its watcher is not pending, the case proves nothing";
+    EXPECT_EQ(seen.reported.load(), reason(qb::http::DisconnectedReason::ByTimeout)) << "reported at the release";
+    EXPECT_EQ(seen.reason.load(), reason(qb::http::DisconnectedReason::ByTimeout)) << "read after the hold-up";
+}
+
+// A session held past its extraction has its INACTIVITY timer stopped -- the one the HTTP/2 session names
+// (`inactivity_timer_t`) -- and a timer the session type keeps of its own is left to tick (the fourteenth independent
+// review of Huly QB-1248, for HTTP/1.1; the same here): with a `use<S>::timeout` of its own, qb-io's rule by type
+// stopped that one and left the inactivity timer armed; with a timer of its own type as a base, neither was stopped.
+// Inactivity 100 ms, own timer 300 ms, read 450 ms after the extraction.
+namespace http2_own_timer_test {
+using std::chrono::milliseconds;
+using Raw = qb::http::test::Http2RawClient;
+
+struct Seen {
+    std::atomic<bool>      extracted{false};
+    std::atomic<bool>      done{false};
+    std::atomic<int>       reason_after{-1};
+    std::atomic<int>       server_unknown{0};
+    std::atomic<int>       own_ticks{0};
+    std::atomic<long long> inactivity_ms{-1};
+    std::atomic<long long> own_ms{-1};
+};
+inline Seen *g_seen = nullptr;
+
+template <typename S>
+class Server;
+
+/// Its own timer is `use<S>::timeout`.
+class UseTimeoutSession
+    : public qb::http2::use<UseTimeoutSession>::session<Server<UseTimeoutSession>>
+    , public qb::io::use<UseTimeoutSession>::timeout {
+    using http_base = qb::http2::use<UseTimeoutSession>::session<Server<UseTimeoutSession>>;
+    using own_base  = qb::io::async::with_timeout<UseTimeoutSession>;
+
+public:
+    explicit UseTimeoutSession(Server<UseTimeoutSession> &server)
+        : http_base(server)
+        , own_base(qb::duration::zero()) {}
+    [[nodiscard]] int
+    ended_for() noexcept {
+        return this->disconnection_reason();
+    }
+    void
+    set_inactivity(qb::duration d) noexcept {
+        static_cast<http_base &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    inactivity() noexcept {
+        return static_cast<http_base &>(*this).getTimeout();
+    }
+    void
+    set_own(qb::duration d) noexcept {
+        static_cast<own_base &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    own() noexcept {
+        return static_cast<own_base &>(*this).getTimeout();
+    }
+    void
+    on(qb::io::async::event::timer const &) {
+        if (g_seen)
+            ++g_seen->own_ticks;
+    }
+};
+
+/// The same, declared final (the seventeenth independent review's W171): qb-io's probe cannot derive from it, and
+/// the name -- the session's public alias -- is looked up in it directly.
+class FinalUseTimeoutSession final
+    : public qb::http2::use<FinalUseTimeoutSession>::session<Server<FinalUseTimeoutSession>>
+    , public qb::io::use<FinalUseTimeoutSession>::timeout {
+    using http_base = qb::http2::use<FinalUseTimeoutSession>::session<Server<FinalUseTimeoutSession>>;
+    using own_base  = qb::io::async::with_timeout<FinalUseTimeoutSession>;
+
+public:
+    explicit FinalUseTimeoutSession(Server<FinalUseTimeoutSession> &server)
+        : http_base(server)
+        , own_base(qb::duration::zero()) {}
+    [[nodiscard]] int
+    ended_for() noexcept {
+        return this->disconnection_reason();
+    }
+    void
+    set_inactivity(qb::duration d) noexcept {
+        static_cast<http_base &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    inactivity() noexcept {
+        return static_cast<http_base &>(*this).getTimeout();
+    }
+    void
+    set_own(qb::duration d) noexcept {
+        static_cast<own_base &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    own() noexcept {
+        return static_cast<own_base &>(*this).getTimeout();
+    }
+    void
+    on(qb::io::async::event::timer const &) {
+        if (g_seen)
+            ++g_seen->own_ticks;
+    }
+};
+
+/// Its own timer is a base of its own type.
+struct Tick : qb::io::async::with_timeout<Tick> {
+    Tick()
+        : qb::io::async::with_timeout<Tick>(qb::duration::zero()) {}
+    void
+    on(qb::io::async::event::timer const &) {
+        if (g_seen)
+            ++g_seen->own_ticks;
+    }
+};
+class TickSession
+    : public qb::http2::use<TickSession>::session<Server<TickSession>>
+    , public Tick {
+    using http_base = qb::http2::use<TickSession>::session<Server<TickSession>>;
+
+public:
+    explicit TickSession(Server<TickSession> &server)
+        : http_base(server) {}
+    [[nodiscard]] int
+    ended_for() noexcept {
+        return this->disconnection_reason();
+    }
+    void
+    set_inactivity(qb::duration d) noexcept {
+        static_cast<http_base &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    inactivity() noexcept {
+        return static_cast<http_base &>(*this).getTimeout();
+    }
+    void
+    set_own(qb::duration d) noexcept {
+        static_cast<Tick &>(*this).setTimeout(d);
+    }
+    [[nodiscard]] qb::duration
+    own() noexcept {
+        return static_cast<Tick &>(*this).getTimeout();
+    }
+    /// An on() of its own, as a session type that handles something has: it hides both bases' (no ambiguous lookup).
+    struct Unused {};
+    void
+    on(Unused) {}
+};
+
+template <typename S>
+class Server : public qb::http2::use<Server<S>>::template server<S> {
+public:
+    std::optional<typename S::transport_io_type> taken; ///< the extracted transport: it ends with the server
+    Server() {
+        this->router().get("/x", [this](auto ctx) {
+            Seen *const observed = g_seen;
+            qb::io::async::callback(
+                [this, ctx, observed] {
+                    auto session = ctx->session();
+                    session->set_inactivity(milliseconds(100));
+                    session->set_own(milliseconds(300));
+                    auto transfer       = this->extractSession(session->id());
+                    observed->extracted = transfer.second;
+                    taken.emplace(std::move(transfer.first));
+                    qb::io::async::callback(
+                        [session, observed] {
+                            observed->reason_after  = session->ended_for();
+                            observed->inactivity_ms = std::chrono::duration_cast<milliseconds>(session->inactivity()).count();
+                            observed->own_ms        = std::chrono::duration_cast<milliseconds>(session->own()).count();
+                            observed->done          = true;
+                        },
+                        milliseconds(450));
+                },
+                milliseconds(10));
+        });
+        this->router().compile();
+    }
+    void
+    disconnected(qb::uuid id) {
+        if (g_seen && this->sessions().find(id) == this->sessions().end())
+            ++g_seen->server_unknown;
+        qb::http2::use<Server<S>>::template server<S>::disconnected(id);
+    }
+};
+
+template <typename S>
+void
+expect_the_inactivity_timer_alone_stopped() {
+    ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+    const std::string cert = qb::http::test::ssl_cert_path().string();
+    const std::string key  = qb::http::test::ssl_key_path().string();
+    Seen              seen;
+    g_seen = &seen;
+    {
+        qb::http::test::ServerThread<Server<S>> thread([cert, key](Server<S> &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread.ready());
+        Raw raw;
+        ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
+        ASSERT_NE(raw.request("/x"), 0u);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(milliseconds(5));
+    }
+    g_seen = nullptr;
+    ASSERT_TRUE(seen.extracted.load()) << "no session was extracted: the case proves nothing";
+    ASSERT_TRUE(seen.done.load()) << "the extracted session was not read";
+    EXPECT_EQ(seen.reason_after.load(), 0) << "the session whose transport was taken was disconnected";
+    EXPECT_EQ(seen.server_unknown.load(), 0) << "the server was told of a session it no longer had";
+    EXPECT_EQ(seen.inactivity_ms.load(), 0) << "the inactivity timer was not stopped";
+    EXPECT_EQ(seen.own_ms.load(), 300) << "the session's own timer was stopped";
+    EXPECT_EQ(seen.own_ticks.load(), 1) << "the session's own timer did not tick";
+}
+} // namespace http2_own_timer_test
+
+TEST(Http2SessionReason, AnExtractedSessionWithATimerOfItsOwnHasItsInactivityTimerAloneStopped) {
+    using namespace http2_own_timer_test;
+    expect_the_inactivity_timer_alone_stopped<UseTimeoutSession>();
+    expect_the_inactivity_timer_alone_stopped<FinalUseTimeoutSession>();
+    expect_the_inactivity_timer_alone_stopped<TickSession>();
+}
+
+// What `Http2ServerLifecycle.AProtocolInstalledWhereTheSessionsWasIsNotTakenForIt` proves of the HTTP/2 protocol,
+// for the HTTP/1.1 fallback of an HTTP/2 server: once the application cleared the session's protocols and installed
+// one of its own, the session does not speak HTTP for the server's drain -- even when that protocol sits at the
+// address of the HTTP/1.1 one the session had installed (Huly QB-1248). Everything happens on the server's thread,
+// from a deferred callback: outside the read dispatch, where a clear destroys at once and the block is free.
+namespace http2_fallback_identity_test {
+struct Seen {
+    std::atomic<bool> done{false};
+    std::atomic<bool> spoke_before{false};
+    std::atomic<bool> speaks_after_clear{true};
+    std::atomic<bool> speaks_after_replacement{true};
+    std::atomic<bool> same_address{false};
+    std::atomic<bool> drain_answered{false};
+    std::atomic<bool> drained{false};
+};
+
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server);
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Seen                                       *seen = nullptr; ///< the run's, set before start()
+    std::shared_ptr<qb::http::Context<Session>> held;
+    Server() {
+        router().get("/swap", [this](auto ctx) {
+            auto session = ctx->session();
+            held         = std::move(ctx);
+            qb::io::async::callback([this, session] { swap(*session); }, std::chrono::milliseconds(20));
+        });
+        router().compile();
+    }
+
+private:
+    void
+    swap(Session &session) {
+        struct AsLargeAsTheSessionsOwn final : Session::Http1Protocol {
+            using Session::Http1Protocol::Http1Protocol;
+            std::shared_ptr<void> lifetime;
+        };
+        const void *const installed = static_cast<const void *>(static_cast<Session::Http1Protocol *>(session.protocol()));
+        seen->spoke_before          = session.http2_speaks_http();
+        session.clear_protocols();
+        seen->speaks_after_clear       = session.http2_speaks_http();
+        auto *const replacement        = session.template switch_protocol<AsLargeAsTheSessionsOwn>(session);
+        seen->same_address             = static_cast<const void *>(static_cast<Session::Http1Protocol *>(replacement)) == installed;
+        seen->speaks_after_replacement = session.http2_speaks_http();
+        std::optional<qb::http::drain_outcome> outcome;
+        const bool began     = this->drain(qb::duration::zero(), [&outcome](qb::http::drain_outcome o) { outcome = o; });
+        seen->drain_answered = began && outcome.has_value();
+        seen->drained        = outcome.has_value() && *outcome == qb::http::drain_outcome::drained;
+        seen->done           = true;
+    }
+};
+Session::Session(Server &server)
+    : session(server) {}
+} // namespace http2_fallback_identity_test
+
+TEST(Http2FallbackIdentity, AProtocolInstalledWhereTheFallbacksWasDoesNotSpeakHttpForTheDrain) {
+    using namespace http2_fallback_identity_test;
+    ASSERT_TRUE(qb::http::test::certs_available());
+    const std::string                    cert = qb::http::test::ssl_cert_path().string();
+    const std::string                    key  = qb::http::test::ssl_key_path().string();
+    Seen                                 seen; // declared before the server's thread: it outlives it
+    qb::http::test::ServerThread<Server> thread([cert, key, &seen](Server &srv) -> bool {
+        srv.seen = &seen;
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2", "http/1.1"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+            return false;
+        srv.start();
+        return true;
+    });
+    ASSERT_TRUE(thread.ready());
+    qb::io::tcp::ssl::socket sock{qb::io::ssl::Context::client().alpn({"http/1.1"})};
+    sock.set_insecure();
+    ASSERT_EQ(sock.connect_v4("127.0.0.1", thread.port()), 0);
+    ASSERT_EQ(sock.get_alpn_selected_protocol(), "http/1.1");
+    const std::string request = "GET /swap HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!seen.done.load() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    ASSERT_TRUE(seen.done.load()) << "the swap did not run";
+    EXPECT_TRUE(seen.spoke_before.load());
+    EXPECT_FALSE(seen.speaks_after_clear.load()) << "no protocol at all";
+    if (!seen.same_address.load()) {
+        GTEST_SKIP() << "the allocator did not hand the cleared protocol's block back: nothing to tell apart";
+    }
+    EXPECT_FALSE(seen.speaks_after_replacement.load()) << "the replacement is taken for the fallback the session installed";
+    ASSERT_TRUE(seen.drain_answered.load());
+    EXPECT_TRUE(seen.drained.load()) << "the drain waited for a session that no longer speaks HTTP";
+}
+
+// ===========================================================================
+// The HTTP/2 client's body limit (Huly QB-1248): `set_max_body_size()`, the constant by default, 0 for none. Past it the
+// response's stream is reset and its request fails with a 502 whose error names the limit -- a body that declares its
+// length at its header block, one that delivers more at the DATA that passes it -- while the connection serves the
+// other requests on. A body past the default under a limit of none is http2-client-huge-body.cpp's: 100 MiB on the wire.
+// ===========================================================================
+namespace http2_client_body_limit_test {
+class Server;
+class Session : public qb::http2::use<Session>::session<Server> {
+public:
+    explicit Session(Server &server)
+        : session(server) {}
+};
+class Server : public qb::http2::use<Server>::server<Session> {
+public:
+    Server() {
+        router().get("/declared-2048", [](auto ctx) { sized(ctx, 2048); });
+        router().get("/declared-1024", [](auto ctx) { sized(ctx, 1024); });
+        router().get("/small", [](auto ctx) { sized(ctx, 5); });
+        router().get("/streamed-2048", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream(); // no content-length: the body is what the DATA frames bring
+            static_cast<void>(stream->write(std::string(2048, 's')));
+            stream->end();
+        });
+        router().compile();
+    }
+
+private:
+    template <typename Ctx>
+    static void
+    sized(Ctx const &ctx, std::size_t size) {
+        ctx->response().status() = qb::http::status::OK;
+        ctx->response().set_header("content-length", std::to_string(size));
+        ctx->response().body() = std::string(size, 'd');
+        ctx->complete();
+    }
+};
+
+class Http2ClientBodyLimit : public ::testing::Test {
+protected:
+    std::unique_ptr<qb::http::test::ServerThread<Server>> thread;
+    std::shared_ptr<qb::http2::Client>                    client;
+
+    void
+    SetUp() override {
+        ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
+        qb::io::async::init();
+        const std::string cert = qb::http::test::ssl_cert_path().string();
+        const std::string key  = qb::http::test::ssl_key_path().string();
+        thread                 = std::make_unique<qb::http::test::ServerThread<Server>>([cert, key](Server &srv) -> bool {
+            srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2"}));
+            if (srv.transport().listen_v4(0, "127.0.0.1") != 0)
+                return false;
+            srv.start();
+            return true;
+        });
+        ASSERT_TRUE(thread->ready());
+        client = qb::http2::make_client("https://localhost:" + std::to_string(thread->port()));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        client->disable_auto_reconnect();
+    }
+
+    void
+    TearDown() override {
+        if (client)
+            client->disconnect();
+    }
+
+    /// The responses to @p paths, requested at once on the client's one connection.
+    std::vector<std::optional<qb::http::Response>>
+    get_all(std::vector<const char *> const &paths) {
+        std::vector<std::optional<qb::http::Response>> responses(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            qb::http::Request request;
+            request.method() = qb::http::Method::GET;
+            request.uri()    = qb::io::uri(paths[i]);
+            EXPECT_TRUE(client->push_request(request, [&responses, i](qb::http::Response r) { responses[i] = std::move(r); }));
+        }
+        client->connect(nullptr);
+        EXPECT_TRUE(qb::http::test::ServerThread<Server>::pump_until([&responses] {
+            return std::all_of(responses.begin(), responses.end(), [](auto const &r) { return r.has_value(); });
+        })) << "not every request was answered";
+        return responses;
+    }
+};
+} // namespace http2_client_body_limit_test
+
+using http2_client_body_limit_test::Http2ClientBodyLimit;
+
+TEST_F(Http2ClientBodyLimit, ABodyPastTheClientsLimitFailsWithAnErrorThatNamesItAndTheConnectionServesOn) {
+    client->set_max_body_size(1024);
+    EXPECT_EQ(client->max_body_size(), 1024u);
+    const auto responses = get_all({"/declared-2048", "/streamed-2048", "/declared-1024", "/small"});
+    ASSERT_EQ(responses.size(), 4u);
+    for (std::size_t i = 0; i < 2; ++i) {
+        SCOPED_TRACE(i == 0 ? "declared past the limit" : "delivered past the limit");
+        ASSERT_TRUE(responses[i].has_value());
+        EXPECT_EQ(responses[i]->status(), qb::http::status::BAD_GATEWAY);
+        EXPECT_NE(responses[i]->body().as<std::string>().find("HTTP/2 response body exceeds the client's limit of 1024 bytes"),
+                  std::string::npos)
+            << responses[i]->body().as<std::string>();
+    }
+    ASSERT_TRUE(responses[2].has_value() && responses[3].has_value());
+    EXPECT_EQ(responses[2]->status(), qb::http::status::OK) << "a body of exactly the limit: " << responses[2]->body().as<std::string>();
+    EXPECT_EQ(responses[2]->body().size(), 1024u);
+    EXPECT_EQ(responses[3]->status(), qb::http::status::OK);
+    EXPECT_TRUE(client->is_connected()) << "a stream reset ended the connection";
+}
+
+TEST_F(Http2ClientBodyLimit, TheClientsBodyLimitIsTheConstantByDefaultAndNoneAtZero) {
+    EXPECT_EQ(client->max_body_size(), qb::http::protocol_limits::MAX_BODY_SIZE);
+    client->set_max_body_size(1024);
+    client->set_max_body_size(0);
+    EXPECT_EQ(client->max_body_size(), 0u);
+    const auto responses = get_all({"/declared-2048", "/streamed-2048"});
+    ASSERT_EQ(responses.size(), 2u);
+    for (auto const &response : responses) {
+        ASSERT_TRUE(response.has_value());
+        EXPECT_EQ(response->status(), qb::http::status::OK) << response->body().as<std::string>();
+        EXPECT_EQ(response->body().size(), 2048u);
+    }
+}

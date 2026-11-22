@@ -365,10 +365,28 @@ struct Http2ServerStream : public Http2StreamBase {
     /// pipe allocates 4 KiB at construction, and a stream that is not streamed must pay neither that nor the words of
     /// a vector it never fills (measured on a plain GET, Huly QB-86).
     std::unique_ptr<Http2StreamedBody> streamed;
-    /// Real progress since the server's last idle sweep: response HEADERS or DATA sent, a stream
-    /// WINDOW_UPDATE received. A store on the frame path; the sweep, which reads the clock anyway,
-    /// turns it into `last_activity` (ServerHttp2Protocol::cleanup_idle_streams).
+    /// Progress since the server's last idle sweep that a frame or a call marks: a DATA of the request that brought
+    /// octets, the request's dispatch, what the application hands a stream whose peer owed it nothing, the frames the
+    /// socket took whole since that sweep when the stream writes again (`queued_from` starts anew there) -- and, for an
+    /// io that does not count its output, a response frame written or a stream WINDOW_UPDATE of a dispatched request.
+    /// A store on the frame path; the sweep, which is handed the time anyway, turns it into `last_activity`
+    /// (ServerHttp2Protocol::cleanup_idle_streams).
     bool progressed_since_idle_sweep = false;
+    /// Where this stream's last response frame ends in the connection's output: the io's `appended_total()` when the
+    /// frame was written -- HEADERS, DATA, a streamed trailer section --, 0 before the first one and on an io that does not count
+    /// its output (`counts_drained_output`). The frame has left for the socket once the io's `drained_total()` reaches
+    /// it: the idle sweep reads there what the socket took of this stream since it last looked, and whether the peer
+    /// still owes it anything (Huly QB-1248).
+    std::uint64_t output_mark = 0;
+    /// Where the socket's drain stood -- the io's `drained_total()` -- when the frames this stream still has in the
+    /// output began to queue: written with the first frame of a stream that had none there. A drain past it took octets
+    /// while the stream had some queued, in front of its own or its own: the stream's progress. One that came before is
+    /// none of it -- a frame written after the socket's last drain is credited with nothing (Huly QB-1248).
+    std::uint64_t queued_from = 0;
+    /// Its place among the streams that wait their turn (ServerHttp2Protocol::resume_waiting_streams()): the count of
+    /// places when it was last served a turn, when the turns first found it waiting, or when DATA handed to it during
+    /// a round began to wait for one -- a stream that has a place keeps it there; 0 before. The least is served first.
+    std::uint64_t turn = 0;
 
     /**
      * @brief Construct a new server stream
