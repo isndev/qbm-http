@@ -4730,7 +4730,11 @@ TEST_F(Http3LoopbackTest, ARefusalKnownAtOnceOfARequestPushedFromACallbackWaitsA
         const auto refused = [&] {
             qb::http::Request request{qb::http::method::POST, qb::io::uri(kind.name == "another origin" ? "https://other.invalid/x" : "/x")};
             if (kind.name == "cannot be submitted") {
-                request.trailers().set_header("content-length", "7"); // a field no trailer section may carry
+                // More regular fields than MAX_HEADERS_COUNT: the engine refuses it where it is submitted, 503 (a field of
+                // trailers() no trailer section may carry is refused for its field now, 400, Huly QB-1246).
+                for (std::size_t i = 0; i <= qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
+                    request.set_header("x-n" + std::to_string(i), "1");
+                }
                 request.body() = "payload";
             }
             return request;
