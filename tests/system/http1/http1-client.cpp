@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <functional>
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <memory>
@@ -40,6 +41,7 @@
 
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
+#include "../../shared/watchdog.h"
 
 #include <qbm/http/http.h>
 #include <qbm/http/redirect.h>
@@ -61,7 +63,7 @@ namespace {
 // leaves both queued. The self-hold itself is no longer at risk — it is owned by the
 // deferred closure, so dropping the queue releases it (see ClientIsReleasedWhenItsLoopEnds
 // WithoutAnotherTurn) — but draining is still the tidy way to let the turn finish. Mirrors
-// the drain already used in DestroyingClientDuringConnectDoesNotLeaveDanglingCallback.
+// the drain already used in DestroyingClientDuringConnectFailsItsCallbackOnce.
 inline void
 drain_client_callbacks() {
     const auto deadline = std::chrono::steady_clock::now() + 200ms;
@@ -133,6 +135,17 @@ public:
     std::atomic<std::uint16_t> redirect_peer_port{0};
 
     Http1ClientTestServer() {
+        // The fields a request carried, as the server read them (Huly QB-1191).
+        router().get("/fields", [this](auto ctx) {
+            ++request_count;
+            const auto shown = [&](const char *name) {
+                return ctx->request().has_header(name) ? "[" + std::string(ctx->request().header(name)) + "]" : std::string("absent");
+            };
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = "x-edge=" + shown("x-edge") + " x-blank=" + shown("x-blank") + " x-inside=" + shown("x-inside");
+            ctx->complete();
+        });
+
         router().get("/ping", [this](auto ctx) {
             ++request_count;
             ctx->response().status() = qb::http::status::OK;
@@ -775,6 +788,988 @@ TEST(Http1ClientTest, ResponseCallbackMayDropLastClientReference) {
     drain_client_callbacks(); // let the self-guard release fire so the Client is freed
 }
 
+// A response callback that runs the loop, then drops the last reference (Huly QB-1246). What keeps the client alive
+// under its connection's handler is a closure in the loop's deferred queue, queued as the callback is entered; a loop
+// turn the callback runs drains it while the callback is still on the stack. On a connection that is kept nothing
+// queued another: the client was destroyed when the handler returned, and its connection with it, under that
+// connection's own read pass (a heap-use-after-free under AddressSanitizer). Two rounds: the first callback runs the
+// loop and pushes the next request, so the hold it drained must be counted as gone, not as still queued.
+TEST(Http1ClientTest, AResponseCallbackThatRunsTheLoopThenDropsTheLastReferenceLeavesItsConnectionAlive) {
+    LoopbackHttp1Server server;
+
+    auto             client = qb::http1::make_client(server.url("/"));
+    qb::http::status first = qb::http::status::IM_A_TEAPOT, second = qb::http::status::IM_A_TEAPOT;
+    bool             second_done  = false;
+    const auto       run_the_loop = [] {
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // a loop turn of the callback's own: it drains what was deferred
+        }
+    };
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        first = response.status();
+        run_the_loop();
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response next) {
+            second = next.status();
+            run_the_loop();
+            second_done = true;
+            client.reset(); // the last reference, on a connection that is kept: no retirement is under way
+        });
+    });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return second_done; }));
+    EXPECT_EQ(first, qb::http::status::OK);
+    EXPECT_EQ(second, qb::http::status::OK);
+    EXPECT_EQ(client, nullptr);
+    drain_client_callbacks(); // the client is destroyed here, once its connection's handler has returned
+}
+
+// The same from the callback of a connect(): the connector's completion is not the connection's own handler, and
+// the client destroyed there takes nothing from under it. A control: green before and after.
+TEST(Http1ClientTest, AConnectCallbackThatRunsTheLoopThenDropsTheLastReferenceEndsCleanly) {
+    LoopbackHttp1Server server;
+
+    auto client    = qb::http1::make_client(server.url("/"));
+    bool connected = false, called = false;
+    client->connect([&](bool ok, std::string const &) {
+        connected = ok;
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        called = true;
+        client.reset();
+    });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return called; }));
+    EXPECT_TRUE(connected);
+    EXPECT_EQ(client, nullptr);
+    drain_client_callbacks();
+}
+
+// A callback that pushes its request back at every failure -- it never gives up -- is never called from inside its own
+// push (Huly QB-1246). With automatic reconnection off and no connection, a push is refused at once: answered inside the
+// push when it is made from the program, on the loop's next turn when it is made from one of the client's own
+// callbacks. Answered inside there too, the callback was called from inside its own push, again and again, each
+// failure one frame deeper (the case stops such a run at 64 so that it fails, and does not overflow its stack). Here
+// it hears one failure a loop turn, and ends by itself: at its fiftieth failure automatic reconnection is turned on, and
+// the request the callback pushes next -- the fifty-first -- connects and is served. Fifty failures, one answer served.
+TEST(Http1ClientTest, ARequestPushedBackAtEveryFailureIsNeverAnsweredFromInsideItsOwnPush) {
+    LoopbackHttp1Server server;
+
+    auto client = qb::http1::make_client(server.url("/"));
+    client->set_auto_reconnect(false);
+    int                   pushes = 0, failures = 0, served = 0, depth = 0, deepest = 0;
+    std::function<void()> push;
+    push = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            if (response.status() == qb::http::status::OK) {
+                ++served;
+            } else {
+                if (++failures == 50) {
+                    client->set_auto_reconnect(true); // what the callback waited for: its next push connects
+                }
+                if (deepest < 64) {
+                    push(); // always: nothing here counts the attempts
+                }
+            }
+            --depth;
+        });
+    };
+    push();
+    EXPECT_EQ(failures, 1) << "a push made from the program is refused inside the push, as before";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served != 0 || deepest >= 64; }));
+    EXPECT_EQ(served, 1);
+    EXPECT_EQ(failures, 50) << "each push is answered once: fifty refusals, then the one that connects";
+    EXPECT_EQ(pushes, 51);
+    EXPECT_EQ(deepest, 1) << "a request pushed back from its failure callback was answered from inside its own push";
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// A callback with no share behind it but the hold its entry queued -- the answer of a refusal inside a push the program
+// makes, the callback of a connect() on a client that is connected -- may run the loop, which runs that hold, and then
+// drop the last reference (Huly QB-1246). The client lives to the end of the call. Here the callback pushes a request
+// refused at once, kept for the client's turn, before it runs the loop: that loop turn is the client's turn, and hears
+// it, once. The client was destroyed under the callback: its destructor left the kept refusal unheard, and the end of
+// the call ran on freed memory. No weak reference is kept here: it would keep the storage.
+TEST(Http1ClientTest, ACallbackWithOnlyItsHoldBehindItThatRunsTheLoopThenDropsTheLastReferenceEndsCleanly) {
+    struct Told : qb::http1::Client {
+        int &destroyed;
+        Told(std::string const &url, int &count)
+            : qb::http1::Client(url)
+            , destroyed(count) {}
+        ~Told() {
+            ++destroyed;
+        }
+    };
+    for (const std::string_view entry : {"a refusal answered inside the program's push", "a connect() on a connected client"}) {
+        SCOPED_TRACE(entry);
+        LoopbackHttp1Server server;
+        int                 destroyed = 0, calls = 0, kept_heard = 0;
+        auto                client = std::make_shared<Told>(server.url("/"), destroyed);
+        auto *const         raw    = client.get();
+        const auto          drop   = [&] {
+            ++calls;
+            raw->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) { ++kept_heard; });
+            for (int pass = 0; pass < 4; ++pass) {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // runs the hold this callback's entry queued
+            }
+            client.reset(); // the last reference
+        };
+        if (entry == "a connect() on a connected client") {
+            bool connected = false;
+            raw->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+            raw->connect([&](bool, std::string const &) { drop(); });
+        } else {
+            raw->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) { drop(); });
+        }
+        EXPECT_EQ(calls, 1);
+        EXPECT_EQ(destroyed, 0) << "the client was destroyed under its own callback";
+        EXPECT_EQ(kept_heard, 1) << "the loop turn the callback ran did not hear the refusal the client owed";
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed != 0; }));
+        EXPECT_EQ(kept_heard, 1) << "a refusal kept for the client's turn is heard once, and once only";
+        EXPECT_EQ(destroyed, 1);
+    }
+}
+
+namespace http1_client_order_test {
+
+/// A coroutine that earns a refusal -- kept for the client's turn when it runs under a callback of the client --, then
+/// awaits a push of its own, or a batch, and says when it got past it.
+qb::io::async::task<void>
+refused_then_awaits(qb::http1::Client &client, std::vector<int> &order, int kept, int done, bool batch) {
+    client.push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"),
+                        [&order, kept](qb::http::Response) { order.push_back(kept); });
+    if (batch) {
+        std::vector<qb::http::Request> two;
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        static_cast<void>(co_await client.push_requests(std::move(two)));
+    } else {
+        static_cast<void>(co_await client.push_request(request(qb::http::method::GET, "/ping")));
+    }
+    order.push_back(done);
+}
+
+/// The same, awaiting connect(): from a callback of a close it completes `false` at once -- behind what is owed.
+qb::io::async::task<void>
+refused_then_connects(qb::http1::Client &client, std::vector<int> &order, int kept, int done) {
+    client.push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"),
+                        [&order, kept](qb::http::Response) { order.push_back(kept); });
+    const auto connected = co_await client.connect();
+    order.push_back(connected ? -done : done);
+}
+
+} // namespace http1_client_order_test
+
+// The answers come in the order the client came to owe them (Huly QB-1246): one queue, oldest first, heard on the
+// client's turn. While a refusal is kept for that turn, every answer that comes after it takes its place behind it --
+// the refusal of a push the program makes next, the failures of a disconnect() the same callback calls, the `false` of
+// a connect() that close gives up, a coroutine push completed at once. Each of those was given at once, ahead of the
+// refusal still waiting for its turn.
+TEST(Http1ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
+    const auto elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once: 400
+    {
+        SCOPED_TRACE("a refusal of the program's next push");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept: pushed from a callback
+        });
+        EXPECT_EQ(order, (std::vector<int>{1}));
+        client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(3); }); // behind what is owed
+        EXPECT_EQ(order, (std::vector<int>{1})) << "an answer was given inside the push with another one owed before it";
+        drain_client_callbacks();
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 3}));
+    }
+    {
+        SCOPED_TRACE("the failures of a disconnect() the same callback calls");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { order.push_back(9); }); // in flight
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
+            client->disconnect();                                                               // fails the request in flight
+        });
+        EXPECT_EQ(order, (std::vector<int>{1})) << "the failure of the close overtook the refusal owed before it";
+        drain_client_callbacks();
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 9}));
+    }
+    {
+        SCOPED_TRACE("the `false` of a connect() the close gives up");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        ASSERT_TRUE(client->connect([&](bool ok, std::string const &) {
+            EXPECT_FALSE(ok);
+            order.push_back(7);
+        }));
+        client->push_request(elsewhere(), [&](qb::http::Response) {
+            order.push_back(1);
+            client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
+            client->disconnect();                                                               // gives the connect() up
+        });
+        EXPECT_EQ(order, (std::vector<int>{1})) << "the callback of the connect() overtook the refusal owed before it";
+        drain_client_callbacks();
+        EXPECT_EQ(order, (std::vector<int>{1, 2, 7}));
+    }
+    {
+        SCOPED_TRACE("the coroutine pushes a callback of a close completes at once");
+        std::vector<int>    order; // declared before the client: its destructor may still hear a refusal
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { // in flight: fails with the close
+            order.push_back(9);
+            qb::http::test::watchdog bound("run_sync() of a push from the callback of a close", 10s);
+            // Each coroutine earns a refusal (3, then 5), kept for the client's turn, and awaits a push the close completes
+            // at once: completed behind that refusal, by a loop turn run_sync() runs, it gets past its await after it.
+            qb::io::async::run_sync(http1_client_order_test::refused_then_awaits(*client, order, 3, 10, false));
+            qb::io::async::run_sync(http1_client_order_test::refused_then_awaits(*client, order, 5, 11, true));
+            // And one that awaits connect(): its `false` at once is an answer the client gives by itself too (7, then 12).
+            qb::io::async::run_sync(http1_client_order_test::refused_then_connects(*client, order, 7, 12));
+        });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        client->disconnect();
+        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11, 7, 12}))
+            << "a coroutine push or connect() completed at once overtook the refusal owed before it";
+        drain_client_callbacks();
+        EXPECT_EQ(order, (std::vector<int>{9, 3, 10, 5, 11, 7, 12}));
+    }
+}
+
+// An answered request leaves no timer armed (Huly QB-1246). A request that waits in the queue owns the timer of its
+// wait, which goes when the request is sent or answered. It was the loop's, and stayed armed for the whole request
+// timeout whatever became of the request -- one live watcher for every request that had waited. Two readings of the
+// loop's count of watchers with no loop turn between them: two clients alike, each with a request in flight, one with
+// ten more queued behind it, are disconnected one after the other; the second gives back ten watchers more. And ten
+// requests that waited, were sent and were served leave the count no higher than it was (loop turns passed there: a
+// timer of an earlier case may have expired, none been added).
+TEST(Http1ClientTest, AnAnsweredRequestLeavesNoTimerArmed) {
+    const auto watchers = [] {
+        return static_cast<std::ptrdiff_t>(qb::io::async::listener::current.size());
+    };
+    {
+        SCOPED_TRACE("answered by a close");
+        int                         answers = 0; // declared before the clients: their destructors may still answer
+        std::vector<std::ptrdiff_t> seen;        // the count as each callback reads it
+        LoopbackHttp1Server         server;
+        const auto                  in_flight = [&](int queued) {
+            auto client = qb::http1::make_client(server.url("/"));
+            for (int i = 0; i < 1 + queued; ++i) {
+                client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) {
+                    ++answers;
+                    seen.push_back(watchers());
+                });
+            }
+            EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+            return client;
+        };
+        auto       alone  = in_flight(0);
+        auto       queued = in_flight(10);
+        const auto first  = watchers();
+        alone->disconnect();
+        const auto second = watchers();
+        seen.clear();
+        queued->disconnect();
+        const auto third = watchers();
+        EXPECT_EQ(answers, 12);
+        EXPECT_EQ((second - third) - (first - second), 10) << "the requests a close answered left the timers of their wait armed";
+        ASSERT_EQ(seen.size(), 11u);
+        EXPECT_EQ(seen, std::vector<std::ptrdiff_t>(11, seen.front())) << "a request was still timed while the callback of another ran";
+        drain_client_callbacks();
+    }
+    {
+        SCOPED_TRACE("sent, then served");
+        int                 served = 0;
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++served; }); // connects
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        {
+            // A request that waited and is then sent is timed by its connection alone: its own timer stops there.
+            bool       first_served = false;
+            const auto idle         = watchers();
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { first_served = true; });
+            client->push_request(request(qb::http::method::GET, "/never"), [](qb::http::Response) {}); // waits, then is sent
+            EXPECT_EQ(watchers(), idle + 1);
+            ASSERT_TRUE(
+                ServerThread<Http1ClientTestServer>::pump_until([&] { return first_served && client->get_active_request_count() == 1; }));
+            EXPECT_LE(watchers(), idle) << "a request that was sent kept the timer of its wait";
+            client->disconnect(); // answers the one in flight
+            drain_client_callbacks();
+            served = 0;
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++served; }); // connects again
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        }
+        const auto before = watchers();
+        for (int i = 0; i < 10; ++i) { // one is sent at once, nine wait for it
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::OK);
+                ++served;
+            });
+        }
+        EXPECT_EQ(watchers(), before + 9) << "a request that waits is timed, one that is sent at once is not";
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 11; }));
+        EXPECT_LE(watchers(), before) << "the requests that waited, then were served, left the timers of their wait armed";
+        client->disconnect();
+        drain_client_callbacks();
+    }
+#ifdef QB_HAS_SSL
+    {
+        // The wait itself: no case made a queued request time out. The peer completes the TCP handshake and answers
+        // nothing, so the TLS handshake lasts and the requests wait behind it for their timeout.
+        SCOPED_TRACE("answered by the timeout of its wait");
+        std::vector<std::ptrdiff_t> seen; // the count as each callback reads it
+        std::vector<std::string>    said;
+        qb::io::tcp::listener       silent;
+        ASSERT_EQ(silent.listen_v4(0, "127.0.0.1"), qb::io::SocketStatus::Done);
+        auto client = qb::http1::make_client("https://127.0.0.1:" + std::to_string(silent.local_endpoint().port()));
+        client->set_verify_peer(false);
+        client->set_connect_timeout(5s);
+        client->set_request_timeout(200ms);
+        const auto began = std::chrono::steady_clock::now();
+        for (int i = 0; i < 3; ++i) {
+            client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                said.push_back(response.body().as<std::string>());
+                seen.push_back(watchers());
+            });
+        }
+        const auto armed = watchers(); // the three timers of the three waits
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return seen.size() == 3; }));
+        EXPECT_GE(std::chrono::steady_clock::now() - began, 150ms);
+        EXPECT_EQ(said, std::vector<std::string>(3, "HTTP/1.1 request timeout while pending"));
+        // Loop turns passed since `armed` was read, so only an upper bound: its own timer is stopped before each answer.
+        EXPECT_LE(seen[0], armed - 1) << "the timer of a wait was still armed when its request heard its timeout";
+        EXPECT_LE(seen[2], armed - 3);
+        client->disconnect();
+        drain_client_callbacks();
+    }
+#endif
+}
+
+// A request the client refuses leaves no timer behind (Huly QB-1246). One with nothing to connect for it -- automatic
+// reconnection off, no connection -- was queued, timed, then failed with the queue: the timer of its wait stayed armed
+// for the request timeout, one for each push of a callback that pushes back at every failure. And one refused where it
+// is sent was timed for a wait it never had. The loop's count of watchers is the same after twenty of each.
+TEST(Http1ClientTest, ARequestRefusedAtOnceLeavesNoTimerBehind) {
+    for (const std::string_view kind : {"nothing connects for it", "cannot be written"}) {
+        SCOPED_TRACE(kind);
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        if (kind == "cannot be written") { // refused where it is sent: on a connection
+            bool connected = false;
+            client->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+        } else {
+            client->set_auto_reconnect(false);
+        }
+        const auto before  = qb::io::async::listener::current.size();
+        int        refused = 0;
+        for (int i = 0; i < 20; ++i) {
+            auto pushed = request(qb::http::method::POST, "/echo");
+            if (kind == "cannot be written") {
+                pushed.body() = "too-long";
+                pushed.set_header("Content-Length", "1");
+            }
+            client->push_request(std::move(pushed), [&](qb::http::Response response) {
+                EXPECT_NE(response.status(), qb::http::status::OK);
+                ++refused;
+            });
+        }
+        EXPECT_EQ(refused, 20);
+        EXPECT_EQ(qb::io::async::listener::current.size(), before) << "a refused request left a timer armed";
+        client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
+// Every refusal known at once goes the same way (Huly QB-1246): a request for another origin (400), one past the
+// pending bound (503) and one that cannot be written to the connection (400) are answered inside the push the program
+// makes, and on the loop's next turn when the push is made from the callback of the one before. Each kind is pushed
+// back twenty times: never nested.
+TEST(Http1ClientTest, ARefusalKnownAtOnceOfARequestPushedFromACallbackWaitsATurn) {
+    for (const std::string_view kind : {"another origin", "past the pending bound", "cannot be written"}) {
+        SCOPED_TRACE(kind);
+        LoopbackHttp1Server server;
+        auto                client = qb::http1::make_client(server.url("/"));
+        if (kind == "cannot be written") { // refused where it is sent: on a connection
+            bool connected = false;
+            client->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+        }
+        if (kind == "past the pending bound") {
+            client->set_max_pending_requests(0);
+        }
+        int                   pushes = 0, failures = 0, depth = 0, deepest = 0;
+        std::function<void()> push;
+        push = [&] {
+            ++pushes;
+            auto refused = request(qb::http::method::POST, kind == "another origin" ? "http://elsewhere.invalid/echo" : "/echo");
+            if (kind == "cannot be written") {
+                refused.body() = "too-long";
+                refused.set_header("Content-Length", "1");
+            }
+            client->push_request(std::move(refused), [&](qb::http::Response response) {
+                deepest = std::max(deepest, ++depth);
+                EXPECT_NE(response.status(), qb::http::status::OK);
+                if (++failures < 20) {
+                    push();
+                }
+                --depth;
+            });
+        };
+        push();
+        EXPECT_EQ(failures, 1) << "a push made from the program is refused inside the push";
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failures == 20; }));
+        EXPECT_EQ(pushes, 20);
+        EXPECT_EQ(deepest, 1) << "a refusal of a request pushed from a callback was answered from inside its push";
+        client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
+// A refusal kept for the client's turn is heard by that turn wherever the loop runs it (Huly QB-1246): a loop turn the
+// callback that earned it runs is one, so a coroutine that callback waits for with run_sync() completes. Heard there
+// once, and not again when the callback has returned.
+TEST(Http1ClientTest, ARefusalKeptForItsTurnIsHeardOnceByALoopTurnItsCallbackRuns) {
+    auto client = qb::http1::make_client("http://127.0.0.1:1");
+    client->set_max_pending_requests(0); // every push is refused at once
+    int  heard = 0, heard_inside_the_push = -1, heard_under_the_callback = -1;
+    bool outer = false;
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++heard; });
+        heard_inside_the_push = heard;
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        heard_under_the_callback = heard;
+        outer                    = true;
+    });
+    ASSERT_TRUE(outer) << "a push made from the program is refused inside the push";
+    EXPECT_EQ(heard_inside_the_push, 0) << "a refusal of a push made from a callback was heard inside the push";
+    EXPECT_EQ(heard_under_the_callback, 1) << "the loop turns the callback ran did not hear the refusal kept for the client's turn";
+    drain_client_callbacks();
+    EXPECT_EQ(heard, 1) << "a refusal kept for the client's turn is heard once, and once only";
+}
+
+// A refusal kept for the next turn is heard exactly once when no turn comes (Huly QB-1246): the loop ends with it still
+// owed -- the thread exits, its deferred queue dropped --, the hold that kept the client goes with the queue, and the
+// client's destructor delivers the refusal, once.
+TEST(Http1ClientTest, ARefusalKeptForATurnThatNeverComesIsHeardOnceFromTheDestructor) {
+    int outer = 0, kept = 0;
+    std::thread([&] {
+        qb::io::async::init();
+        auto client = qb::http1::make_client("http://127.0.0.1:1");
+        client->set_max_pending_requests(0); // every push is refused at once
+        client->push_request(request(qb::http::method::GET, "/ping"), [&, raw = client.get()](qb::http::Response) {
+            ++outer;
+            raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++kept; }); // kept for the next turn
+        });
+        EXPECT_EQ(outer, 1);
+        EXPECT_EQ(kept, 0) << "a refusal of a push made from a callback was heard inside the push";
+        // Deliberately no turn of the loop.
+    }).join();
+    EXPECT_EQ(kept, 1) << "a refusal still owed its turn when its client is destroyed is heard once";
+}
+
+// The same at the client's destruction, where no later turn exists (Huly QB-1246): a request pushed from a callback the
+// destructor runs is answered inside its push, and one pushed from inside THAT answer is refused by the return value
+// alone, its callback destroyed unheard -- as connect() is refused there. A callback that always pushes again then
+// ends: three pushes, two answers, never deeper than two. It was answered inside each push, without end.
+TEST(Http1ClientTest, ARequestPushedBackFromTheDestructorsCallbacksEndsAtItsSecondPush) {
+    LoopbackHttp1Server server;
+
+    int                   pushes = 0, answers = 0, depth = 0, deepest = 0;
+    std::vector<bool>     accepted;
+    qb::http1::Client    *raw = nullptr;
+    std::function<void()> push;
+    push = [&] {
+        const auto index = static_cast<std::size_t>(pushes++); // a push returns after the ones its callback makes
+        accepted.resize(index + 1);
+        accepted[index] = raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+            deepest = std::max(deepest, ++depth);
+            ++answers;
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            if (deepest < 64) {
+                push();
+            }
+            --depth;
+        });
+    };
+    {
+        auto client = qb::http1::make_client(server.url("/"));
+        raw         = client.get();
+        push(); // queued behind the connection it asked for
+        ASSERT_TRUE(client->is_connecting());
+    } // destroyed with that request waiting
+    drain_client_callbacks();
+    EXPECT_EQ(pushes, 3);
+    EXPECT_EQ(answers, 2);
+    EXPECT_EQ(deepest, 2);
+    EXPECT_EQ(accepted, (std::vector<bool>{true, true, false}));
+}
+
+// An answer the client gives by itself waits for the client's turn under any callback of this client, with nothing owed
+// too (Huly QB-1246): given inside the call, the callback of a `connect()` or of an empty batch ran under the callback
+// that made the call.
+TEST(Http1ClientTest, AnAnswerTheClientGivesByItselfIsNotGivenUnderACallbackOfThisClient) {
+    for (const std::string_view call : {"an empty batch", "a connect() on a connected client"}) {
+        SCOPED_TRACE(call);
+        LoopbackHttp1Server server;
+        int                 heard = 0, heard_inside_the_call = -1; // before the client: its callbacks count here
+        auto                client    = qb::http1::make_client(server.url("/"));
+        bool                connected = false;
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+        client->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) {
+            // Answered inside the program's push: one callback of this client on the stack, and nothing owed.
+            if (call == "an empty batch") {
+                EXPECT_TRUE(client->push_requests({}, [&](std::vector<qb::http::Response>) { ++heard; }));
+            } else {
+                EXPECT_TRUE(client->connect([&](bool, std::string const &) { ++heard; }));
+            }
+            heard_inside_the_call = heard;
+        });
+        EXPECT_EQ(heard_inside_the_call, 0) << "an answer the client gives by itself was given under a callback of this client";
+        drain_client_callbacks();
+        EXPECT_EQ(heard, 1);
+        client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
+// The failures of a disconnect() are answers the client gives by itself, as a cancellation's is: the program asked for
+// them (Huly QB-1246). Called from a callback of this client, disconnect() gives them on the client's turn -- the
+// failure of a request, the answer of a batch, the `false` of a connect() still waiting --; called with no callback on
+// the stack and nothing owed, inside the call, as before. They were the loop's answers, given inside the call whoever
+// made it -- 3.3.0 gave them so too --: an answer of the client ran inside another with no loop turn of the program's.
+TEST(Http1ClientTest, TheFailuresOfADisconnectACallbackCallsAreHeardOnTheClientsTurn) {
+    for (const std::string_view what : {"a request in flight", "a batch in flight", "a connect() still waiting"}) {
+        SCOPED_TRACE(what);
+        LoopbackHttp1Server server;
+        int                 heard = 0, heard_inside_the_call = -1; // before the client: its callbacks count here
+        auto                client = qb::http1::make_client(server.url("/"));
+        const auto          start  = [&] {
+            if (what == "a request in flight") {
+                client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++heard; });
+            } else if (what == "a batch in flight") {
+                std::vector<qb::http::Request> two;
+                two.push_back(request(qb::http::method::GET, "/never"));
+                two.push_back(request(qb::http::method::GET, "/never"));
+                client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
+                    EXPECT_EQ(responses.size(), 2u);
+                    ++heard;
+                });
+            } else {
+                EXPECT_TRUE(client->connect([&](bool ok, std::string const &) {
+                    EXPECT_FALSE(ok);
+                    ++heard;
+                }));
+            }
+        };
+        start();
+        if (what != "a connect() still waiting") {
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        }
+        client->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [&](qb::http::Response) { // answered inside the push
+            client->disconnect();
+            heard_inside_the_call = heard;
+        });
+        EXPECT_EQ(heard_inside_the_call, 0) << "an answer of a disconnect() was heard under the callback that called it";
+        EXPECT_EQ(heard, 0);
+        drain_client_callbacks();
+        EXPECT_EQ(heard, 1);
+        start(); // and with no callback on the stack and nothing owed: inside the call
+        if (what != "a connect() still waiting") {
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+        }
+        client->disconnect();
+        EXPECT_EQ(heard, 2) << "the program's own disconnect() did not answer inside the call";
+        drain_client_callbacks();
+    }
+}
+
+// A callback that pushes its request back at every failure and then calls disconnect() is never called under itself
+// (Huly QB-1246). The request it has just pushed is accepted, for the next connection, and its disconnect() ends it:
+// that failure is the client's own answer, heard on the client's turn. Given inside the disconnect(), the callback was
+// called from inside the call it had just made, one frame deeper at every failure -- a hundred deep, where the case
+// stops it, all of it inside the one disconnect() the program made, with no loop turn of the program's anywhere.
+TEST(Http1ClientTest, ARequestPushedBackThenADisconnectFromItsCallbackIsNeverCalledUnderItself) {
+    LoopbackHttp1Server   server;
+    int                   calls = 0, pushes = 0, depth = 0, deepest = 0, calls_inside_the_programs_disconnect = -1; // before the client
+    const int             cap = 100;
+    std::function<void()> push; // before the client too: its callbacks call it
+    auto                  client = qb::http1::make_client(server.url("/"));
+    push                         = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response response) {
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            deepest = std::max(deepest, ++depth);
+            if (++calls < cap) {
+                push();               // accepted: queued for the next connection
+                client->disconnect(); // ends it
+            }
+            --depth;
+        });
+    };
+    push();
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+    client->disconnect(); // the program's own: its request in flight fails inside this call
+    calls_inside_the_programs_disconnect = calls;
+    EXPECT_EQ(calls_inside_the_programs_disconnect, 1)
+        << "the failures of the disconnect() its callback called were heard inside the program's";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return calls == cap; }));
+    drain_client_callbacks();
+    EXPECT_EQ(calls, cap);
+    EXPECT_EQ(pushes, cap) << "every push is answered once";
+    EXPECT_EQ(deepest, 1) << "the callback was called from inside a disconnect() it made";
+}
+
+// The other order, with ten requests: every failure callback resets the connection, then pushes its request back --
+// disconnect(), then push. One request is in flight and nine are queued behind it; the program calls disconnect() once.
+// Each of the ten is failed once, one deep. Each disconnect() a callback makes ends the request the callback before it
+// pushed back, and that failure waits for the client's turn, as every answer after it does. Given inside the call, each nested
+// close ran the retries of the ones before it: 1023 calls inside the program's disconnect(), ten deep (Huly QB-1246).
+TEST(Http1ClientTest, TenRequestsThatEachResetTheConnectionAndRetryAreEachFailedOnceAndOneDeep) {
+    LoopbackHttp1Server   server;
+    int                   calls = 0, heard = 0, pushes = 0, depth = 0, deepest = 0; // before the client
+    bool                  stop = false;
+    std::function<void()> push; // before the client too: its callbacks call it
+    auto                  client = qb::http1::make_client(server.url("/"));
+    push                         = [&] {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response response) {
+            EXPECT_NE(response.status(), qb::http::status::OK);
+            deepest = std::max(deepest, ++depth);
+            ++heard;
+            if (!stop && ++calls < 20000) {
+                client->disconnect(); // reset the connection
+                push();               // and try again: accepted, queued for the next connection
+            }
+            --depth;
+        });
+    };
+    for (int i = 0; i < 10; ++i) {
+        push(); // the first is written at once, nine wait behind it
+    }
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->get_active_request_count() == 1; }));
+    client->disconnect(); // the program's own
+    // Two inside the call, each one deep: the second callback's disconnect() ends the retry of the first, whose failure is
+    // then owed, and the eight other requests' failures take their place behind it.
+    EXPECT_EQ(calls, 2) << "a failure was heard inside the program's disconnect() with another one owed before it";
+    EXPECT_EQ(deepest, 1);
+    stop = true; // what is still owed is heard, and pushes nothing back
+    drain_client_callbacks();
+    client->disconnect(); // ends the last request pushed back
+    drain_client_callbacks();
+    EXPECT_EQ(pushes, 12) << "the ten requests, and the retries of the two heard before the program stopped";
+    EXPECT_EQ(heard, 12) << "every push is answered once";
+    EXPECT_EQ(deepest, 1);
+}
+
+// An answer the client gives by itself is given inside the call while the client is destroyed, where no turn is left to
+// keep it for (Huly QB-1246): an empty batch pushed from a callback the destructor runs.
+TEST(Http1ClientTest, AnEmptyBatchPushedFromACallbackTheDestructorRunsIsAnsweredInsideThePush) {
+    LoopbackHttp1Server server;
+    int                 answers = 0, batches = 0, batches_inside_the_push = -1;
+    {
+        auto client = qb::http1::make_client(server.url("/"));
+        client->push_request(request(qb::http::method::GET, "/ping"), [&, raw = client.get()](qb::http::Response) { // fails with the client
+            ++answers;
+            EXPECT_TRUE(raw->push_requests({}, [&](std::vector<qb::http::Response> responses) {
+                EXPECT_TRUE(responses.empty());
+                ++batches;
+            }));
+            batches_inside_the_push = batches;
+        });
+        ASSERT_TRUE(client->is_connecting()); // queued behind the connection it asked for
+    } // destroyed with that request waiting
+    drain_client_callbacks();
+    EXPECT_EQ(answers, 1);
+    EXPECT_EQ(batches_inside_the_push, 1) << "an answer was kept for a turn that a client being destroyed does not have";
+    EXPECT_EQ(batches, 1);
+}
+
+// Two refusals owed their turn when the client is destroyed with no turn left (Huly QB-1246): the destructor hears
+// both, in order and alike. Each is a callback the destructor runs, so the request each pushes back is answered inside
+// that push, 503, and accepted. The second was heard from inside the answer of the push the first one made: the push
+// of its own callback was refused by the return value alone, and never answered.
+TEST(Http1ClientTest, TwoRefusalsOwedWhenTheClientIsDestroyedAreHeardAlike) {
+    int               outer = 0, kept = 0, answers = 0;
+    std::vector<int>  order;
+    std::vector<bool> accepted;
+    std::thread([&] {
+        qb::io::async::init();
+        auto client = qb::http1::make_client("http://127.0.0.1:1");
+        client->set_max_pending_requests(0); // every push is refused at once
+        client->push_request(request(qb::http::method::GET, "/ping"), [&, raw = client.get()](qb::http::Response) {
+            ++outer;
+            for (int i = 1; i <= 2; ++i) {
+                raw->push_request(request(qb::http::method::GET, "/ping"), [&, raw, i](qb::http::Response) { // kept for the client's turn
+                    ++kept;
+                    order.push_back(i);
+                    accepted.push_back(raw->push_request(request(qb::http::method::GET, "/ping"), [&, i](qb::http::Response response) {
+                        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+                        ++answers;
+                        order.push_back(10 * i);
+                    }));
+                });
+            }
+        });
+        EXPECT_EQ(outer, 1);
+        EXPECT_EQ(kept, 0) << "a refusal of a push made from a callback was heard inside the push";
+        // Deliberately no turn of the loop.
+    }).join();
+    EXPECT_EQ(kept, 2);
+    EXPECT_EQ(answers, 2) << "a push made from a callback the destructor runs was not answered";
+    EXPECT_EQ(accepted, (std::vector<bool>{true, true}));
+    EXPECT_EQ(order, (std::vector<int>{1, 10, 2, 20})) << "each refusal owed, then the answer of the push its callback made";
+}
+
+namespace http1_client_lifetime_test {
+
+/// A client that tells when it is destroyed.
+struct Told : qb::http1::Client {
+    int &destroyed;
+    Told(std::string const &url, int &count)
+        : qb::http1::Client(url)
+        , destroyed(count) {}
+    ~Told() {
+        ++destroyed;
+    }
+};
+
+} // namespace http1_client_lifetime_test
+
+// A callback the destructor hears -- the answer of what is still owed when the client is destroyed -- may run the loop
+// (Huly QB-1246). The turn that was asked for that answer is still in the loop's queue, and the loop the callback runs
+// may reach it: it finds no client to hear for, and touches nothing. What the callback pushes then is answered as from
+// any callback the destructor runs: inside the push, and by the return value alone from inside that answer. And a
+// response on its way when the client is destroyed may come in that loop: its request hears once, the response or the
+// close. The client is owned apart from its control block, so that a sanitizer sees the object freed. On HTTP/1.1 the
+// client is destroyed by the loop turn that runs its last hold, so the callback runs the loop from inside the loop's
+// pass over its queue: only a loop whose pass nests reaches the turn that was asked from there.
+TEST(Http1ClientTest, ACallbackTheDestructorHearsThatRunsTheLoopEndsCleanly) {
+    using http1_client_lifetime_test::Told;
+    const auto elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once
+    const auto ping = [] {
+        return request(qb::http::method::GET, "/ping");
+    };
+    for (const std::string_view with : {"nothing else under way", "a response on its way"}) {
+        SCOPED_TRACE(with);
+        LoopbackHttp1Server   server;
+        int                   destroyed = 0, kept = 0, answers = 0, first = 0;      // before the client: its callbacks count here
+        int                   destroyed_when_heard = -1;                            // 1: heard by the destructor, the object's end begun
+        int                   second = 0, second_under_the_first = 0, in_first = 0; // a second answer owed behind the first
+        std::vector<bool>     accepted;
+        std::shared_ptr<Told> client(new Told(server.url("/"), destroyed));
+        auto *const           raw = client.get();
+        if (with == "a response on its way") {
+            bool connected = false;
+            raw->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+            raw->push_request(ping(), [&](qb::http::Response) { ++first; }); // written at once: in flight
+        }
+        const auto heard_by_the_destructor = [&, raw](qb::http::Response) {
+            ++kept;
+            in_first             = 1;
+            destroyed_when_heard = destroyed;
+            const auto until     = std::chrono::steady_clock::now() + 100ms;
+            while (std::chrono::steady_clock::now() < until) {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // the turn that was asked may run here, and what the connection brings
+            }
+            const bool outer = raw->push_request(ping(), [&, raw](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+                ++answers;
+                accepted.push_back(raw->push_request(ping(), [&](qb::http::Response) { ++answers; }));
+            });
+            accepted.push_back(outer);
+            in_first = 0;
+        };
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) { // answered inside the program's push
+            raw->push_request(elsewhere(), heard_by_the_destructor);  // kept for the client's turn: the destructor's, here
+            raw->push_request(elsewhere(), [&](qb::http::Response) {  // kept behind it: the destructor's too, once the first has returned
+                ++second;
+                second_under_the_first += in_first;
+            });
+        });
+        EXPECT_EQ(kept, 0) << "a refusal of a push made from a callback was heard inside the push";
+        // The program's last reference. The hold the callback above left in the loop's queue keeps the client to the next
+        // loop turn, which runs that hold ahead of the turn that was asked: the client is destroyed there, inside the
+        // loop's own pass over its queue, and the callback it hears runs the loop from inside that pass.
+        client.reset();
+        EXPECT_EQ(destroyed, 0);
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed != 0; }));
+        EXPECT_EQ(kept, 1);
+        EXPECT_EQ(destroyed_when_heard, 1) << "the answer owed was not heard by the destructor: the case shows nothing";
+        EXPECT_EQ(answers, 1)
+            << "a push made from a callback the destructor runs is answered inside it; one made from inside that answer is not";
+        EXPECT_EQ(accepted, (std::vector<bool>{false, true}));
+        EXPECT_EQ(second, 1) << "the second answer owed is heard once";
+        EXPECT_EQ(second_under_the_first, 0) << "the turn that was asked heard for a client being destroyed, inside the loop its callback ran";
+        drain_client_callbacks();
+        EXPECT_EQ(kept, 1) << "the turn that was asked heard for a client that is gone";
+        EXPECT_EQ(second, 1);
+        EXPECT_EQ(answers, 1);
+        EXPECT_EQ(first, with == "a response on its way" ? 1 : 0) << "the request in flight when the client was destroyed hears once";
+    }
+}
+
+namespace http1_client_relaunch_test {
+
+/// A callback that pushes its request back at every refusal -- it never gives up -- and then does one thing more.
+struct Relaunch {
+    std::shared_ptr<qb::http1::Client> client;
+    int                                pushes = 0, calls = 0, depth = 0, deepest = 0, cap = 200;
+    int                                loop_turns         = 0; ///< the loop turns this callback is running, one inside the other
+    int                                deepest_loop_turns = 0; ///< the most of them a call found on the stack
+    int                                under_another      = 0; ///< calls made under another one with no such turn between the two
+    std::function<void()>              then;                   ///< what the callback does once it has pushed its request back
+
+    void
+    push() {
+        ++pushes;
+        client->push_request(request(qb::http::method::GET, "http://elsewhere.invalid/x"), [this](qb::http::Response response) {
+            EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+            deepest            = std::max(deepest, ++depth);
+            deepest_loop_turns = std::max(deepest_loop_turns, loop_turns);
+            under_another += depth != loop_turns + 1;
+            if (++calls < cap) {
+                push(); // refused at once -- another origin --, and kept for the client's turn: pushed from a callback
+                then();
+            }
+            --depth;
+        });
+    }
+
+    void
+    run_the_loop() {
+        ++loop_turns;
+        for (int pass = 0; pass < 4; ++pass) {
+            qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        }
+        --loop_turns;
+    }
+};
+
+} // namespace http1_client_relaunch_test
+
+// A callback that pushes its request back at every refusal, and then makes a call the client answers by itself -- an
+// empty batch, a connect() on a client that is connected --, is never called under itself (Huly QB-1246). Such an
+// answer takes its place behind the refusal kept for the client's turn. Given inside the call, it heard that refusal
+// first: the callback was called from inside the call it had just made, one frame deeper at every refusal -- two
+// hundred deep here, all of them inside the push the program made.
+TEST(Http1ClientTest, ARequestPushedBackThenACallTheClientAnswersByItselfIsNeverAnsweredUnderItsCallback) {
+    using http1_client_relaunch_test::Relaunch;
+    for (const std::string_view call : {"an empty batch", "a connect() on a connected client"}) {
+        SCOPED_TRACE(call);
+        LoopbackHttp1Server server;
+        int                 answered = 0, answered_under_the_callback = 0; // before the client: its callbacks count here
+        Relaunch            r;
+        r.client = qb::http1::make_client(server.url("/"));
+        if (call == "an empty batch") {
+            r.then = [&] {
+                EXPECT_TRUE(r.client->push_requests({}, [&](std::vector<qb::http::Response> responses) {
+                    EXPECT_TRUE(responses.empty());
+                    ++answered;
+                    answered_under_the_callback += r.depth != 0;
+                }));
+            };
+        } else {
+            bool connected = false;
+            r.client->connect([&](bool ok, std::string const &) { connected = ok; });
+            ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+            r.then = [&] {
+                EXPECT_TRUE(r.client->connect([&](bool ok, std::string const &) {
+                    EXPECT_TRUE(ok);
+                    ++answered;
+                    answered_under_the_callback += r.depth != 0;
+                }));
+            };
+        }
+        r.push();
+        EXPECT_EQ(r.calls, 1) << "the push the program makes is refused inside it, and nothing else is heard there";
+        EXPECT_EQ(answered, 0) << "an answer the client gives by itself was given under a callback of this client";
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // one loop turn: one turn of the client
+        EXPECT_EQ(r.calls, 2) << "a turn of the client hears what was owed as it started, and no more";
+        EXPECT_EQ(answered, 1);
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return r.calls == r.cap; }));
+        drain_client_callbacks();
+        EXPECT_EQ(r.calls, 200);
+        EXPECT_EQ(r.pushes, 200) << "every push is answered once";
+        EXPECT_EQ(answered, 199) << "one for each call that pushed back";
+        EXPECT_EQ(answered_under_the_callback, 0);
+        EXPECT_EQ(r.deepest, 1) << "the callback was called from inside a call it made";
+        r.client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
+// The same callback while ten other requests of the client time out in the queue, in two shapes (Huly QB-1246).
+// Returning once it has pushed back, it is never called inside another call of this client: every call is exactly one
+// deep, whatever the loop brings in between -- the ten timeouts, and the refusals that keep coming. Running the loop
+// itself once it has pushed back -- qb::io::async::run() here; run_once(), run_until() and run_sync() are such turns
+// too --, it receives inside that loop whatever the client owes, the refusal it has just earned included: it recurses
+// once for each refusal, and that recursion is the program's. So that shape checks an invariant, not a depth: every
+// call finds on the stack the loop turns this callback is itself running, and one call more. The invariant also held
+// on the code before the one queue, whose nesting went through the same loop turns: this is no witness of what
+// changed -- the shapes that run no loop are. Every push is answered once in both shapes: the ten the timeouts make,
+// and one for each call before the sixtieth.
+TEST(Http1ClientTest, ARequestPushedBackWhileOthersTimeOutIsCalledUnderItselfOnlyThroughTheLoopTurnsItsCallbackRuns) {
+    using http1_client_relaunch_test::Relaunch;
+    for (const bool runs_the_loop : {false, true}) {
+        SCOPED_TRACE(runs_the_loop ? "the callback runs the loop" : "the callback returns");
+        LoopbackHttp1Server server;
+        int                 timed_out = 0; // before the client: its callbacks count here
+        Relaunch            r;
+        r.client = qb::http1::make_client(server.url("/"));
+        r.cap    = 60;
+        r.then   = [&] {
+            if (runs_the_loop) {
+                r.run_the_loop();
+            }
+        };
+        r.client->set_request_timeout(30s);
+        r.client->push_request(request(qb::http::method::GET, "/never"), [](qb::http::Response) {}); // in flight: it keeps the connection
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return r.client->get_active_request_count() == 1; }));
+        r.client->set_request_timeout(150ms);
+        for (int i = 0; i < 10; ++i) { // queued behind it: each times out in the queue
+            r.client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+                EXPECT_EQ(response.status(), qb::http::status::REQUEST_TIMEOUT);
+                ++timed_out; // runs no loop turn, and is not counted in the depth: the callback that pushes back is
+                r.push();
+            });
+        }
+        ASSERT_TRUE(
+            ServerThread<Http1ClientTestServer>::pump_until([&] { return timed_out == 10 && r.calls == r.pushes && r.calls >= r.cap; }));
+        drain_client_callbacks();
+        EXPECT_EQ(timed_out, 10);
+        EXPECT_EQ(r.pushes, 69) << "the ten the timeouts made, and one for each of the fifty-nine calls that pushed back";
+        EXPECT_EQ(r.calls, 69) << "every push is answered once";
+        EXPECT_EQ(r.under_another, 0) << "a call of the callback found something else on the stack than the loop turns it runs itself";
+        EXPECT_EQ(r.deepest, r.deepest_loop_turns + 1);
+        if (runs_the_loop) {
+            RecordProperty("deepest", r.deepest); // measured, not asserted: the recursion of the program, which the loop it runs allows
+            RecordProperty("deepest_loop_turns", r.deepest_loop_turns);
+        } else {
+            EXPECT_EQ(r.deepest_loop_turns, 0);
+            EXPECT_EQ(r.deepest, 1) << "a callback that runs no loop turn was called inside another call of this client";
+        }
+        r.client->disconnect();
+        drain_client_callbacks();
+    }
+}
+
 TEST(Http1ClientTest, ResponseCallbackMayDisconnectClient) {
     LoopbackHttp1Server server;
 
@@ -1046,22 +2041,32 @@ TEST(Http1ClientTest, ImplicitConnectFailureCompletesQueuedRequest) {
     EXPECT_FALSE(client->is_connected());
 }
 
-// Regression: dropping the last client reference while a connect() callback is
-// still registered must NOT leave a dangling callback that fires into freed
-// memory. Previously this ended in SUCCEED() — only ASan could prove anything.
-// Now the connect targets a real loopback server so we can observe that the
-// connection callback NEVER fires (the client was destroyed first) AND that the
-// server records zero completed connections for it, i.e. no late callback ran.
-TEST(Http1ClientTest, DestroyingClientDuringConnectDoesNotLeaveDanglingCallback) {
+// Dropping the last client reference while a connect() callback is still waiting: the callback hears `false`, once,
+// from the client's destructor -- as the HTTP/2 and HTTP/3 clients' does (Huly QB-1246; it was abandoned, destroyed
+// without a word) -- and never again: the connect targets a real loopback server, and nothing fires into freed memory
+// once the loop runs. A connect() that callback asks is refused by its return value alone.
+TEST(Http1ClientTest, DestroyingClientDuringConnectFailsItsCallbackOnce) {
     LoopbackHttp1Server server;
 
-    std::atomic<int> callback_invocations{0};
+    int  callback_invocations = 0, invocations_at_destruction = -1, inner_invocations = 0;
+    bool heard = true, inner_accepted = true;
     {
-        auto client = qb::http1::make_client(server.url("/"));
-        client->connect([&](bool, std::string const &) { ++callback_invocations; });
-        // Drop the only strong reference immediately, before the connect can
-        // resolve: the registered callback must be torn down, not fired.
+        auto  client = qb::http1::make_client(server.url("/"));
+        auto *raw    = client.get();
+        client->connect([&, raw](bool ok, std::string const &) {
+            ++callback_invocations;
+            heard          = ok;
+            inner_accepted = raw->connect([&](bool, std::string const &) { ++inner_invocations; });
+        });
+        EXPECT_EQ(callback_invocations, 0);
+        // Drop the only strong reference immediately, before the connect can resolve.
+        client.reset();
+        invocations_at_destruction = callback_invocations;
     }
+    EXPECT_EQ(invocations_at_destruction, 1) << "the destructor answers the connect() that was waiting";
+    EXPECT_FALSE(heard);
+    EXPECT_FALSE(inner_accepted) << "a connect() asked of a client being destroyed is refused";
+    EXPECT_EQ(inner_invocations, 0) << "by its return value alone";
 
     // Pump the loop generously; if a dangling callback existed it would fire (or
     // crash under ASan) within this window.
@@ -1070,7 +2075,68 @@ TEST(Http1ClientTest, DestroyingClientDuringConnectDoesNotLeaveDanglingCallback)
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
     }
 
-    EXPECT_EQ(callback_invocations.load(), 0) << "connect callback fired after the client was destroyed";
+    EXPECT_EQ(callback_invocations, 1) << "connect callback fired after the client was destroyed";
+    EXPECT_EQ(inner_invocations, 0);
+}
+
+#ifdef QB_HAS_SSL
+namespace http1_connect_awaiter_test {
+
+/// A coroutine that awaits connect(), and counts how many times it got past it.
+qb::io::async::task<void>
+await_connect(qb::http1::Client &client, qb::http1::ConnectResult &result, int &resumed) {
+    result = co_await client.connect();
+    ++resumed;
+}
+
+} // namespace http1_connect_awaiter_test
+
+// The coroutine form of the same: a coroutine parked on connect() is resumed, once, with `ok == false`, when its client
+// is destroyed while the loop lives -- the destructor answers the connect() its awaiter asked. It was never resumed: the
+// callback that would have completed it was destroyed unheard, and the frame parked for ever (Huly QB-1246). The peer
+// completes the TCP handshake and answers nothing, so the TLS handshake is in flight for as long as the test likes.
+TEST(Http1ClientTest, ACoroutineParkedOnConnectIsResumedWithFalseWhenItsClientIsDestroyed) {
+    qb::io::async::init();
+    qb::io::tcp::listener silent;
+    ASSERT_EQ(silent.listen_v4(0, "127.0.0.1"), qb::io::SocketStatus::Done);
+
+    int                      resumed = 0;
+    qb::http1::ConnectResult result{true, "not resumed"};
+    auto                     client = qb::http1::make_client("https://127.0.0.1:" + std::to_string(silent.local_endpoint().port()));
+    client->set_verify_peer(false);
+    qb::io::async::coro_scheduler().spawn(http1_connect_awaiter_test::await_connect(*client, result, resumed));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return client->is_connecting(); }));
+    EXPECT_EQ(resumed, 0);
+
+    client.reset(); // the last owner: the destructor answers the connect() the awaiter asked
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return resumed != 0; }));
+    drain_client_callbacks();
+    EXPECT_EQ(resumed, 1);
+    EXPECT_FALSE(result.ok);
+}
+#endif
+
+// A client with no shared owner -- a plain object, not make_client()'s -- cannot connect. Its connect() says so by
+// its return value alone: the callback is never called. It was, inside the call, and one that dials again on `false`
+// recursed without end (Huly QB-1246).
+TEST(Http1ClientTest, AClientWithNoSharedOwnerRefusesConnectByItsReturnValueAlone) {
+    LoopbackHttp1Server server;
+    qb::http1::Client   plain{server.url("/")};
+
+    int                                            calls = 0, dials = 0;
+    std::function<void(bool, std::string const &)> redial;
+    redial = [&](bool ok, std::string const &) {
+        ++calls;
+        if (!ok && dials < 64) {
+            ++dials;
+            static_cast<void>(plain.connect(redial));
+        }
+    };
+    ++dials;
+    EXPECT_FALSE(plain.connect(redial));
+    EXPECT_EQ(calls, 0) << "the callback of a connect() that starts nothing is never called";
+    EXPECT_EQ(dials, 1);
+    EXPECT_FALSE(plain.is_connecting());
 }
 
 // Regression: a user response callback is invoked from the protocol's noexcept
@@ -1487,6 +2553,383 @@ struct Cleanup {
     }
 };
 } // namespace http1_callback_reentry_test
+
+namespace http1_run_sync_connect_test {
+
+/// run_sync(client->connect()) -- a coroutine the caller blocks on, the loop pumped until it completes -- from a callback,
+/// bounded by a watchdog that ends the process, saying so, instead of letting the test hang.
+struct Blocked {
+    bool                      returned = false;
+    qb::http1::ConnectResult  result;
+    std::chrono::milliseconds took{0};
+
+    void
+    run(qb::http1::Client &client, char const *const from) {
+        const auto               started = std::chrono::steady_clock::now();
+        qb::http::test::watchdog bound(std::string("run_sync(connect()) from ") + from, 5s);
+        result   = qb::io::async::run_sync(client.connect());
+        took     = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+        returned = true;
+    }
+};
+
+/// Completes at its first resumption: a run_sync() of it is one pass of the loop.
+qb::io::async::task<void>
+completes_at_once() {
+    co_return;
+}
+
+/// Awaits connect() twice in a row.
+qb::io::async::task<void>
+connect_twice(qb::http1::Client &client, qb::http1::ConnectResult &first, qb::http1::ConnectResult &second) {
+    first  = co_await client.connect();
+    second = co_await client.connect();
+}
+
+/// Two requests on a connection that is up, automatic reconnection on (the default): the first on `target`, whose
+/// connection its deadline (`timeout`, when not zero) or the server ends; the second queued behind it, which that close
+/// keeps for the next connection. The first's failure callback turns automatic reconnection off -- a policy that gives up
+/// after N failures -- and takes the listener away, so an attempt is refused; the second's runs
+/// run_sync(client->connect()), which returns at once, `false`, and nothing connects for it.
+void
+reconnection_turned_off_by_the_failure_ahead(char const *const target, qb::duration const timeout, qb::http::status const first_status,
+                                             char const *const from) {
+    std::optional<LoopbackHttp1Server> server{std::in_place};
+    Blocked                            blocked;
+    int                                answered = 0, failed = 0;
+    bool                               connected = false;
+    qb::http::status                   first = qb::http::status::OK, status = qb::http::status::OK;
+    std::string                        text;
+    auto                               client = qb::http1::make_client(server->url(""));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    client->set_request_timeout(timeout); // armed for the first as it is sent: at once, the client connected
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, target), [&](qb::http::Response response) {
+        ++answered;
+        first = response.status();
+        client->set_auto_reconnect(false); // gives up
+        server.reset();                    // its listener gone: an attempt is refused
+    }));
+    client->set_request_timeout(qb::duration::zero()); // the second has no deadline: the close alone ends it
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++failed;
+        status = response.status();
+        text   = response.body().as<std::string>();
+        blocked.run(*client, from);
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(first, first_status);
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(text, "HTTP/1.1 client is not connected") << "failed under the policy the callback left: no attempt was made for it";
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+}
+
+} // namespace http1_run_sync_connect_test
+
+// run_sync(client->connect()) from a failure callback of disconnect() returns at once, `false`, "HTTP/1.1 connection is
+// closing", and nothing connects for it. The connect() it asked was queued until the callbacks of the close had unwound,
+// which the pump it ran could not reach: it never returned -- in 3.3.0 as well (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromAFailureCallbackOfDisconnectReturnsFalseAtOnce) {
+    qb::io::async::init();
+    LoopbackHttp1Server                  server;
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  failed    = 0;
+    bool                                 connected = false;
+    auto                                 client    = qb::http1::make_client(server.url(""));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        ++failed;
+        blocked.run(*client, "a failure callback of disconnect()");
+    }));
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+}
+
+// The coroutine push_request() and push_requests() take the same rule (Huly QB-1246): awaited from a callback of a
+// close, they complete at once, 503 "HTTP/1.1 connection is closing". The callback form queues the request for the next
+// connection, which cannot start before that callback returns: a run_sync() of the coroutine form there waited for the
+// request's timeout (the case gives it 2 s, and a watchdog).
+TEST(Http1ClientTest, ARunSyncOfAPushFromAFailureCallbackOfDisconnectIsAnsweredAtOnce) {
+    qb::io::async::init();
+    LoopbackHttp1Server             server;
+    int                             failed    = 0;
+    bool                            connected = false;
+    qb::http::Response              single;
+    std::vector<qb::http::Response> batch;
+    std::chrono::milliseconds       took{0};
+    auto                            client = qb::http1::make_client(server.url(""));
+    client->set_request_timeout(2s);
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        ++failed;
+        const auto               started = std::chrono::steady_clock::now();
+        qb::http::test::watchdog bound("run_sync(push_request()) from a failure callback of disconnect()", 10s);
+        single = qb::io::async::run_sync(client->push_request(request(qb::http::method::GET, "/ping")));
+        std::vector<qb::http::Request> two;
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        two.emplace_back(request(qb::http::method::GET, "/ping"));
+        batch = qb::io::async::run_sync(client->push_requests(std::move(two)));
+        took  = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    }));
+    client->disconnect();
+    EXPECT_EQ(failed, 1);
+    EXPECT_EQ(single.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(single.body().as<std::string>(), "HTTP/1.1 connection is closing");
+    ASSERT_EQ(batch.size(), 2u);
+    EXPECT_EQ(batch[0].body().as<std::string>(), "HTTP/1.1 connection is closing");
+    EXPECT_EQ(batch[1].body().as<std::string>(), "HTTP/1.1 connection is closing");
+    EXPECT_LT(took, 1s) << "a coroutine push awaited from a callback of a close waited for the request's timeout";
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
+// The same from the callback of a response that closes its connection: retired before the callback runs, the
+// connection's close is under way there too.
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheCallbackOfAClosingResponseReturnsFalseAtOnce) {
+    qb::io::async::init();
+    LoopbackHttp1Server                  server;
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  answered = 0;
+    auto                                 client   = qb::http1::make_client(server.url(""));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close"), [&](qb::http::Response response) {
+        ++answered;
+        EXPECT_EQ(response.status(), qb::http::status::OK);
+        blocked.run(*client, "the callback of a response that closes its connection");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered != 0; }));
+    EXPECT_EQ(answered, 1);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// A client whose close refused a run_sync(client->connect()) -- from the callback of a response that closes its
+// connection -- still serves the next request, pushed once that callback has returned, with no disconnect() from
+// outside a callback. The pump run_sync() ran inside the callback drained the loop's deferred queue, where the reset
+// of the retired connection waited: it ran there, the callback still on the stack, and gave up. The connection
+// stayed retired until the client next ran a callback: a request queued then waited for its request timeout (408,
+// 60 s by default), whose callback restarted the connection -- for ever with none.
+TEST(Http1ClientTest, AClientWhoseCloseRefusedARunSyncOfConnectServesTheNextRequest) {
+    qb::io::async::init();
+    LoopbackHttp1Server                  server;
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  answered = 0, pinged = 0;
+    qb::http::status                     status = qb::http::status::INTERNAL_SERVER_ERROR;
+    auto                                 client = qb::http1::make_client(server.url(""));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close"), [&](qb::http::Response) {
+        ++answered;
+        blocked.run(*client, "the callback of a response that closes its connection");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered != 0; }));
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++pinged;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return pinged != 0; }, 2s)) << "the next request was never answered";
+    EXPECT_EQ(status, qb::http::status::OK);
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// The same with any loop pumped there: a run_sync() of a coroutine that completes at its first resumption, from the
+// callback of a response that closes its connection -- in 3.3.0 as well.
+TEST(Http1ClientTest, AClientWhoseCloseCallbackRanTheLoopServesTheNextRequest) {
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    int                 answered = 0, pinged = 0;
+    qb::http::status    status = qb::http::status::INTERNAL_SERVER_ERROR;
+    auto                client = qb::http1::make_client(server.url(""));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close"), [&](qb::http::Response) {
+        ++answered;
+        qb::io::async::run_sync(http1_run_sync_connect_test::completes_at_once());
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered != 0; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++pinged;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return pinged != 0; }, 2s)) << "the next request was never answered";
+    EXPECT_EQ(status, qb::http::status::OK);
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// The same when the close is a disconnect() made from the callback of a response: a request pushed once that callback
+// has returned connects again and is answered.
+TEST(Http1ClientTest, AClientWhoseDisconnectFromACallbackRefusedARunSyncOfConnectServesTheNextRequest) {
+    qb::io::async::init();
+    LoopbackHttp1Server                  server;
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  answered = 0, pinged = 0;
+    qb::http::status                     status = qb::http::status::INTERNAL_SERVER_ERROR;
+    auto                                 client = qb::http1::make_client(server.url(""));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) {
+        ++answered;
+        client->disconnect();
+        blocked.run(*client, "the callback of a response that disconnected");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered != 0; }));
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++pinged;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return pinged != 0; }, 2s)) << "the next request was never answered";
+    EXPECT_EQ(status, qb::http::status::OK);
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// With automatic reconnection off, a request queued behind a response that closes its connection fails inside that close,
+// the connection retired: a run_sync(client->connect()) from its callback returns at once, `false`, and nothing connects
+// for it. The request was failed by the reset of the retired connection, which the loop's deferred queue runs at the tail
+// of the turn, once the close has returned: no close was under way there, the connect() started an attempt, and its
+// refusal, sent through that same queue, which the pump run_sync() ran could not drain, came only with the connect
+// deadline -- 30 s by default, macOS reporting a loopback refusal through the socket --, for ever where connect()
+// reports it at once (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestQueuedBehindAClosingResponseReturnsFalseAtOnce) {
+    qb::io::async::init();
+    std::optional<LoopbackHttp1Server>   server{std::in_place};
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  answered = 0, failed = 0;
+    bool                                 connected = false;
+    qb::http::status                     status    = qb::http::status::OK;
+    auto                                 client    = qb::http1::make_client(server->url(""));
+    client->set_auto_reconnect(false);
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/close"), [&](qb::http::Response) {
+        ++answered;
+        server.reset(); // its listener gone: an attempt is refused
+    }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++failed;
+        status = response.status();
+        blocked.run(*client, "the failure of a request queued behind a response that closes its connection");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+    EXPECT_FALSE(client->is_connected());
+}
+
+// With automatic reconnection on, a request queued behind one whose deadline ends its connection is kept for the next
+// connection -- until the failure callback of the one ahead turns automatic reconnection off: it then fails inside that
+// close, the connection retired, and a run_sync(client->connect()) from its callback returns at once, `false`. The queue
+// was left to the reset of the retired connection, at the tail of the turn, which failed it there, where that connect()
+// was not refused: its attempt's refusal waited in the deferred queue that reset runs from (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestKeptBehindATimeoutWhoseCallbackEndedReconnectionReturnsFalseAtOnce) {
+    qb::io::async::init();
+    http1_run_sync_connect_test::reconnection_turned_off_by_the_failure_ahead(
+        "/never", 300ms, qb::http::status::GATEWAY_TIMEOUT,
+        "the failure of a request kept behind a timeout, automatic reconnection turned off by the failure ahead");
+}
+
+// The same when the server closes the connection of the request ahead (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestKeptBehindAServerCloseWhoseCallbackEndedReconnectionReturnsFalseAtOnce) {
+    qb::io::async::init();
+    http1_run_sync_connect_test::reconnection_turned_off_by_the_failure_ahead(
+        "/peer-close-without-response", qb::duration::zero(), qb::http::status::BAD_GATEWAY,
+        "the failure of a request kept behind a server close, automatic reconnection turned off by the failure ahead");
+}
+
+// What the callback of a connect() made on a connected client throws is logged and goes no further, as for every other
+// callback of this client: connect() returns true and the client stays connected. It reached the caller of connect().
+TEST(Http1ClientTest, AThrowingCallbackOfAConnectOnAConnectedClientIsContained) {
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    bool                connected = false;
+    int                 called    = 0;
+    auto                client    = qb::http1::make_client(server.url(""));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    bool accepted = false;
+    EXPECT_NO_THROW(accepted = client->connect([&](bool, std::string const &) {
+        ++called;
+        throw std::runtime_error("thrown by the callback of a connect() on a connected client");
+    }));
+    EXPECT_TRUE(accepted);
+    EXPECT_EQ(called, 1);
+    EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// A request a callback of the client's destructor pushes is answered inside the push with 503 whatever it is -- one for
+// another origin included, which a live client refuses with 400: the client being destroyed accepts nothing, and says so
+// before it reads the request (Huly QB-1246).
+TEST(Http1ClientTest, AClientBeingDestroyedAnswersEveryRequestItsCallbacksPushWith503) {
+    qb::io::async::init();
+    LoopbackHttp1Server server;
+    int                 heard  = 0;
+    qb::http::status    pushed = qb::http::status::OK;
+    {
+        auto  client = qb::http1::make_client(server.url(""));
+        auto *raw    = client.get();
+        ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&, raw](qb::http::Response) {
+            ++heard;
+            raw->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("http://elsewhere.invalid/x")},
+                              [&](qb::http::Response response) { pushed = response.status(); });
+        }));
+        client.reset(); // destroyed with its request queued
+    }
+    EXPECT_EQ(heard, 1);
+    EXPECT_EQ(pushed, qb::http::status::SERVICE_UNAVAILABLE);
+    drain_client_callbacks();
+}
+
+// A coroutine that awaits connect() again once an attempt failed -- the port refuses it -- gets the next attempt's own
+// outcome, not "HTTP/1.1 connection is closing". The connector's failure is delivered through the loop's deferred queue,
+// and the coroutine resumes in the same turn, the failed connection still retired: the awaiter answers at once only from
+// a callback of the close, where the attempt it would wait for cannot start before that callback returns.
+TEST(Http1ClientTest, ACoroutineThatAwaitsConnectAgainAfterAFailedAttemptGetsThatAttemptsOutcome) {
+    qb::io::async::init();
+    qb::io::tcp::listener holder;
+    ASSERT_EQ(holder.listen_v4(0, "127.0.0.1"), 0);
+    const std::uint16_t port = holder.local_endpoint().port();
+    holder.close(); // the port refuses from here on
+    auto                     client = qb::http1::make_client("http://127.0.0.1:" + std::to_string(port));
+    qb::http1::ConnectResult first{true, "not returned"}, second{true, "not returned"};
+    {
+        qb::http::test::watchdog bound("two connect() awaited in a row", 20s);
+        qb::io::async::run_sync(http1_run_sync_connect_test::connect_twice(*client, first, second));
+    }
+    EXPECT_FALSE(first.ok);
+    EXPECT_FALSE(second.ok);
+    EXPECT_NE(second.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_EQ(second.error_message, first.error_message) << "the second attempt's own failure";
+    drain_client_callbacks();
+}
 
 // QB-509: new work submitted by a callback belongs to the next connection,
 // not to the response/failed cohort whose callback is currently being delivered.
@@ -2713,6 +4156,44 @@ TEST(Http1ClientTest, AnAskedSwitchIsTheAnswerAndRetiresItsConnection) {
     drain_client_callbacks();
 }
 
+// The same behind a 101 its request never asked for, automatic reconnection off: the switch fails the request it
+// answers, 502, and the request queued behind it fails inside that close too -- a run_sync(client->connect()) from its
+// callback returns at once, `false`. It was failed by the reset of the retired connection, where it returned only at
+// the connect deadline, as above (Huly QB-1246).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheFailureOfARequestQueuedBehindAnUnaskedSwitchReturnsFalseAtOnce) {
+    using namespace http1_switched_protocols_test;
+    qb::io::async::init();
+    std::optional<http1_head_no_length_test::ScriptedPeer> peer{std::in_place, std::vector<std::string>{switched}};
+    http1_run_sync_connect_test::Blocked                   blocked;
+    int                                                    answered = 0, failed = 0;
+    bool                                                   connected = false;
+    qb::http::status                                       first = qb::http::status::OK, status = qb::http::status::OK;
+    auto                                                   client = qb::http1::make_client(peer->url("/"));
+    client->set_auto_reconnect(false);
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/switch"), [&](qb::http::Response response) {
+        ++answered;
+        first = response.status();
+        peer.reset(); // its listener gone: an attempt is refused
+    }));
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++failed;
+        status = response.status();
+        blocked.run(*client, "the failure of a request queued behind an unasked switch");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return failed != 0; }));
+    EXPECT_EQ(answered, 1);
+    EXPECT_EQ(first, qb::http::status::BAD_GATEWAY);
+    EXPECT_EQ(status, qb::http::status::SERVICE_UNAVAILABLE);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    EXPECT_LT(blocked.took, 1s);
+    drain_client_callbacks();
+    EXPECT_FALSE(client->is_connecting()) << "nothing was queued for it";
+}
+
 TEST(Http1ClientTest, OneShotUnaskedSwitchFailsAndAnAskedOneIsTheAnswer) {
     using namespace http1_switched_protocols_test;
     {
@@ -3341,7 +4822,7 @@ TEST(Http1ClientTest, AResponseCutByTheReadBufferCapFailsNamingThatCap) {
 // A response the client's body limit cut (Huly QB-1248): its failure callback runs once the connection is retired, as the
 // callback of a response that closes the connection does (CloseResponseCallbackQueuesItsNextRequestOnANewConnection), so
 // a request the callback pushes is never written to that connection. With automatic reconnection it goes to a new one;
-// without, it is refused at once, as after any other end of a connection. It was written to the dying connection while
+// without, it is refused as that close ends, as after any other end of a connection. It was written to the dying connection while
 // the client still read it as connected, and the disconnect that followed failed it: 502 "Connection closed". A request
 // QUEUED behind the cut one goes the same way: out on the new connection, or failed once, 503 -- it was written to the dying
 // connection first, and failed with it, 502. Its 503 reads "HTTP/1.1 client is not connected" when the callback itself
@@ -3408,7 +4889,9 @@ TEST(Http1ClientTest, ACallbackOfAResponseTheBodyLimitCutQueuesItsNextRequestOnA
             EXPECT_EQ(queued.body().as<std::string>(), "pong");
             EXPECT_EQ(server.connection_count(), 2);
         } else {
-            EXPECT_EQ(answered_in_callback, 1) << "a client that is down and does not reconnect refuses the request at once";
+            // Refused once the callback has returned, inside the same close: never inside the push a callback of the client
+            // makes, where a callback that pushes back at every failure was called from inside its own push (Huly QB-1246).
+            EXPECT_EQ(answered_in_callback, 0) << "a request pushed from a callback of the client was answered inside its push";
             EXPECT_EQ(observed->response.status(), qb::http::status::SERVICE_UNAVAILABLE);
             EXPECT_EQ(observed->response.body().as<std::string>(), "HTTP/1.1 client is not connected");
             EXPECT_EQ(queued.status(), qb::http::status::SERVICE_UNAVAILABLE) << "the request queued behind the cut one";
@@ -3737,4 +5220,379 @@ TEST(Http1ClientTest, AnHttp10ResponseWithTransferEncodingRetiresItsConnection) 
         EXPECT_EQ(peer.connections.load(), connections) << head;
         drain_client_callbacks();
     }
+}
+
+// run_sync(client->connect()) from the failure callback of a response the body limit cut completes `false`, and the next
+// request is served: the cut retires the connection before its callback, as every other end does (Huly QB-1246, QB-1248).
+TEST(Http1ClientTest, ARunSyncOfConnectFromTheCallbackOfACutResponseReturnsFalseAtOnce) {
+    qb::io::async::init();
+    LoopbackHttp1Server                  server;
+    http1_run_sync_connect_test::Blocked blocked;
+    int                                  answered = 0, pinged = 0;
+    bool                                 connected_in_callback = true;
+    qb::http::status                     cut = qb::http::status::OK, status = qb::http::status::INTERNAL_SERVER_ERROR;
+    auto                                 client = qb::http1::make_client(server.url(""));
+    client->set_max_body_size(1024);
+    auto big   = request(qb::http::method::POST, "/echo");
+    big.body() = std::string(4096, 'x');
+    ASSERT_TRUE(client->push_request(std::move(big), [&](qb::http::Response response) {
+        ++answered;
+        cut                   = response.status();
+        connected_in_callback = client->is_connected();
+        blocked.run(*client, "the callback of a response the body limit cut");
+    }));
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered != 0; }));
+    EXPECT_EQ(cut, qb::http::status::BAD_GATEWAY);
+    EXPECT_FALSE(connected_in_callback);
+    ASSERT_TRUE(blocked.returned);
+    EXPECT_FALSE(blocked.result.ok);
+    EXPECT_EQ(blocked.result.error_message, "HTTP/1.1 connection is closing");
+    ASSERT_TRUE(client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response response) {
+        ++pinged;
+        status = response.status();
+    }));
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return pinged != 0; }, 2s));
+    EXPECT_EQ(status, qb::http::status::OK);
+    client->disconnect();
+    drain_client_callbacks();
+}
+
+// While the destructor hears what the client still owes, an answer the loop brings takes its place behind it, as in
+// ordinary operation (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the first runs
+// the loop, and the response of a request in flight comes in that loop. The order the client came to owe them is the
+// first refusal (1; -1 marks the end of its callback), the second (2), then the response (9). The response was given at
+// once, under the first callback and ahead of the second refusal: 1 9 -1 2.
+TEST(Http1ClientTest, AResponseThatComesWhileTheDestructorHearsWhatIsOwedTakesItsPlaceBehindIt) {
+    using http1_client_lifetime_test::Told;
+    LoopbackHttp1Server   server;
+    int                   destroyed = 0; // before the client: its callbacks write here
+    bool                  up        = false;
+    std::vector<int>      order;
+    std::shared_ptr<Told> client(new Told(server.url("/"), destroyed));
+    auto *const           raw       = client.get();
+    const auto            elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once: another origin
+    raw->connect([&](bool ok, std::string const &) { up = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return up; }));
+    raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { order.push_back(9); }); // in flight
+    raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                                                // inside the program's push
+        raw->push_request(elsewhere(), [&](qb::http::Response) {                                                 // owed first
+            order.push_back(1);
+            const auto until = std::chrono::steady_clock::now() + 150ms;
+            while (std::chrono::steady_clock::now() < until) {
+                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // the response comes in this loop
+            }
+            order.push_back(-1);
+        });
+        raw->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // owed second
+    });
+    client.reset(); // the last reference of the program: the hold of the callback above runs on the next loop turn
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed == 1; }));
+    drain_client_callbacks();
+    EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the loop brought was given ahead of one still owed";
+}
+
+// And so does an answer the client gives by itself there: the destructor has one rule, the order the client came to owe
+// its answers (Huly QB-1246). Two refusals are owed when the last reference goes; the callback of the first calls
+// disconnect(), which ends a request in flight. That failure (9) takes its place behind the second refusal (2), as it
+// would in ordinary operation. It was given inside the disconnect(), ahead of it: 1 9 -1 2.
+TEST(Http1ClientTest, ADisconnectFromACallbackTheDestructorHearsGivesItsFailuresBehindWhatIsOwed) {
+    using http1_client_lifetime_test::Told;
+    LoopbackHttp1Server   server;
+    int                   destroyed = 0; // before the client: its callbacks write here
+    bool                  up        = false;
+    std::vector<int>      order;
+    std::shared_ptr<Told> client(new Told(server.url("/"), destroyed));
+    auto *const           raw       = client.get();
+    const auto            elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once: another origin
+    raw->connect([&](bool ok, std::string const &) { up = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return up; }));
+    raw->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { order.push_back(9); }); // in flight
+    raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                                                // inside the program's push
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) {                                            // owed first
+            order.push_back(1);
+            raw->disconnect(); // ends the request in flight
+            order.push_back(-1);
+        });
+        raw->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // owed second
+    });
+    client.reset(); // the last reference of the program: the hold of the callback above runs on the next loop turn
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return destroyed == 1; }));
+    drain_client_callbacks();
+    EXPECT_EQ(order, (std::vector<int>{1, -1, 2, 9})) << "an answer the client gave by itself was given ahead of one still owed";
+}
+
+// An empty batch pushed from a callback the destructor runs follows the destructor's rule, as a request does (Huly
+// QB-1246): it is answered inside the push, and one pushed from inside that answer is refused by the return value alone,
+// its callback unheard. An empty batch pushed back from its own callback had no end there: a hundred calls, a hundred
+// deep, where the case stops it.
+TEST(Http1ClientTest, AnEmptyBatchPushedBackFromTheDestructorsCallbacksEndsAtItsSecondPush) {
+    LoopbackHttp1Server   server;
+    int                   calls = 0, depth = 0, deepest = 0;
+    std::vector<bool>     accepted;
+    qb::http1::Client    *raw = nullptr;
+    std::function<void()> push_empty;
+    push_empty = [&] {
+        const auto index = accepted.size(); // a push returns after the ones its callback makes
+        accepted.push_back(false);
+        const bool taken = raw->push_requests({}, [&](std::vector<qb::http::Response>) {
+            deepest = std::max(deepest, ++depth);
+            if (++calls < 100) {
+                push_empty();
+            }
+            --depth;
+        });
+        accepted[index]  = taken;
+    };
+    {
+        auto client = qb::http1::make_client(server.url("/"));
+        raw         = client.get();
+        client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { push_empty(); }); // fails with the client
+        ASSERT_TRUE(client->is_connecting()); // queued behind the connection it asked for
+    } // destroyed with that request waiting
+    drain_client_callbacks();
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(deepest, 1);
+    EXPECT_EQ(accepted, (std::vector<bool>{true, false}));
+}
+
+// A run_sync() of a coroutine push made from a callback the client's turn hears completes. The refusal it awaits is
+// kept for the client's next turn -- a callback of the client is on the stack --, and the loop run_sync() runs brings
+// that turn from the loop's deferred queue, whose drain is still running the first turn. qb-io runs deferred callbacks
+// under a nested turn (Huly QB-1246, in qb): where that drain does not nest, this wait never ends -- the one queue of
+// owed answers needs that drain, and must not be used without it.
+TEST(Http1ClientTest, ARunSyncOfACoroutinePushFromACallbackTheClientsTurnHearsCompletes) {
+    LoopbackHttp1Server server;
+    bool                done      = false; // before the client: its callbacks write here
+    qb::http::status    status    = qb::http::status::OK;
+    auto                client    = qb::http1::make_client(server.url("/"));
+    const auto          elsewhere = [] {
+        return request(qb::http::method::GET, "http://elsewhere.invalid/x");
+    }; // refused at once: another origin
+    client->push_request(elsewhere(), [&](qb::http::Response) {     // answered inside the program's push
+        client->push_request(elsewhere(), [&](qb::http::Response) { // kept: heard by the client's turn
+            qb::http::test::watchdog bound("run_sync() of a coroutine push from a callback the client's turn hears", 5s);
+            status = qb::io::async::run_sync(client->push_request(elsewhere())).status();
+            done   = true;
+        });
+    });
+    EXPECT_FALSE(done) << "a refusal of a push made from a callback was heard inside the push";
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return done; }));
+    EXPECT_EQ(status, qb::http::status::BAD_REQUEST);
+}
+
+namespace http1_client_target_test {
+/// Targets no client may send: a query that carries SP, a control byte or DEL as written (the path of a URI holds path
+/// characters only: such a byte there fails the parse, and the URI names no target).
+struct UnsendableTarget {
+    std::string_view what;
+    std::string      target;
+};
+inline const UnsendableTarget k_unsendable_targets[] = {
+    {"LF in the query", std::string("/ping?q=a\nb")},
+    {"CR in the query", std::string("/ping?q=a\rb")},
+    {"0x1F in the query", std::string("/ping?q=a\x1F") + "b"},
+    {"DEL in the query", std::string("/ping?q=a\x7F") + "b"},
+    {"SP in the query", std::string("/ping?q=a b")},
+    {"LF in the path", std::string("/ping/a\nb")},
+    {"CR in the path", std::string("/ping/a\rb")},
+    {"0x1F in the path", std::string("/ping/a\x1F") + "b"},
+    {"DEL in the path", std::string("/ping/a\x7F") + "b"},
+    {"SP in the path", std::string("/ping/a b")},
+};
+} // namespace http1_client_target_test
+
+// A request whose target cannot be sent is refused where it is pushed, 400, as a refusal the client gives by itself, and
+// costs nothing else (Huly QB-1246): the connection stays, what it carries goes on, the next request is served on it.
+// The check is the HTTP/1.1 serializer's, shared by the three clients. On HTTP/1.1 a query the serializer refuses was answered only once the
+// request's turn to be written came, a connection made for it; and a URI that failed to parse was made absolute and
+// sent, to another resource than the one asked for.
+TEST(Http1ClientTest, ARequestWhoseTargetCannotBeSentIsRefusedWhereItIsPushed) {
+    for (const auto &row : http1_client_target_test::k_unsendable_targets) {
+        SCOPED_TRACE(row.what);
+        LoopbackHttp1Server server;
+        int                 refused = 0, served = 0; // before the client: its callbacks count here
+        bool                connected = false;
+        qb::http::status    status    = qb::http::status::OK;
+        std::string         body;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+        const auto requests = server.request_count();
+        EXPECT_TRUE(client->push_request(request(qb::http::method::GET, row.target), [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        }));
+        EXPECT_EQ(refused, 1) << "the request was not refused where it was pushed";
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_TRUE(client->is_connected());
+        client->push_request(request(qb::http::method::GET, "/ping"),
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; }));
+        EXPECT_EQ(refused, 1);
+        EXPECT_EQ(server.connection_count(), 1) << "the refusal cost the connection";
+        EXPECT_EQ(server.request_count(), requests + 1) << "the server was sent the request that was refused";
+        client->disconnect();
+    }
+}
+
+// A close calls every callback it owes, whatever one of them throws (Huly QB-1246). On HTTP/1.1 nothing a callback
+// throws leaves the client: it is logged, and the close goes on -- three requests wait for a connection nobody answers,
+// the program disconnects, the callback of the first throws, and the two others hear all the same; a connect() asked
+// afterwards starts. (The HTTP/2 client let the exception out at once: the two others were never answered, and no later
+// connect() could start.)
+TEST(Http1ClientTest, ADisconnectWhoseFirstCallbackThrowsStillAnswersTheOthers) {
+    LoopbackHttp1Server server;
+    int                 first = 0, second = 0, third = 0, served = 0; // before the client: its callbacks count here
+    bool                connected = false;
+    auto                client    = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { // in flight
+        ++first;
+        throw std::runtime_error("the first failure callback throws");
+    });
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++second; }); // queued behind it
+    client->push_request(request(qb::http::method::GET, "/ping"), [&](qb::http::Response) { ++third; });
+    EXPECT_NO_THROW(client->disconnect());
+    EXPECT_EQ(first, 1);
+    EXPECT_EQ(second + third, 2) << "the requests behind the one whose callback threw were not answered";
+    client->push_request(request(qb::http::method::GET, "/ping"),
+                         [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return served == 1; })) << "the client was left unable to connect";
+    EXPECT_EQ(first + second + third, 3) << "a request was answered twice";
+    client->disconnect();
+}
+
+// A target longer than the serializer allows is refused where it is pushed, as the two other clients refuse it, and one
+// at the limit is sent (Huly QB-1246): the shared check measures what serialize_request() measures, the path and the
+// query together against MAX_URL_LENGTH. It was refused only where the request was written, once its turn had come:
+// queued behind a request in flight, it was not answered where it was pushed.
+TEST(Http1ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheLimitIsSent) {
+    LoopbackHttp1Server server;
+    int                 refused = 0, sent = 0, never = 0; // before the client: its callbacks count here
+    bool                connected      = false;
+    qb::http::status    refused_status = qb::http::status::OK, sent_status = qb::http::status::OK;
+    std::string         refused_body, sent_body;
+    auto                client = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+    const auto of = [](std::size_t const length) {
+        return "/" + std::string(length - 1, 'a');
+    }; // a path, and no query
+    client->push_request(request(qb::http::method::GET, of(qb::http::protocol_limits::MAX_URL_LENGTH)), [&](qb::http::Response response) {
+        ++sent;
+        sent_status = response.status();
+        sent_body   = response.body().as<std::string>();
+    });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return sent != 0; }));
+    // Sent: the answer is the server's, not one of the client's own.
+    EXPECT_EQ(sent_body.find("cannot be sent"), std::string::npos) << sent_body;
+    EXPECT_EQ(sent_body.find("serialization"), std::string::npos) << "the client did not send it: " << sent_body;
+    // One limit for the three clients, on one quantity: a path and a query of MAX_URL_LENGTH together -- the `?` between
+    // them is not counted -- are sent as well.
+    int         with_a_query = 0;
+    std::string query_body;
+    client->push_request(request(qb::http::method::GET, "/q?" + std::string(qb::http::protocol_limits::MAX_URL_LENGTH - 2, 'a')),
+                         [&](qb::http::Response response) {
+                             ++with_a_query;
+                             query_body = response.body().as<std::string>();
+                         });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return with_a_query != 0; }));
+    EXPECT_EQ(query_body.find("cannot be sent"), std::string::npos) << query_body;
+    EXPECT_EQ(query_body.find("serialization"), std::string::npos) << "the client did not send it: " << query_body;
+    client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) { ++never; }); // in flight
+    client->push_request(request(qb::http::method::GET, of(qb::http::protocol_limits::MAX_URL_LENGTH + 1)), [&](qb::http::Response response) {
+        ++refused;
+        refused_status = response.status();
+        refused_body   = response.body().as<std::string>();
+    });
+    EXPECT_EQ(refused, 1) << "the request was not refused where it was pushed";
+    EXPECT_EQ(refused_status, qb::http::status::BAD_REQUEST) << refused_body;
+    EXPECT_NE(refused_body.find("cannot be sent"), std::string::npos) << refused_body;
+    EXPECT_NE(refused_body.find("MAX_URL_LENGTH"), std::string::npos) << refused_body;
+    EXPECT_EQ(never, 0);
+    client->disconnect();
+    EXPECT_EQ(refused, 1) << "the request was answered twice";
+}
+
+namespace http1_client_fields_test {
+/// Requests that carry a field the serializer cannot write: LF, NUL and CR in a value, SP in a name, CR in a cookie, LF in
+/// a trailer field (a chunked body's).
+struct UnsendableField {
+    std::string_view what;
+    std::string      name;
+    std::string      value;
+    bool             trailer;
+};
+inline const UnsendableField k_unsendable_fields[] = {
+    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+};
+} // namespace http1_client_fields_test
+
+// The HTTP/1.1 serializer refuses such a field before it writes a byte of the request: the request hears 400, and now
+// with a reason that names the field, as the two other clients answer (Huly QB-1191: it read "header value exceeds
+// MAX_HEADER_VALUE_LENGTH" for a LF, and named no field). The connection stays, and the request behind is served on it.
+TEST(Http1ClientTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndNamesTheField) {
+    for (const auto &field : http1_client_fields_test::k_unsendable_fields) {
+        SCOPED_TRACE(field.what);
+        LoopbackHttp1Server server;
+        int                 refused = 0, served = 0; // before the client: its callbacks count here
+        bool                connected = false;
+        qb::http::status    status    = qb::http::status::OK;
+        std::string         body;
+        auto                client = qb::http1::make_client(server.url("/"));
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected && server.connection_count() == 1; }));
+        const auto requests = server.request_count();
+        auto       bad      = request(qb::http::method::POST, "/echo");
+        if (field.trailer) {
+            bad.set_header("Transfer-Encoding", "chunked");
+            bad.body() = "x";
+            bad.trailers().set_header(field.name, field.value);
+        } else {
+            bad.set_header(field.name, field.value);
+        }
+        client->push_request(std::move(bad), [&](qb::http::Response response) {
+            ++refused;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        });
+        client->push_request(request(qb::http::method::GET, "/ping"),
+                             [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
+        EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return refused == 1 && served == 1; }));
+        EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
+        EXPECT_NE(body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << body;
+        EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_EQ(server.connection_count(), 1) << "the refusal cost the connection";
+        EXPECT_EQ(server.request_count(), requests + 1) << "the server was sent the request that was refused";
+        client->disconnect();
+    }
+}
+
+// HTTP/1.1 writes a value as it is, the SP and HTAB at its edges included, and the receiver strips them (RFC 9110
+// section 5.5): " v " arrives "v", a value of whitespace alone arrives empty -- what the two other clients now send. A
+// pin: it held before.
+TEST(Http1ClientTest, AValueArrivesWithoutTheWhitespaceAtItsEdges) {
+    LoopbackHttp1Server server;
+    std::string         fields; // before the client: its callback writes here
+    bool                connected = false;
+    auto                client    = qb::http1::make_client(server.url("/"));
+    client->connect([&](bool ok, std::string const &) { connected = ok; });
+    ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+    auto req = request(qb::http::method::GET, "/fields");
+    req.set_header("x-edge", " v ");
+    req.set_header("x-blank", "  ");
+    req.set_header("x-inside", "a \t b");
+    client->push_request(std::move(req), [&](qb::http::Response response) { fields = response.body().as<std::string>(); });
+    EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return !fields.empty(); }));
+    EXPECT_EQ(fields, "x-edge=[v] x-blank=[] x-inside=[a \t b]");
+    client->disconnect();
 }

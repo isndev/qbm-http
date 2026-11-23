@@ -465,37 +465,54 @@ request_target(qb::io::uri const &uri) {
  *         qb::protocol::http2::HeaderValidator::is_sent_request_field() keeps, less the fields its @c connection
  *         header names (qb::protocol::http2::connection_nominated_fields()); a field either rule leaves out is
  *         dropped, @c host (folded into @c :authority) and @c content-length (make_request_headers writes it from
- *         the body) among them.
+ *         the body) among them. A request's field HTTP/1.1 cannot write refuses it (Huly QB-1191): @c false, and
+ *         @p field_refusal, when given, names the field; a value leaves without the SP and HTAB at its edges.
+ * @param field_refusal Set when a request is refused for a field HTTP/1.1 cannot write.
  */
 template <typename Message>
 bool
-add_regular_headers(header_block &block, Message const &msg, std::size_t &fields, qb::http::detail::outgoing_trailers const *trailers) {
+add_regular_headers(header_block &block, Message const &msg, std::size_t &fields, qb::http::detail::outgoing_trailers const *trailers,
+                    std::string *field_refusal = nullptr) {
     std::vector<std::string> nominated; // a request's: a response carrying `connection` is refused below
     if constexpr (std::is_same_v<Message, qb::http::Request>) {
-        // A request leaves with the rules the servers apply on receipt, the HTTP/2 client's (Huly QB-1191): a field
-        // they would refuse is dropped, as an intermediary translating an HTTP/1.1 message removes the
-        // connection-specific fields and those its `connection` field nominates (RFC 9114 §4.2, RFC 9113 §8.2.2).
-        // HTTP/3 refused the whole request instead -- `connection: keep-alive` copied from an HTTP/1.1 message, a
-        // `te: gzip` --, which HTTP/2 served (Huly QB-1191). A name is lowercase already: the headers map stores it
-        // folded, and an uppercase one fails the rule. The field bounds stay a refusal: a peer's nghttp3 takes a field
-        // past its own (a name past sent_field_name_fits(), Huly QB-1210) for a connection error, every stream with it.
+        // A request leaves under the clients' rule, the HTTP/2 client's (append_sendable_request_fields(), Huly
+        // QB-1191): a field HTTP/1.1 cannot write refuses the request -- @p field_refusal names it -- before nghttp3
+        // sees it; a connection-specific field and those its `connection` field nominates are dropped, as an
+        // intermediary translating an HTTP/1.1 message removes them (RFC 9114 §4.2, RFC 9113 §8.2.2); a value leaves
+        // without the SP and HTAB at its edges. HTTP/3 refused the whole request for a `connection: keep-alive` copied
+        // from an HTTP/1.1 message or a `te: gzip`, which HTTP/2 served; then such a field was dropped, and such a
+        // value (Huly QB-1191). A name is lowercase already: the headers map stores it folded. The bounds past those
+        // HTTP/1.1 holds stay a refusal, 503: a peer's nghttp3 takes a field past its own (a name past
+        // sent_field_name_fits(), Huly QB-1210, or more than MAX_HEADERS_COUNT) for a connection error, every stream
+        // with it. A trimmed value is a view of the stored one: it is copied once into the block, as the whole value
+        // was.
         nominated = qb::protocol::http2::connection_nominated_fields(msg);
         for (auto const &[name, values] : msg.headers()) {
-            if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) [[unlikely]] {
-                continue;
-            }
-            if (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), name) != trailers->moved.end()) {
-                continue; // in the trailer section
-            }
-            for (auto const &value : values) {
-                if (!qb::protocol::http2::HeaderValidator::is_sent_request_field(name, value)) [[unlikely]] {
-                    continue;
+            if (!qb::http::detail::sendable_field_name(name)) [[unlikely]] {
+                if (field_refusal) {
+                    *field_refusal = qb::http::detail::unsendable_field("request header", name, nullptr);
                 }
-                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH
-                    || !sent_field_name_fits(name)) {
+                return false;
+            }
+            const bool skipped = qb::protocol::http2::HeaderValidator::is_dropped_request_field_name(name)
+                                 || (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end())
+                                 || (trailers && std::find(trailers->moved.begin(), trailers->moved.end(), name) != trailers->moved.end());
+            for (auto const &value : values) {
+                if (!qb::http::detail::sendable_field_value(value)) [[unlikely]] {
+                    if (field_refusal) {
+                        const std::string_view view{value};
+                        *field_refusal = qb::http::detail::unsendable_field("request header", name, &view);
+                    }
                     return false;
                 }
-                block.add(name, value);
+                const auto sent = qb::http::utility::trim_http_whitespace(value);
+                if (skipped || (name == "te" && !qb::http::utility::iequals(sent, "trailers"))) [[unlikely]] {
+                    continue; // left out, or in the trailer section
+                }
+                if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !sent_field_name_fits(name)) {
+                    return false;
+                }
+                block.add(name, std::string(sent));
             }
         }
     } else {
@@ -546,21 +563,33 @@ add_regular_headers(header_block &block, Message const &msg, std::size_t &fields
  * @param trailers The message's trailer section.
  * @param nominated The fields a request's @c connection header names (qb::protocol::http2::connection_nominated_fields):
  *        left out, as they are of its header section (Huly QB-1202).
+ * @param clients_rule A client's request: a field HTTP/1.1 cannot write refuses it, and a value leaves without the SP and
+ *        HTAB at its edges (Huly QB-1191). False for a response: HTTP/3's own rule.
+ * @param field_refusal Set, with @p clients_rule, to which field refused the request and why.
  * @return The trailer field block -- empty when the section has no field (announced, not set) or
  *         only nominated ones -- or @c std::nullopt on an invalid field or a count-limit breach.
  */
 inline std::optional<header_block>
-make_trailer_block(qb::http::detail::outgoing_trailers const &trailers, std::vector<std::string> const &nominated = {}) {
+make_trailer_block(qb::http::detail::outgoing_trailers const &trailers, std::vector<std::string> const &nominated = {},
+                   bool clients_rule = false, std::string *field_refusal = nullptr) {
     header_block block;
     std::size_t  fields = 0;
     for (auto const &[name, value] : trailers.fields) {
         if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) {
             continue;
         }
-        if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(name, value)) {
+        if (clients_rule && (!qb::http::detail::sendable_field_name(name) || !qb::http::detail::sendable_field_value(value))) [[unlikely]] {
+            if (field_refusal) {
+                *field_refusal =
+                    qb::http::detail::unsendable_field("request trailer", name, qb::http::detail::sendable_field_name(name) ? &value : nullptr);
+            }
             return std::nullopt;
         }
-        block.add(std::string(name), std::string(value));
+        const auto sent = clients_rule ? qb::http::utility::trim_http_whitespace(value) : value;
+        if (++fields > qb::http::protocol_limits::MAX_HEADERS_COUNT || !is_valid_header_field(name, sent)) {
+            return std::nullopt;
+        }
+        block.add(std::string(name), std::string(sent));
     }
     return block;
 }
@@ -583,30 +612,36 @@ plan_trailers(Message const &msg) {
  * @param request Request to serialize.
  * @param trailers Its trailer section (plan_trailers): the fields it takes are left out, its
  *        announcement added.
- * @return The field block, or @c std::nullopt if the target exceeds @c MAX_URL_LENGTH, @c :authority
+ * @return The field block, or @c std::nullopt if the path and the query exceed @c MAX_URL_LENGTH, @c :authority
  *         (qb::http::origin::authority, Huly QB-1064) @c MAX_HEADER_VALUE_LENGTH as a `host` field does -- a peer's
  *         nghttp3 closes the connection past 64 KiB --, the regular fields @c MAX_HEADERS_COUNT, the pseudo-headers
  *         aside as a server reads them (both Huly QB-1266), or @c trailers() carries a field a trailer section must
  *         not. The regular fields are those add_regular_headers() keeps -- the HTTP/2 client's rule (Huly QB-1191) --
  *         and @c content-length is the body's, written when the body is non-empty, as the HTTP/2 client writes it: a
  *         declared one is left out (it was sent, and a request whose body contradicted it refused).
+ * @param field_refusal Set when the request is refused for a field HTTP/1.1 cannot write (add_regular_headers()).
  */
 inline std::optional<header_block>
-make_request_headers(qb::http::Request const &request, std::optional<qb::http::detail::outgoing_trailers> const &trailers) {
+make_request_headers(qb::http::Request const &request, std::optional<qb::http::detail::outgoing_trailers> const &trailers,
+                     std::string *field_refusal = nullptr) {
     if (trailers && !trailers->forbidden.empty()) {
         return std::nullopt;
     }
     header_block block;
     std::size_t  fields = 0; // the regular fields alone, as a server reads them: pseudo-headers counted until Huly QB-1266
     std::string  target = request_target(request.uri()), authority = qb::http::origin::authority(request.uri());
-    if (target.size() > qb::http::protocol_limits::MAX_URL_LENGTH || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
+    // The target's bound is the HTTP/1.1 serializer's, on what it measures -- the path and the query, the `?` between
+    // them not counted: one limit for the three clients (Huly QB-1246). Measured on the target, a path and a query of
+    // MAX_URL_LENGTH together were refused here, and sent by the two other clients.
+    if (request.uri().path().size() + request.uri().encoded_queries().size() > qb::http::protocol_limits::MAX_URL_LENGTH
+        || authority.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
         return std::nullopt;
     }
     block.add(":method", std::string(request.method()));
     block.add(":scheme", request.uri().scheme().empty() ? "https" : std::string(request.uri().scheme()));
     block.add(":authority", std::move(authority));
     block.add(":path", std::move(target));
-    if (!add_regular_headers(block, request, fields, trailers ? &*trailers : nullptr)) {
+    if (!add_regular_headers(block, request, fields, trailers ? &*trailers : nullptr, field_refusal)) {
         return std::nullopt;
     }
     if (!request.body().empty()) {
@@ -2110,49 +2145,71 @@ public:
         return it != _streams.end() && it->second->tx_streaming && !it->second->tx_streamed_eof;
     }
 
+    /// A request's field sections, built and judged before a stream is opened for it (prepare_request()).
+    struct prepared_request {
+        std::optional<detail::header_block> headers;       ///< The header section; empty when the request is refused.
+        std::optional<detail::header_block> trailers;      ///< The trailer section, when it has fields.
+        std::string                         field_refusal; ///< Why, when refused for a field HTTP/1.1 cannot write (Huly QB-1191).
+    };
+
     /**
-     * @brief Submit a request (client role) on a freshly opened stream.
+     * @brief Build and judge a request's field sections (client role), before a stream is opened for it: the client
+     *        opens none for a request refused for a field, so nothing of it is written, and nghttp3 never sees it (Huly
+     *        QB-1191). Reads the peer's SETTINGS_MAX_FIELD_SECTION_SIZE; changes nothing.
+     * @return The sections: @c headers empty when the request is refused, @c field_refusal naming the field when that
+     *         is why -- a field the HTTP/1.1 serializer refuses, in its header section or its @c trailers().
+     */
+    [[nodiscard]] prepared_request
+    prepare_request(qb::http::Request const &request) const {
+        prepared_request prepared;
+        // The trailer section, built and validated before anything is submitted (Huly QB-1073): see submit_response.
+        const auto plan  = detail::plan_trailers(request);
+        prepared.headers = detail::make_request_headers(request, plan, &prepared.field_refusal);
+        if (!prepared.headers) {
+            return prepared;
+        }
+        if (plan && !plan->fields.empty()) {
+            prepared.trailers =
+                detail::make_trailer_block(*plan, qb::protocol::http2::connection_nominated_fields(request), true, &prepared.field_refusal);
+            if (!prepared.trailers) {
+                prepared.headers.reset();
+                return prepared;
+            }
+            if (prepared.trailers->nva.empty()) {
+                prepared.trailers.reset(); // every field nominated by `connection`: no trailer section (Huly QB-1202)
+            }
+        }
+        if (prepared.headers->section_size > _peer_max_field_section_size
+            || (prepared.trailers && prepared.trailers->section_size > _peer_max_field_section_size)) {
+            prepared.headers.reset(); // past the server's SETTINGS_MAX_FIELD_SECTION_SIZE (Huly QB-1204)
+        }
+        return prepared;
+    }
+
+    /**
+     * @brief Submit a request (client role) on a freshly opened stream, its sections built by prepare_request().
      * @param stream_id Stream to send the request on.
      * @param request   Request to send (copied into per-stream state).
-     * @return @c true on success; @c false if header assembly fails, nghttp3
-     *         rejects the submission, or a @c trailer header is present but no
-     *         valid trailer block can be built. On success the body is captured,
-     *         trailers are submitted when present, and output is drained.
+     * @param prepared  Its sections.
+     * @return @c true on success; @c false if the sections were refused (prepare_request()) or nghttp3 rejects the
+     *         submission. On success the body is captured, trailers are submitted when present, and output is drained.
      */
     bool
-    submit_request(std::uint64_t stream_id, qb::http::Request const &request) {
+    submit_prepared(std::uint64_t stream_id, qb::http::Request const &request, prepared_request prepared) {
         auto &st = state_for(stream_id);
         // Same invariant as `submit_response`: nghttp3 holds a raw pointer into
         // `tx_body` until the body is acknowledged, so a second submission on one
         // stream must be refused before that buffer is reassigned.
-        if (st.body_submitted) {
+        if (st.body_submitted || !prepared.headers) {
             return false;
         }
-        // The trailer section, built and validated before anything is submitted (Huly QB-1073):
-        // see submit_response.
-        const auto plan    = detail::plan_trailers(request);
-        auto       headers = detail::make_request_headers(request, plan);
-        if (!headers) {
-            return false;
-        }
-        std::optional<detail::header_block> trailers;
-        if (plan && !plan->fields.empty()) {
-            trailers = detail::make_trailer_block(*plan, qb::protocol::http2::connection_nominated_fields(request));
-            if (!trailers) {
-                return false;
-            }
-            if (trailers->nva.empty()) {
-                trailers.reset(); // every field nominated by `connection`: no trailer section (Huly QB-1202)
-            }
-        }
-        if (headers->section_size > _peer_max_field_section_size || (trailers && trailers->section_size > _peer_max_field_section_size)) {
-            return false; // past the server's SETTINGS_MAX_FIELD_SECTION_SIZE (Huly QB-1204)
-        }
-        st.request    = request;
-        st.tx_body    = request.body().template as<std::string>();
-        st.tx_offset  = 0;
-        const auto rv = nghttp3_conn_submit_request(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
-                                                    st.tx_body.empty() && !trailers ? nullptr : &st.reader, &st);
+        auto &headers  = prepared.headers;
+        auto &trailers = prepared.trailers;
+        st.request     = request;
+        st.tx_body     = request.body().template as<std::string>();
+        st.tx_offset   = 0;
+        const auto rv  = nghttp3_conn_submit_request(_conn, static_cast<int64_t>(stream_id), headers->nva.data(), headers->nva.size(),
+                                                     st.tx_body.empty() && !trailers ? nullptr : &st.reader, &st);
         if (rv != 0) {
             return false;
         }
@@ -2162,6 +2219,20 @@ public:
         }
         drain();
         return true;
+    }
+
+    /**
+     * @brief Submit a request (client role) on a freshly opened stream: prepare_request(), then submit_prepared().
+     * @param stream_id Stream to send the request on.
+     * @param request   Request to send (copied into per-stream state).
+     * @return @c true on success; @c false if header assembly fails, nghttp3
+     *         rejects the submission, or a @c trailer header is present but no
+     *         valid trailer block can be built. On success the body is captured,
+     *         trailers are submitted when present, and output is drained.
+     */
+    bool
+    submit_request(std::uint64_t stream_id, qb::http::Request const &request) {
+        return submit_prepared(stream_id, request, prepare_request(request));
     }
 
     /**

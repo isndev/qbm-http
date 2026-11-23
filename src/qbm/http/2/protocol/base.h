@@ -413,6 +413,15 @@ public:
     [[nodiscard]] static bool is_sent_request_field(std::string_view name, std::string_view value) noexcept;
 
     /**
+     * @brief Whether a request field of this name is left out whatever its value, as a translating intermediary removes
+     *        it (RFC 9113 §8.2.2, Huly QB-1191): a connection-specific field (is_forbidden_header, `http2-settings`
+     *        included), `host` (folded into `:authority`), `content-length` (the sender writes the body's). `te` is
+     *        judged by its value: it stays only as `trailers`.
+     * @param name Field name, lowercase.
+     */
+    [[nodiscard]] static bool is_dropped_request_field_name(std::string_view name) noexcept;
+
+    /**
      * @brief Check if header name is a pseudo-header
      * @param name Header name
      * @return true if it's a pseudo-header (starts with ':')
@@ -517,6 +526,52 @@ append_sent_request_fields(const Message &request, std::vector<qb::protocol::hpa
 }
 
 /**
+ * @brief Appends the regular fields of a request the client sends to @p out, under the clients' rule (Huly QB-1191):
+ *        - a field HTTP/1.1 cannot write -- a name or a value qb::http::detail::sendable_field_name() or
+ *          sendable_field_value() refuses: CR, LF, NUL, another control byte or DEL in a value, a name that is not a
+ *          token, either past its length bound -- refuses the request: false, nothing appended past it matters, and
+ *          @p refusal (when given) names the field and says why. It was dropped, and the request sent without it: a
+ *          dropped `authorization` sent the request unauthenticated, without a word;
+ *        - a connection-specific field, one its `connection` header names, a `te` other than `trailers`, `host` and
+ *          `content-length` are left out, as before (HeaderValidator::is_dropped_request_field_name);
+ *        - a value is sent without the SP and HTAB at its edges, which are not part of it (RFC 9110 §5.5, RFC 9113
+ *          §8.2.1): a value that is nothing else is sent empty. Such a value was dropped.
+ *        One pass: each name and each value is read once, by the rule that refuses it; the trim reads its edges. The
+ *        promised request of a PUSH_PROMISE keeps append_sent_request_fields().
+ * @tparam Message `qb::http::Request`.
+ */
+template <typename Message>
+[[nodiscard]] bool
+append_sendable_request_fields(const Message &request, std::vector<qb::protocol::hpack::HeaderField> &out, std::string *refusal) {
+    const auto nominated = connection_nominated_fields(request);
+    for (const auto &[name, values] : request.headers()) {
+        if (!qb::http::detail::sendable_field_name(name)) [[unlikely]] {
+            if (refusal) {
+                *refusal = qb::http::detail::unsendable_field("request header", name, nullptr);
+            }
+            return false;
+        }
+        const bool dropped = HeaderValidator::is_dropped_request_field_name(name)
+                             || (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end());
+        for (const auto &value : values) {
+            if (!qb::http::detail::sendable_field_value(value)) [[unlikely]] {
+                if (refusal) {
+                    const std::string_view view{value};
+                    *refusal = qb::http::detail::unsendable_field("request header", name, &view);
+                }
+                return false;
+            }
+            const auto sent = qb::http::utility::trim_http_whitespace(value);
+            if (dropped || (name == "te" && !qb::http::utility::iequals(sent, "trailers"))) [[unlikely]] {
+                continue;
+            }
+            out.emplace_back(name, std::string(sent));
+        }
+    }
+    return true;
+}
+
+/**
  * @brief A message's trailer section as HTTP/2 sends it: the fields of
  *        qb::http::detail::plan_outgoing_trailers -- those its `trailer` header announces that a
  *        trailer section may carry, then its `trailers()` -- names lowercase, a field HTTP/2 cannot
@@ -528,10 +583,11 @@ append_sent_request_fields(const Message &request, std::vector<qb::protocol::hpa
  * @param planned Set, when given, to whether the plan holds a field -- what says the message sets its trailer
  *        fields, whatever is left out here: a section whose every field is left out is still a section the message
  *        sets, sent empty, never one announced and left to the caller (Huly QB-1202).
+ * @param trims A client's request: a value is sent without the SP and HTAB at its edges (Huly QB-1191).
  */
 template <typename Message>
 std::vector<qb::protocol::hpack::HeaderField>
-outgoing_trailer_fields(const Message &message, bool *planned = nullptr) {
+outgoing_trailer_fields(const Message &message, bool *planned = nullptr, bool trims = false) {
     const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
     if (planned) {
         *planned = !plan.fields.empty();
@@ -543,8 +599,11 @@ outgoing_trailer_fields(const Message &message, bool *planned = nullptr) {
         if (!nominated.empty() && std::find(nominated.begin(), nominated.end(), name) != nominated.end()) {
             continue;
         }
-        if (HeaderValidator::is_valid_header_field(name, value)) {
-            fields.emplace_back(std::string(name), std::string(value));
+        // A request's value without the SP and HTAB at its edges (@p trims, the client's: its fields were refused or
+        // kept where its header block was prepared, prepare_trailed_header_block(), Huly QB-1191).
+        const auto sent = trims ? qb::http::utility::trim_http_whitespace(value) : value;
+        if (HeaderValidator::is_valid_header_field(name, sent)) {
+            fields.emplace_back(std::string(name), std::string(sent));
         }
     }
     return fields;
@@ -563,22 +622,41 @@ outgoing_trailer_fields(const Message &message, bool *planned = nullptr) {
  *        `trailer` field announcing `trailers()` joins it when the message announces nothing itself
  *        (qb::http::detail::plan_outgoing_trailers, Huly QB-1073). Called only for such a message,
  *        so a message without trailers pays nothing.
+ * @param clients_rule A client's request: a field of `trailers()` HTTP/1.1 cannot write refuses it, and a value with SP
+ *        or HTAB at its edges is kept, to be sent trimmed (Huly QB-1191). False for a response: HTTP/2's own rule.
+ * @param field_refusal Set, when given, to which field refused the request and why (clients_rule).
  * @return nullptr when the block is ready; otherwise why the message is refused: its `trailers()`
  *         carries a field a trailer section must not, or one HTTP/2 cannot encode. Nothing has been
  *         sent at that point.
  */
 template <typename Message>
 const char *
-prepare_trailed_header_block(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message) {
+prepare_trailed_header_block(std::vector<qb::protocol::hpack::HeaderField> &leading, const Message &message, bool clients_rule = false,
+                             std::string *field_refusal = nullptr) {
     const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
     if (!plan.forbidden.empty()) {
         return "trailers() carries a field a trailer section must not (framing, connection, routing, proxy authentication)";
     }
     if (message.has_trailers()) {
         for (const auto &[name, values] : message.trailers().headers()) {
+            if (clients_rule && !qb::http::detail::sendable_field_name(name)) [[unlikely]] {
+                if (field_refusal) {
+                    *field_refusal = qb::http::detail::unsendable_field("request trailer", name, nullptr);
+                }
+                return "a trailer field cannot be sent";
+            }
             for (const auto &value : values) {
-                if (!HeaderValidator::is_valid_header_field(name, value)) {
-                    return "trailers() carries an invalid field";
+                // A client's request: the clients' rule, its edges trimmed when it is sent (append_sendable_request_fields,
+                // Huly QB-1191); a response: HTTP/2's own.
+                if (clients_rule ? !qb::http::detail::sendable_field_value(value) : !HeaderValidator::is_valid_header_field(name, value)) {
+                    if (!clients_rule) {
+                        return "trailers() carries an invalid field";
+                    }
+                    if (field_refusal) {
+                        const std::string_view view{value};
+                        *field_refusal = qb::http::detail::unsendable_field("request trailer", name, &view);
+                    }
+                    return "a trailer field cannot be sent";
                 }
             }
         }

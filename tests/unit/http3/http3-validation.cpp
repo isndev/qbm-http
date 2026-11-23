@@ -221,13 +221,16 @@ TEST(Http3ProtocolValidationTest, AFieldValueWithWhitespaceAtAnEndIsInvalid) {
         EXPECT_TRUE(h3detail::is_valid_header_field("x-test", value)) << "[" << value << "]";
         EXPECT_TRUE(h3detail::is_valid_incoming_header_field("x-test", value)) << "[" << value << "]";
     }
-    // A request leaves without it, as an HTTP/2 request does; a response, or a trailer section, is refused.
+    // A request leaves without the whitespace, as an HTTP/2 request does (Huly QB-1191: the field was left out); a
+    // response, or a trailer section, is refused.
     qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/r")};
     req.set_header("x-edge", " a");
     req.set_header("x-kept", "1");
     const auto block = h3detail::make_request_headers(req);
     ASSERT_TRUE(block.has_value());
-    EXPECT_EQ(field_count(*block, "x-edge"), 0u);
+    ASSERT_EQ(field_count(*block, "x-edge"), 1u);
+    const auto edge = std::find_if(block->storage.begin(), block->storage.end(), [](const auto &f) { return f.first == "x-edge"; });
+    EXPECT_EQ(edge->second, "a");
     EXPECT_EQ(field_count(*block, "x-kept"), 1u);
     qb::http::Response res;
     res.status() = qb::http::status::OK;
@@ -431,11 +434,10 @@ TEST(Http3ProtocolValidationTest, MakeRequestHeadersWritesTheBodysContentLength)
     EXPECT_EQ(field_count(*block, "content-length"), 0u) << "no body, no length: the stream ends with its header section";
 }
 
-// The regular fields a request sends are those the servers accept on receipt, by the HTTP/2 client's rule
-// (qb::protocol::http2::HeaderValidator::is_sent_request_field, Huly QB-1191): a connection-specific field -- RFC 9114
-// section 4.2's, and `http2-settings` --, a `te` other than the one value `trailers`, a pseudo-header name, a value
-// HTTP/3 cannot carry are left out, whatever their case, and the request is built; it was refused whole -- a
-// `Connection: keep-alive` copied from an HTTP/1.1 message failed the request HTTP/2 sent.
+// The regular fields a request sends, by the clients' rule (Huly QB-1191): a connection-specific field -- RFC 9114
+// section 4.2's, and `http2-settings` --, a `te` other than the one value `trailers` are left out, whatever their case,
+// and the request is built; it was refused whole -- a `Connection: keep-alive` copied from an HTTP/1.1 message failed
+// the request HTTP/2 sent. A field HTTP/1.1 cannot write refuses it, and says which (it was left out).
 TEST(Http3ProtocolValidationTest, ARequestLeavesOutTheFieldsTheServerRefuses) {
     const std::vector<std::pair<std::string, std::string>> left_out = {
         {"Connection", "keep-alive"},
@@ -446,8 +448,6 @@ TEST(Http3ProtocolValidationTest, ARequestLeavesOutTheFieldsTheServerRefuses) {
         {"HTTP2-Settings", "AAMAAABkAAQAAP__"},
         {"TE", "gzip"},
         {"TE", "trailers, trailers"},
-        {":protocol", "websocket"},
-        {"x-bad", "a\rb"},
     };
     for (auto const &[name, value] : left_out) {
         qb::http::Request req{qb::http::method::GET, qb::io::uri("https://example.test/r")};
@@ -479,8 +479,15 @@ TEST(Http3ProtocolValidationTest, ARequestLeavesOutTheFieldsTheServerRefuses) {
     EXPECT_EQ(field_count(*block, "te"), 1u);
     EXPECT_EQ(field_count(*block, "x-kept"), 1u);
 
-    // A field past HTTP/3's bounds still refuses the request: a peer's nghttp3 takes one past its own for a connection
-    // error.
+    // A field HTTP/1.1 cannot write refuses the request, and names the field; so does one past the HTTP/1.1 serializer's
+    // bounds -- a peer's nghttp3 takes a field past its own for a connection error.
+    for (const auto &[name, value] : std::vector<std::pair<std::string, std::string>>{{":protocol", "websocket"}, {"x-bad", "a\rb"}}) {
+        qb::http::Request bad{qb::http::method::GET, qb::io::uri("https://example.test/r")};
+        bad.set_header(name, value);
+        std::string why;
+        EXPECT_FALSE(h3detail::make_request_headers(bad, h3detail::plan_trailers(bad), &why).has_value()) << name;
+        EXPECT_NE(why.find("`" + name + "`"), std::string::npos) << why;
+    }
     qb::http::Request big{qb::http::method::GET, qb::io::uri("https://example.test/r")};
     big.set_header("x-big", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'));
     EXPECT_FALSE(h3detail::make_request_headers(big).has_value());

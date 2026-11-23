@@ -82,6 +82,13 @@ public:
         /// A GOAWAY(NO_ERROR) naming 2^31-1, then 100 more, each lowering the last-stream-id by one -- all above the request
         /// on stream 1 -- and a PING in one write; once the PONG is back, the 200 of stream 1 with END_STREAM.
         goaways_lowered,
+        /// A GOAWAY(NO_ERROR) naming stream 1, no answer to stream 1, and 500 ms later the connection ended, read or not.
+        goaway_then_close,
+        /// Nothing: no request is answered. It reads on, and records what the client sends.
+        no_answer,
+        /// SETTINGS_MAX_CONCURRENT_STREAMS of 1; the first request is never answered, the second gets a 200 that ends
+        /// its stream.
+        one_stream_the_second_answered,
     };
 
     /// @p budget bounds the peer's whole life: every wait ends by then, so a test keeps its own bounds under its binary's.
@@ -129,6 +136,19 @@ public:
     resets() const {
         std::lock_guard lock(_mutex);
         return _resets;
+    }
+    /// The streams the client opened a request on, by the HEADERS read, in order.
+    [[nodiscard]] std::vector<uint32_t>
+    requests() const {
+        std::lock_guard lock(_mutex);
+        return _requests;
+    }
+    /// The fields of the request HEADERS read on @p stream_id, as the client sent them (a block in one frame), decoded.
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>>
+    fields_of(uint32_t stream_id) const {
+        std::lock_guard lock(_mutex);
+        const auto      it = _fields.find(stream_id);
+        return it == _fields.end() ? std::vector<std::pair<std::string, std::string>>{} : it->second;
     }
 
 private:
@@ -218,14 +238,27 @@ private:
             const uint8_t *payload   = head + 9;
             if (type == 0x4 && (flags & 0x1) == 0 && !_answered) {
                 std::vector<uint8_t> reply;
-                append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
-                append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
+                append_frame(reply, 0x4, 0, 0,
+                             _plan == Plan::one_stream_the_second_answered ? std::vector<uint8_t>{0, 3, 0, 0, 0, 1} // MAX_CONCURRENT_STREAMS 1
+                                                                           : std::vector<uint8_t>{});               // our SETTINGS
+                append_frame(reply, 0x4, 0x1, 0, {});                                                               // the ACK of the client's
                 if (!send(reply)) {
                     return false;
                 }
                 _answered = true;
             } else if (type == 0x1) {
+                std::lock_guard lock(_mutex);
                 _requests.push_back(stream_id);
+                if ((flags & 0x4) != 0 && (flags & 0x28) == 0) { // END_HEADERS, neither PADDED nor PRIORITY: a block in one frame
+                    std::vector<qb::protocol::hpack::HeaderField> decoded;
+                    bool                                          incomplete = false;
+                    if (_decoder.decode(std::vector<uint8_t>(payload, payload + length), decoded, incomplete) && !incomplete) {
+                        auto &fields = _fields[stream_id];
+                        for (auto &field : decoded) {
+                            fields.emplace_back(std::move(field.name), std::move(field.value));
+                        }
+                    }
+                }
             } else if (type == 0x8 && length == 4) {
                 const auto increment = static_cast<int64_t>(be32(payload) & 0x7FFFFFFFu);
                 (stream_id == 0 ? _connection_window : window(stream_id)) += increment;
@@ -436,6 +469,21 @@ private:
                     play_empty_data_flood();
                 } else if (_plan == Plan::goaways_lowered) {
                     play_goaways_lowered();
+                } else if (_plan == Plan::goaway_then_close) {
+                    append_frame(frame, 0x7, 0, 0, {0, 0, 0, 1, 0, 0, 0, 0}); // GOAWAY: last stream 1, NO_ERROR
+                    static_cast<void>(send(frame));
+                    frame.clear();
+                    for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                         !_release && std::chrono::steady_clock::now() < until;)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                } else if (_plan == Plan::no_answer) {
+                    // nothing is sent: the loop below reads on
+                } else if (_plan == Plan::one_stream_the_second_answered) {
+                    while (_requests.size() < 2 && read_some()) {
+                    }
+                    if (_requests.size() >= 2) {
+                        append_frame(frame, 0x1, 0x5, _requests[1], {0x88}); // HEADERS, END_STREAM | END_HEADERS: `:status: 200`
+                    }
                 } else {
                     append_frame(frame, 0x1, 0x4, 1, {0x88});
                     for (int chunk = 0; chunk < 200; ++chunk) {
@@ -451,33 +499,35 @@ private:
                 }
             }
         }
-        while (read_some()) {
+        while (_plan != Plan::goaway_then_close && read_some()) {
         }
         _sock.disconnect();
         _sock.close();
     }
 
-    Plan                                       _plan;
-    std::chrono::seconds                       _budget;
-    qb::io::tcp::ssl::listener                 _listener;
-    qb::io::tcp::ssl::socket                   _sock;
-    uint16_t                                   _port = 0;
-    std::chrono::steady_clock::time_point      _deadline{};
-    std::vector<uint8_t>                       _in;
-    bool                                       _preface_seen = false;
-    bool                                       _answered     = false;
-    std::vector<uint32_t>                      _requests;
-    int64_t                                    _connection_window = 65535;
-    std::map<uint32_t, int64_t>                _windows;
-    std::atomic<bool>                          _release{false};
-    std::atomic<bool>                          _eof{false};
-    std::atomic<bool>                          _goaway{false};
-    std::size_t                                _pongs = 0;
-    mutable std::mutex                         _mutex;
-    uint32_t                                   _goaway_code = 0;
-    std::string                                _goaway_debug;
-    std::vector<std::pair<uint32_t, uint32_t>> _resets;
-    std::thread                                _thread;
+    Plan                                                                 _plan;
+    std::chrono::seconds                                                 _budget;
+    qb::io::tcp::ssl::listener                                           _listener;
+    qb::io::tcp::ssl::socket                                             _sock;
+    uint16_t                                                             _port = 0;
+    std::chrono::steady_clock::time_point                                _deadline{};
+    std::vector<uint8_t>                                                 _in;
+    bool                                                                 _preface_seen = false;
+    bool                                                                 _answered     = false;
+    std::vector<uint32_t>                                                _requests;
+    qb::protocol::hpack::Decoder                                         _decoder; // the server's: one for the connection
+    std::map<uint32_t, std::vector<std::pair<std::string, std::string>>> _fields;
+    int64_t                                                              _connection_window = 65535;
+    std::map<uint32_t, int64_t>                                          _windows;
+    std::atomic<bool>                                                    _release{false};
+    std::atomic<bool>                                                    _eof{false};
+    std::atomic<bool>                                                    _goaway{false};
+    std::size_t                                                          _pongs = 0;
+    mutable std::mutex                                                   _mutex;
+    uint32_t                                                             _goaway_code = 0;
+    std::string                                                          _goaway_debug;
+    std::vector<std::pair<uint32_t, uint32_t>>                           _resets;
+    std::thread                                                          _thread;
 };
 
 } // namespace qb::http::test

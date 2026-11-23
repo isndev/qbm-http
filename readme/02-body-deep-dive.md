@@ -65,7 +65,7 @@ allocates for an empty body what the eager pipe allocated before.
 
 Copies are explicit and deep — the copy constructor and copy-assignment delegate to the pipe's copy semantics; move is defaulted and cheap:
 
-<!-- src: qbm/http/src/qbm/http/body.h:80-86, qbm/http/src/qbm/http/body.cpp:159-169 -->
+<!-- src: qbm/http/src/qbm/http/body.h:80-86, qbm/http/src/qbm/http/body.cpp:136-146 -->
 ```cpp
 Body(Body &&) noexcept = default;          // move: steals the pipe
 Body(Body const &);                        // copy: deep-copies the pipe
@@ -173,7 +173,7 @@ Prefer `try_as<T>()` when parsing client-supplied bodies: a malformed payload yi
 
 ### `as<std::string_view>()` and `as<std::string>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:826-842 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:803-819 -->
 ```cpp
 std::string_view sv  = body.as<std::string_view>();   // zero-copy view of the pipe
 std::string      str = body.as<std::string>();         // owning copy
@@ -183,7 +183,7 @@ std::string      str = body.as<std::string>();         // owning copy
 
 ### `as<qb::json>()`
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:850-854 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:827-831 -->
 ```cpp
 qb::json doc = body.as<qb::json>();   // qb::json::parse over the pipe view
 ```
@@ -213,7 +213,7 @@ if (auto doc = req.body().try_as<qb::json>()) {
 
 Parses `application/x-www-form-urlencoded` bytes into a [`Form`](#the-form-container). Keys and values are URI-decoded (so `%40` becomes `@`); a `+` in form data decodes to a space, consistent with the encoding used on assignment. A pair with no `=` is stored with an empty value; empty keys are dropped. The parser does not throw on odd input — it does its best and returns what it found.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:977-1016 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:954-993 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -229,7 +229,7 @@ form.get_first("flag").value_or("");    // ""          (key present, empty value
 
 Parses `multipart/form-data` into a [`Multipart`](#the-multipart-container). This overload extracts the boundary from the **first line of the body itself** (it expects the body to begin with `--<boundary>\r\n`), not from the `Content-Type` header. It throws `std::runtime_error` if no boundary is found, the boundary is empty, the underlying state machine reports an error, or the document is not closed by its final delimiter — a body that ends inside a part or its headers is a truncated document, not a shorter one. Bytes after the closing delimiter (the epilogue) are ignored.
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:870-911 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:847-888 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -434,7 +434,7 @@ Both replace the body in place and return the new byte count. The `encoding` arg
 - `uncompress` throws `std::runtime_error` for an unsupported encoding or when more than one compression algorithm is stacked. It also caps decompressed output at `qb::http::protocol_limits::MAX_BODY_SIZE` and throws `std::length_error` if exceeded — an explicit zip-bomb guard.
 - Both run until the codec reports the stream DONE, not until the input is consumed. Since 3.3 (Huly QB-464) a body whose compressed stream ends before its end marker -- cut in transit, or truncated by the sender -- makes `uncompress` throw `std::runtime_error` instead of returning the prefix it decoded, and `compress` no longer ships a stream cut short when the codec's output outgrows the input (a large incompressible body under gzip or deflate lost its last blocks).
 
-<!-- src: qbm/http/src/qbm/http/body.cpp:569-691 -->
+<!-- src: qbm/http/src/qbm/http/body.cpp:546-668 -->
 ```cpp
 #include <qbm/http/http.h>
 

@@ -148,8 +148,13 @@ HeaderValidator::is_valid_request_te_value(std::string_view value) noexcept {
 }
 
 bool
+HeaderValidator::is_dropped_request_field_name(std::string_view name) noexcept {
+    return is_forbidden_header(name) || name == "host" || name == "content-length";
+}
+
+bool
 HeaderValidator::is_sent_request_field(std::string_view name, std::string_view value) noexcept {
-    if (is_forbidden_header(name) || name == "host" || name == "content-length") {
+    if (is_dropped_request_field_name(name)) {
         return false;
     }
     if (name == "te" && !qb::http::utility::iequals(value, "trailers")) {
