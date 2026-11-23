@@ -103,8 +103,34 @@ constexpr std::size_t MAX_IDLE_TIMEOUT_SECONDS = 300; // 5 minutes
 /** @brief Absolute floor of stream resets tolerated before the Rapid Reset guard can trip: the client's RST_STREAMs
  *  (CVE-2023-44487) and the resets it provokes (CVE-2025-8671). A legitimate client resets very few streams, so the
  *  guard only fires once resets ALSO outnumber half the streams opened — see ServerHttp2Protocol::on(RstStreamFrame)
- *  and ServerHttp2Protocol::send_provoked_rst_stream(). */
+ *  and ServerHttp2Protocol::send_provoked_rst_stream(). A reset of a stream the server still has open counts only when
+ *  premature (RAPID_RESET_WINDOW_SECONDS). */
 constexpr std::uint32_t MAX_RAPID_RESETS = 100;
+
+/** @brief A reset of a stream the server still has open counts toward MAX_RAPID_RESETS only when PREMATURE, as Envoy
+ *  counts one -- but stricter on a streamed response, which Envoy counts as begun: no work done -- no response begun,
+ *  or a streamed one its producer still writes -- and young: at most this many WHOLE seconds old, its age truncated as
+ *  Envoy truncates a stream's lifetime -- less than two seconds -- on the steady clock (an io that keeps a clock of its
+ *  own, keeps_no_progress_clock: the difference of its whole-second readings, so less than one second for sure and less
+ *  than two by the readings' phase). Envoy ages a stream from its creation; qb ages a request from its dispatch (the
+ *  stream's creation while it is not dispatched): the same instant for a request its HEADERS completes, and for an
+ *  upload the moment its last DATA hands it to the application -- abandoning it then is the attack, however long it was
+ *  held. The attack abandons a request the moment it is dispatched, freeing its concurrency slot while the work goes
+ *  on; a client that cancels the requests it gave up on two seconds or more after their dispatch -- Go's and Node's
+ *  clients reset a stream at a deadline -- is not cut, and neither is one whose cancellation lands on a stream the
+ *  server ended -- answered it, reset it, or refused it after creating it (413, 414, 431, malformed) -- once the
+ *  request is past the window, the server giving up too (RFC 9113 §5.1): such a reset is spared once
+ *  (ServerHttp2Protocol::crossed_late()), the stream remembered as the last of its class until the next reset of its
+ *  id, young or late. A reset of a stream no longer open counts otherwise -- arriving young, on a stream the client
+ *  reset, one refused at its HEADERS (REFUSED_STREAM, never created), an id it never used, or forgotten: it frees
+ *  nothing and makes no progress. Envoy, which never sees a reset after a stream ends, counts none of these: a young
+ *  reset crossing the end of a stream is qb's second strictness. The price is Envoy's: the ratio has no decay, so every
+ *  request a client let complete, cancelled late or saw answered licenses one premature reset, then or later, all at
+ *  once if it likes -- as a completed request did when every reset counted -- and one that waits out the window before
+ *  each reset gains a licence every two seconds per concurrency slot. What a handler goes on with after a reset cancels
+ *  its context is bounded by those licences, not by the concurrency limit. A buffered response begun -- in the dispatch
+ *  or later -- or a stream its producer ended is work done, while the server holds the stream. */
+constexpr std::int64_t RAPID_RESET_WINDOW_SECONDS = 1;
 
 /** @brief Cap on peer-triggered replies still QUEUED in the output: the PING PONGs, the SETTINGS ACKs and the RST_STREAMs
  *  a peer draws for nothing -- on the server those on closed or refused streams or before a request's dispatch, on the
@@ -176,7 +202,9 @@ concept counts_bytes_written = requires(IO const &io) {
 /// a count of seconds; Http2Protocol::refuse_no_progress_frame(), Huly QB-1270): the qbm-http test suite's fake handlers
 /// keep one, to step the time the bucket sees instead of sleeping through it -- back too, which the bucket counts as one
 /// second, as nghttp2 does. Every other handler, every qb-io session among them, has the bucket read
-/// std::chrono::steady_clock.
+/// std::chrono::steady_clock. The server's Rapid Reset guard ages its streams by the same clock (RAPID_RESET_WINDOW_SECONDS,
+/// Huly QB-1282): a reading earlier than a stream's window start keeps it in the window, and a clock that jumps ahead
+/// ages every stream past it, so a clock of one's own counts monotonic seconds.
 template <typename IO>
 concept keeps_no_progress_clock = requires(IO const &io) {
     { io.no_progress_clock_seconds() } -> std::same_as<std::int64_t>;

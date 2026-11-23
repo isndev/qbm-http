@@ -3883,7 +3883,7 @@ TEST(HTTP2ServerProtocol, ClientSettingsUnknownIdentifierIsIgnoredAndAcked) {
 
 // MAX_HEADER_LIST_SIZE advertised by the client is enforced on the send path:
 // when the response's header list, counted uncompressed, exceeds it, the stream
-// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1336-1339).
+// is reset with INTERNAL_ERROR before encoding (2/protocol/server.h:1367-1370).
 TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStream) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3911,7 +3911,7 @@ TEST(HTTP2ServerProtocol, ResponseHeadersExceedingPeerMaxHeaderListSizeResetsStr
 // ---------------------------------------------------------------------------
 
 // Declared content-length that does not match the body size is a stream error
-// (2/protocol/server.h:1320-1325).
+// (2/protocol/server.h:1351-1356).
 TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3931,7 +3931,7 @@ TEST(HTTP2ServerProtocol, ResponseDeclaredContentLengthMismatchIsStreamError) {
 }
 
 // Two content-length response headers with conflicting values is a stream error
-// (2/protocol/server.h:3265-3268).
+// (2/protocol/server.h:3303-3306).
 TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3951,7 +3951,7 @@ TEST(HTTP2ServerProtocol, ResponseConflictingContentLengthHeadersIsStreamError) 
     EXPECT_TRUE(protocol.ok());
 }
 
-// A non-numeric content-length response header is rejected (2/protocol/server.h:3259-3264).
+// A non-numeric content-length response header is rejected (2/protocol/server.h:3297-3302).
 TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -3974,7 +3974,7 @@ TEST(HTTP2ServerProtocol, ResponseInvalidContentLengthHeaderIsStreamError) {
 // ---------------------------------------------------------------------------
 
 // A connection-level WINDOW_UPDATE that would push the connection send window
-// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1130-1135).
+// past 2^31-1 is a connection FLOW_CONTROL_ERROR (2/protocol/server.h:1156-1161).
 TEST(HTTP2ServerProtocol, ConnectionWindowUpdateOverflowIsConnectionFlowControlError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4190,7 +4190,7 @@ TEST(HTTP2ServerProtocol, InitialWindowSizeReflowDrivingStreamWindowNegativeIsTr
 
 // ---------------------------------------------------------------------------
 // DATA on an unknown lower-numbered stream -> RST_STREAM(
-// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:457-466).
+// STREAM_CLOSED) on the connection-receive-window path (qbm/http/src/qbm/http/2/protocol/server.h:469-478).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
@@ -4213,7 +4213,7 @@ TEST(HTTP2ServerProtocol, DataOnUnknownLowerStreamIsResetClosed) {
 }
 
 // DATA on an idle stream ABOVE the high-water mark is a connection PROTOCOL_ERROR
-// (qbm/http/src/qbm/http/2/protocol/server.h:457-461).
+// (qbm/http/src/qbm/http/2/protocol/server.h:469-473).
 TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -4230,7 +4230,7 @@ TEST(HTTP2ServerProtocol, DataOnIdleHigherStreamIsConnectionProtocolError) {
 
 // ---------------------------------------------------------------------------
 // PRIORITY frame referencing a not-yet-existing stream is silently ignored
-// (no stream context to store into; 2/protocol/server.h:1244-1254 else arm).
+// (no stream context to store into; 2/protocol/server.h:1270-1280 else arm).
 // ---------------------------------------------------------------------------
 
 TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
@@ -4249,7 +4249,7 @@ TEST(HTTP2ServerProtocol, PriorityForUnknownStreamIsIgnored) {
 
 // ---------------------------------------------------------------------------
 // WINDOW_UPDATE on a stream that is already CLOSED but with an increment that
-// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1149-1161);
+// would overflow its window is a stream FLOW_CONTROL_ERROR (2/protocol/server.h:1175-1187);
 // without overflow it is ignored.
 // ---------------------------------------------------------------------------
 
@@ -4312,8 +4312,9 @@ TEST(HTTP2ServerProtocol, RapidResetSurvivesSynchronousResponsesThatEraseTheStre
     // The synchronous-response Rapid Reset shape: HEADERS(END_STREAM) dispatches the request; the
     // server answers IN-CALL via send_response, which completes AND ERASES the stream; the paired
     // RST_STREAM then arrives for a stream no longer resident. The guard must count the reset
-    // anyway (it targets any recently-live, non-idle stream id, not only resident ones) —
-    // otherwise this common configuration bypasses the CVE-2023-44487 mitigation entirely.
+    // anyway (it targets any non-idle stream id the server no longer has open, not only resident
+    // ones): such a reset frees nothing and makes no progress, and only the guard bounds a client
+    // that sends one beside each request (Huly QB-1282 keeps it counted when it comes young).
     const std::vector<uint8_t> rst_cancel{0x00, 0x00, 0x00, 0x08}; // error_code = CANCEL
     uint32_t                   sid = 1;
     for (int i = 0; i < 400 && io.goaway_count == 0; ++i, sid += 2) {
@@ -6777,7 +6778,7 @@ TEST(HTTP2ServerProtocol, AProvokedResetIsWeighedAgainstHalfTheStreamsOpened) {
 
 // A reset the client provokes before its request is dispatched -- a window overflow on an upload still open -- stops no
 // application work: it is not counted (Huly QB-1244), as a stream the protocol layer refuses is not, where the client's
-// own RST_STREAM of that upload counts a reset and a stream opened. 400 such streams, no GOAWAY.
+// own prompt RST_STREAM of that upload counts a reset and a stream opened. 400 such streams, no GOAWAY.
 TEST(HTTP2ServerProtocol, AResetProvokedBeforeTheRequestIsDispatchedIsNotCounted) {
     Http2FakeIO    io;
     ServerProtocol protocol(io);
@@ -6822,6 +6823,948 @@ TEST(HTTP2ServerProtocol, TheClientsAndTheProvokedResetsShareOneCeiling) {
     EXPECT_EQ(io.goaway_count, 1);
     EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
     EXPECT_EQ(pairs, qb1244_test::max_resets + 1) << "51 client resets and 50 provoked, one ceiling";
+}
+
+// ===========================================================================
+// The Rapid Reset guard lets a client cancel late a request the server still has open (Huly QB-1282): a reset of an
+// open stream counts only when PREMATURE -- no work done (no response begun, or a streamed one its producer still
+// writes), the request dispatched (the stream created, while it is not) at most RAPID_RESET_WINDOW_SECONDS whole
+// seconds before, Envoy's rule -- while one of a stream no longer open counts, but once on a stream the server ended
+// when the request is past the window (the cancellation crossing the end of the stream). Counted over the connection's
+// whole life, every reset cut a client that cancels the requests it gave up on. The clock is the fake io's, stepped by
+// hand (Http2FakeIO::clock_seconds), and the requests go in waves of 40: the server lets a client hold 50 streams at
+// once (APriorityOnItsOwnStreamResetsNothing), so each wave is reset before the next opens.
+// ===========================================================================
+namespace qb1282_test {
+
+/// The requests of one wave: fewer than the 50 streams the server lets a client hold at once.
+constexpr int wave = 40;
+
+/// A wave of @ref wave GET requests on the ids from @p sid, each dispatched: @p sid is moved past them, and the first id
+/// is returned.
+uint32_t
+open_wave(ServerProtocol &protocol, Http2FakeIO &io, uint32_t &sid) {
+    const uint32_t first = sid;
+    for (int i = 0; i < wave; ++i, sid += 2) {
+        open_get_stream_end_stream(protocol, io, sid, "/");
+    }
+    return first;
+}
+
+/// A wave of @ref wave uploads on the ids from @p sid -- a POST's HEADERS without END_STREAM: a slot held, nothing
+/// dispatched -- @p sid moved past them, the first id returned.
+uint32_t
+open_upload_wave(ServerProtocol &protocol, Http2FakeIO &io, uint32_t &sid) {
+    auto post = default_request_headers("/upload");
+    for (auto &field : post) {
+        if (field.name == ":method") {
+            field.value = "POST";
+        }
+    }
+    const uint32_t first = sid;
+    for (int i = 0; i < wave; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, encode_hpack_headers(post));
+    }
+    drive(protocol, io);
+    return first;
+}
+
+/// RST_STREAM(CANCEL) on @p sid.
+void
+cancel(Http2FakeIO &io, uint32_t sid) {
+    push_frame(io, FrameType::RST_STREAM, 0, sid, {0x00, 0x00, 0x00, 0x08});
+}
+
+/// An io that keeps no clock of its own -- the hook made private, so keeps_no_progress_clock does not see it -- as every
+/// qb-io session: the guard reads the steady clock and the stream's created_at.
+struct SteadyClockIO : Http2FakeIO {
+private:
+    using Http2FakeIO::no_progress_clock_seconds;
+};
+static_assert(!qb::protocol::http2::keeps_no_progress_clock<SteadyClockIO>);
+using SteadyClockProtocol = qb::protocol::http2::ServerHttp2Protocol<SteadyClockIO>;
+
+} // namespace qb1282_test
+
+// The probe of the review of the HTTP clients' destruction contract (H2-47): a client that cancels the requests it gave
+// up on -- Go's and Node's clients reset a stream at its deadline -- against a slow server, which answers none. Three
+// waves of 40 requests, each reset two seconds after it opened. Counted over the connection's life, the 101st reset --
+// more than MAX_RAPID_RESETS, more than half of the 120 streams opened -- closed the connection; none is premature now:
+// served, a request after them dispatched. Not counted, and not merely deferred: they are opened streams, which license
+// as many premature resets (the ratio has no decay, RAPID_RESET_WINDOW_SECONDS) -- HEADERS + RST_STREAM pairs after them
+// trip the guard at the 122nd, when 122 counted resets pass half of the 243 streams opened (the 120, the request after
+// them and the pairs).
+TEST(HTTP2ServerProtocol, AClientCancellingTheRequestsItGaveUpOnIsServed) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    uint32_t sid = 1;
+    for (int w = 0; w < 3; ++w) {
+        const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+        ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1)) << "a request of the wave was not dispatched";
+        io.clock_seconds += 2; // the client's deadline, past the window
+        for (uint32_t s = first; s < sid; s += 2) {
+            qb1282_test::cancel(io, s);
+        }
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "120 requests cancelled at their deadline closed the connection";
+    EXPECT_TRUE(protocol.ok());
+    open_get_stream_end_stream(protocol, io, sid, "/after");
+    sid += 2;
+    EXPECT_EQ(io.request_count, 3 * qb1282_test::wave + 1) << "a request after the cancellations was not dispatched";
+    int pairs = 0;
+    for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        qb1244_test::reset_pair(io, protocol, sid);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(pairs, 3 * qb1282_test::wave + 2) << "the late cancellations were counted, or licensed nothing";
+}
+
+// The documented window: a request at most one whole second old, less than two seconds -- Envoy's default.
+static_assert(::qb::http2::protocol_limits::RAPID_RESET_WINDOW_SECONDS == 1, "the window documented and tested below");
+
+// A stream the CLIENT reset is not one the server ended: its second RST_STREAM crosses nothing. Three waves of 40 requests
+// cancelled two seconds after their dispatch (late, not counted), then a second RST_STREAM on each of the 120 ids: each a
+// frame on a closed stream that frees nothing, counted -- the 101st trips the guard.
+TEST(HTTP2ServerProtocol, ASecondResetOfAStreamTheClientResetCounts) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int w = 0; w < 3; ++w) {
+        const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+        io.clock_seconds += 2;
+        for (uint32_t s = first; s < sid; s += 2) {
+            qb1282_test::cancel(io, s);
+        }
+        drive(protocol, io);
+    }
+    ASSERT_EQ(io.goaway_count, 0) << "late cancellations were counted";
+    int again = 0;
+    for (uint32_t s = 1; s < sid && io.goaway_count == 0; s += 2, ++again) {
+        qb1282_test::cancel(io, s);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "second resets of streams the client reset were spared";
+    EXPECT_EQ(again, qb1244_test::max_resets + 1);
+}
+
+// The streams the server ended are remembered per class of client ids, ERASED_STREAMS (64) of them: 100 HEADERS +
+// RST_STREAM pairs (100 resets counted), then 50 requests the server answers two seconds after their dispatch, all 50
+// erased before the client's 50 RST_STREAMs land -- each spared, no GOAWAY; then a second RST_STREAM on the first of them
+// counts, the 101st: GOAWAY. Fewer slots, or a slot by the id itself, forget some of the 50; a slot not forgotten, or
+// an id not checked, spares the second reset too.
+TEST(HTTP2ServerProtocol, AnOldStreamTheServerEndedIsRememberedAmongTheLast64) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < qb1244_test::max_resets; ++i, sid += 2) {
+        qb1244_test::reset_pair(io, protocol, sid);
+    }
+    ASSERT_EQ(io.goaway_count, 0);
+    const uint32_t first = sid;
+    for (int i = 0; i < 50; ++i, sid += 2) {
+        open_get_stream_end_stream(protocol, io, sid, "/");
+    }
+    io.clock_seconds += 2;
+    for (uint32_t s = first; s < sid; s += 2) {
+        qb::http::Response timeout;
+        timeout.status() = qb::http::status::GATEWAY_TIMEOUT;
+        ASSERT_TRUE(protocol.send_response(s, timeout));
+    }
+    for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2) {
+        qb1282_test::cancel(io, s);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "a reset crossing the end of one of the last 50 streams the server ended was counted";
+    qb1282_test::cancel(io, first);
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 1) << "a second reset of a stream already spared was spared";
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+}
+
+// A stream the server refused after creating it -- a malformed request, reset before its dispatch (PROTOCOL_ERROR) -- is
+// one the server ended. 100 HEADERS + RST_STREAM pairs (100 counted), then 50 malformed requests, each refused: a client
+// RST_STREAM on each two seconds after its creation is spared (no GOAWAY), and a second one on the first counts, the
+// 101st (GOAWAY); in the same second, the first reset counts, the 101st.
+TEST(HTTP2ServerProtocol, AResetCrossingTheRefusalOfAStreamIsSparedWhenLate) {
+    for (const bool late : {true, false}) {
+        SCOPED_TRACE(late ? "late" : "young");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        uint32_t sid = 1;
+        for (int i = 0; i < qb1244_test::max_resets; ++i, sid += 2) {
+            qb1244_test::reset_pair(io, protocol, sid);
+        }
+        const auto     malformed = encode_hpack_headers({{":method", "GET"}, {":scheme", "https"}, {":authority", "example.test"}}); // no :path
+        const uint32_t first     = sid;
+        for (int i = 0; i < 50; ++i, sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, malformed);
+            drive(protocol, io);
+            ASSERT_EQ(last_rst_stream_error(io.output, sid), ErrorCode::PROTOCOL_ERROR) << "refused before its dispatch";
+        }
+        ASSERT_EQ(io.request_count, qb1244_test::max_resets);
+        ASSERT_EQ(io.goaway_count, 0);
+        if (late) {
+            io.clock_seconds += 2;
+        }
+        int resets = 0;
+        for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+            qb1282_test::cancel(io, s);
+            drive(protocol, io);
+        }
+        if (late) {
+            EXPECT_EQ(io.goaway_count, 0) << "late resets of streams the server refused were counted";
+            qb1282_test::cancel(io, first);
+            drive(protocol, io);
+            EXPECT_EQ(io.goaway_count, 1) << "a second reset of a refused stream already spared was spared";
+        } else {
+            EXPECT_EQ(io.goaway_count, 1) << "young resets of streams the server refused were not counted";
+            EXPECT_EQ(resets, 1);
+        }
+    }
+}
+
+// A slot holds the LAST stream of its class the server erased: 100 HEADERS + RST_STREAM pairs (100 counted), then stream
+// 201 held open, 63 requests answered at once (203 to 327, one per other class), stream 329 held open -- the class of
+// 201. Two seconds later the server answers 201, then 329, which takes the slot: the client's late RST_STREAM on 329 is
+// spared, the one on 201 -- replaced -- counts, the 101st: GOAWAY.
+TEST(HTTP2ServerProtocol, AStreamTheServerEndedIsForgottenWhenTheLastOfItsClassReplacesIt) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < qb1244_test::max_resets; ++i, sid += 2) {
+        qb1244_test::reset_pair(io, protocol, sid);
+    }
+    ASSERT_EQ(sid, 201u);
+    open_get_stream_end_stream(protocol, io, 201, "/held");
+    for (sid = 203; sid <= 327; sid += 2) {
+        open_get_stream_end_stream(protocol, io, sid, "/");
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        ASSERT_TRUE(protocol.send_response(sid, answer));
+    }
+    open_get_stream_end_stream(protocol, io, 329, "/held");
+    io.clock_seconds += 2;
+    for (const uint32_t s : {201u, 329u}) {
+        qb::http::Response timeout;
+        timeout.status() = qb::http::status::GATEWAY_TIMEOUT;
+        ASSERT_TRUE(protocol.send_response(s, timeout));
+    }
+    qb1282_test::cancel(io, 329);
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 0) << "the late reset of the last stream of its class was counted";
+    qb1282_test::cancel(io, 201);
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 1) << "the reset of a stream its class's last replaced was spared";
+}
+
+// The slots remember the CLIENT's streams (odd ids), never a stream the server pushed: push enabled, 100 HEADERS +
+// RST_STREAM pairs (100 counted), then stream 201 held open and stream 200 promised on it -- the class of 201, slot 36.
+// Two seconds later the server answers 201, then the pushed 200, ended after it: the client's late RST_STREAM on 201 is
+// spared. Remembering the push too would replace 201 in its slot, and that reset would count, the 101st: GOAWAY.
+TEST(HTTP2ServerProtocol, AStreamTheServerPushedReplacesNoClientStreamInItsSlot) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_push_enabled(protocol, io);
+    ASSERT_TRUE(protocol.ok());
+    uint32_t sid = 1;
+    for (int i = 0; i < qb1244_test::max_resets; ++i, sid += 2) {
+        qb1244_test::reset_pair(io, protocol, sid);
+    }
+    ASSERT_EQ(sid, 201u);
+    ASSERT_EQ(io.goaway_count, 0);
+    open_get_stream_end_stream(protocol, io, 201, "/held");
+    ASSERT_FALSE(protocol.send_push_promise(201, 200, make_promised_request()).has_value());
+    io.clock_seconds += 2;
+    for (const uint32_t s : {201u, 200u}) {
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        ASSERT_TRUE(protocol.send_response(s, answer));
+    }
+    ASSERT_FALSE(protocol.has_streams()) << "201 or the pushed 200 was not ended and erased";
+    qb1282_test::cancel(io, 201);
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 0) << "a pushed stream the server ended replaced the client stream of its class";
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A crossing is weighed once: 99 HEADERS + RST_STREAM pairs (99 counted), then a request the server answers at once and
+// the client's RST_STREAM on it in the same second -- young, counted (100), the stream forgotten -- and two seconds later
+// a second RST_STREAM on the same id: no longer remembered, it counts, the 101st: GOAWAY.
+TEST(HTTP2ServerProtocol, AYoungCrossingIsCountedAndForgotten) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    for (int i = 0; i < qb1244_test::max_resets - 1; ++i, sid += 2) {
+        qb1244_test::reset_pair(io, protocol, sid);
+    }
+    open_get_stream_end_stream(protocol, io, sid, "/");
+    qb::http::Response answer;
+    answer.status() = qb::http::status::OK;
+    ASSERT_TRUE(protocol.send_response(sid, answer));
+    qb1282_test::cancel(io, sid);
+    drive(protocol, io);
+    ASSERT_EQ(io.goaway_count, 0) << "100 resets counted: not past the floor";
+    io.clock_seconds += 2;
+    qb1282_test::cancel(io, sid);
+    drive(protocol, io);
+    EXPECT_EQ(io.goaway_count, 1) << "a young crossing left the stream remembered, its second reset spared";
+}
+
+// The same client when its cancellation crosses the end of the request (RFC 9113 §5.1): the server answers each one -- a
+// 504 at its own timeout -- or resets it, as the client gives up at its deadline two seconds after the dispatch, and
+// each RST_STREAM lands on a stream already erased. Spared, once: three waves, no GOAWAY -- and a second RST_STREAM on
+// each of the 120 ids, a frame that frees nothing, counts: the guard trips at the 101st. The same crossing within the
+// window (the server answering and the client resetting 0 or 1 whole second after the dispatch) counts: the 101st trips
+// the guard. The clock starts at 10 s: a stream's remembered start is its own, not the clock's origin.
+TEST(HTTP2ServerProtocol, AClientCancellingAtItsDeadlineAsTheServerGivesUpIsServed) {
+    for (const bool reset_by_the_server : {false, true}) {
+        for (const std::int64_t after : {std::int64_t{2}, std::int64_t{0}, std::int64_t{1}}) {
+            const bool late = after >= 2;
+            SCOPED_TRACE(std::string(reset_by_the_server ? "reset by the server, " : "answered 504, ") + std::to_string(after) + " s");
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            io.clock_seconds = 10;
+            do_handshake(protocol, io);
+            uint32_t sid    = 1;
+            int      resets = 0;
+            for (int w = 0; w < 3 && io.goaway_count == 0; ++w) {
+                const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+                ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+                io.clock_seconds += after;
+                for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                    if (reset_by_the_server) {
+                        protocol.send_rst_stream(s, ErrorCode::CANCEL, "the server's own timeout");
+                    } else {
+                        qb::http::Response timeout;
+                        timeout.status() = qb::http::status::GATEWAY_TIMEOUT;
+                        ASSERT_TRUE(protocol.send_response(s, timeout));
+                    }
+                    ASSERT_TRUE(protocol.is_stream_closed(s)) << "the stream ended before the client's reset";
+                    qb1282_test::cancel(io, s);
+                    drive(protocol, io);
+                }
+            }
+            if (!late) {
+                EXPECT_EQ(io.goaway_count, 1) << "young resets crossing the end of their stream were not counted";
+                EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+                continue;
+            }
+            EXPECT_EQ(io.goaway_count, 0) << "resets crossing the end of requests past the window were counted";
+            EXPECT_TRUE(protocol.ok());
+            int again = 0;
+            for (uint32_t s = 1; s < sid && io.goaway_count == 0; s += 2, ++again) {
+                qb1282_test::cancel(io, s);
+                drive(protocol, io);
+            }
+            EXPECT_EQ(io.goaway_count, 1) << "a second reset of a stream already spared was not counted";
+            EXPECT_EQ(again, qb1244_test::max_resets + 1);
+        }
+    }
+}
+
+// The window's edges (RAPID_RESET_WINDOW_SECONDS whole seconds, as Envoy counts a stream's lifetime), on the fake io's
+// whole seconds: waves of 40 requests, each reset `after` seconds after it was dispatched. Within the window -- 0 or 1
+// whole second, less than two, or a clock that reads earlier than the dispatch (-5) -- the resets are premature and the
+// guard trips at the 101st: more than MAX_RAPID_RESETS, more than half of the 120 streams then opened; two seconds
+// after, none is, and four waves are reset.
+TEST(HTTP2ServerProtocol, AResetCountsWithinTheWindowOfItsRequestsDispatch) {
+    for (const std::int64_t after : {std::int64_t{-5}, std::int64_t{0}, std::int64_t{1}, std::int64_t{2}}) {
+        SCOPED_TRACE(after);
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        uint32_t sid    = 1;
+        int      resets = 0;
+        for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+            const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+            ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+            io.clock_seconds += after;
+            for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                qb1282_test::cancel(io, s);
+                drive(protocol, io);
+            }
+        }
+        if (after < 2) {
+            EXPECT_EQ(io.goaway_count, 1);
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+            EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+        } else {
+            EXPECT_EQ(io.goaway_count, 0) << "resets two seconds after their requests' dispatch were counted";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(resets, 4 * qb1282_test::wave);
+        }
+    }
+}
+
+// The window opens at the request's DISPATCH, not at its stream's creation: an upload held open two seconds -- its slot
+// held, nothing dispatched -- then completed by its last DATA and reset in the same write abandons a request the moment it
+// is dispatched, the attack itself. Waves of 40 such uploads: the guard trips at the 101st reset. A request whose header
+// block a CONTINUATION ends two seconds after its HEADERS (END_STREAM on the HEADERS) is dispatched by the CONTINUATION:
+// the same, one block at a time. Reset two seconds after the dispatch instead, both are late cancellations (the
+// control): 160 resets, no GOAWAY.
+TEST(HTTP2ServerProtocol, AResetCountsFromTheRequestsDispatchNotItsStreamsCreation) {
+    for (const bool continuation : {false, true}) {
+        for (const bool late : {false, true}) {
+            SCOPED_TRACE(std::string(continuation ? "a CONTINUATION, " : "an upload, ") + (late ? "late" : "at once"));
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            do_handshake(protocol, io);
+            uint32_t sid    = 1;
+            int      resets = 0;
+            if (continuation) {
+                const auto block = encode_hpack_headers(default_request_headers("/"));
+                for (; resets < 4 * qb1282_test::wave && io.goaway_count == 0; ++resets, sid += 2) {
+                    push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_STREAM, sid, block); // no END_HEADERS
+                    drive(protocol, io);
+                    io.clock_seconds += 2; // the block held past the window
+                    push_frame(io, FrameType::CONTINUATION, qb::protocol::http2::FLAG_END_HEADERS, sid, {});
+                    drive(protocol, io);
+                    ASSERT_EQ(io.request_count, resets + 1) << "the CONTINUATION dispatches the request";
+                    if (late) {
+                        io.clock_seconds += 2;
+                    }
+                    qb1282_test::cancel(io, sid);
+                    drive(protocol, io);
+                }
+            } else {
+                for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+                    const uint32_t first = qb1282_test::open_upload_wave(protocol, io, sid);
+                    ASSERT_EQ(io.request_count, qb1282_test::wave * w) << "an upload was dispatched before its body ended";
+                    io.clock_seconds += 2; // the slots held past the window
+                    for (uint32_t s = first; s < sid; s += 2) {
+                        push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, s, std::vector<uint8_t>(16, 'x'));
+                    }
+                    drive(protocol, io);
+                    ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1)) << "the last DATA dispatches each upload";
+                    if (late) {
+                        io.clock_seconds += 2;
+                    }
+                    for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                        qb1282_test::cancel(io, s);
+                        drive(protocol, io);
+                    }
+                }
+            }
+            if (late) {
+                EXPECT_EQ(io.goaway_count, 0) << "resets two seconds after the dispatch were counted";
+                EXPECT_TRUE(protocol.ok());
+                EXPECT_EQ(resets, 4 * qb1282_test::wave);
+            } else {
+                EXPECT_EQ(io.goaway_count, 1) << "requests reset as their dispatch came were not counted";
+                EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+                EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+            }
+        }
+    }
+}
+
+// A stream never dispatched is aged from its creation: an upload's HEADERS and its RST_STREAM in one write -- a slot
+// taken and freed, nothing dispatched -- is a premature reset, counted with the stream opened, on the fake io's clock
+// read at 10 s and on the steady clock: the 101st closes the connection, as it did when every reset counted.
+TEST(HTTP2ServerProtocol, APromptCancellationOfAnUploadIsCountedFromItsCreation) {
+    const auto run = [](auto &protocol, auto &io) {
+        do_handshake(protocol, io);
+        auto post = default_request_headers("/upload");
+        for (auto &field : post) {
+            if (field.name == ":method") {
+                field.value = "POST";
+            }
+        }
+        const auto block = encode_hpack_headers(post);
+        int        pairs = 0;
+        for (uint32_t sid = 1; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, block);
+            qb1282_test::cancel(io, sid);
+            drive(protocol, io);
+        }
+        EXPECT_EQ(io.goaway_count, 1) << "prompt cancellations of uploads were not counted";
+        EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+        EXPECT_EQ(pairs, qb1244_test::max_resets + 1);
+        EXPECT_EQ(io.request_count, 0);
+    };
+    {
+        SCOPED_TRACE("the fake io's clock at 10 s");
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        io.clock_seconds = 10;
+        run(protocol, io);
+    }
+    {
+        SCOPED_TRACE("the steady clock");
+        qb1282_test::SteadyClockIO       io;
+        qb1282_test::SteadyClockProtocol protocol(io);
+        run(protocol, io);
+    }
+}
+
+// A stream never dispatched counts as opened only with its counted reset: a late cancellation of an upload frees no
+// application work and is not counted, so it must not dilute the ratio either. Ten rounds of 40 uploads held two
+// seconds and then cancelled, and 20 HEADERS + RST_STREAM pairs: the pairs alone are weighed -- the guard trips at the
+// 101st, as with no upload at all. Counted opened, each round's 40 cancellations licensed 40 more pairs, for ever.
+TEST(HTTP2ServerProtocol, ALateCancellationOfAnUploadDilutesNoRapidReset) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid   = 1;
+    int      pairs = 0;
+    for (int round = 0; round < 10 && io.goaway_count == 0; ++round) {
+        const uint32_t first = qb1282_test::open_upload_wave(protocol, io, sid);
+        io.clock_seconds += 2;
+        for (uint32_t s = first; s < sid; s += 2) {
+            qb1282_test::cancel(io, s);
+        }
+        drive(protocol, io);
+        ASSERT_EQ(io.goaway_count, 0) << "late cancellations of uploads were counted";
+        for (int i = 0; i < 20 && io.goaway_count == 0; ++i, ++pairs, sid += 2) {
+            qb1244_test::reset_pair(io, protocol, sid);
+        }
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "the late cancellations diluted the pairs";
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    EXPECT_EQ(pairs, qb1244_test::max_resets + 1);
+}
+
+// A reset after the response began is no Rapid Reset (Envoy: the stream has a response code): the server answered and
+// its HEADERS left, the DATA waiting for the client's window (0) -- the stream still open. Waves of 40 such requests,
+// each then reset within the window, by the client's RST_STREAM or by the server for a DATA the client sent after its
+// END_STREAM (provoked, MadeYouReset): four waves, no GOAWAY. The same requests left unanswered trip the guard at the
+// 101st reset (the control).
+TEST(HTTP2ServerProtocol, AResetAfterTheResponseBeganIsNoRapidReset) {
+    for (const bool provoked : {false, true}) {
+        for (const bool answered : {true, false}) {
+            SCOPED_TRACE(std::string(provoked ? "provoked, " : "the client's, ") + (answered ? "answered" : "unanswered"));
+            Http2FakeIO    io;
+            ServerProtocol protocol(io);
+            handshake_with_initial_window(protocol, io, 0);
+            uint32_t sid    = 1;
+            int      resets = 0;
+            for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+                const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+                ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+                for (uint32_t s = first; answered && s < sid; s += 2) {
+                    qb::http::Response response;
+                    response.status() = qb::http::status::OK;
+                    response.body()   = std::string(64, 'x');
+                    ASSERT_TRUE(protocol.send_response(s, response));
+                    ASSERT_TRUE(headers_sent_on(io.output, s)) << "the response began";
+                    ASSERT_FALSE(protocol.is_stream_closed(s)) << "its DATA waits: the stream is still open";
+                }
+                for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                    if (provoked) {
+                        qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, s);
+                    } else {
+                        qb1282_test::cancel(io, s);
+                    }
+                    drive(protocol, io);
+                    if (provoked) {
+                        ASSERT_EQ(last_rst_stream_error(io.output, s), ErrorCode::STREAM_CLOSED) << "the DATA provoked no reset";
+                    }
+                }
+            }
+            if (answered) {
+                EXPECT_EQ(io.goaway_count, 0) << "resets of requests whose response began were counted";
+                EXPECT_TRUE(protocol.ok());
+                EXPECT_EQ(resets, 4 * qb1282_test::wave);
+            } else {
+                EXPECT_EQ(io.goaway_count, 1) << "the control";
+                EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+                EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+            }
+        }
+    }
+}
+
+// A streamed response its producer still writes is work going on: abandoning it young is abandoning work, as the attack
+// does -- waves of 40 requests whose streamed response's HEADERS left, the stream open, each reset at once: the guard
+// trips at the 101st. Reset two seconds after the dispatch, or once the producer ended the stream (its last piece
+// waiting for the client's window, 0), they are not counted: four waves, no GOAWAY. The same, the reset provoked by a
+// DATA after the client's END_STREAM (MadeYouReset).
+TEST(HTTP2ServerProtocol, AResetOfAStreamedResponseCountsWhileItsProducerWrites) {
+    enum class shape { writing_at_once, writing_late, ended_at_once, provoked_writing_at_once, provoked_ended_at_once };
+    for (const auto how :
+         {shape::writing_at_once, shape::writing_late, shape::ended_at_once, shape::provoked_writing_at_once, shape::provoked_ended_at_once}) {
+        const bool provoked = how == shape::provoked_writing_at_once || how == shape::provoked_ended_at_once;
+        const bool ended    = how == shape::ended_at_once || how == shape::provoked_ended_at_once;
+        SCOPED_TRACE(static_cast<int>(how));
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        handshake_with_initial_window(protocol, io, 0);
+        uint32_t sid    = 1;
+        int      resets = 0;
+        for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+            const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+            ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+            for (uint32_t s = first; s < sid; s += 2) {
+                qb::http::Response head;
+                head.status() = qb::http::status::OK;
+                ASSERT_TRUE(protocol.begin_streamed_response(s, head, false));
+                if (ended) {
+                    ASSERT_TRUE(protocol.write_streamed_body(s, std::string(64, 'x')));
+                    ASSERT_TRUE(protocol.end_streamed_response(s, nullptr));
+                }
+                ASSERT_FALSE(protocol.is_stream_closed(s)) << "the streamed response goes on: the stream is still open";
+            }
+            if (how == shape::writing_late) {
+                io.clock_seconds += 2;
+            }
+            for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                if (provoked) {
+                    qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, s);
+                } else {
+                    qb1282_test::cancel(io, s);
+                }
+                drive(protocol, io);
+                if (provoked) {
+                    ASSERT_EQ(last_rst_stream_error(io.output, s), ErrorCode::STREAM_CLOSED) << "the DATA provoked no reset";
+                }
+            }
+        }
+        if (how == shape::writing_at_once || how == shape::provoked_writing_at_once) {
+            EXPECT_EQ(io.goaway_count, 1) << "resets of streamed responses still written were not counted";
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+            EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+        } else {
+            EXPECT_EQ(io.goaway_count, 0) << "late resets, or resets of streams their producer ended, were counted";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(resets, 4 * qb1282_test::wave);
+        }
+    }
+}
+
+// On an io that keeps no clock of its own -- every qb-io session -- a request's age is its time on the steady clock since
+// its dispatch (the stream's created_at for a request its creating HEADERS completed), truncated to whole seconds as
+// Envoy truncates a stream's lifetime. 25 GETs reset 2.05 s after their dispatch are late, not counted; 15 GETs reset
+// about 1.4 s after theirs are within the window (one whole second), counted; 9 uploads created with the 25, then
+// completed by their last DATA and reset in the same write, are reset as their dispatch comes, counted. So HEADERS +
+// RST_STREAM pairs after them trip the guard at the 77th, the 101st reset counted (15 + 9 + 77) of 126 streams opened
+// -- the 25 counted, it trips at the 52nd; the uploads aged from their creation, at the 86th; the 15 read as late, at
+// the 92nd. The test measures the 15's age on the steady clock itself: a host stalled long enough to make some of them
+// two seconds old moves the trip to 92 less the number still counted, and only that range is let through.
+TEST(HTTP2ServerProtocol, OnTheSteadyClockAResetTwoSecondsAfterTheDispatchIsLate) {
+    qb1282_test::SteadyClockIO       io;
+    qb1282_test::SteadyClockProtocol protocol(io);
+    do_handshake(protocol, io);
+    const auto get  = encode_hpack_headers(default_request_headers("/"));
+    auto       post = default_request_headers("/upload");
+    for (auto &field : post) {
+        if (field.name == ":method") {
+            field.value = "POST";
+        }
+    }
+    const auto upload = encode_hpack_headers(post);
+    const auto pair   = [&](uint32_t sid) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, get);
+        qb1282_test::cancel(io, sid);
+        drive(protocol, io);
+    };
+    using steady = std::chrono::steady_clock;
+    uint32_t sid = 1;
+    for (int i = 0; i < 25; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, get);
+    }
+    const uint32_t first_upload = sid;
+    for (int i = 0; i < 9; ++i, sid += 2) {
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS, sid, upload);
+    }
+    drive(protocol, io);
+    std::this_thread::sleep_for(std::chrono::milliseconds(650));
+    const uint32_t first_young = sid;
+    for (int i = 0; i < 15; ++i, sid += 2) { // 49 streams held, under the 50 the server lets a client hold
+        push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, get);
+    }
+    const auto young_created_from = steady::now();
+    drive(protocol, io);
+    const auto young_created_until = steady::now();
+    ASSERT_EQ(io.request_count, 40);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1400)); // the 25 and the 9: 2.05 s; the 15: some 1.4 s
+    for (uint32_t s = 1; s < first_upload; s += 2) {
+        qb1282_test::cancel(io, s);
+    }
+    drive(protocol, io);
+    const auto young_reset_from = steady::now();
+    for (uint32_t s = first_young; s < sid; s += 2) {
+        qb1282_test::cancel(io, s);
+    }
+    drive(protocol, io);
+    const auto young_reset_until = steady::now();
+    for (uint32_t s = first_upload; s < first_young; s += 2) {
+        push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, s, std::vector<uint8_t>(16, 'x'));
+        qb1282_test::cancel(io, s);
+        drive(protocol, io);
+    }
+    ASSERT_EQ(io.request_count, 49) << "the last DATA dispatches each upload";
+    EXPECT_EQ(io.goaway_count, 0);
+    int pairs = 0;
+    for (; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+        pair(sid);
+    }
+    EXPECT_EQ(io.goaway_count, 1) << "premature resets on the steady clock were not counted";
+    EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+    // The 15's age lies between these two: surely below two seconds, they were premature; surely at two or more, late.
+    const auto at_least = young_reset_from - young_created_until, at_most = young_reset_until - young_created_from;
+    if (at_most < std::chrono::seconds(2)) {
+        EXPECT_EQ(pairs, 77) << "52: the late resets counted; 86: the uploads aged from their creation; 92: the 15 read as late";
+    } else if (at_least >= std::chrono::seconds(2)) {
+        EXPECT_EQ(pairs, 92) << "a stalled host made the 15 late: 92 expected";
+    } else {
+        EXPECT_TRUE(pairs >= 77 && pairs <= 92) << pairs << ": a stall split the 15 across two seconds";
+    }
+}
+
+// A production io's age, without waiting (qb::protocol::http2::detail::steady_whole_seconds): the steady clock's elapsed
+// time truncated toward zero to whole seconds, as Envoy truncates a stream's lifetime -- 1.999 s is 1 (premature), 2 s is
+// 2 (late), a reading less than a second earlier than the start is 0 (truncated toward zero: earlier still, below 0),
+// and the start's own value does not matter.
+TEST(HTTP2ServerProtocol, AnAgeOnTheSteadyClockIsTruncatedToWholeSeconds) {
+    using namespace std::chrono_literals;
+    const auto ticks = [](std::chrono::nanoseconds d) {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::steady_clock::duration>(d).count());
+    };
+    for (const std::int64_t start : {std::int64_t{0}, ticks(3600s), ticks(-7s)}) {
+        SCOPED_TRACE(start);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start), 0);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start + ticks(999ms)), 0);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start + ticks(1s)), 1);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start + ticks(1999ms)), 1);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start + ticks(2s)), 2);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start + ticks(2001ms)), 2);
+        EXPECT_EQ(qb::protocol::http2::detail::steady_whole_seconds(start, start - ticks(500ms)), 0);
+    }
+}
+
+// A response begun INSIDE the dispatch is a response begun: a handler that answers in the call with a body the client's
+// window (0) holds back leaves its stream open, its HEADERS sent -- 400 such requests each reset at once draw no GOAWAY
+// (the work is done). A handler that begins a STREAMED response in the call and goes on writing it is work going on: the
+// same pairs trip the guard at the 101st, as they do answered and gone in the dispatch
+// (RapidResetSurvivesSynchronousResponsesThatEraseTheStream).
+TEST(HTTP2ServerProtocol, AResetOfAResponseBegunInTheDispatchCountsOnlyWhileItsProducerWrites) {
+    for (const bool streamed : {false, true}) {
+        SCOPED_TRACE(streamed ? "streamed, its producer writing" : "buffered, its body waiting");
+        qb1244_test::AnsweringIO       io;
+        qb1244_test::AnsweringProtocol protocol(io);
+        io.answer = [&protocol, streamed](uint32_t sid) {
+            qb::http::Response response;
+            response.status() = qb::http::status::OK;
+            if (streamed) {
+                EXPECT_TRUE(protocol.begin_streamed_response(sid, response, false));
+            } else {
+                response.body() = std::string(64, 'x');
+                EXPECT_TRUE(protocol.send_response(sid, response));
+            }
+            EXPECT_FALSE(protocol.is_stream_closed(sid)) << "the response goes on: the stream is still open";
+        };
+        push_preface(io);
+        push_frame(io, FrameType::SETTINGS, 0, 0, encode_settings_payload({{Http2SettingIdentifier::SETTINGS_INITIAL_WINDOW_SIZE, 0}}));
+        drive(protocol, io);
+        const auto get   = encode_hpack_headers(default_request_headers("/"));
+        int        pairs = 0;
+        for (uint32_t sid = 1; pairs < 400 && io.goaway_count == 0; ++pairs, sid += 2) {
+            push_frame(io, FrameType::HEADERS, qb::protocol::http2::FLAG_END_HEADERS | qb::protocol::http2::FLAG_END_STREAM, sid, get);
+            qb1282_test::cancel(io, sid);
+            drive(protocol, io);
+        }
+        EXPECT_TRUE(headers_sent_on(io.output, 1)) << "the response began in the dispatch";
+        if (streamed) {
+            EXPECT_EQ(io.goaway_count, 1) << "resets of streamed responses still written were not counted";
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+            EXPECT_EQ(pairs, qb1244_test::max_resets + 1);
+        } else {
+            EXPECT_EQ(io.goaway_count, 0) << "resets of responses begun in the dispatch were counted";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(io.request_count, 400);
+        }
+    }
+}
+
+// A response begun is one begun (Huly QB-1282, Http2ServerStream::response_sent): its HEADERS left and its DATA waits for
+// the client's window (0), and no other response begins on the stream -- a streamed one, or a second send_response(),
+// sent a second HEADERS on a stream whose response had begun, the second replacing the body still leaving.
+TEST(HTTP2ServerProtocol, NoSecondResponseBeginsWhereAResponseBegan) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    handshake_with_initial_window(protocol, io, 0);
+    open_get_stream_end_stream(protocol, io, 1, "/");
+    qb::http::Response response;
+    response.status() = qb::http::status::OK;
+    response.body()   = std::string(64, 'x');
+    ASSERT_TRUE(protocol.send_response(1, response));
+    ASSERT_FALSE(protocol.is_stream_closed(1)) << "its DATA waits: the stream is still open";
+    EXPECT_FALSE(protocol.can_begin_streamed_response(1));
+    qb::http::Response head;
+    head.status() = qb::http::status::OK;
+    EXPECT_FALSE(protocol.begin_streamed_response(1, head, false));
+    qb::http::Response second;
+    second.status() = qb::http::status::NOT_FOUND;
+    second.body()   = "other";
+    EXPECT_FALSE(protocol.send_response(1, second));
+    std::size_t headers = 0;
+    for (const auto &f : parse_emitted_frames(io.output)) {
+        headers += f.type == FrameType::HEADERS && f.stream_id == 1u ? 1u : 0u;
+    }
+    EXPECT_EQ(headers, 1u) << "a second HEADERS left on a stream whose response had begun";
+    make_window_update_frame(io, 1, 64); // the first response's body leaves, whole
+    drive(protocol, io);
+    EXPECT_EQ(sum_data_bytes(io.output, 1), 64u);
+    EXPECT_TRUE(protocol.is_stream_closed(1));
+    EXPECT_TRUE(protocol.ok());
+}
+
+// A reset the client provokes (MadeYouReset) is held to the same window: waves of 40 requests, each made to reset by a
+// DATA after its END_STREAM `after` seconds after it was dispatched. One second after, the resets are premature and the
+// guard trips at the 101st (AResetTheClientProvokesCountsAgainstTheRapidResetCeiling provokes them at once); two seconds
+// after, none is, and four waves are reset.
+TEST(HTTP2ServerProtocol, AProvokedResetCountsWithinTheWindowOfItsRequestsDispatch) {
+    for (const std::int64_t after : {std::int64_t{1}, std::int64_t{2}}) {
+        SCOPED_TRACE(after);
+        Http2FakeIO    io;
+        ServerProtocol protocol(io);
+        do_handshake(protocol, io);
+        uint32_t sid      = 1;
+        int      provoked = 0;
+        for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+            const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+            ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+            io.clock_seconds += after;
+            for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++provoked) {
+                qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, s);
+                drive(protocol, io);
+                ASSERT_EQ(last_rst_stream_error(io.output, s), ErrorCode::STREAM_CLOSED) << "the DATA provoked no reset";
+            }
+        }
+        if (after <= ::qb::http2::protocol_limits::RAPID_RESET_WINDOW_SECONDS) {
+            EXPECT_EQ(io.goaway_count, 1);
+            EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+            EXPECT_EQ(provoked, qb1244_test::max_resets + 1);
+        } else {
+            EXPECT_EQ(io.goaway_count, 0) << "provoked resets past the window were counted";
+            EXPECT_TRUE(protocol.ok());
+            EXPECT_EQ(provoked, 4 * qb1282_test::wave);
+        }
+    }
+}
+
+// A protocol reset starts a new connection: the streams the last one erased are forgotten with it (Huly QB-1282). 40
+// requests answered and erased, two seconds pass, the protocol is reset; the new connection opens stream 401 first and
+// resets ids below it it never opened -- each a frame on a closed stream, counted: the 101st trips the guard. Remembered
+// from the last connection, ids 1 to 79 would be spared as crossings of old streams, the guard tripping at the 141st.
+TEST(HTTP2ServerProtocol, AProtocolResetForgetsTheStreamsErased) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid = 1;
+    qb1282_test::open_wave(protocol, io, sid);
+    for (uint32_t s = 1; s < sid; s += 2) {
+        qb::http::Response answer;
+        answer.status() = qb::http::status::OK;
+        ASSERT_TRUE(protocol.send_response(s, answer));
+        ASSERT_TRUE(protocol.is_stream_closed(s));
+    }
+    io.clock_seconds += 2;
+    protocol.reset();
+    io.input.reset();
+    io.output.reset();
+    do_handshake(protocol, io);
+    open_get_stream_end_stream(protocol, io, 401, "/");
+    int resets = 0;
+    for (uint32_t s = 1; s < 401 && io.goaway_count == 0; s += 2, ++resets) {
+        qb1282_test::cancel(io, s);
+        drive(protocol, io);
+    }
+    EXPECT_EQ(io.goaway_count, 1);
+    EXPECT_EQ(resets, qb1244_test::max_resets + 1) << "the streams the last connection erased were remembered";
+}
+
+// A reset the client provokes on a request past its window is neither counted nor budgeted (send_provoked_rst_stream()):
+// one RST_STREAM per request it had dispatched -- 26 waves of 40 requests each made to reset by a DATA after its
+// END_STREAM two seconds after its dispatch, the client reading none of the 1040 resets: no GOAWAY. Counted while queued
+// with the replies the client solicited (the fake io never drains its output), the 1001st would close the connection;
+// the closed-stream budget would not, each wave's dispatches forgiving it.
+TEST(HTTP2ServerProtocol, ALateProvokedResetIsNeitherCountedNorBudgeted) {
+    Http2FakeIO    io;
+    ServerProtocol protocol(io);
+    do_handshake(protocol, io);
+    uint32_t sid      = 1;
+    int      provoked = 0;
+    for (int w = 0; w < 26 && io.goaway_count == 0; ++w) {
+        const uint32_t first = qb1282_test::open_wave(protocol, io, sid);
+        ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+        io.clock_seconds += 2;
+        for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++provoked) {
+            qb1244_test::provoke(io, qb1244_test::provocation::data_after_end_stream, s);
+            drive(protocol, io);
+        }
+    }
+    EXPECT_EQ(io.goaway_count, 0) << "late provoked resets were counted or budgeted";
+    EXPECT_TRUE(protocol.ok());
+    EXPECT_EQ(provoked, 26 * qb1282_test::wave);
+    EXPECT_EQ(last_rst_stream_error(io.output, sid - 2), ErrorCode::STREAM_CLOSED) << "the last DATA provoked no reset";
+}
+
+// A reset that crosses the end of a stream the server reset itself counts when the stream was young (Huly QB-1282): waves
+// of 40 requests whose handler throws -- the server resets each (INTERNAL_ERROR) and erases it -- then the client's
+// RST_STREAM on each in the same second: counted, the 101st closes the connection. Two seconds later it crosses the end
+// of a request past the window, and is spared: four waves, no GOAWAY. On a GET, dispatched by its HEADERS, and on an
+// upload, dispatched by its last DATA.
+TEST(HTTP2ServerProtocol, AResetCrossingTheServersOwnResetCountsWhenTheStreamWasYoung) {
+    for (const bool upload : {false, true}) {
+        for (const bool late : {false, true}) {
+            SCOPED_TRACE(std::string(upload ? "an upload, " : "a GET, ") + (late ? "late" : "young"));
+            qb1244_test::AnsweringIO       io;
+            qb1244_test::AnsweringProtocol protocol(io);
+            io.throws = [](uint32_t) {
+                return true;
+            };
+            push_preface(io);
+            push_frame(io, FrameType::SETTINGS, 0, 0, {});
+            drive(protocol, io);
+            auto fields = default_request_headers("/throws");
+            for (auto &field : fields) {
+                if (upload && field.name == ":method") {
+                    field.value = "POST";
+                }
+            }
+            uint32_t sid    = 1;
+            int      resets = 0;
+            for (int w = 0; w < 4 && io.goaway_count == 0; ++w) {
+                const uint32_t first = sid;
+                for (int i = 0; i < qb1282_test::wave; ++i, sid += 2) {
+                    push_frame(io, FrameType::HEADERS,
+                               qb::protocol::http2::FLAG_END_HEADERS | (upload ? 0 : qb::protocol::http2::FLAG_END_STREAM), sid,
+                               encode_hpack_headers(fields));
+                    if (upload) {
+                        push_frame(io, FrameType::DATA, qb::protocol::http2::FLAG_END_STREAM, sid, std::vector<uint8_t>(16, 'x'));
+                    }
+                    drive(protocol, io);
+                    ASSERT_EQ(last_rst_stream_error(io.output, sid), ErrorCode::INTERNAL_ERROR) << "the handler threw";
+                }
+                ASSERT_EQ(io.request_count, qb1282_test::wave * (w + 1));
+                if (late) {
+                    io.clock_seconds += 2; // past the window
+                }
+                for (uint32_t s = first; s < sid && io.goaway_count == 0; s += 2, ++resets) {
+                    qb1282_test::cancel(io, s);
+                    drive(protocol, io);
+                }
+            }
+            if (late) {
+                EXPECT_EQ(io.goaway_count, 0) << "resets crossing the end of requests past the window were counted";
+                EXPECT_TRUE(protocol.ok());
+                EXPECT_EQ(resets, 4 * qb1282_test::wave);
+            } else {
+                EXPECT_EQ(io.goaway_count, 1) << "young resets crossing the server's own were not counted";
+                EXPECT_EQ(io.last_goaway_error, ErrorCode::ENHANCE_YOUR_CALM);
+                EXPECT_EQ(resets, qb1244_test::max_resets + 1);
+            }
+        }
+    }
 }
 
 // ===========================================================================
@@ -7441,7 +8384,7 @@ TEST(HTTP2ServerProtocol, AStreamErrorOnARequestInFlightCountsAgainstTheRapidRes
     }
 }
 
-// The closed-stream budget is forgiven by a stream the client opens -- a request dispatched, or one it cancels, both of
+// The closed-stream budget is forgiven by a stream the client opens -- a request dispatched, or one it cancels promptly, both of
 // which the Rapid Reset guard weighs -- never by a frame it can send for nothing: 999 frames on a closed stream, then an
 // empty DATA on an upload left open, over and over, drew a reset per frame and never a GOAWAY (Huly QB-1270).
 TEST(HTTP2ServerProtocol, AnEmptyDataDoesNotForgiveTheClosedStreamBudget) {

@@ -33,6 +33,8 @@
 #include <concepts>    // std::convertible_to: counts_appended_output (Huly QB-1212)
 #include <limits>      // std::numeric_limits: a newcomer's place among the turns, a turn with no cap (Huly QB-1248)
 #include <string_view> // detail::name_is
+#include <array>       // the client streams erased last, for the Rapid Reset guard (Huly QB-1282)
+#include <chrono>      // detail::steady_whole_seconds: a request's age on the steady clock (Huly QB-1282)
 
 #include <qb/utility/branch_hints.h> // QB_GNU_ALWAYS_INLINE: detail::name_is (Huly QB-1270)
 
@@ -131,6 +133,15 @@ template <std::size_t N>
 name_is(std::string_view name, const char (&literal)[N]) noexcept {
     return name.size() == N - 1 && std::memcmp(name.data(), literal, N - 1) == 0;
 }
+
+/// The whole seconds from @p start_ticks to @p now_ticks, two readings of std::chrono::steady_clock as its ticks
+/// (`time_since_epoch().count()`): truncated toward zero, as Envoy truncates a stream's lifetime -- 1.999 s is 1, 2 s is
+/// 2, a reading earlier than the start 0 or less. The age of a request on a production io, which
+/// ServerHttp2Protocol::premature_reset() holds to protocol_limits::RAPID_RESET_WINDOW_SECONDS (Huly QB-1282).
+[[nodiscard]] constexpr std::int64_t
+steady_whole_seconds(std::int64_t start_ticks, std::int64_t now_ticks) noexcept {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::duration(now_ticks - start_ticks)).count();
+}
 } // namespace detail
 
 /// HTTP/2 ":status" response pseudo-header name.
@@ -155,7 +166,7 @@ private:
     qb::unordered_map<uint32_t, Http2ServerStream> _server_streams;                      ///< Active stream contexts
     uint32_t                                       _last_client_initiated_stream_id = 0; ///< Last valid client stream ID
     uint32_t                                       _next_server_initiated_stream_id = 2; ///< Next server stream ID (for PUSH)
-    std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client resets, sent or provoked; streams opened (Rapid Reset)
+    std::uint32_t _rst_stream_count = 0, _client_streams_opened = 0; ///< Client resets counted, sent or provoked; streams opened (Rapid Reset)
     std::uint32_t _continuation_frame_count = 0;                     ///< CONTINUATION frames in the current header block (flood guard)
 
     std::vector<uint8_t> _current_header_block_fragment;    ///< Header block assembly buffer
@@ -297,6 +308,7 @@ public:
         FramerBase::reset(); // Call base class reset first
 
         _server_streams.clear();
+        _erased_ids.fill(0); // a new connection: no stream of the last one is remembered (Huly QB-1282)
         _current_header_block_fragment.clear();
         _current_header_stream_id        = 0;
         _last_client_initiated_stream_id = 0;
@@ -478,7 +490,7 @@ public:
             return;
         }
         if (stream.end_stream_received) {
-            // Provoked by the client's frame: counted against the Rapid Reset ceiling (MadeYouReset, Huly QB-1244).
+            // Provoked by the client's frame: counted against the Rapid Reset ceiling when premature (MadeYouReset, QB-1244).
             this->send_provoked_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "DATA frame received after END_STREAM.");
             this->_connection_receive_window -= data_payload_size;
             this->conditionally_send_connection_window_update();
@@ -631,6 +643,7 @@ public:
             stream_ptr                = &emp_res.first->second;
             _highest_client_stream_id = _last_client_initiated_stream_id = std::max(_highest_client_stream_id, stream_id);
             request_progress(); // a request's first HEADERS: its header block has the whole timeout from here (Huly QB-1248)
+            this->start_reset_window(*stream_ptr, end_stream && end_headers); // the Rapid Reset guard's (Huly QB-1282)
         } else {
             stream_ptr = &it->second;
         }
@@ -651,7 +664,7 @@ public:
             // The client ended its side (END_STREAM): a trailer section would have had to come
             // before it, and nothing but WINDOW_UPDATE, PRIORITY or RST_STREAM may follow -- a
             // stream error of type STREAM_CLOSED (RFC 9113 §5.1). It used to be PROTOCOL_ERROR
-            // (Huly QB-1058). Provoked: counted against the Rapid Reset ceiling (Huly QB-1244).
+            // (Huly QB-1058). Provoked: counted against the Rapid Reset ceiling when premature (Huly QB-1244).
             this->send_provoked_rst_stream(stream_id, ErrorCode::STREAM_CLOSED, "HEADERS frame after the client ended the stream");
             this->begin_discarded_header_block(stream_id, headers_event.payload.header_block_fragment, end_headers);
             return;
@@ -943,23 +956,36 @@ public:
             return;
         }
 
-        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM dispatches the request yet frees the
-        // concurrency slot before it counts -- unbounded CPU amplification. Count the reset for ANY non-idle stream (id at or
-        // below the highest client id) WHETHER OR NOT it is resident: a synchronous server erases the stream in the HEADERS
-        // handler before the RST arrives. Weigh the resets against the streams the client OPENED -- a request dispatched, or one
-        // it cancelled before it was complete -- never its highest id: ids may be skipped (RFC 9113 §5.1.1), and a client that
-        // opened 2^30+1 first, or whose every other stream the server refused itself (413, 414, 431, malformed), was never
-        // tripped (Huly QB-1244). Idle streams (id > highest opened) are a protocol error handled further down. A pushed (even)
-        // stream is the server's work, not the client's: its resets are no Rapid Reset, and one at or below the largest
-        // promised is closed, not idle (RFC 9113 §5.1.1) -- it was judged against the client's ids, and a reset or a
-        // window update crossing the end of a push closed the connection (Huly QB-1239).
+        // Rapid Reset (CVE-2023-44487): HEADERS(+END_STREAM) then an immediate RST_STREAM dispatches the request yet frees
+        // the concurrency slot before it counts -- unbounded CPU amplification. Count a reset of a stream still open when
+        // it is PREMATURE (premature_reset(): no work done -- no response begun, or a streamed one its producer still
+        // writes -- and the request dispatched (its stream created, while it is not) less than two seconds before: Envoy's
+        // rule, aged from the dispatch). Count one of ANY non-idle stream (id at or below the highest client id) the server
+        // no longer has open, WHETHER OR NOT it is resident -- a synchronous server erases the stream in the HEADERS
+        // handler before the RST arrives, a refused stream was never held, a stream reset already is gone: the frame frees
+        // nothing and makes no progress -- but one on a stream the SERVER ended arriving once the request is past its
+        // window, once (crossed_late(): the client cancelling at its deadline as the server gave up, crossing the stream's
+        // end, RFC 9113 §5.1). Counted over the connection's life, every reset cut a client cancelling the requests it gave
+        // up on, a slow server's client (Huly QB-1282); what that lets an attacker do instead is said at
+        // RAPID_RESET_WINDOW_SECONDS: the ratio below has no decay. Weigh the resets against the streams the client OPENED
+        // -- a request dispatched, or one it cancelled before it was complete, that reset counted -- never its highest id:
+        // ids may be skipped (RFC 9113 §5.1.1), and a client that opened 2^30+1 first, or whose every other stream the
+        // server refused itself (413, 414, 431, malformed), was never tripped (Huly QB-1244). Idle streams (id > highest
+        // opened) are a protocol error handled further down. A pushed (even) stream is the server's work, not the client's:
+        // its resets are no Rapid Reset, and one at or below the largest promised is closed, not idle (RFC 9113 §5.1.1) --
+        // it was judged against the client's ids, and a reset or a window update crossing the end of a push closed the
+        // connection (Huly QB-1239).
         const bool pushed = (stream_id & 1u) == 0u;
         if (!pushed && stream_id <= _highest_client_stream_id) {
-            ++_rst_stream_count;
-            // Cancelled before its request was complete -- an upload, say: opened, never dispatched.
-            if (const auto held = _server_streams.find(stream_id); held != _server_streams.end() && !held->second.request_dispatched)
+            const auto held    = _server_streams.find(stream_id);
+            const bool open    = held != _server_streams.end() && !held->second.rst_stream_sent && !held->second.rst_stream_received;
+            const bool counted = open ? premature_reset(held->second) : !(held == _server_streams.end() && crossed_late(stream_id));
+            // Cancelled before its request was complete -- an upload, say: opened, never dispatched -- and counted: a late
+            // cancellation of one would dilute the ratio for nothing (Huly QB-1282).
+            if (counted && held != _server_streams.end() && !held->second.request_dispatched)
                 ++_client_streams_opened;
-            if (_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS && _rst_stream_count * 2u > _client_streams_opened) {
+            if (counted && ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS
+                && _rst_stream_count * 2u > _client_streams_opened) {
                 this->send_goaway_and_close(ErrorCode::ENHANCE_YOUR_CALM, "Excessive stream resets (HTTP/2 Rapid Reset)");
                 return;
             }
@@ -999,7 +1025,7 @@ public:
         } else if (stream_id > (pushed ? _last_promised_stream_id : _highest_client_stream_id)) {
             this->send_goaway_and_close(ErrorCode::PROTOCOL_ERROR, "RST_STREAM frame received on idle stream");
         }
-        // If stream not found (already closed), the reset was still counted above.
+        // If stream not found (already closed), the reset was still counted above, but a late crossing (crossed_late()).
     }
 
     /**
@@ -1273,6 +1299,11 @@ public:
             return false; // Or send RST_STREAM(STREAM_CLOSED) if appropriate
         }
         Http2ServerStream &stream = it->second;
+        if (stream.response_sent) [[unlikely]] {
+            // Its response began: a second would send a second HEADERS and replace the body still leaving (Huly QB-1282).
+            LOG_HTTP_WARN_PA(stream_id, "ServerHttp2Protocol: Attempt to send a second response on a stream whose response began");
+            return false;
+        }
         handler_hands_over(stream);
 
         if (stream.state == Http2StreamConcreteState::IDLE) {
@@ -1392,6 +1423,7 @@ public:
             return false;
         }
         response_frame_written(stream);
+        stream.response_sent = true; // the response began: held, the stream's reset is no Rapid Reset, whatever DATA follows
 
         // Update stream state AFTER successful send of HEADERS frame
         if (header_flags & FLAG_END_STREAM) {
@@ -2753,6 +2785,8 @@ private:
             stream.request_dispatched          = true;
             stream.progressed_since_idle_sweep = true; // its handler's turn begins: the sweep's clock for it (Huly QB-1248)
             ++_client_streams_opened;                  // a request the application serves, which the Rapid Reset guard weighs (Huly QB-1244)
+            if (stream.window_starts_at_dispatch)      // completed by a later frame: the guard's window opens now (Huly QB-1282)
+                stream.window_start = this->reset_window_clock();
 
             // _io.on() runs the application layer (router, middleware, sync
             // handlers) synchronously. It is reached from the noexcept frame
@@ -2813,6 +2847,10 @@ private:
                 if ((!stream.request_dispatched || !stream.end_stream_sent) && (stream.rst_stream_sent || stream.rst_stream_received)
                     && stream.error_code != ErrorCode::NO_ERROR) {
                     // Stream was reset before full lifecycle completion by app. Error already dispatched by RST handler.
+                }
+                if ((stream_id & 1u) != 0u && !stream.rst_stream_received) { // a client's the server ended (Huly QB-1282)
+                    _erased_ids[erased_slot(stream_id)]    = stream_id;
+                    _erased_starts[erased_slot(stream_id)] = stream.window_start;
                 }
                 _server_streams.erase(it);
                 LOG_HTTP_INFO_PA(stream_id, "ServerHttp2Protocol: Stream context cleaned up successfully");
@@ -3507,29 +3545,6 @@ private:
     }
 
     /**
-     * @brief Get existing stream or create new stream context
-     *
-     * @param stream_id Stream identifier
-     * @param is_client_initiated Whether stream was initiated by client (unused, inferred from ID)
-     * @return Reference to stream context
-     */
-    Http2ServerStream &
-    get_or_create_stream_context(uint32_t stream_id, bool /*is_client_initiated -- inferred from stream_id */) {
-        auto it = _server_streams.find(stream_id);
-        if (it == _server_streams.end()) {
-            // Create new stream context
-            // For server, is_client_initiated is true if stream_id is odd.
-            // bool client_init = (stream_id % 2 != 0);
-            Http2ServerStream new_stream(stream_id, _initial_peer_window_size, this->get_initial_window_size_from_settings());
-            // new_stream.is_client_initiated = client_init; // is_client_initiated is not a member of Http2ServerStream
-            // The count of active client streams is handled elsewhere, e.g. on HEADERS receipt.
-            auto result = _server_streams.emplace(stream_id, std::move(new_stream));
-            it          = result.first;
-        }
-        return it->second;
-    }
-
-    /**
      * @brief Get reference to I/O handler (application layer).
      * @return Reference to I/O handler.
      */
@@ -3622,20 +3637,100 @@ private:
         return count;
     }
 
+    /// The Rapid Reset guard's clock (Http2ServerStream::window_start; Huly QB-1282): the io's own whole seconds when it
+    /// keeps a clock (keeps_no_progress_clock -- the test suite's fakes, stepped by hand), else std::chrono::steady_clock's
+    /// ticks.
+    [[nodiscard]] std::int64_t
+    reset_window_clock() noexcept {
+        if constexpr (keeps_no_progress_clock<IO_Handler>) {
+            return this->_io.no_progress_clock_seconds();
+        } else {
+            return std::chrono::steady_clock::now().time_since_epoch().count();
+        }
+    }
+
+    /// Opens the Rapid Reset guard's window of a stream its HEADERS just created (Huly QB-1282): at its creation, read
+    /// once for the stream already (Http2StreamBase::created_at) unless the io keeps a clock of its own. A request that a
+    /// later frame completes -- a CONTINUATION, its body, its trailers -- restarts it at its dispatch
+    /// (dispatch_complete_request()); one its creating HEADERS completes (@p completed_here) is dispatched now.
+    void
+    start_reset_window(Http2ServerStream &stream, bool completed_here) noexcept {
+        if constexpr (keeps_no_progress_clock<IO_Handler>) {
+            stream.window_start = this->reset_window_clock();
+        } else {
+            stream.window_start = stream.created_at.time_since_epoch().count();
+        }
+        stream.window_starts_at_dispatch = !completed_here;
+    }
+
+    /// Whether a window opened at @p window_start (Http2ServerStream::window_start) is still open: the age since, in
+    /// WHOLE seconds, at most protocol_limits::RAPID_RESET_WINDOW_SECONDS -- truncated as Envoy truncates a stream's
+    /// lifetime on the steady clock, less than two seconds; on an io's own clock, the difference of its whole-second
+    /// readings (a clock that reads earlier than the window's start is within it). Huly QB-1282.
+    [[nodiscard]] bool
+    within_reset_window(std::int64_t window_start) noexcept {
+        std::int64_t age_seconds = 0;
+        if constexpr (keeps_no_progress_clock<IO_Handler>) {
+            age_seconds = this->reset_window_clock() - window_start;
+        } else {
+            age_seconds = detail::steady_whole_seconds(window_start, this->reset_window_clock());
+        }
+        return age_seconds <= ::qb::http2::protocol_limits::RAPID_RESET_WINDOW_SECONDS;
+    }
+
+    /// Whether a reset of @p stream, which the server still has open (reset by neither side), is PREMATURE, as Envoy
+    /// counts one (isPrematureRstStream()) but for a streamed response: no work done -- no response begun
+    /// (Http2ServerStream::response_sent), or a streamed one whose producer has not ended (`streaming`, not
+    /// `stream_ended`), which Envoy counts as begun: abandoning it young is abandoning work as the attack does, where a
+    /// buffered body or an ended stream is work done -- and the stream within its window (within_reset_window(): its
+    /// request's dispatch, or its creation while it is not dispatched). The Rapid Reset guard counts only such a reset of
+    /// an open stream (on(RstStreamFrame), send_provoked_rst_stream(); Huly QB-1282).
+    [[nodiscard]] bool
+    premature_reset(Http2ServerStream const &stream) noexcept {
+        if (stream.response_sent && !(stream.streaming && !stream.stream_ended))
+            return false;
+        return within_reset_window(stream.window_start);
+    }
+
+    /// The slot of _erased_ids a client stream id falls in: its class, the id over two modulo ERASED_STREAMS.
+    [[nodiscard]] static constexpr std::size_t
+    erased_slot(uint32_t stream_id) noexcept {
+        return (stream_id >> 1) & (ERASED_STREAMS - 1);
+    }
+
+    /// Whether a RST_STREAM on @p stream_id, a client stream the server no longer holds, is one on a stream the SERVER
+    /// ended (_erased_ids) arriving once its request is past the window: the client cancelling at its deadline as the
+    /// server gave up, the reset crossing the end of the stream (RFC 9113 §5.1). Spared once -- the slot forgotten, so a
+    /// second reset of the id counts -- as a late cancellation of an open stream is (Huly QB-1282). Any other -- the id not
+    /// remembered (an id the client never used, a stream refused at its HEADERS -- never created --, a stream it reset, one
+    /// replaced in its slot), or remembered young -- counts, as it always did.
+    [[nodiscard]] bool
+    crossed_late(uint32_t stream_id) noexcept {
+        const std::size_t slot = erased_slot(stream_id);
+        if (_erased_ids[slot] != stream_id)
+            return false;
+        _erased_ids[slot] = 0;
+        return !within_reset_window(_erased_starts[slot]);
+    }
+
     /**
      * @brief Reset a stream because the client's own frame provoked it (MadeYouReset, CVE-2025-8671; Huly QB-1244): DATA
      *        or HEADERS after its END_STREAM, a WINDOW_UPDATE past 2^31-1 on a request in flight -- dispatched, unanswered,
      *        reset by neither side -- free its slot as a client RST_STREAM would while the application's work may go on,
-     *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)). A WINDOW_UPDATE of 0 or a
-     *        short PRIORITY on a request in flight comes here too (on_stream_frame_error). A reset provoked BEFORE
-     *        dispatch -- a malformed request or trailer section, DATA over the window, a body against its content-length,
-     *        trailers without END_STREAM, a stream error on an upload -- frees no application work, and the client gets one
-     *        per new stream id: the published form of the reset flood (CVE-2019-9514). It counts against the closed-stream
-     *        budget and, while it is queued, with the replies the client solicited (admit_solicited_reset(), which holds
-     *        both bounds); past either the connection is closed and the reset is not sent (Huly QB-1270). A
-     *        stream the server reset itself is not counted again (a handler that threw: closed). A client RST_STREAM on an
-     *        id whose reset it provoked counts once more (on(RstStreamFrame) counts any closed odd id), toward the ceiling
-     *        only.
+     *        so the reset counts against the same Rapid Reset ceiling (on(RstStreamFrame)) when it is premature, as a
+     *        client reset of an open stream is (premature_reset(): no work done, within the window; Huly QB-1282).
+     *        Otherwise -- a buffered response begun or a stream its producer ended, or the request dispatched two seconds
+     *        or more before -- the reset is neither counted nor budgeted: one RST_STREAM the client draws per request it
+     *        had dispatched, the stream reset and gone after it. A WINDOW_UPDATE of 0 or a short PRIORITY on a request in
+     *        flight comes here too (on_stream_frame_error). A reset provoked BEFORE dispatch -- a malformed request or
+     *        trailer section, DATA over the window, a body against its content-length, trailers without END_STREAM, a
+     *        stream error on an upload -- frees no application work, and the client gets one per new stream id: the
+     *        published form of the reset flood (CVE-2019-9514). It counts against the closed-stream budget and, while it
+     *        is queued, with the replies the client solicited (admit_solicited_reset(), which holds both bounds); past
+     *        either the connection is closed and the reset is not sent (Huly QB-1270). A stream the server reset itself is
+     *        not counted again (a handler that threw: closed). A client RST_STREAM on an id whose reset it provoked counts
+     *        when it comes young, once more if that reset was counted -- on(RstStreamFrame) counts a stream no longer
+     *        open but a late crossing (crossed_late()) --, toward the ceiling only.
      */
     void
     send_provoked_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
@@ -3644,7 +3739,7 @@ private:
             const Http2ServerStream &stream = it->second;
             if (!stream.rst_stream_sent && !stream.rst_stream_received) {
                 if (stream.request_dispatched) {
-                    past_ceiling = !stream.end_stream_sent && ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS
+                    past_ceiling = premature_reset(stream) && ++_rst_stream_count > ::qb::http2::protocol_limits::MAX_RAPID_RESETS
                                    && _rst_stream_count * 2u > _client_streams_opened;
                 } else if (!this->admit_solicited_reset("Excessive stream resets before dispatch (HTTP/2 reset flood)")) {
                     return;
@@ -3724,13 +3819,13 @@ private:
 
     /**
      * @brief Answer a frame on a closed stream with RST_STREAM, at most MAX_QUEUED_CONTROL_REPLIES of them between two
-     *        streams the client opens -- a request dispatched, or one it cancelled, which the Rapid Reset guard weighs --
-     *        never forgiven by a frame it can send for nothing, such as an empty DATA (admit_solicited_reset(), the budget
-     *        a stream refused and a request reset before its dispatch share): past them the connection is closed with
-     *        GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of CVE-2019-9514;
-     *        Huly QB-1270). The reset is also one of the replies the client solicited that are counted while the output
-     *        holds them, with the PONGs and the SETTINGS ACKs: a thousand queued close the connection the same way,
-     *        whatever streams the client opens (admit_solicited_reset() holds both bounds).
+     *        streams the client opens -- a request dispatched, or one it cancelled promptly, which the Rapid Reset guard
+     *        weighs -- never forgiven by a frame it can send for nothing, such as an empty DATA (admit_solicited_reset(),
+     *        the budget a stream refused and a request reset before its dispatch share): past them the connection is closed
+     *        with GOAWAY(ENHANCE_YOUR_CALM). Each such frame drew a reset, without a bound (the reset flood of
+     *        CVE-2019-9514; Huly QB-1270). The reset is also one of the replies the client solicited that are counted while
+     *        the output holds them, with the PONGs and the SETTINGS ACKs: a thousand queued close the connection the same
+     *        way, whatever streams the client opens (admit_solicited_reset() holds both bounds).
      */
     void
     send_closed_stream_rst(uint32_t stream_id, ErrorCode error_code, const std::string &context_msg) noexcept {
@@ -3744,7 +3839,7 @@ private:
      * @brief Count one RST_STREAM the client solicits on a stream it never opened -- a frame on a closed stream, a stream
      *        refused, a request reset or refused before its dispatch -- against two bounds of MAX_QUEUED_CONTROL_REPLIES.
      *        The closed-stream budget: that many between two streams the client opens (_client_streams_opened, what the
-     *        Rapid Reset guard weighs: a request dispatched, or one it cancels), which no frame it sends for nothing
+     *        Rapid Reset guard weighs: a request dispatched, or one it cancels promptly), which no frame it sends for nothing
      *        forgives -- and which holds for a client that reads every reset. And the replies queued: such a reset is
      *        one the client draws for nothing, as a PONG or a SETTINGS ACK is, so it counts with them while the output
      *        holds it (control_replies_at_bound()); the caller records it once written (control_reply_written()). A
@@ -3783,10 +3878,10 @@ public:
     /**
      * @brief A frame error RFC 9113 makes a STREAM error -- a WINDOW_UPDATE of 0 (§6.9), a PRIORITY that is not 5 octets
      *        (§6.3) -- for which the frame layer ended the connection, without a GOAWAY (Huly QB-1270): the stream is reset
-     *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling, an upload
-     *        not yet dispatched against the closed-stream budget (send_provoked_rst_stream), a closed stream against that
-     *        budget too (send_closed_stream_rst); an idle stream, which no RST_STREAM may name (§6.4), or stream 0 makes it
-     *        a connection error, with its GOAWAY (§5.4.1).
+     *        and the connection serves on. A request in flight counts its reset against the Rapid Reset ceiling when it is
+     *        premature, an upload not yet dispatched against the closed-stream budget (send_provoked_rst_stream), a closed
+     *        stream against that budget too (send_closed_stream_rst); an idle stream, which no RST_STREAM may name (§6.4),
+     *        or stream 0 makes it a connection error, with its GOAWAY (§5.4.1).
      */
     void
     on_stream_frame_error(ErrorCode error_code, const std::string &message, uint32_t stream_id) noexcept {
@@ -3809,6 +3904,18 @@ private:
     uint32_t _highest_client_stream_id = 0;
     /// The resets admit_solicited_reset() let go since the client last opened a stream (_client_streams_opened, as it was).
     std::uint32_t _closed_stream_reply_count = 0, _streams_opened_at_closed_reply = 0;
+    /// The slots of _erased_ids: a power of two, the slot being the client id over two masked (erased_slot()).
+    static constexpr std::size_t ERASED_STREAMS = 64;
+    static_assert((ERASED_STREAMS & (ERASED_STREAMS - 1)) == 0, "the slot is the id masked: a power of two");
+    /// The client streams the SERVER ended and erased last (try_close_stream_context(): answered, reset by it -- its own
+    /// reset or one the client provoked --, refused after it was created; not one the client reset), with their Rapid
+    /// Reset window's start: a RST_STREAM on such a stream arriving once its request is past the window -- the client
+    /// cancelling at its deadline as the server gave up, the reset crossing the end of the stream (RFC 9113 §5.1) -- is
+    /// spared once (crossed_late(); Huly QB-1282). One slot per class of client ids (the id over two, modulo
+    /// ERASED_STREAMS): consecutive client ids fall in distinct slots, and a slot holds the last stream of its class
+    /// erased -- a reset whose stream a later one of the class replaced counts. Two arrays, 768 octets a connection.
+    std::array<std::uint32_t, ERASED_STREAMS> _erased_ids{};
+    std::array<std::int64_t, ERASED_STREAMS>  _erased_starts{};
 
     /// What the idle sweep and the turns keep from one call to the next (Huly QB-1248): one value, which reset()
     /// returns to its initial conditions whole.

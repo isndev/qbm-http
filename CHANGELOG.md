@@ -300,7 +300,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   `qb::protocol::http2::keeps_no_progress_clock`: a handler with `std::int64_t no_progress_clock_seconds() const` is
   read by `Http2Protocol::refuse_no_progress_frame()` instead of `std::chrono::steady_clock`, a clock that reads earlier
   counting one second. The test suite's fake handlers keep one, so that the bucket's refill is tested by stepping time
-  rather than by sleeping through it; every qb-io session reads the steady clock, as before.
+  rather than by sleeping through it; every qb-io session reads the steady clock, as before. The server's Rapid Reset
+  guard ages its requests by the same clock (Huly QB-1282), as the difference of two whole-second readings -- a request
+  less than one second old is within `RAPID_RESET_WINDOW_SECONDS` for sure, one less than two by the readings' phase --
+  so such a clock counts monotonic seconds: one that jumps ahead ages every request past the window, one stepped back
+  keeps every request young.
 
 - **`Http2GoAwayEvent::sent` says who sent an HTTP/2 GOAWAY (Huly QB-1270).** The client and server protocols dispatch
   `qb::protocol::http2::Http2GoAwayEvent` for the `GOAWAY` they receive and for the `GOAWAY` with an error they send
@@ -1435,25 +1439,69 @@ All notable changes to the qbm-http module are documented here. The format is ba
   it, was counted more than 2^29 streams opened and never tripped the guard -- some 5 x 10^8 requests dispatched then
   cancelled on one connection, the amplification the guard exists to bound. A stream now counts as opened when its
   request is dispatched to the application, whatever the application answers, or when the client cancels it before its
-  request is complete (an upload, as before); a stream the protocol layer refuses itself -- answered 413, 414 or 431,
-  or malformed -- is none, else a client that sent such a request before each pair would open as many streams as it
-  resets; a protocol reset forgets the count. Measured on a client-to-server frame exchange: no `GOAWAY` after 400
-  pairs from stream 2^30+1, nor after 400 pairs each behind a malformed request or a `431`; the 101st reset trips it
-  now, as for a client that starts at stream 1, and after 300 requests served the 301st (more than half of 300 + r). A
-  client that cancels fewer than half of its streams is served as before: 133 of 400 GETs reset, answered later or
-  inside the dispatch, or 3 uploads cancelled in every 8 requests. The guard now also counts the resets a client makes
-  the server send (MadeYouReset, CVE-2025-8671). DATA or HEADERS after the client's END_STREAM, or a WINDOW_UPDATE
-  that takes a stream's window past 2^31-1, on a request dispatched and not yet answered, makes the server reset the
-  stream: the concurrency slot is freed as the client's own RST_STREAM would free it, the application's work may go on,
-  and the reset was never counted. It counts now as the client's RST_STREAM does; the server's own resets -- a handler
-  that throws, a response HTTP/2 cannot carry -- are not the client's and never count. Measured on the same exchange:
-  no `GOAWAY` after 400 such pairs for each of the three frames on the base, `GOAWAY(ENHANCE_YOUR_CALM)` at the 101st
-  now, and for DATA at the 301st after 300 requests served; 400 requests whose handler throws, 400 answered with a
-  field HTTP/2 cannot carry, and a client that sends a WINDOW_UPDATE on each of 400 streams and cancels one in three
-  draw no `GOAWAY`. A WINDOW_UPDATE of 0 on a stream already ends the connection (the frame layer refuses it), so a
-  client provokes one such reset per connection. The ceiling bounds the share of streams reset, not the work in
-  flight: a client that sends a request answered at once beside each one it resets stays at half and is not closed,
-  one request cancelled for each one served.
+  request is complete (an upload, as before; since Huly QB-1282, when that cancellation is counted); a stream the
+  protocol layer refuses itself -- answered 413, 414 or 431, or malformed -- is none, else a client that sent such a
+  request before each pair would open as many streams as it resets; a protocol reset forgets the count. Measured on a
+  client-to-server frame exchange: no `GOAWAY` after 400 pairs from stream 2^30+1, nor after 400 pairs each behind a
+  malformed request or a `431`; the 101st reset trips it now, as for a client that starts at stream 1, and after 300
+  requests served the 301st (more than half of 300 + r). A client that cancels fewer than half of its streams is served
+  as before: 133 of 400 GETs reset, answered later or inside the dispatch, or 3 uploads cancelled in every 8 requests.
+  The guard now also counts the resets a client makes the server send (MadeYouReset, CVE-2025-8671). DATA or HEADERS
+  after the client's END_STREAM, or a WINDOW_UPDATE that takes a stream's window past 2^31-1, on a request dispatched
+  and not yet answered, makes the server reset the stream: the concurrency slot is freed as the client's own RST_STREAM
+  would free it, the application's work may go on, and the reset was never counted. It counts now as the client's
+  RST_STREAM does; the server's own resets -- a handler that throws, a response HTTP/2 cannot carry -- are not the
+  client's and never count. Measured on the same exchange: no `GOAWAY` after 400 such pairs for each of the three frames
+  on the base, `GOAWAY(ENHANCE_YOUR_CALM)` at the 101st now, and for DATA at the 301st after 300 requests served; 400
+  requests whose handler throws, 400 answered with a field HTTP/2 cannot carry, and a client that sends a WINDOW_UPDATE
+  on each of 400 streams and cancels one in three draw no `GOAWAY`. A WINDOW_UPDATE of 0 on a stream already ends the
+  connection (the frame layer refuses it), so a client provokes one such reset per connection. The ceiling bounds the
+  share of streams reset, not the work in flight: a client that sends a request answered at once beside each one it
+  resets stays at half and is not closed, one request cancelled for each one served.
+
+- **The HTTP/2 server's Rapid Reset guard spares a client that cancels the requests it gave up on (Huly QB-1282).**
+  The guard (CVE-2023-44487) counted every reset over the connection's life, so a client that cancels requests at its
+  deadline -- Go's and Node's clients reset a stream when a request times out -- against a slow server was closed with
+  `GOAWAY(ENHANCE_YOUR_CALM)` once its cancellations passed `MAX_RAPID_RESETS` (100) and half of its streams. A reset of
+  a stream the server still has open now counts only when it is premature, as Envoy counts one -- but stricter on a
+  streamed response, which Envoy counts as begun: no work done -- no response begun, or a streamed one its producer
+  still writes -- and young: at most `RAPID_RESET_WINDOW_SECONDS` (1, new in `qb::http2::protocol_limits`) whole seconds
+  old, its age on the steady clock truncated as Envoy truncates a stream's lifetime, so less than two seconds: a client
+  that cancels two seconds or more after the dispatch is not cut. Envoy ages a stream from its creation; qb ages a
+  request from its dispatch (a stream never dispatched from its creation): the same instant for a request its `HEADERS`
+  completes, and for an upload the moment its last `DATA` hands it to the application -- one held open past the window,
+  then completed and reset in one write, is counted. The attack abandons a request the moment it is dispatched, freeing
+  its concurrency slot while the work goes on. A reset on a stream the server ended -- answered it, reset it, or refused
+  it after creating it (413, 414, 431, malformed) -- arriving once the request is past the window is spared once: the
+  client cancelling at its deadline as the server gave up, crossing the end of the stream (RFC 9113 §5.1), the stream
+  remembered as the last of its class the server ended (64 classes of client ids, the id over two modulo 64, never a
+  pushed stream: 768 octets a connection) until a reset of its id arrives, young or late. The price is Envoy's: the
+  ratio has no decay, so every request a client let complete, cancelled late or saw answered licenses one premature
+  reset, then or later, all at once if it likes -- as a completed request did when every reset counted -- and one that
+  waits out the window before each reset gains a licence every two seconds per concurrency slot; what a handler goes on
+  with after a reset cancels its context is bounded by those licences, not by `SETTINGS_MAX_CONCURRENT_STREAMS`. A reset
+  the client provokes (MadeYouReset, CVE-2025-8671) is held to the same rule; past the window it is neither counted nor
+  budgeted, one per request dispatched. Any other reset of a stream no longer open -- arriving young, on a stream the
+  client reset, one refused at its `HEADERS` (`REFUSED_STREAM`, never created), an id it never used, or forgotten --
+  frees nothing and makes no progress, and still counts (Envoy, which never sees a reset after a stream ends, counts
+  none of these): `HEADERS` + `RST_STREAM` pairs close the connection at the 101st as before, unanswered, answered and
+  gone in the dispatch, or answered there with a stream its producer still writes; a buffered response begun and still
+  leaving -- its body held by the client's window -- is not counted, in the dispatch or later. A stream cancelled before
+  its request was complete counts as opened only when its reset is counted, so late cancellations of uploads neither
+  dilute the ratio nor forgive the closed-stream budget. Measured on a client-to-server frame exchange: three waves of
+  40 requests, each cancelled two seconds after its dispatch, closed the connection at the 101st cancellation and are
+  served now -- licensing as many premature resets: with one request served after them, `HEADERS` + `RST_STREAM` pairs
+  trip the guard at the 122nd (122 counted resets, more than half of 243 streams opened) --, and so is the same client
+  whose cancellations cross a 504 or a reset of the server's, once (a second reset of each id counts, as does a second
+  reset of a stream the client reset itself); 160 requests whose buffered response began, or whose streamed response its
+  producer ended, reset at once or made to reset, and 160 reset or made to reset two seconds after their dispatch, draw
+  no `GOAWAY`; one second after, the 101st still does, and so do uploads reset as their last `DATA` dispatches them and
+  streamed responses reset or made to reset while their producer writes. On the steady clock -- an io that keeps no
+  clock of its own, as a session -- 25 requests reset 2.05 s after their dispatch are not counted, 15 reset about 1.4 s
+  after theirs are, and so are 9 uploads held 2.05 s then completed and reset in one write. `send_response()` now marks
+  the response begun as `begin_streamed_response()` did, and refuses a second response on its stream: a streamed
+  response, or another response, could begin on a stream whose response had begun, a second `HEADERS` sent and the body
+  still leaving replaced.
 
 - **The HTTP/2 client holds a request to the server's `SETTINGS_MAX_HEADER_LIST_SIZE` (Huly QB-1274).**
   `ClientHttp2Protocol` stored the bound the server announced and never read it: a request whose header list or
@@ -1495,27 +1543,27 @@ All notable changes to the qbm-http module are documented here. The format is ba
   CVE-2019-9514 on closed streams).** Each `DATA` or `HEADERS` a client sent on a closed stream -- and a
   `WINDOW_UPDATE` past 2^31-1 on one still resident -- drew a `RST_STREAM`, without a bound: the reset flood of
   CVE-2019-9514, on closed streams. At most `MAX_QUEUED_CONTROL_REPLIES` (1000) are sent now between two streams the
-  client opens -- a request dispatched, or one it cancels, both weighed by the Rapid Reset guard; never a frame it
-  sends for nothing, as an empty `DATA` -- and past them the connection is closed with `GOAWAY(ENHANCE_YOUR_CALM)`:
+  client opens -- a request dispatched, or one it cancels promptly, both weighed by the Rapid Reset guard; never a frame
+  it sends for nothing, as an empty `DATA` -- and past them the connection is closed with `GOAWAY(ENHANCE_YOUR_CALM)`:
   on a client-to-server frame exchange, 1100 `DATA` or `HEADERS` frames on a closed stream drew 1100 resets and no
-  `GOAWAY`; the 1001st closes the connection now, even with an empty `DATA` on an open upload after every 999, while
-  900 between requests, three times over, are answered for a client that reads them (the resets sent before a request
-  is dispatched joined that budget, and a client that reads nothing is held to the count of the replies queued, in the
-  two entries below). A stream refused with `REFUSED_STREAM` -- the concurrency limit, a shutdown -- left its
-  id idle: a `DATA`, `WINDOW_UPDATE` or `RST_STREAM` the client had sent on it before it saw the refusal closed the
-  connection with `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §5.1.1), and a `HEADERS` on it was refused again or served as
-  a new request reusing the id. The id is closed now, each of those a frame on a closed stream, a `GOAWAY` still names the last
-  stream accepted, the refusal itself -- a reset the client solicits, unbounded too -- shares the budget, and the
-  client's reset of a refused stream counts against the Rapid Reset ceiling. A handler that threw inside the `DATA`
-  completing an upload reset its stream and kept it resident, half-closed, holding a concurrency slot until the idle
-  sweep (30 s): 50 such uploads refused the 51st stream, which is served now, the stream reclaimed. A `WINDOW_UPDATE`
-  of 0 on a stream and a `PRIORITY` that is not 5 octets, an empty one included, are stream errors (RFC 9113 §6.9,
-  §6.3), for which the frame layer ended the connection at the first such frame, without a `GOAWAY`: the stream is
-  reset now (`PROTOCOL_ERROR`, `FRAME_SIZE_ERROR`) and the connection serves on, the reset counted against the Rapid
-  Reset ceiling on a request in flight (the 101st such pair closes the connection) and against the budget on a closed
-  stream; on an idle stream, which no `RST_STREAM` may name (§6.4), the connection is closed with a `GOAWAY`, as on
-  stream 0. A `PRIORITY` naming its own stream stays ignored: RFC 9113 deprecates priority signals and keeps no
-  self-dependency error (§5.3.2; RFC 7540 §5.3.1 had one, which h2spec's RFC 7540 cases still check).
+  `GOAWAY`; the 1001st closes the connection now, even with an empty `DATA` on an open upload after every 999, while 900
+  between requests, three times over, are answered for a client that reads them (the resets sent before a request is
+  dispatched joined that budget, and a client that reads nothing is held to the count of the replies queued, in the two
+  entries below). A stream refused with `REFUSED_STREAM` -- the concurrency limit, a shutdown -- left its id idle: a
+  `DATA`, `WINDOW_UPDATE` or `RST_STREAM` the client had sent on it before it saw the refusal closed the connection with
+  `GOAWAY(PROTOCOL_ERROR)` (RFC 9113 §5.1.1), and a `HEADERS` on it was refused again or served as a new request reusing
+  the id. The id is closed now, each of those a frame on a closed stream, a `GOAWAY` still names the last stream
+  accepted, the refusal itself -- a reset the client solicits, unbounded too -- shares the budget, and the client's
+  reset of a refused stream counts against the Rapid Reset ceiling. A handler that threw inside the `DATA` completing an
+  upload reset its stream and kept it resident, half-closed, holding a concurrency slot until the idle sweep (30 s): 50
+  such uploads refused the 51st stream, which is served now, the stream reclaimed. A `WINDOW_UPDATE` of 0 on a stream
+  and a `PRIORITY` that is not 5 octets, an empty one included, are stream errors (RFC 9113 §6.9, §6.3), for which the
+  frame layer ended the connection at the first such frame, without a `GOAWAY`: the stream is reset now
+  (`PROTOCOL_ERROR`, `FRAME_SIZE_ERROR`) and the connection serves on, the reset counted against the Rapid Reset ceiling
+  on a request in flight when premature (Huly QB-1282; the 101st such pair closes the connection) and against the budget
+  on a closed stream; on an idle stream, which no `RST_STREAM` may name (§6.4), the connection is closed with a
+  `GOAWAY`, as on stream 0. A `PRIORITY` naming its own stream stays ignored: RFC 9113 deprecates priority signals and
+  keeps no self-dependency error (§5.3.2; RFC 7540 §5.3.1 had one, which h2spec's RFC 7540 cases still check).
 
 - **Security: the HTTP/2 server bounds the resets it sends before a request is dispatched (Huly QB-1270;
   CVE-2019-9514).** A reset the server sent on a new stream before its request was dispatched -- a

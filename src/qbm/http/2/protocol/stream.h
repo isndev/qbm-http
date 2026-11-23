@@ -340,6 +340,15 @@ struct Http2ServerStream : public Http2StreamBase {
     bool              request_dispatched = false; ///< Request has been dispatched
     bool              response_sent      = false; ///< Tracks if initial HEADERS frame for response was sent
 
+    /// The request is completed by a frame after the HEADERS that created the stream -- a CONTINUATION, its body, its
+    /// trailers -- so its dispatch restarts the Rapid Reset guard's window (window_start); completed by that HEADERS, its
+    /// creation is its dispatch. Beside the two flags above, so that it takes no padding of its own.
+    bool window_starts_at_dispatch = false;
+    /// When the Rapid Reset guard's window opened (ServerHttp2Protocol::premature_reset(); Huly QB-1282): the request's
+    /// dispatch, or, while it is not dispatched, the stream's creation -- on the guard's clock: the io's whole seconds
+    /// when it keeps a clock of its own (keeps_no_progress_clock), else std::chrono::steady_clock's ticks.
+    std::int64_t window_start = 0;
+
     // Response sending state for the current response_to_send
     size_t send_buffer_offset = 0; ///< Current offset in response_to_send.body().raw()
 

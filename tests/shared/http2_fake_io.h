@@ -182,7 +182,10 @@ struct Http2FakeIO {
     }
 
     /// The clock the bucket of the frames that make no progress reads (h2::keeps_no_progress_clock): stopped at 0 unless
-    /// a test steps it, so that the bucket holds the burst and regains nothing until one does (Huly QB-1270).
+    /// a test steps it, so that the bucket holds the burst and regains nothing until one does (Huly QB-1270). The
+    /// server's Rapid Reset guard ages its requests by it too: a stream's window opens at the second it reads at the
+    /// stream's creation, again at its request's dispatch when a later frame completes the request, and a test steps it
+    /// past RAPID_RESET_WINDOW_SECONDS to make a reset late (Huly QB-1282).
     std::int64_t clock_seconds = 0;
     [[nodiscard]] std::int64_t
     no_progress_clock_seconds() const noexcept {
