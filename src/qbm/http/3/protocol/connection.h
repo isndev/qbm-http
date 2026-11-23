@@ -625,6 +625,10 @@ inline std::optional<header_block>
 make_request_headers(qb::http::Request const &request, std::optional<qb::http::detail::outgoing_trailers> const &trailers,
                      std::string *field_refusal = nullptr) {
     if (trailers && !trailers->forbidden.empty()) {
+        if (field_refusal) {
+            // 400, naming the field, as HTTP/1.1 refuses it. It was 503 (Huly QB-1246).
+            *field_refusal = qb::http::detail::forbidden_trailer_field_reason("request trailer", trailers->forbidden);
+        }
         return std::nullopt;
     }
     header_block block;

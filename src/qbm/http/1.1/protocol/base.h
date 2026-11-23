@@ -125,8 +125,8 @@ sendable_field_value(const std::string_view value) noexcept {
  *        the reason the three clients answer such a request with, 400 (Huly QB-1191). For a field
  *        sendable_field_name() or sendable_field_value() refuses; a byte that cannot be printed is written `\xNN`. Cold,
  *        out of line (request.cpp).
- * @param section What the field is in: "request header", "request trailer", or "trailer" (a serializer's, for a request
- *        or a response).
+ * @param section What the field is in: "request header", "response header" (the Response serializer's), "request
+ *        trailer", or "trailer" (a serializer's, for a request or a response).
  * @param name The field's name.
  * @param value The value refused, or none when the name is.
  */

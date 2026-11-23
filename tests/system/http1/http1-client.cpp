@@ -5522,19 +5522,54 @@ TEST(Http1ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTheL
 }
 
 namespace http1_client_fields_test {
-/// Requests that carry a field the serializer cannot write: LF, NUL and CR in a value, SP in a name, CR in a cookie, LF in
-/// a trailer field (a chunked body's).
+/// Requests that carry a field the serializer cannot write: LF, NUL, CR, DEL and 0x01 in a value, SP, DEL and 0x01 in a
+/// name, CR in a cookie, LF in a trailer field (a chunked body's), and a trailer field a trailer section must not carry.
+/// @p shown is the name as the reason prints it, when it is not the name; @p says what the reason says of the fault.
 struct UnsendableField {
     std::string_view what;
     std::string      name;
     std::string      value;
     bool             trailer;
+    std::string_view shown = {};
+    std::string_view says  = {};
 };
 inline const UnsendableField k_unsendable_fields[] = {
-    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
-    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
-    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"LF in a value", "x-probe", "a\nb", false},
+    {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},
+    {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false},
+    {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"DEL in a value",
+     "x-probe",
+     "a\x7f"
+     "b",
+     false,
+     {},
+     "its value carries DEL"},
+    {"0x01 in a value",
+     "x-probe",
+     "a\x01"
+     "b",
+     false,
+     {},
+     "its value carries \\x01"},
+    {"DEL in a name",
+     "x\x7f"
+     "probe",
+     "v", false, "xDELprobe", "its name carries DEL"},
+    {"0x01 in a name",
+     "x\x01"
+     "probe",
+     "v", false, "x\\x01probe", "its name carries \\x01"},
+    {"a trailer field a trailer section must not carry", "content-length", "1", true, {}, "a trailer section must not carry it"},
 };
+
+/// The name as the reason prints it, between backquotes.
+inline std::string
+named(const UnsendableField &field) {
+    return "`" + (field.shown.empty() ? field.name : std::string(field.shown)) + "`";
+}
 } // namespace http1_client_fields_test
 
 // The HTTP/1.1 serializer refuses such a field before it writes a byte of the request: the request hears 400, and now
@@ -5569,10 +5604,46 @@ TEST(Http1ClientTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndNamesTheF
                              [&](qb::http::Response response) { served += response.status() == qb::http::status::OK ? 1 : 0; });
         EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return refused == 1 && served == 1; }));
         EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
-        EXPECT_NE(body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << body;
+        EXPECT_NE(body.find(http1_client_fields_test::named(field)), std::string::npos) << "the refusal does not name the field: " << body;
         EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_NE(body.find(field.says), std::string::npos) << body;
         EXPECT_EQ(server.connection_count(), 1) << "the refusal cost the connection";
         EXPECT_EQ(server.request_count(), requests + 1) << "the server was sent the request that was refused";
+        client->disconnect();
+    }
+}
+
+// A request's trailers() are sent, and judged, only with chunked framing on HTTP/1.1 (RFC 9112 section 7.1.2): framed by
+// its content-length, or with no body, a request sends none of them, and none of them refuses it -- as Go's http.Request
+// sends its Trailer only chunked. A field the serializer cannot write and one a trailer section must not carry: the
+// request is served. HTTP/2 and HTTP/3 send a request's trailers() whatever its framing, and refuse it for them (a pin).
+TEST(Http1ClientTest, TheTrailersOfARequestThatIsNotChunkedAreNeitherSentNorJudged) {
+    for (const bool with_a_body : {true, false}) {
+        SCOPED_TRACE(with_a_body ? "framed by its content-length" : "with no body");
+        LoopbackHttp1Server server;
+        int                 answered = 0; // before the client: its callback counts here
+        qb::http::status    status   = qb::http::status::OK;
+        std::string         body;
+        bool                connected = false;
+        auto                client    = qb::http1::make_client(server.url("/"));
+        client->connect([&](bool ok, std::string const &) { connected = ok; });
+        ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
+        const auto requests = server.request_count();
+        auto       req      = request(qb::http::method::POST, "/echo");
+        if (with_a_body) {
+            req.body() = "x";
+        }
+        req.trailers().set_header("x-sum", "a\nb");
+        req.trailers().set_header("content-length", "1");
+        client->push_request(std::move(req), [&](qb::http::Response response) {
+            ++answered;
+            status = response.status();
+            body   = response.body().as<std::string>();
+        });
+        EXPECT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return answered == 1; }));
+        EXPECT_EQ(status, qb::http::status::CREATED) << body;
+        EXPECT_EQ(body, with_a_body ? "x" : "");
+        EXPECT_EQ(server.request_count(), requests + 1) << "the request was not sent";
         client->disconnect();
     }
 }

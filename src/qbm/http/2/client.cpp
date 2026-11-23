@@ -804,10 +804,11 @@ Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
     // callback threw, or the pass of the push itself, before the callback of a request queued behind it threw. Refused
     // or failed there, its answer was kept for the client's turn, and is never heard (below). Sent, it is given up on
     // the wire as well: RST_STREAM(CANCEL) on its stream (ClientHttp2Protocol::cancel_request()), which frees that
-    // stream for what waits and tells the server that nobody does; the protocol reports the reset, and fail_request()
-    // retires the request -- to a callback that hears nothing, set first, which also drops an answer that comes
-    // where no reset can be written. Left in flight, it was answered after its push had thrown, and held its stream
-    // until the server answered (Huly QB-1246).
+    // stream for what waits and tells the server that nobody does; fail_request() retires the request here -- to a
+    // callback that hears nothing, set first, which also drops an answer that comes where no reset can be written.
+    // The reset tells the protocol's handler nothing: told, on(Http2StreamErrorEvent) would run a pass under the call
+    // of the program this serves, which runs its own. Left in flight, it was answered after its push had thrown, and
+    // held its stream until the server answered (Huly QB-1246).
     std::vector<std::uint32_t> sent; // their streams, taken first: each reset changes the registry
     for (auto &[key, context] : _active_requests) {
         (void) key;
@@ -827,7 +828,9 @@ Client::withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept {
             break; // the connection ended under a reset before this one: its close ends the streams
         }
         const auto pass = this->protocol_pass(); // a member function of the protocol, outside the read loop (send_pending())
-        (void) _h2_protocol->cancel_request(stream_id);
+        if (_h2_protocol->cancel_request(stream_id, false)) {
+            (void) fail_request(stream_id, "Stream error: RST_STREAM sent by client: request given up by the client");
+        }
     }
     for (auto &kept : _owed) {
         if ((request_id != 0 && kept.request == request_id) || (batch_id != 0 && kept.batch == batch_id)) {
@@ -1094,7 +1097,7 @@ Client::complete_request(uint32_t stream_id, qb::http::Response response) {
     arm_request_timeout();
 }
 
-void
+bool
 Client::fail_request(uint32_t stream_id, const std::string &error_message, qb::http::status status) {
     auto it = _active_requests.find(stream_id);
     if (it == _active_requests.end() || !it->second || it->second->stream_id != stream_id) {
@@ -1103,7 +1106,7 @@ Client::fail_request(uint32_t stream_id, const std::string &error_message, qb::h
     }
     if (it == _active_requests.end()) {
         LOG_HTTP_WARN_PA(_client_id, "Tried to fail unknown stream " << stream_id);
-        return;
+        return false;
     }
 
     auto context = std::move(it->second);
@@ -1117,6 +1120,7 @@ Client::fail_request(uint32_t stream_id, const std::string &error_message, qb::h
 
     finish_graceful_goaway_if_drained();
     arm_request_timeout();
+    return true;
 }
 
 void
@@ -1281,6 +1285,16 @@ Client::check_request_timeouts() {
             timed_out_requests.push_back(entry.first);
         }
     }
+    // The queue's requests that timed out, set aside before any 408 below runs a callback: one that pushes while
+    // connected runs a pass, which sent them too -- a request that had timed out already, on a stream of its own, reset
+    // and answered 408 at the next tick (Huly QB-1246).
+    std::deque<std::unique_ptr<RequestContext>> timed_out_pending, still_waiting;
+    while (!_pending_requests.empty()) {
+        auto context = std::move(_pending_requests.front());
+        _pending_requests.pop_front();
+        (now - context->created_at >= timeout_duration ? timed_out_pending : still_waiting).push_back(std::move(context));
+    }
+    _pending_requests = std::move(still_waiting);
 
     const auto sent_on = _transports_started;
     for (const uint32_t key : timed_out_requests) {
@@ -1304,24 +1318,13 @@ Client::check_request_timeouts() {
         fail_request(stream_id, "Request timeout", qb::http::status::REQUEST_TIMEOUT);
     }
 
-    // Check pending requests for timeouts
-    std::deque<std::unique_ptr<RequestContext>> non_timed_out_requests;
+    for (auto &context : timed_out_pending) {
+        LOG_HTTP_WARN_PA(_client_id, "Pending request timed out");
+        _failed_requests++;
 
-    while (!_pending_requests.empty()) {
-        auto context = std::move(_pending_requests.front());
-        _pending_requests.pop_front();
-
-        if (now - context->created_at >= timeout_duration) {
-            LOG_HTTP_WARN_PA(_client_id, "Pending request timed out");
-            _failed_requests++;
-
-            give(*context, create_error_response(qb::http::status::REQUEST_TIMEOUT, "Request timeout while pending"));
-        } else {
-            non_timed_out_requests.push_back(std::move(context));
-        }
+        give(*context, create_error_response(qb::http::status::REQUEST_TIMEOUT, "Request timeout while pending"));
     }
 
-    _pending_requests = std::move(non_timed_out_requests);
     if (!timed_out_requests.empty()) {
         // What waited for the streams those timeouts freed is sent now, as after a response: nothing else ran a pass,
         // and a request queued behind one that timed out waited for the next push, or timed out in its turn (Huly
@@ -1502,7 +1505,16 @@ Client::on(qb::http::Response response, uint64_t app_request_id) {
 void
 Client::on(const qb::protocol::http2::Http2StreamErrorEvent &event) {
     LOG_HTTP_WARN_PA(_client_id, "HTTP/2 stream error on stream " << event.stream_id << ": " << event.message);
-    fail_request(event.stream_id, "Stream error: " + event.message);
+    // What waited for the stream that error freed is sent now, as after a response. The loop brings this: the server's
+    // RST_STREAM, or a reset the protocol writes for what the server sent -- a body past the client's limit, a
+    // content-length it contradicts, a malformed head. The client's own resets tell nothing here -- withdraw() and the
+    // timer's pass retire their request themselves --, and a request the protocol resets while it is sent is not in
+    // flight yet.
+    // There was no pass: a request queued behind waited for the next push or response, and under a stream limit of 1,
+    // once every request in flight ended so, it heard its own 408 at its deadline without having been sent (Huly QB-1246).
+    if (fail_request(event.stream_id, "Stream error: " + event.message) && !_received_graceful_goaway) {
+        process_pending_requests();
+    }
 }
 
 void

@@ -656,11 +656,11 @@ private:
     void complete_request(uint32_t stream_id, qb::http::Response response);
 
     /**
-     * @brief Fail a request with error
+     * @brief Fail a request with error. @return true when the client held a request on that stream, which is answered
      * @param stream_id Stream ID of the request
      * @param error_message Error description
      */
-    void fail_request(uint32_t stream_id, const std::string &error_message, qb::http::status status = qb::http::status::BAD_GATEWAY);
+    bool fail_request(uint32_t stream_id, const std::string &error_message, qb::http::status status = qb::http::status::BAD_GATEWAY);
 
     /**
      * @brief Fail active streams that the peer explicitly did not process in GOAWAY.

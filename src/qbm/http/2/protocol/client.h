@@ -2762,11 +2762,7 @@ private:
                         send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers");
                         return false;
                     }
-                    if (stream.method != "HEAD" && *parsed > response_body_limit()) {
-                        send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error());
-                        return false;
-                    }
-                    stream.expected_content_length = *parsed;
+                    stream.expected_content_length = *parsed; // judged against the body limit once :status is known (below)
                 }
 
                 if (is_trailers_block) {
@@ -2790,6 +2786,16 @@ private:
                 return false;
             }
             response.status() = *status_code_opt;
+            // A declared length past the client's body limit refuses the response only where it frames content: a 1xx,
+            // a 204, a 304 and a response to HEAD carry none, whatever their `content-length` says (RFC 9110 section
+            // 8.6) -- the exemption should_enforce_response_content_length() applies, as HTTP/1.1 reads such a
+            // response's length as 0. Judged with the field, before :status was known, a 304 that declared the
+            // representation's length past the limit failed 502, and was answered 304 on HTTP/1.1 (Huly QB-1246).
+            if (stream.expected_content_length && *stream.expected_content_length > response_body_limit()
+                && should_enforce_response_content_length(stream)) {
+                send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error());
+                return false;
+            }
         }
 
         return true;

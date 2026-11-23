@@ -20,10 +20,12 @@
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <qb/system/allocator/pipe.h>
 
@@ -904,4 +906,61 @@ TEST(Http1Serialization, AMessageHeadCarriesTheVersionOfItsConnection) {
         EXPECT_TRUE(wire(response).starts_with(status_line)) << c.major << "." << c.minor << ": " << wire(response);
         EXPECT_TRUE(wire(qb::http::MessageHead{response}).starts_with(status_line)) << c.major << "." << c.minor;
     }
+}
+
+// The Request and the Response serializers refuse the same bytes in a field, by the same two predicates -- those the three
+// clients share, qb::http::detail::sendable_field_name() and sendable_field_value() --, which the Response serializer
+// takes in place of a copy of its own; its reason names the field, as the Request's does (Huly QB-1246: "header name
+// exceeds MAX_HEADER_NAME_LENGTH" or "header value exceeds MAX_HEADER_VALUE_LENGTH", whatever the fault). Each of the 256
+// bytes in a name and in a value, and each bound by one octet.
+TEST(Http1Serialization, TheRequestAndTheResponseSerializersRefuseTheSameFieldBytes) {
+    const auto refusal = [](auto const &message) -> std::optional<std::string> {
+        qb::allocator::pipe<char> out;
+        try {
+            out << message;
+        } catch (const std::length_error &error) {
+            return std::string(error.what());
+        }
+        return std::nullopt;
+    };
+    struct Field {
+        std::string name, value;
+        bool        name_refused;
+    };
+    std::vector<Field> fields;
+    for (int byte = 0; byte < 256; ++byte) {
+        const char c = static_cast<char>(byte);
+        fields.push_back({std::string("x-a") + c, "v", true});
+        fields.push_back({"x-a", std::string("a") + c + "b", false});
+    }
+    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH, 'n'), "v", true});
+    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'n'), "v", true});
+    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'), false});
+    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'), false});
+    int refused = 0, sent = 0;
+    for (auto const &field : fields) {
+        const bool expected =
+            field.name_refused ? !qb::http::detail::sendable_field_name(field.name) : !qb::http::detail::sendable_field_value(field.value);
+        qb::http::Request request{qb::http::method::GET, {"http://example.test/x"}};
+        request.set_header(field.name, field.value);
+        qb::http::Response response;
+        response.status() = qb::http::status::OK;
+        response.set_header(field.name, field.value);
+        const auto by_request = refusal(request), by_response = refusal(response);
+        const auto shown = [&] {
+            return "name size " + std::to_string(field.name.size()) + ", value size " + std::to_string(field.value.size()) + ", last name byte "
+                   + std::to_string(static_cast<unsigned char>(field.name.back())) + ", middle value byte "
+                   + std::to_string(field.value.size() > 1 ? static_cast<unsigned char>(field.value[1]) : 0);
+        };
+        EXPECT_EQ(by_request.has_value(), expected) << shown() << ": " << by_request.value_or("sent");
+        EXPECT_EQ(by_response.has_value(), expected) << shown() << ": " << by_response.value_or("sent");
+        if (by_response) {
+            EXPECT_TRUE(by_response->starts_with("qb::http::Response serialization: response header field `")) << *by_response;
+            EXPECT_NE(by_response->find("cannot be sent"), std::string::npos) << *by_response;
+        }
+        (expected ? refused : sent) += 1;
+    }
+    // Neither side of the table is empty: a predicate that refuses everything, or nothing, fails above.
+    EXPECT_GT(refused, 100);
+    EXPECT_GT(sent, 100);
 }

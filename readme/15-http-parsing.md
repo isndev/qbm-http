@@ -165,7 +165,7 @@ Both are wired in by the server/client session types as `using protocol = qb::pr
 
 - **Chunked** (`Transfer-Encoding` present): `resume()` the parser and feed the post-header bytes. `HPE_CB_MESSAGE_COMPLETE` means the final chunk arrived — return the full message size; a `204` or a `304` that names a coding completes there at once, at its header section, llhttp ending it by its status (Huly QB-1248). `HPE_OK` means more chunks are pending — advance `body_offset` and return 0. Anything else marks the protocol `not_ok()`.
 - **Content-Length** (the common case): the message is complete once `_io.in().size() >= body_offset + content_length`. When complete, a temporary `string_view` identifies the bytes in the input buffer; assigning it to `Body` **copies** them into the owning pipe before the total size is returned. Otherwise return 0 and keep accumulating.
-<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1252-1262; qbm/http/src/qbm/http/body.cpp:694-698 -->
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1252-1262; qbm/http/src/qbm/http/body.cpp:693-697 -->
 
 When `getMessageSize()` returns a non-zero size, qb-io consumes exactly that many bytes and calls `onMessage()`. If the parser ever marks itself `not_ok()`, the framework disconnects the connection.
 
@@ -269,7 +269,7 @@ assert(std::string_view(http_get_error_reason(&parser)) == "Unsupported HTTP Tra
 
 Parsing turns bytes into objects; serialization is the inverse, and it is **not** part of `Parser`. It is a `qb::allocator::pipe<char>::put<>` specialization for each message type, declared in `request.h` / `response.h` and defined in `request.cpp` / `response.cpp`:
 
-<!-- src: qbm/http/src/qbm/http/request.h:432; qbm/http/src/qbm/http/response.h:373; qbm/http/src/qbm/http/request.cpp:452-454; qbm/http/src/qbm/http/response.cpp:368-370 -->
+<!-- src: qbm/http/src/qbm/http/request.h:432; qbm/http/src/qbm/http/response.h:373; qbm/http/src/qbm/http/request.cpp:452-454; qbm/http/src/qbm/http/response.cpp:354-356 -->
 
 ```cpp
 template <>
@@ -299,7 +299,7 @@ The HTTP/1.1 parser handles only the *opening* handshake of a WebSocket connecti
 - **`reset()` before reuse, always.** A `Parser` carries the previous message's state until reset. The framing layer resets after every `onMessage()`; a hand-rolled loop must too. `reset()` is also what makes the parser usable after an error.
 - **`content_length == 0` does not mean "no `Content-Length` header."** For requests with no framing headers, and for `1xx`/`204`/`304` responses, the parser normalizes the length to 0 even when a (misleading) `Content-Length` header was present. Read the body, not the raw header, to know what arrived.
 - **The parsed body owns its bytes before `onMessage`.** Inside `getMessageSize()`, the temporary `string_view` passed to `Body::operator=` is copied into the body's pipe. `onMessage()` moves that owning message to the handler. Do not keep a reference to `get_parsed_message()` across `parse()`, `reset()`, or message delivery.
-<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1257-1262; qbm/http/src/qbm/http/body.cpp:694-698; qbm/http/src/qbm/http/1.1/protocol/server.h:76-95 -->
+<!-- src: qbm/http/src/qbm/http/1.1/protocol/base.h:1257-1262; qbm/http/src/qbm/http/body.cpp:693-697; qbm/http/src/qbm/http/1.1/protocol/server.h:76-95 -->
 - **The limits are the server's.** `set_request_limits()` (and `set_max_body_size()` for the body alone) is read when each request begins; 0 means none, and the defaults are the `protocol_limits` constants. A Content-Length body is buffered whole, so `QB_MAX_READ_BUFFER_SIZE` (200 MB) still bounds it; the session leaves the transport's generic message cap (`QB_MAX_MESSAGE_SIZE`) to the protocol, which states its bounds and answers a breach -- a body at the default cap plus its header section was past it, and was cut with no answer (Huly QB-168). The HTTP/2 and HTTP/3 layers keep their own framing limits (`qb::http2::protocol_limits`, nghttp3's), and their servers take the same `request_limits` with the same answers (Huly QB-94); a client reads responses under the defaults.
 - **This is HTTP/1.1 only.** Neither `Parser` nor `qb::protocol::http::base` is involved in HTTP/2 (`2/protocol/`) or HTTP/3 (`3/protocol/`) framing; what the three share is `request_limits`, whose defaults are these `protocol_limits` constants. Do not reason about h2/h3 framing from this page.
 

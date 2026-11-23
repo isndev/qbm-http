@@ -1074,9 +1074,20 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
         std::string        field_refusal; // a field HTTP/1.1 cannot write: no stream is opened for the request (Huly QB-1191)
         try {
             // Its sections first, then its stream: a request refused for a field opens none, so that nothing of it is
-            // written. Such a field was dropped, and the request sent without it.
-            auto prepared = _h3->prepare_request(ctx->request);
-            if (prepared.field_refusal.empty()) [[likely]] {
+            // written. Such a field was dropped, and the request sent without it. What prepare_request() fails at -- an
+            // allocation -- leaves nothing written and no encoder touched (it changes nothing): refused 503 below, as
+            // the engine's own refusal is, on a connection that serves on. Taken for a submission cut short, it ended
+            // the connection (Huly QB-1246).
+            bool unprepared = false;
+            auto prepared   = [&]() -> h3_connection::prepared_request {
+                try {
+                    return _h3->prepare_request(ctx->request);
+                } catch (...) {
+                    unprepared = true; // submitted stays false: the refusal below, no stream opened
+                    return {};
+                }
+            }();
+            if (!unprepared && prepared.field_refusal.empty()) [[likely]] {
                 auto stream    = open_bidirectional_stream(0);
                 ctx->stream_id = stream.id();
                 stream_id      = ctx->stream_id;
@@ -1092,7 +1103,7 @@ Client::submit_pending(from who, std::uint64_t own_request, std::uint64_t own_ba
                     }
                 } guard(_submit_depth);
                 submitted = _h3->submit_prepared(stream_id, ctx->request, std::move(prepared));
-            } else {
+            } else if (!unprepared) {
                 field_refusal = std::move(prepared.field_refusal);
             }
         } catch (...) {
@@ -1701,6 +1712,7 @@ Client::dispatch(qb::io::async::quic::event::stream_data_acked const &ev) {
 void
 Client::dispatch(qb::io::async::quic::event::stream_closed const &ev) {
     EventLifetime lifetime{*this};
+    const bool    held = _active_requests.find(ev.id) != _active_requests.end();
     on_http3_stream_closed(ev.id, ev.error_code);
     // nghttp3 frees a stream only when told, and the request, the response and the body copy kept
     // beside it go with it: until 3.2 nobody told it, and a long-lived connection kept every
@@ -1708,6 +1720,14 @@ Client::dispatch(qb::io::async::quic::event::stream_closed const &ev) {
     // on_http3_stream_closed(), which by then finds the request already settled.
     if (_h3) {
         _h3->close_stream(ev.id, ev.error_code);
+    }
+    if (held) {
+        // A request this close failed -- a stream the server reset or closed, a response past the client's body limit
+        // -- frees a stream: what waited for it is submitted now, as after a response. There was no pass, and under a
+        // stream limit of 1 the request behind heard its own 408 without having been sent. The client's own resets take
+        // their request out of the registry first -- a cancellation, a timeout, what a push that throws takes back
+        // (withdraw()) -- and find nothing here (Huly QB-1246).
+        process_pending_requests();
     }
 }
 

@@ -3909,8 +3909,9 @@ TEST_F(Http3LoopbackTest, ABatchMemberRefusedBeforeACloseKeepsItsOwnAnswerAndIsC
     }
     EXPECT_EQ(batch_calls, 1);
     ASSERT_EQ(heard.size(), 2u);
-    EXPECT_EQ(heard[0].status(), qb::http::status::SERVICE_UNAVAILABLE);
-    EXPECT_EQ(heard[0].body().as<std::string>(), "Failed to submit HTTP/3 request")
+    EXPECT_EQ(heard[0].status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(heard[0].body().as<std::string>(), "HTTP/3 request trailer field `content-length` cannot be sent: a trailer section must not "
+                                                 "carry it (framing, connection, routing, proxy authentication)")
         << "the member refused before the close lost its own answer";
     EXPECT_EQ(heard[1].body().as<std::string>(), "HTTP/3 client disconnect");
     const auto [total, served, failed] = client->get_stats();
@@ -4161,11 +4162,15 @@ pattern(std::size_t const size, unsigned const salt) {
     return out;
 }
 
-/// A request the engine refuses where it is submitted, with no exception: a trailer section may not carry content-length.
+/// A request the engine refuses where it is submitted, with no exception, a stream opened and reset for it: more regular
+/// fields than qb::http::protocol_limits::MAX_HEADERS_COUNT, a bound HTTP/1.1 does not hold, 503. It was a trailer field
+/// a trailer section must not carry, now refused for its field, 400, before a stream is opened (Huly QB-1246).
 inline qb::http::Request
 unsendable() {
     qb::http::Request request{qb::io::uri("/ok")};
-    request.trailers().set_header("content-length", "3");
+    for (std::size_t i = 0; i <= qb::http::protocol_limits::MAX_HEADERS_COUNT; ++i) {
+        request.set_header("x-n" + std::to_string(i), "1");
+    }
     return request;
 }
 
@@ -4578,7 +4583,8 @@ TEST_F(Http3LoopbackTest, AnAnsweredRequestLeavesNoTimerArmed) {
         refused.trailers().set_header("content-length", "7");
         refused.body() = "payload";
         client->push_request(std::move(refused), [&](qb::http::Response response) {
-            EXPECT_EQ(response.body().as<std::string>(), "Failed to submit HTTP/3 request");
+            EXPECT_EQ(response.body().as<std::string>(), "HTTP/3 request trailer field `content-length` cannot be sent: a trailer section must "
+                                                         "not carry it (framing, connection, routing, proxy authentication)");
             at_the_refusal = watchers();
         });
         const auto armed = watchers(); // the two requests have their timers
@@ -5130,14 +5136,16 @@ TEST_F(Http3LoopbackTest, FailedSubmitCallbackMayDisconnectAndQueueAnotherReques
     int                failed_calls = 0, good_calls = 0;
     qb::http::Response good_response;
     qb::http::Request  invalid{qb::http::method::POST, qb::io::uri("/forbidden-trailer")};
-    // A trailer field no trailer section may carry: the submission is refused (Huly QB-1073). An
-    // announced field the request does not set -- what this test used -- is sent now, as HTTP/1.1 and
-    // HTTP/2 send it: an empty trailer section.
+    // A trailer field no trailer section may carry: the submission is refused (Huly QB-1073), 400, the reason naming the
+    // field, as HTTP/1.1 refuses it (Huly QB-1246: 503). An announced field the request does not set -- what this test
+    // used -- is sent now, as HTTP/1.1 and HTTP/2 send it: an empty trailer section.
     invalid.trailers().set_header("content-length", "7");
     invalid.body() = "payload";
     EXPECT_NO_THROW(client->push_request(std::move(invalid), [&](qb::http::Response response) {
         ++failed_calls;
-        EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+        EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+        EXPECT_EQ(response.body().as<std::string>(), "HTTP/3 request trailer field `content-length` cannot be sent: a trailer section must not "
+                                                     "carry it (framing, connection, routing, proxy authentication)");
         client->disconnect();
         ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/good")}, [&](qb::http::Response good) {
             ++good_calls;
@@ -5584,15 +5592,18 @@ TEST_F(Http3LoopbackTest, ClientRejectsForbiddenOutgoingRequestTrailer) {
     auto client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
 
-    // A field of trailers() a trailer section must not carry refuses the request (Huly QB-1073). An
-    // announced one (`trailer: content-length`) stays in the header section, as on HTTP/1.1 and HTTP/2.
+    // A field of trailers() a trailer section must not carry refuses the request (Huly QB-1073), 400, the reason naming
+    // the field, as HTTP/1.1 refuses it (Huly QB-1246: 503). An announced one (`trailer: content-length`) stays in the
+    // header section, as on HTTP/1.1 and HTTP/2.
     qb::http::Request request{qb::http::method::POST, qb::io::uri("/forbidden-trailer")};
     request.trailers().set_header("content-length", "7");
     request.body() = "payload";
 
     auto response = qb::http::run_sync(client->push_request(std::move(request)));
 
-    EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+    EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
+    EXPECT_EQ(response.body().as<std::string>(), "HTTP/3 request trailer field `content-length` cannot be sent: a trailer section must not "
+                                                 "carry it (framing, connection, routing, proxy authentication)");
     EXPECT_EQ(server_requests.load(), 0);
 
     client->disconnect();
@@ -8474,19 +8485,54 @@ TEST_F(Http3LoopbackTest, ACancellationWhoseCallbackThrowsStillResetsItsStreamAn
 // ---- A request field that cannot be sent refuses its request, the same way on the three clients (Huly QB-1191) ----
 
 namespace http3_client_fields_test {
-/// Requests that carry a field HTTP/1.1 cannot write: LF, NUL and CR in a value, SP in a name, CR in a cookie, LF in a
-/// trailer field.
+/// Requests that carry a field HTTP/1.1 cannot write: LF, NUL, CR, DEL and 0x01 in a value, SP, DEL and 0x01 in a name,
+/// CR in a cookie, LF in a trailer field, and a trailer field a trailer section must not carry. @p shown is the name as
+/// the reason prints it, when it is not the name; @p says what the reason says of the fault.
 struct UnsendableField {
     std::string_view what;
     std::string      name;
     std::string      value;
     bool             trailer;
+    std::string_view shown = {};
+    std::string_view says  = {};
 };
 inline const UnsendableField k_unsendable_fields[] = {
-    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
-    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
-    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"LF in a value", "x-probe", "a\nb", false},
+    {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},
+    {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false},
+    {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"DEL in a value",
+     "x-probe",
+     "a\x7f"
+     "b",
+     false,
+     {},
+     "its value carries DEL"},
+    {"0x01 in a value",
+     "x-probe",
+     "a\x01"
+     "b",
+     false,
+     {},
+     "its value carries \\x01"},
+    {"DEL in a name",
+     "x\x7f"
+     "probe",
+     "v", false, "xDELprobe", "its name carries DEL"},
+    {"0x01 in a name",
+     "x\x01"
+     "probe",
+     "v", false, "x\\x01probe", "its name carries \\x01"},
+    {"a trailer field a trailer section must not carry", "content-length", "1", true, {}, "a trailer section must not carry it"},
 };
+
+/// The name as the reason prints it, between backquotes.
+inline std::string
+named(const UnsendableField &field) {
+    return "`" + (field.shown.empty() ? field.name : std::string(field.shown)) + "`";
+}
 
 inline qb::http::Request
 carrying(const UnsendableField &field) {
@@ -8533,8 +8579,9 @@ TEST_F(Http3LoopbackTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndTheCo
                              [&](qb::http::Response response) { behind += response.status() == qb::http::status::OK ? 1 : 0; });
         EXPECT_TRUE(pump([&] { return refused == 1 && behind == 1; }, 3s));
         EXPECT_EQ(status, qb::http::status::BAD_REQUEST) << body;
-        EXPECT_NE(body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << body;
+        EXPECT_NE(body.find(named(field)), std::string::npos) << "the refusal does not name the field: " << body;
         EXPECT_NE(body.find("cannot be sent"), std::string::npos) << body;
+        EXPECT_NE(body.find(field.says), std::string::npos) << body;
         for (const auto until = std::chrono::steady_clock::now() + 100ms; std::chrono::steady_clock::now() < until;)
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
         EXPECT_EQ(stalled, 0) << "the request refused reached the server";
@@ -8591,6 +8638,107 @@ TEST_F(Http3LoopbackTest, AValueLeavesWithoutTheWhitespaceAtItsEdgesAndAConnecti
     EXPECT_EQ(hop, "x-edge=absent x-blank=absent x-inside=absent connection=absent te=absent x-kept=[1] x-sum=absent");
     EXPECT_EQ(trailed, "x-edge=absent x-blank=absent x-inside=absent connection=absent te=absent x-kept=absent x-sum=[v]");
     EXPECT_TRUE(client->is_connected());
+    client->disconnect();
+    server->close();
+}
+
+// A request that a stream error ends frees its stream, and what waited for it is submitted at once, as after a response
+// (Huly QB-1246). One stream allowed; A, then B behind it. A ends by a stream error: a body past the client's limit of
+// 1 KiB, which the client resets (H3_REQUEST_CANCELLED), and a stream the server resets. B is answered 200 at once. No
+// pass ran there: B waited for the next push or response, and heard its own 408 at its deadline. The control: A's body
+// within the limit.
+TEST_F(Http3LoopbackTest, WhatWaitsForTheStreamAStreamErrorFreesIsSubmittedAtOnce) {
+    struct Shape {
+        std::string_view what;
+        const char      *first;
+        qb::http::status first_status;
+    };
+    const Shape shapes[] = {
+        {"a body past the limit", "/body/4096", qb::http::status::BAD_GATEWAY},
+        {"a stream the server resets", "/cancel", qb::http::status::BAD_GATEWAY},
+        {"the control: a body within the limit", "/body/512", qb::http::status::OK},
+    };
+    for (const auto &shape : shapes) {
+        SCOPED_TRACE(shape.what);
+        int              a = 0, b = 0; // before the client: its callbacks count here
+        qb::http::status a_status = qb::http::status::OK, b_status = qb::http::status::OK;
+        std::string      b_body;
+        const auto       port   = next_port();
+        auto             server = qb::http3::make_server();
+        server->router().get("/body/:n", [](auto ctx) { ctx->text(std::string(std::stoul(std::string(ctx->path_param("n"))), 'b')); });
+        server->router().get("/cancel", [](auto ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream();
+            (void) stream->write("never whole");
+            ctx->cancel("reset by the test");
+        });
+        server->router().get("/small", [](auto ctx) { ctx->text("small"); });
+        server->router().compile();
+        ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+        auto client = qb::http3::make_client(https_origin(port));
+        client->set_verify_peer(false);
+        client->set_auto_reconnect(false);
+        client->set_max_concurrent_streams(1);
+        client->set_max_body_size(1024);
+        client->set_request_timeout(3s);
+        ASSERT_TRUE(client->connect(nullptr));
+        ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+        client->push_request(qb::http::Request{qb::io::uri(shape.first)}, [&](qb::http::Response response) {
+            ++a;
+            a_status = response.status();
+        });
+        client->push_request(qb::http::Request{qb::io::uri("/small")}, [&](qb::http::Response response) {
+            ++b;
+            b_status = response.status();
+            b_body   = response.body().as<std::string>();
+        });
+        ASSERT_EQ(client->get_active_request_count(), 1u) << "B did not wait for A's stream: the case proves nothing";
+        EXPECT_TRUE(pump([&] { return a == 1 && b == 1; }, 2s)) << "B was not submitted once A's stream was free";
+        EXPECT_EQ(a_status, shape.first_status);
+        EXPECT_EQ(b_status, qb::http::status::OK) << b_body;
+        EXPECT_EQ(b_body, "small");
+        client->disconnect();
+        server->close();
+        EXPECT_EQ(a + b, 2);
+    }
+}
+
+// A 304 that declares the length its representation would have (RFC 9110 section 8.6) is answered 304 whatever the
+// client's body limit: the HTTP/3 client judges what DATA brings, and a 304 brings none. The HTTP/2 client refused it
+// 502, by its content-length (Huly QB-1246). The control: a 200 whose body passes the limit, 502.
+TEST_F(Http3LoopbackTest, ANotModifiedThatDeclaresALengthPastTheBodyLimitIsAnswered304) {
+    int              answered     = 0; // before the client: its callbacks count here
+    qb::http::status not_modified = qb::http::status::OK, past = qb::http::status::OK;
+    std::string      length;
+    const auto       port   = next_port();
+    auto             server = qb::http3::make_server();
+    server->router().get("/not-modified", [](auto ctx) {
+        ctx->response().status() = qb::http::status::NOT_MODIFIED;
+        ctx->response().set_header("content-length", "4096");
+        ctx->complete();
+    });
+    server->router().get("/past", [](auto ctx) { ctx->text(std::string(4096, 'p')); });
+    server->router().compile();
+    ASSERT_TRUE(server->listen(qb::io::uri(https_origin(port)), cert_path(), key_path()));
+    auto client = qb::http3::make_client(https_origin(port));
+    client->set_verify_peer(false);
+    client->set_auto_reconnect(false);
+    client->set_max_body_size(1024);
+    ASSERT_TRUE(client->connect(nullptr));
+    ASSERT_TRUE(pump([&] { return client->is_connected(); }));
+    client->push_request(qb::http::Request{qb::io::uri("/not-modified")}, [&](qb::http::Response response) {
+        ++answered;
+        not_modified = response.status();
+        length       = std::string(response.header("content-length"));
+    });
+    client->push_request(qb::http::Request{qb::io::uri("/past")}, [&](qb::http::Response response) {
+        ++answered;
+        past = response.status();
+    });
+    EXPECT_TRUE(pump([&] { return answered == 2; }, 3s));
+    EXPECT_EQ(not_modified, qb::http::status::NOT_MODIFIED);
+    EXPECT_EQ(length, "4096") << "the 304 declared no length: the case proves nothing";
+    EXPECT_EQ(past, qb::http::status::BAD_GATEWAY);
     client->disconnect();
     server->close();
 }

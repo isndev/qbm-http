@@ -349,14 +349,20 @@ All notable changes to the qbm-http module are documented here. The format is ba
   QB-1191's earlier policy, below under Fixed, made HTTP/3 drop it too, and dropped a value with SP or HTAB at its
   edges on both. The rule is now one, HTTP/1.1's, applied where each client already reads
   the fields, and nowhere else:
-  - **A field HTTP/1.1 cannot write** -- by `qb::http::detail::sendable_field_name()` and `sendable_field_value()`,
-    the serializer's own predicates, which the three clients share (a name past `MAX_HEADER_NAME_LENGTH`, a value past
-    `MAX_HEADER_VALUE_LENGTH`, included) -- **refuses the request**, in its header section or its `trailers()`:
-    `400`, "HTTP/2 request header field `x-probe` cannot be sent: its value carries LF" (`qb::http::detail::
-    unsendable_field()`), an answer the client gives by itself, through its one queue. Nothing of the request is
-    written -- on HTTP/2 nothing is encoded, and no stream identifier is spent; on HTTP/3 no stream is opened, and
-    nghttp3 never sees it --; the connection stays, and the other requests are served. Any other refusal of a request
-    is still `503`.
+  - **A field HTTP/1.1 cannot write** -- by `qb::http::detail::sendable_field_name()` and `sendable_field_value()`, the
+    serializer's own predicates, which the three clients share (a name past `MAX_HEADER_NAME_LENGTH`, a value past
+    `MAX_HEADER_VALUE_LENGTH`, included) -- **refuses the request**, in its header section or its `trailers()`: `400`,
+    "HTTP/2 request header field `x-probe` cannot be sent: its value carries LF"
+    (`qb::http::detail::unsendable_field()`), an answer the client gives by itself, through its one queue. Nothing of
+    the request is written -- on HTTP/2 nothing is encoded, and no stream identifier is spent; on HTTP/3 no stream is
+    opened, and nghttp3 never sees it --; the connection stays, and the other requests are served. So does a field of
+    `trailers()` that a trailer section must not carry (`content-length`, `host`, `te`, the list of
+    `qb::http::detail::is_forbidden_trailer_field()`): `400`, "... request trailer field `content-length` cannot be
+    sent: a trailer section must not carry it ..." (`qb::http::detail::forbidden_trailer_field_reason()`) -- `503` on
+    HTTP/2 and HTTP/3, `400` naming no field on HTTP/1.1, until now. A request's `trailers()` are sent, and judged,
+    only with chunked framing on HTTP/1.1 -- a request with a `content-length`, or with no body, sends none of them,
+    and no field of them refuses it, as Go's `http.Request` sends its `Trailer` only chunked --, and always on HTTP/2
+    and HTTP/3. Any other refusal of a request is still `503`.
   - **A connection-specific field is still dropped**, as a translating intermediary must (RFC 9113 §8.2.2, RFC 9114
     §4.2): `connection` and the fields it names, `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`,
     `http2-settings`, a `te` other than `trailers`, `host` (folded into `:authority`), `content-length` (written from
@@ -368,7 +374,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the HTTP/3 adapter builds a request's sections with `prepare_request()` before a stream is opened for it, and
   submits them with `submit_prepared()` (`submit_request()` is the two). The field loop reads each name and each value
   once, as before, with the predicate that refuses it; the trim reads a value's edges and copies nothing more than
-  before. The server's fields, and the promised request of a `PUSH_PROMISE`, are unchanged.
+  before. The server's fields, and the promised request of a `PUSH_PROMISE`, are judged as before; the HTTP/1.1
+  `Response` serializer refuses the same bytes by the same two predicates, in place of a copy of its own, and its
+  reason names the field ("qb::http::Response serialization: response header field `x-a` cannot be sent: ...") --
+  it said "header name exceeds MAX_HEADER_NAME_LENGTH" or "header value exceeds MAX_HEADER_VALUE_LENGTH", whatever
+  the fault.
   Witnesses, each red on the base of this change but the pins: on the three clients a value with LF, with NUL, with
   CR, a name with SP, a `cookie` with CR, and a trailer with LF each refuse their request `400`, the reason naming
   the field, the connection kept and the request behind it served; a raw HTTP/2 peer reads one HEADERS, the request
@@ -1334,9 +1344,12 @@ All notable changes to the qbm-http module are documented here. The format is ba
   by the old connection's pass, and its stream reset. A case: two requests time out in one pass, and the first `408`'s
   callback reconnects and pushes two more -- neither is answered, and no stream of the new connection is reset (red on
   the code before). The other passes that take first and answer later were read: GOAWAY's and the closes' own what they
-  answer; `withdraw()` runs none of the program's callbacks between one reset and the next; the timeouts of the queue
-  are a prefix of it, so every `408` callback runs before anything is set aside; the HTTP/3 client times each request
-  by its own number.
+  answer; `withdraw()` runs none of the program's callbacks between one reset and the next; the HTTP/3 client times
+  each request by its own number. The queue's requests that timed out are now set aside before any `408` callback
+  runs: the pass took them after the requests in flight, and a callback of one of those that pushed while connected
+  ran a pass that sent them too -- a request that had timed out already, on a stream of its own, reset and answered
+  `408` at the next tick. A case: one stream in flight and one queued time out together, and the first `408`'s
+  callback pushes -- the server sees two requests, never the queued one, which hears one `408`.
   Mutants: 3 planted, 1 caught -- the pass taking stream numbers again. The connection check dropped survives,
   equivalent today: every end of a connection takes its requests out of the registry, and a request sent again takes a
   new number. The reset's guard without the connection's flag survives as before: a callback's close ends the pass
@@ -1346,6 +1359,32 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the protocol telling the handler of a reset it was asked to keep quiet. The survivor drops the connection's flag
   from the guard of the reset, which every close clears with the protocol: the same guard. The 27 mutants of the
   HTTP/2 client planted again on that tree: 26 caught, the same one surviving.
+
+- **A request that a stream error ends frees its stream for what waits (HTTP/2, HTTP/3; Huly QB-1246).** A request of
+  `qb::http2::Client` or `qb::http3::Client` that a stream error ended -- the server's `RST_STREAM`, or a reset the
+  client writes for what the server sent: a body past the client's limit, declared or delivered, a body that
+  contradicts its `content-length`, a malformed head; on HTTP/3 a stream the server resets or closes, a body past the
+  limit -- was answered `502`, and nothing else ran: what waited for the stream it freed waited for the next push or
+  response. Under `set_max_concurrent_streams(1)`, the client used as a serial queue, once the request in flight had
+  ended that way the one behind heard its own `408` at its deadline, "Request timeout while pending", without having
+  been sent. The error the loop brings now runs the pass a response runs -- as Go's `x/net/http2` wakes what waits at
+  the end of every stream, whatever ended it --, its answer given as every answer the loop brings, behind what is owed.
+  The client's own resets -- a push that throws, a timeout -- answer their request themselves and run their own pass.
+  Witnesses, one stream allowed: on HTTP/2 a body past the limit, declared and then delivered, and a stream the server
+  resets, each followed by a request answered `200` at once; on HTTP/3 a body past the limit, likewise; the control, a
+  body within the limit.
+
+- **An HTTP/2 `304` that declares the representation's length past the client's body limit is answered `304` (Huly
+  QB-1246).** `qb::http2::Client` judged a response's `content-length` against its body limit (`set_max_body_size()`,
+  `qb::http::protocol_limits::MAX_BODY_SIZE` by default) where it read the field, before `:status` was known, and
+  reset the stream: `502`, "HTTP/2 response body exceeds the client's limit of ... bytes". A `304` may carry the
+  length the selected representation would have (RFC 9110 section 8.6), and no content follows it: a conditional
+  `GET` of a representation past the limit failed where it was not modified, and was answered `304` by the HTTP/1.1
+  client. The length is judged once `:status` is known, with the exemption the client applies to a response's
+  `content-length` already -- a `1xx`, a `204`, a `304` and a response to `HEAD` frame no content --, as HTTP/1.1
+  reads such a length as 0, and nghttp2 does. The HTTP/3 client judges what its DATA brings, and answers it `304`
+  too. Witnesses: a `304` declaring a length past the limit is answered `304` on HTTP/2 and on HTTP/3; the control, a
+  `200` declaring the same, `502`.
 
 - **An HTTP/3 submission that an exception cuts short gives its request one outcome and ends the connection (Huly
   QB-1246).** `qb::http3::Client` takes a request out of its queue, opens a stream and submits it. An exception out of
@@ -1361,7 +1400,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   Nothing in the client knows whether the transport took the bytes, so the connection is not kept, as nghttp3 itself
   treats the failure of a callback. Measured with the connection kept, against a server that advertises a table of
   4096 octets: after one submission cut short, 26 of the next 30 requests failed, "HTTP/3 protocol read error (514)",
-  H3_QPACK_ENCODER_STREAM_ERROR; none read a wrong value. A qb server advertises no table.
+  H3_QPACK_ENCODER_STREAM_ERROR; none read a wrong value. A qb server advertises no table. What fails while the
+  request's sections are built -- an allocation in `prepare_request()`, before its stream is opened -- writes nothing
+  and touches no encoder: that request is refused `503`, "Failed to submit HTTP/3 request", and the connection serves
+  on (it was taken for a submission cut short, and ended the connection).
   A request has exactly one outcome, by the rule of Asio's `async_initiate`: an initiating call that throws never
   invokes its completion handler. Thrown inside the program's own call for that request -- `push_request()`,
   `push_requests()`, the `co_await` of either --, the exception is that outcome: what the call pushed is taken back

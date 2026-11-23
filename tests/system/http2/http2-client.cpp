@@ -7744,7 +7744,7 @@ TEST_F(Http2ClientTest, ARunSyncOfACoroutinePushFromACallbackTheClientsTurnHears
 // ---- What a callback throws, and a connect() asked while a transport closes (Huly QB-1246) ----
 
 /// A request the protocol refuses where it is sent, with no frame and no GOAWAY: a trailer section may not carry
-/// content-length. 503 "Failed to send HTTP/2 request".
+/// content-length. 400, the reason naming the field (503 "Failed to send HTTP/2 request" until Huly QB-1246).
 inline qb::http::Request
 unsendable() {
     auto request = reconnect::get_test();
@@ -7773,7 +7773,7 @@ TEST_F(Http2ClientTest, ACallbackThatThrowsUnderAnotherPushLeavesThatPushOneOutc
         ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
         ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response response) {
             ++b;
-            EXPECT_EQ(response.status(), qb::http::status::SERVICE_UNAVAILABLE);
+            EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST);
             throw std::runtime_error("the callback of the request that waited throws");
         }));
         ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
@@ -9094,7 +9094,7 @@ TEST_F(Http2ClientTest, WhatAPushTakesBackIsNamedByItsNumberAndNothingElseIsTake
         settle(300ms); // the client's turn
         EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
         EXPECT_EQ(p, 1) << "another request's answer was taken back with what the push pushed";
-        EXPECT_EQ(p_status, static_cast<int>(qb::http::status::SERVICE_UNAVAILABLE));
+        EXPECT_EQ(p_status, static_cast<int>(qb::http::status::BAD_REQUEST));
         client->disconnect();
         settle();
         EXPECT_EQ(r, 0);
@@ -9160,19 +9160,55 @@ TEST_F(Http2ClientTest, WhatAPushTakesBackIsTakenBackFromTheAnswersOfACloseMadeU
 
 // ---- A request field that cannot be sent refuses its request, the same way on the three clients (Huly QB-1191) ----
 
-/// Requests that carry a field HTTP/1.1 cannot write, and the name the refusal says: LF, NUL and CR in a value, SP in a
-/// name, CR in a cookie, LF in a trailer field. Their target is a route the server counts and never answers.
+/// Requests that carry a field HTTP/1.1 cannot write, and the name the refusal says: LF, NUL, CR, DEL and 0x01 in a
+/// value, SP, DEL and 0x01 in a name, CR in a cookie, LF in a trailer field, and a trailer field a trailer section must
+/// not carry. Their target is a route the server counts and never answers. @p shown is the name as the reason prints
+/// it, when it is not the name; @p says what the reason says of the fault.
 struct UnsendableField {
     std::string_view what;
     std::string      name;
     std::string      value;
     bool             trailer;
+    std::string_view shown = {};
+    std::string_view says  = {};
 };
 inline const UnsendableField k_unsendable_fields[] = {
-    {"LF in a value", "x-probe", "a\nb", false},        {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
-    {"CR in a value", "x-probe", "a\rb", false},        {"SP in a name", "x probe", "v", false},
-    {"CR in a cookie", "cookie", "session=1\r", false}, {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"LF in a value", "x-probe", "a\nb", false},
+    {"NUL in a value", "x-probe", std::string("a\0b", 3), false},
+    {"CR in a value", "x-probe", "a\rb", false},
+    {"SP in a name", "x probe", "v", false},
+    {"CR in a cookie", "cookie", "session=1\r", false},
+    {"LF in a trailer field", "x-sum", "a\nb", true},
+    {"DEL in a value",
+     "x-probe",
+     "a\x7f"
+     "b",
+     false,
+     {},
+     "its value carries DEL"},
+    {"0x01 in a value",
+     "x-probe",
+     "a\x01"
+     "b",
+     false,
+     {},
+     "its value carries \\x01"},
+    {"DEL in a name",
+     "x\x7f"
+     "probe",
+     "v", false, "xDELprobe", "its name carries DEL"},
+    {"0x01 in a name",
+     "x\x01"
+     "probe",
+     "v", false, "x\\x01probe", "its name carries \\x01"},
+    {"a trailer field a trailer section must not carry", "content-length", "1", true, {}, "a trailer section must not carry it"},
 };
+
+/// The name as the reason prints it, between backquotes.
+inline std::string
+named(const UnsendableField &field) {
+    return "`" + (field.shown.empty() ? field.name : std::string(field.shown)) + "`";
+}
 
 /// A request to @p target carrying @p field.
 inline qb::http::Request
@@ -9207,8 +9243,9 @@ TEST_F(Http2ClientTest, ARequestFieldThatCannotBeSentRefusesItsRequestAndTheConn
         ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(behind)));
         EXPECT_TRUE(loop_until([&] { return refused.count != 0 && behind.count != 0; }, 3s));
         EXPECT_EQ(refused.status, qb::http::status::BAD_REQUEST) << refused.body;
-        EXPECT_NE(refused.body.find("`" + field.name + "`"), std::string::npos) << "the refusal does not name the field: " << refused.body;
+        EXPECT_NE(refused.body.find(named(field)), std::string::npos) << "the refusal does not name the field: " << refused.body;
         EXPECT_NE(refused.body.find("cannot be sent"), std::string::npos) << refused.body;
+        EXPECT_NE(refused.body.find(field.says), std::string::npos) << refused.body;
         EXPECT_EQ(behind.status, qb::http::status::OK) << behind.body;
         settle(100ms);
         EXPECT_EQ(_server->server().hang_routed(), routed) << "the request refused reached the server";
@@ -9357,6 +9394,184 @@ TEST_F(Http2ClientTest, TheTimeoutsOfAConnectionAreNeverAnsweredOnTheNextOne) {
     client->disconnect();
     settle();
     EXPECT_EQ(c.count + d.count, 2);
+}
+
+// ---- The queue's timeouts are set aside before a 408 callback runs (Huly QB-1246) ----
+
+// One stream allowed: A in flight and B queued behind it are both past their deadline when the timer's pass runs (the
+// thread sleeps past them), and A's 408 callback pushes C. The pass took the queue's timeouts after the requests in
+// flight: the pass C's push ran sent B -- a request that had timed out already -- on the stream A freed, where it was
+// reset and answered 408 at the next tick, C waiting for it. B is never sent and hears one 408, "Request timeout while
+// pending"; C is sent on A's stream.
+TEST_F(Http2ClientTest, AQueuedRequestThatTimedOutIsNeverSentFromA408CallbackOfThePass) {
+    Answer b, c; // before the client, which answers what it still holds when it is destroyed
+    int    a      = 0;
+    bool   up     = false;
+    auto   client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_max_concurrent_streams(1);
+    client->set_request_timeout(300ms);
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    const auto routed = _server->server().hang_routed();
+    ASSERT_TRUE(client->push_request(hang(), [&](qb::http::Response response) {
+        ++a;
+        if (response.status() == qb::http::status::REQUEST_TIMEOUT) {
+            (void) client->push_request(reconnect::get_test(), std::ref(c));
+        }
+    }));
+    ASSERT_TRUE(client->push_request(hang(), std::ref(b)));
+    ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == routed + 1; }));
+    ASSERT_EQ(client->get_active_request_count(), 1u) << "B did not wait for A's stream: the case proves nothing";
+    std::this_thread::sleep_for(400ms); // the timer's pass comes late: A and B are past their deadline when it runs
+    EXPECT_TRUE(loop_until([&] { return a == 1 && b.count == 1 && c.count == 1; }, 3s));
+    settle(300ms);
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(b.count, 1);
+    EXPECT_EQ(b.status, qb::http::status::REQUEST_TIMEOUT) << b.body;
+    EXPECT_EQ(b.body, "Request timeout while pending") << "B was sent, though it had timed out already";
+    EXPECT_EQ(c.status, qb::http::status::OK) << c.body;
+    EXPECT_EQ(_server->server().hang_routed(), routed + 1) << "the queued request that had timed out reached the server";
+    client->disconnect();
+    settle();
+}
+
+// ---- What waits for a stream a stream error frees is sent; a 304 is never refused for its length (Huly QB-1246) ----
+
+class LimitServer;
+class LimitSession : public qb::http2::use<LimitSession>::session<LimitServer> {
+public:
+    explicit LimitSession(LimitServer &server)
+        : session(server) {}
+};
+using LimitContext = qb::http::Context<LimitSession>;
+
+/// A body of n octets declared by its content-length (/declared/n) or delivered without one (/streamed/n), a stream the
+/// server resets (/reset), a 304 that declares the representation's length (/not-modified/n), and /small.
+class LimitServer : public qb::http2::use<LimitServer>::server<LimitSession> {
+public:
+    LimitServer() {
+        router().get("/declared/:n", [](std::shared_ptr<LimitContext> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            ctx->response().body()   = std::string(std::stoul(std::string(ctx->path_param("n"))), 'd');
+            ctx->complete();
+        });
+        router().get("/streamed/:n", [](std::shared_ptr<LimitContext> ctx) {
+            ctx->response().status() = qb::http::status::OK;
+            auto stream              = ctx->begin_stream(); // no content-length: its DATA frames are the body
+            (void) stream->write(std::string(std::stoul(std::string(ctx->path_param("n"))), 's'));
+            stream->end();
+        });
+        router().get("/reset", [](std::shared_ptr<LimitContext> ctx) {
+            if (auto session = ctx->session()) {
+                (void) session->reset_stream(static_cast<uint32_t>(ctx->request().stream_id), qb::protocol::http2::ErrorCode::CANCEL,
+                                             "reset by the test");
+            }
+        });
+        router().get("/not-modified/:n", [](std::shared_ptr<LimitContext> ctx) {
+            ctx->response().status() = qb::http::status::NOT_MODIFIED;
+            ctx->response().set_header("content-length", std::string(ctx->path_param("n")));
+            ctx->complete();
+        });
+        router().get("/small", [](std::shared_ptr<LimitContext> ctx) { ctx->text("small"); });
+        router().compile();
+    }
+};
+
+using LimitThread = qb::http::test::ServerThread<LimitServer>;
+
+inline std::unique_ptr<LimitThread>
+start_limit_server() {
+    const std::string cert = qb::http::test::ssl_cert_path().string(), key = qb::http::test::ssl_key_path().string();
+    return std::make_unique<LimitThread>([cert, key](LimitServer &srv) -> bool {
+        srv.transport().init(qb::io::ssl::Context::server(cert, key).alpn({"h2"}));
+        if (srv.transport().listen_v4(0, "127.0.0.1") != 0) {
+            return false;
+        }
+        srv.start();
+        return true;
+    });
+}
+
+inline qb::http::Request
+get_of(const std::string &target) {
+    qb::http::Request request;
+    request.method() = qb::http::Method::GET;
+    request.uri()    = qb::io::uri(target);
+    return request;
+}
+
+// A request that a stream error ends frees its stream, and what waited for it is sent at once, as after a response. One
+// stream allowed; A, then B behind it. A ends by a stream error: a body past the client's limit of 1 KiB, declared by
+// its content-length and then delivered without one, which the client resets (ENHANCE_YOUR_CALM), and a stream the
+// server resets. B is answered 200 at once. No pass ran there: B waited for the next push or response, and heard its own
+// 408, "Request timeout while pending", at its deadline. The control: A's body within the limit.
+TEST_F(Http2ClientTest, WhatWaitsForTheStreamAStreamErrorFreesIsSentAtOnce) {
+    struct Shape {
+        std::string_view what;
+        const char      *first;
+        qb::http::status first_status;
+    };
+    const Shape shapes[] = {
+        {"a body declared past the limit", "/declared/4096", qb::http::status::BAD_GATEWAY},
+        {"a body delivered past the limit", "/streamed/4096", qb::http::status::BAD_GATEWAY},
+        {"a stream the server resets", "/reset", qb::http::status::BAD_GATEWAY},
+        {"the control: a body within the limit", "/declared/512", qb::http::status::OK},
+    };
+    const auto server = start_limit_server();
+    ASSERT_TRUE(server->ready());
+    for (const auto &shape : shapes) {
+        SCOPED_TRACE(shape.what);
+        Answer a, b; // before the client, which answers what it still holds when it is destroyed
+        bool   up     = false;
+        auto   client = reconnect::make_client_for(server->port());
+        client->set_auto_reconnect(false);
+        client->set_max_concurrent_streams(1);
+        client->set_max_body_size(1024);
+        client->set_request_timeout(3s);
+        client->connect([&](bool ok, const std::string &) { up = ok; });
+        ASSERT_TRUE(loop_until([&] { return up; }));
+        ASSERT_TRUE(client->push_request(get_of(shape.first), std::ref(a)));
+        ASSERT_TRUE(client->push_request(get_of("/small"), std::ref(b)));
+        ASSERT_EQ(client->get_active_request_count(), 1u) << "B did not wait for A's stream: the case proves nothing";
+        EXPECT_TRUE(loop_until([&] { return a.count != 0 && b.count != 0; }, 2s)) << "B was not sent once A's stream was free";
+        EXPECT_EQ(a.status, shape.first_status) << a.body;
+        EXPECT_EQ(b.status, qb::http::status::OK) << b.body;
+        EXPECT_EQ(b.body, "small");
+        client->disconnect();
+        settle();
+        EXPECT_EQ(a.count + b.count, 2);
+    }
+}
+
+// A 304 may declare the length its representation would have (RFC 9110 section 8.6), and no content follows it: the
+// client's body limit never refuses it, nor a 1xx, a 204 or a response to HEAD -- the exemption the client applies to a
+// response's content-length; HTTP/1.1 reads such a length as 0. Judged where the field was read, before :status was
+// known, a 304 that declared 4 KiB under a limit of 1 KiB failed 502. The control: a 200 that declares the same, 502.
+TEST_F(Http2ClientTest, ANotModifiedThatDeclaresALengthPastTheBodyLimitIsAnswered304) {
+    const auto server = start_limit_server();
+    ASSERT_TRUE(server->ready());
+    Answer      not_modified, declared; // before the client, which answers what it still holds when it is destroyed
+    std::string length;
+    bool        up     = false;
+    auto        client = reconnect::make_client_for(server->port());
+    client->set_auto_reconnect(false);
+    client->set_max_body_size(1024);
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(loop_until([&] { return up; }));
+    ASSERT_TRUE(client->push_request(get_of("/not-modified/4096"), [&](qb::http::Response response) {
+        length = std::string(response.header("content-length"));
+        not_modified(std::move(response));
+    }));
+    ASSERT_TRUE(client->push_request(get_of("/declared/4096"), std::ref(declared)));
+    EXPECT_TRUE(loop_until([&] { return not_modified.count != 0 && declared.count != 0; }, 3s));
+    EXPECT_EQ(not_modified.status, qb::http::status::NOT_MODIFIED) << not_modified.body;
+    EXPECT_EQ(length, "4096") << "the 304 declared no length: the case proves nothing";
+    EXPECT_EQ(declared.status, qb::http::status::BAD_GATEWAY) << declared.body;
+    EXPECT_NE(declared.body.find("exceeds the client's limit of 1024 bytes"), std::string::npos) << declared.body;
+    EXPECT_TRUE(client->is_connected()) << "a refused stream cost the connection";
+    client->disconnect();
+    settle();
 }
 
 #ifdef QB_WITH_LOGGING

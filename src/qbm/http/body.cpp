@@ -75,8 +75,7 @@ check_trailer_section(const Headers &trailers, const char *serializer) {
     };
     for (const auto &[name, values] : trailers.headers()) {
         if (is_forbidden_trailer_field(name)) {
-            refuse(": trailers() carries a field a trailer section must not (framing, connection, routing, proxy "
-                   "authentication).");
+            refuse(": " + forbidden_trailer_field_reason("trailer", name)); // named, as the two other clients name it
         }
         if (!sendable_field_name(name)) {
             refuse(": " + unsendable_field("trailer", name, nullptr));

@@ -635,6 +635,10 @@ prepare_trailed_header_block(std::vector<qb::protocol::hpack::HeaderField> &lead
                              std::string *field_refusal = nullptr) {
     const auto plan = qb::http::detail::plan_outgoing_trailers(message, message.has_trailers() ? &message.trailers() : nullptr);
     if (!plan.forbidden.empty()) {
+        if (clients_rule && field_refusal) {
+            // A client's request: 400, naming the field, as HTTP/1.1 refuses it. It was 503 (Huly QB-1246).
+            *field_refusal = qb::http::detail::forbidden_trailer_field_reason("request trailer", plan.forbidden);
+        }
         return "trailers() carries a field a trailer section must not (framing, connection, routing, proxy authentication)";
     }
     if (message.has_trailers()) {
