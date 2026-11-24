@@ -588,6 +588,13 @@ is_forbidden_trailer_field(std::string_view name) noexcept {
     return false;
 }
 
+QB_COLD std::string
+        forbidden_trailer_field_reason(const std::string_view section, const std::string_view name) {
+            // A name of the list above: printable as it is.
+            return std::string(section) + " field `" + std::string(name)
+                   + "` cannot be sent: a trailer section must not carry it (framing, connection, routing, proxy authentication)";
+        }
+
 std::vector<std::string>
 trailer_section_fields(const Headers &message) {
     std::vector<std::string> fields;

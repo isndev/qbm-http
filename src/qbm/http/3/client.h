@@ -68,6 +68,27 @@ struct ConnectResult {
     }
 };
 
+class Client;
+
+/**
+ * @brief The timer of one request's timeout, owned by the request (Huly QB-1246): it goes with the request's answer,
+ *        whatever gives it, so an answered request leaves no timer armed behind it. A request has one at most.
+ */
+class request_timer : public qb::io::async::with_timeout<request_timer> {
+    Client       &_client;
+    std::uint64_t _request_id;
+
+public:
+    /// @param after The request timeout, counted from the request's push: what is left of it.
+    request_timer(Client &client, std::uint64_t request_id, qb::duration after)
+        : qb::io::async::with_timeout<request_timer>(after)
+        , _client(client)
+        , _request_id(request_id) {}
+
+    /// The request timeout has passed: the request fails, `408`, if it is still queued or in flight.
+    void on(qb::io::async::event::timer const &) noexcept;
+};
+
 /**
  * @brief Internal bookkeeping for a single in-flight or queued request.
  */
@@ -75,9 +96,12 @@ struct RequestContext {
     qb::http::Request                     request;
     ResponseCallback                      callback;
     std::chrono::steady_clock::time_point created_at;
-    qb::http3::request_id                 request_id = 0;
-    std::uint64_t                         stream_id  = 0;
-    std::uint64_t                         batch_id   = 0;
+    qb::http3::request_id                 request_id  = 0; ///< Never used twice: what the request's timer looks it up by
+    std::uint64_t                         stream_id   = 0;
+    std::uint64_t                         batch_id    = 0;
+    std::size_t                           batch_index = 0;     ///< Its place in its batch; a member has no callback of its own
+    bool                                  timed       = false; ///< It has come to rest -- queued, or in flight -- and was timed there
+    std::optional<request_timer>          timer;               ///< Armed from there to its answer, when a request timeout is set
 };
 
 /**
@@ -92,6 +116,13 @@ struct BatchRequestContext {
     std::vector<bool>               completed;           ///< Per-request completion flags.
     std::size_t                     completed_count = 0; ///< Number of requests completed so far.
 };
+
+/**
+ * @brief Test seam: what no call of the public surface reaches -- the addresses a lookup returned and the time it
+ *        took, an attempt started with nothing left of the connect timeout, the count of attempts. Declared only; the
+ *        qbm-http test suite defines it, no production code names it.
+ */
+struct ClientTestPeer;
 
 /**
  * @brief Persistent single-origin HTTP/3 client over a QUIC connection.
@@ -112,6 +143,8 @@ class Client
     , public qb::io::async::quic::endpoint {
 public:
     using h3_connection = qb::protocol::http3::connection<Client>;
+    friend struct ClientTestPeer;
+    friend class request_timer;
 
 private:
     qb::io::uri   _base_uri;
@@ -122,7 +155,40 @@ private:
     bool          _h3_ready               = false;
     bool          _remote_shutdown        = false;
     bool          _closing_failed_attempt = false;
+    bool          _starting_attempt       = false; ///< The endpoint's connect() is on the stack: a close it delivers is the attempt's
+    bool          _attempt_ended_at_start = false; ///< It delivered one: this address could not start
+    std::size_t   _refused_at_start       = 0;     ///< The addresses of this connect() it did so for: the network refused them
+    bool          _destroying             = false; ///< The destructor runs: nothing is accepted, armed or connected (Huly QB-1246)
+    bool          _connect_after_close    = false; ///< A connect() asked while a close is deferred: started when it has completed
     std::uint64_t _connect_epoch          = 0;
+    // The addresses the host resolved to, and the next to dial: an attempt its address does not answer in its share of the
+    // connect timeout is closed, without a word, and the next address is dialled (Huly QB-1246). One deadline for all of it.
+    std::vector<qb::io::endpoint>         _connect_candidates;
+    std::size_t                           _connect_next    = 0;
+    std::uint64_t                         _connect_attempt = 0; ///< Counts the attempts: the one a share's timer was armed for
+    std::chrono::steady_clock::time_point _connect_deadline{};  ///< When the connect() under way gives up; zero with no timeout
+    std::chrono::steady_clock::time_point _connect_asked_at{};  ///< When a connect() held back was asked: its timeout counts from there
+    // The answers this client owes, in the order it came to owe them (Huly QB-1246). An answer the client gives by itself
+    // -- a refusal, a connect() on a connected client, an empty batch, a cancellation, a coroutine push completed at
+    // once -- is given inside the call only when no callback of this client is on the stack and nothing is owed; an
+    // answer the loop brings -- a response, a timeout, a failure, a close -- is given at once when nothing is owed.
+    // Otherwise it is kept here. What is kept is heard in two places only: the client's turn (a task in the loop's
+    // deferred queue, one a loop turn at most), and its destructor. So the order is total, and what a callback pushes
+    // is never answered inside that push.
+    /// One answer kept, and whose it is: the request (RequestContext::request_id) or the batch it answers, 0 for neither.
+    /// What a push takes back by when an exception leaves it (withdraw()).
+    struct Owed {
+        std::function<void()> answer;
+        std::uint64_t         request = 0;
+        std::uint64_t         batch   = 0;
+    };
+    std::deque<Owed> _owed;
+    std::uint64_t    _owed_heard      = 0;           ///< How many of them were heard: a turn hears those owed as it starts
+    bool             _turn_asked      = false;       ///< The client's turn is in the loop's queue
+    int              _callback_depth  = 0;           ///< Callbacks of this client on the stack
+    int              _destroy_answers = 0;           ///< Pushes the destructor's callbacks made, being answered inside themselves
+    struct CallbackScope;                            ///< Counts one callback while it runs
+    enum class from : bool { the_client, the_loop }; ///< Who gives an answer: the client by itself, or the loop that brings it
 
     // Reentrancy guard for HTTP/3 reads. nghttp3_conn_read_stream2 (driven from
     // dispatch(stream_data)) runs response callbacks that can synchronously fail the
@@ -131,8 +197,9 @@ private:
     // nghttp3_conn_del while the outer read is still on the stack (use-after-free), and fire
     // user callbacks reentrantly. While _read_depth > 0 the teardown is DEFERRED into
     // _deferred_close and executed once the outermost read returns.
-    int _read_depth   = 0;
-    int _submit_depth = 0;
+    int _read_depth        = 0;
+    int _submit_depth      = 0;
+    int _failure_callbacks = 0; ///< handle_connection_failure() runs its callbacks: the coroutine connect() answers at once
     // Empty value means explicit disconnect; a nonempty value is a transport failure.
     std::optional<std::string> _deferred_close;
 
@@ -151,6 +218,7 @@ private:
     bool                            _auto_reconnect         = true;
     bool                            _verify_peer            = true;
     std::vector<ConnectionCallback> _connection_callbacks;
+    std::vector<ConnectionCallback> _deferred_connects; ///< The callbacks of the connect() calls `_connect_after_close` holds
 
     std::uint64_t _total_requests      = 0;
     std::uint64_t _successful_requests = 0;
@@ -171,10 +239,12 @@ public:
     explicit Client(qb::io::uri const &uri);
     /**
      * @brief Destructor: fails all outstanding requests and tears down the connection.
-     * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and a
-     *          `connect()` still waiting hears `false`. From the first of those callbacks on the client accepts
-     *          nothing, as during `disconnect()`: a request pushed again is answered at once ("HTTP/3 client
-     *          disconnect") and a `connect()` refused -- nothing is queued, armed or connected from a destructor.
+     * @details Every request in flight or queued hears once, with a 503 ("HTTP/3 client destroyed"), and every
+     *          `connect()` still waiting hears `false` once. From one of those callbacks a request pushed, alone or
+     *          in a batch, is answered inside the push (503, "HTTP/3 client disconnect") -- and one pushed from
+     *          inside THAT answer is refused by the return value alone, its callback never called --, and a
+     *          `connect()` is refused: it returns false and its callback is never called. A callback that throws is
+     *          logged.
      *          A client with static storage is destroyed after its thread's event loop (`listener::current`,
      *          which `exit()` destroys first): the callbacks then run there, where nothing can be asked of the
      *          loop any more (Huly QB-1246). The coroutines parked on the awaiter forms were destroyed with it.
@@ -186,14 +256,28 @@ public:
 
     /**
      * @brief Begin connecting (if not already connected/connecting).
-     * @param callback Invoked with the connection outcome; may be null.
-     * @return @c true if the connection is already established or a connect
-     *         attempt was started/joined; @c false if it could not be started.
+     * @param callback Invoked with the connection outcome; may be null. Called inside this call only when the client
+     *                 is already connected, no callback of this client is on the stack and no answer is owed -- on
+     *                 the client's turn of the loop otherwise. Asked while a close is under way -- from a callback of
+     *                 disconnect(),
+     *                 of a read that has just disconnected, or of a read that lost its connection -- the attempt starts
+     *                 once that close has run; a disconnect() before the attempt starts gives it up (it hears `false`).
+     *                 The host is resolved here, by a blocking lookup as the HTTP/1.1 and HTTP/2 clients' connector makes:
+     *                 every address of the family the URI names (IPv4 for a host name), in the resolver's order, each
+     *                 dialled in turn for its share of the connect timeout, which covers the lookup too. QUIC's
+     *                 handshake bound follows it (`handshake_timeout` applies only with no connect timeout); QUIC's
+     *                 `idle_timeout` is left as set, and ends an attempt that hears nothing when it is the shorter.
+     *                 The name given stays the one sent as SNI and checked against the certificate.
+     * @return @c true when the callback will hear the outcome -- of an attempt that cannot start too (a name that does
+     *         not resolve, no UDP socket), on a later turn of the loop, as on the two other clients. @c false when
+     *         nothing starts and the callback is never called: the client is being destroyed, or has no shared owner
+     *         to hear later for.
      */
     bool connect(ConnectionCallback callback);
     /**
      * @brief Coroutine-awaiter variant of connect().
-     * @return An awaiter resolving to the ConnectResult of the attempt.
+     * @return An awaiter resolving to the ConnectResult of the attempt. Awaited from a callback the client runs for a
+     *         close or a failure: `false`, "HTTP/3 connection is closing", on the client's turn of the loop.
      */
     [[nodiscard]] qb::http::async::awaiter<ConnectResult> connect();
     /// Fail all outstanding requests and close the QUIC connection.
@@ -211,14 +295,26 @@ public:
     }
 
     /**
-     * @brief Queue a request, delivering the response via @p callback.
+     * @brief Queue a request, delivering the response via @p callback -- or throw what its own submission threw.
      * @param request  Request to send (made absolute against the base origin).
-     * @param callback Response handler; must be non-null.
-     * @return @c false if @p callback is null, or if the request would take the queued + active
-     *         count past set_max_pending_requests() -- @p callback has then already received its
-     *         503, as with the HTTP/1.1 and HTTP/2 clients. @c true otherwise, an invalid request
-     *         (400) or one refused after the server's GOAWAY (503) included: those are answered
-     *         through @p callback.
+     * @param callback Response handler; must be non-null. A request the client refuses at once -- another origin,
+     *                 the pending bound, a disconnect() under way, the server's GOAWAY, a submission the connection
+     *                 cannot take -- is answered inside this call when no callback of this client is on the stack and
+     *                 no answer is owed; otherwise on the client's turn of the loop, in the order the client came to
+     *                 owe its answers. A callback that pushes back at every refusal is never called from inside its
+     *                 own push. Bound such a retry all the same, with a delay: it spins otherwise.
+     *                 With callbacks that run no loop turn of their own, no callback of a client is called inside
+     *                 another one of the same client: nesting is exactly one outside the destructor -- and what a
+     *                 disconnect() called from a callback ends is heard on the client's turn too.
+     *                 A callback that runs the loop -- qb::io::async::run(), run_once(), run_until(), run_sync() --
+     *                 receives inside that loop whatever the client owes, its own refusals included: one that pushes
+     *                 a refused request back and then runs the loop recurses once per refusal. To relaunch without
+     *                 nesting, push back and return.
+     * @return @c false if @p callback is null; if the request would take the queued + active count past
+     *         set_max_pending_requests() -- @p callback then hears a 503, inside the call or on that turn, as
+     *         with the HTTP/1.1 and HTTP/2 clients; or if the push is made from inside the answer of a push the
+     *         destructor refused, where @p callback is never called. @c true otherwise, an invalid request (400)
+     *         or one refused after the server's GOAWAY (503) included: those are answered through @p callback.
      */
     bool push_request(qb::http::Request request, ResponseCallback callback);
     /**
@@ -229,7 +325,7 @@ public:
      */
     [[nodiscard]] request_id push_request_with_id(qb::http::Request request, ResponseCallback callback);
     /**
-     * @brief Cancel a queued or in-flight request by id.
+     * @brief Cancel a queued or in-flight request by id; its callback hears so as a refusal is heard (push_request()).
      * @param id     Request id from push_request_with_id().
      * @param reason Reason text used in the synthesized error response.
      * @return @c true if a matching request was found and cancelled.
@@ -242,19 +338,22 @@ public:
      */
     [[nodiscard]] qb::http::async::awaiter<qb::http::Response> push_request(qb::http::Request request);
     /**
-     * @brief Queue a batch of requests, delivering all responses via @p callback.
+     * @brief Queue a batch of requests, delivering all responses via @p callback -- or throw, as push_request() does.
      *
      * The members are admitted in order, each exactly as push_request() would admit it: an
      * invalid member completes with its 400, and a member that would take the queued + active
      * count past set_max_pending_requests() completes with a 503, both at its index and before
-     * any state is allocated for it. @p callback runs once, with every result in request order
-     * -- at once when no member was admitted.
+     * any state is allocated for it. @p callback runs once, with every result in request order.
+     * When no member was admitted the batch is one refusal, heard as push_request() hears one:
+     * inside this call, or on the client's turn of the loop when a callback of this client is on
+     * the stack or an answer is owed.
      *
-     * @param requests Requests to send; an empty batch completes immediately.
+     * @param requests Requests to send; an empty batch is answered with an empty vector, as a refusal is heard.
      * @param callback Batch handler; must be non-null for a non-empty batch.
-     * @return @c false if @p callback is null, or if the bound refused at least one member, as
-     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do;
-     *         @c true otherwise.
+     * @return @c false if @p callback is null; if the bound refused at least one member, as
+     *         push_request() answers a refused request and the HTTP/1.1 and HTTP/2 batches do; or if
+     *         the batch is pushed from inside the answer of a push the destructor refused, where
+     *         @p callback is never called. @c true otherwise.
      */
     bool push_requests(std::vector<qb::http::Request> requests, BatchResponseCallback callback);
     /**
@@ -270,8 +369,9 @@ public:
         _max_concurrent_streams = value;
     }
     /// Set the cap on queued+active requests (bounds `_pending_requests`); a push past the
-    /// bound is failed synchronously with 503 -- a single push, or each batch member past it
-    /// (see push_requests()). The setter mirrors `http2::Client` for API parity.
+    /// bound is refused with 503 -- a single push, or each batch member past it (see
+    /// push_requests()) --, heard as every refusal known at once (push_request()). The setter
+    /// mirrors `http2::Client` for API parity.
     void
     set_max_pending_requests(std::size_t value) noexcept {
         _max_pending_requests = value;
@@ -377,26 +477,89 @@ private:
     /// Admit one request (push_request() and push_request_with_id()); @return its id, or 0 when it
     /// was answered at once. @p refused_by_bound is set when the pending bound refused it.
     [[nodiscard]] request_id admit_request(qb::http::Request request, ResponseCallback callback, bool &refused_by_bound);
-    /// Submit as many queued requests as the concurrency limit allows.
-    void process_pending_requests();
+    /// Submit as many queued requests as the concurrency limit allows. @p who brought the pass here: a call of the
+    /// program (a push, a cancellation), or the loop. @p own_request / @p own_batch name what that call is itself pushing,
+    /// 0 for none: a submission of it that an exception cuts short has that exception for its one outcome. When the
+    /// callback of a request refused in the pass throws, under a call of the program, the pass runs again for the others
+    /// and the first exception goes on once that is done.
+    void process_pending_requests(from who = from::the_loop, std::uint64_t own_request = 0, std::uint64_t own_batch = 0);
+    /// The pass itself: process_pending_requests() holds the client around it, and takes back under that hold what its
+    /// caller pushed when an exception leaves the pass. With @p a_throw_is_kept, the pass that runs again: what the
+    /// callback of a request refused here throws is dropped, and the pass goes on.
+    void submit_pending(from who, std::uint64_t own_request, std::uint64_t own_batch, bool a_throw_is_kept = false);
+    /// Takes back, unanswered, what a call of the program pushed and an exception is leaving that call with: the request
+    /// @p request_id, or every member of the batch @p batch_id and the batch with its callback -- queued, in flight (its
+    /// answer is dropped when it comes) or answered already with that answer still owed. Never throws.
+    void withdraw(std::uint64_t request_id, std::uint64_t batch_id) noexcept;
     /// Mark the connection up, notify callbacks, and flush pending requests.
     void handle_connection_success(std::string const &alpn);
-    /// Mark the connection down, notify callbacks, and fail all requests.
-    void handle_connection_failure(std::string const &error);
+    /// Mark the connection down, notify callbacks, and fail all requests. @p who gives those answers: the loop, or the
+    /// client itself when a submission the program's own call made lost the connection.
+    void handle_connection_failure(std::string const &error, from who = from::the_loop);
     /// Close an unsuccessful QUIC attempt without delivering its own close event twice.
-    void close_failed_transport(std::string_view reason);
+    void close_failed_transport(std::string_view reason) noexcept;
     /// Fail every pending/active request and batch with @p error.
-    [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error);
+    [[nodiscard]] std::exception_ptr fail_all_requests(std::string const &error, from who = from::the_loop);
+    void                             complete_disconnect(
+        from who = from::the_loop); ///< The close itself, no read or submission on the stack: starts, at its end, a connect() queued meanwhile
     /// Fail the active request on @p stream_id with @p status and @p error.
-    void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
+    void fail_request(std::uint64_t stream_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY,
+                      from who = from::the_loop);
     /// Fail the pending request with @p request_id with @p status and @p error.
     void fail_pending_request(std::uint64_t request_id, std::string const &error, qb::http::status status = qb::http::status::BAD_GATEWAY);
-    /// Arm the one-shot connect-timeout callback.
+    /// Whether an answer @p who gives is given now, or kept for the client's turn (the rule above `_owed`).
+    [[nodiscard]] bool given_now(from who) const noexcept;
+    /// Calls @p fn, a callback of the program, now: counted while it runs. The caller holds the client; what @p fn throws
+    /// goes on to it.
+    template <typename Fn>
+    void call_now(Fn &&fn);
+    /// Keeps @p answer for the client's turn, which is asked. @p request / @p batch: whose answer it is, 0 for neither.
+    void owe(std::function<void()> answer, std::uint64_t request = 0, std::uint64_t batch = 0) noexcept;
+    /// An answer the client gives by itself: now, or kept.
+    void answer_by_itself(std::function<void()> answer);
+    /// In the handler of a `try` around a callback given at once: rethrows under a call of the program (@p who is the
+    /// client), logs and stops what the loop's callback threw otherwise.
+    void escaped(from who);
+    /// The outcome of a connect(), told to @p callback: now, or kept.
+    void tell_connect(ConnectionCallback const &callback, bool ok, std::string const &error, from who);
+    /// The answer of the batch @p batch_id, told to its callback: now, or kept.
+    void tell_batch(BatchResponseCallback callback, std::vector<qb::http::Response> responses, from who, std::uint64_t batch_id);
+    /// The answer of one request -- its response, a failure, a refusal --: its timer is stopped first; a member of a
+    /// batch is recorded in its batch at once (the batch's callback is the answer); a request's own callback is called
+    /// now, or kept behind what is owed. Every answer of a request goes through here.
+    void give(RequestContext &ctx, qb::http::Response response, from who = from::the_loop);
+    /// One member of a batch has its answer: recorded; the batch's callback is told when it was the last.
+    void batch_member_answered(std::uint64_t batch_id, std::size_t index, qb::http::Response response, from who);
+    /// Asks the client's turn of the loop, if it is not asked.
+    void ask_turn() noexcept;
+    /// The client's turn: what was owed as it starts is heard, in order.
+    void run_turn() noexcept;
+    /// Arm the one-shot connect-timeout callback, for what is left of the connect timeout.
     void arm_connect_timeout();
-    /// Arm the per-request timeout for @p request_id.
-    void arm_request_timeout(std::uint64_t request_id);
-    /// (Re)schedule the request-timeout callback for @p request_id after @p delay.
-    void schedule_request_timeout(std::uint64_t request_id, qb::duration delay);
+    /// connect() once the host is resolved: dials @p candidates in turn, under the connect timeout counted from @p began.
+    bool dial(std::vector<qb::io::endpoint> candidates, ConnectionCallback callback, std::chrono::steady_clock::time_point began);
+    /// Dials the next address that takes an attempt, and arms its share; false when none is left.
+    [[nodiscard]] bool start_attempt();
+    /// What kept this connect() from starting any attempt, for the log: no socket, or a first datagram the network refused.
+    [[nodiscard]] const char *why_nothing_started() const noexcept;
+    /// The address under way is given up -- its share ended, or QUIC gave it up first: closed without a word, the next
+    /// one dialled; the connect() fails when none is left to start.
+    void next_attempt(std::string_view why);
+    /// Starts the connect() asked while a close was deferred, its teardown now complete: each callback joins the one attempt.
+    void start_deferred_connect();
+    /// Gives up that connect(): a disconnect() came after it, or the destructor. Its callbacks hear `false` with the close.
+    void give_up_deferred_connects();
+    /// connect(), its timeout counted from @p asked when that is a time: the moment a connect() held back was asked.
+    [[nodiscard]] bool connect_from(ConnectionCallback callback, std::chrono::steady_clock::time_point asked);
+    /// Times @p ctx, once: it has come to rest. Its timer is armed when a request timeout is set.
+    void time(RequestContext &ctx);
+    /// The refusal of a request that was queued: the request ends here, its timer with it, and its callback hears
+    /// @p response as an answer the client gives by itself (give()).
+    void refuse_request(std::unique_ptr<RequestContext> ctx, qb::http::Response response);
+    /// The timer of the request @p request_id fired: fails it if its timeout has passed, arms the timer again if not.
+    void request_timed_out(std::uint64_t request_id) noexcept;
+    /// Arms the timeout of every queued request that has none yet: the last of the queue.
+    void time_pending() noexcept;
     /// @return @c true if any pending request, active request, or batch remains.
     [[nodiscard]] bool has_pending_or_active_work() const noexcept;
     /// Build a text/plain error response with @p status and @p message.

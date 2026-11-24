@@ -105,29 +105,15 @@ refuse_size(const char *prefix, const std::size_t size, const char *limit_name, 
     throw std::length_error(std::string(prefix) + std::to_string(size) + ") exceeds " + limit_name + " (" + std::to_string(limit) + suffix);
 }
 
-[[nodiscard]] bool
-is_header_name_char(const unsigned char c) noexcept {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
-           || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
-}
-
-[[nodiscard]] bool
-header_name_is_valid(const std::string &name) noexcept {
-    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
-        return false;
-    }
-    return std::all_of(name.begin(), name.end(), [](const char c) { return is_header_name_char(static_cast<unsigned char>(c)); });
-}
-
-[[nodiscard]] bool
-header_value_is_valid(const std::string &value) noexcept {
-    if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-        return false;
-    }
-    return std::all_of(value.begin(), value.end(), [](const char c) {
-        const auto uc = static_cast<unsigned char>(c);
-        return c == '\t' || (uc >= 0x20 && uc != 0x7f);
-    });
+/// Throws the refusal of a field the serializer cannot write, naming it (qb::http::detail::unsendable_field), as the
+/// request serializer does: the same bytes refused, by the same predicates (Huly QB-1246). A field was refused as "header
+/// name exceeds MAX_HEADER_NAME_LENGTH" or "header value exceeds MAX_HEADER_VALUE_LENGTH", whatever its fault, by a copy
+/// of those predicates of its own.
+[[noreturn]] QB_NOINLINE QB_COLD void
+refuse_field(const std::string &name, const std::string *value) {
+    const std::string_view view = value ? std::string_view(*value) : std::string_view{};
+    throw std::length_error("qb::http::Response serialization: "
+                            + qb::http::detail::unsendable_field("response header", name, value ? &view : nullptr));
 }
 
 struct transfer_encoding_result {
@@ -258,13 +244,13 @@ serialize_response(pipe<char> &out, const qb::http::Response &r, const bool cont
 
     // Add headers size
     for (const auto &it : r.headers()) {
-        if (!header_name_is_valid(it.first)) {
-            refuse("qb::http::Response serialization: header name exceeds MAX_HEADER_NAME_LENGTH.");
+        if (!qb::http::detail::sendable_field_name(it.first)) [[unlikely]] {
+            refuse_field(it.first, nullptr);
         }
         estimated_size += it.first.size() + 2; // ": "
         for (const auto &value : it.second) {
-            if (!header_value_is_valid(value)) {
-                refuse("qb::http::Response serialization: header value exceeds MAX_HEADER_VALUE_LENGTH.");
+            if (!qb::http::detail::sendable_field_value(value)) [[unlikely]] {
+                refuse_field(it.first, &value);
             }
             estimated_size += value.size() + 2; // CRLF
         }

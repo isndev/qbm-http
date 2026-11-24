@@ -598,6 +598,16 @@ namespace detail {
 [[nodiscard]] bool is_forbidden_trailer_field(std::string_view name) noexcept;
 
 /**
+ * @brief Why a field of `trailers()` that a trailer section must not carry (is_forbidden_trailer_field) cannot be sent,
+ *        naming it: "request trailer field `content-length` cannot be sent: a trailer section must not carry it
+ *        (framing, connection, routing, proxy authentication)" -- the reason the three clients answer such a request
+ *        with, 400, as they answer a field qb::http::detail::unsendable_field() names (Huly QB-1246). Cold, out of line.
+ * @param section What the field is in: "request trailer", or "trailer" (a serializer's, for a request or a response).
+ * @param name The field's name.
+ */
+[[nodiscard]] std::string forbidden_trailer_field_reason(std::string_view section, std::string_view name);
+
+/**
  * @brief The fields a message's `Trailer` header announces that may travel in a trailer section:
  *        lowercased, in the order announced, each once; empty when the message has no `Trailer`
  *        header. A forbidden field (is_forbidden_trailer_field) or a pseudo-header is left out -- it

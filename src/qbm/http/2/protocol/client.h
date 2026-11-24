@@ -1246,10 +1246,13 @@ public:
      * @brief Send an HTTP/2 request
      * @param http_request The HTTP request to send
      * @param app_request_id Application-specific request ID
+     * @param field_refusal Set, when given, when the request is refused for a field HTTP/1.1 cannot write -- in its
+     *        header section or its trailers(): the field named, and why (append_sendable_request_fields(), Huly
+     *        QB-1191). Nothing is encoded or sent for it, and the connection is untouched. Left as it was otherwise.
      * @return true if request was successfully initiated, false on error
      */
     [[nodiscard]] bool
-    send_request(qb::http::Request http_request, uint64_t app_request_id = 0) noexcept {
+    send_request(qb::http::Request http_request, uint64_t app_request_id = 0, std::string *field_refusal = nullptr) noexcept {
         LOG_HTTP_DEBUG_PA(0, "Client: send_request called for app_id " << app_request_id);
 
         if (!this->ok() || !_connection_active || _received_goaway) {
@@ -1293,7 +1296,7 @@ public:
 
         std::vector<hpack::HeaderField> hf_vector;
         // Pass by const ref to prepare_request_headers as http_request will be moved later if needed.
-        if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj)) [[unlikely]] {
+        if (const char *refused = prepare_bounded_request_headers(http_request, hf_vector, stream_obj, field_refusal)) [[unlikely]] {
             release_unsent_stream_id(stream_id, initiated_before); // nothing sent (QB-1073 trailers, QB-1274 bound)
             LOG_HTTP_WARN_PA(stream_id, "Client: Request refused: " << refused);
             _client_streams.erase(iter);
@@ -1379,7 +1382,7 @@ public:
         if (stream_obj.client_will_send_trailers && !stream_obj.has_pending_data_to_send && !stream_obj.end_stream_sent
             && !stream_obj.queued_trailer_fields) {
             bool planned        = false;
-            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send, &planned);
+            auto trailer_fields = outgoing_trailer_fields(stream_obj.original_request_to_send, &planned, true);
             if (planned || !_explicit_request_trailers) {
                 // The stream may be closed and erased past this call: nothing below touches it.
                 (void) send_request_trailer_block(stream_obj, std::move(trailer_fields));
@@ -1454,6 +1457,28 @@ public:
         _connection_active           = false;
         _graceful_shutdown_initiated = true;
         this->FramerBase::not_ok(ErrorCode::NO_ERROR);
+        return true;
+    }
+
+    /**
+     * @brief Give up a request this client sent and still holds: RST_STREAM(CANCEL) on its stream -- the stream is no
+     *        longer needed (RFC 9113 §7) --, which is retired at once, so that it no longer counts against the server's
+     *        limit; what the server sent on it before it read the reset is discarded (send_rst_stream()). For an
+     *        application that takes a request back, as qb::http2::Client does with what a push that throws had already
+     *        sent, or that answers it itself, as at the request's timeout (Huly QB-1246).
+     * @param stream_id The stream of the request, one this client opened.
+     * @param tell_the_handler true (the default): the io handler is told with Http2StreamErrorEvent when the response
+     *        had not been dispatched, as for every reset this client sends. false: for an application that has answered
+     *        the request already, and would hear a second end for it.
+     * @return true if the reset was written; false when the connection is no longer live, or this client holds no
+     *         request on that stream.
+     */
+    bool
+    cancel_request(uint32_t stream_id, bool tell_the_handler = true) noexcept {
+        if (!this->ok() || (stream_id & 1u) == 0u || _client_streams.find(stream_id) == _client_streams.end()) {
+            return false;
+        }
+        send_rst_stream(stream_id, ErrorCode::CANCEL, "request given up by the client", tell_the_handler);
         return true;
     }
 
@@ -1900,12 +1925,13 @@ private:
      * @param http_request The HTTP request
      * @param out_hf_vector Output vector for header fields
      * @param stream_context Stream context
+     * @param field_refusal Set, when given, when the request is refused for a field HTTP/1.1 cannot write (send_request()).
      * @return nullptr when the block is ready; otherwise why the request is refused (its trailers()
-     *         carries a field a trailer section cannot, Huly QB-1073).
+     *         carries a field a trailer section cannot, Huly QB-1073; a field HTTP/1.1 cannot write, QB-1191).
      */
     [[nodiscard]] const char *
     prepare_request_headers(const qb::http::Request &http_request, std::vector<hpack::HeaderField> &out_hf_vector,
-                            Http2ClientStream &stream_context) {
+                            Http2ClientStream &stream_context, std::string *field_refusal = nullptr) {
         // Add pseudo-headers first (required order)
         out_hf_vector.emplace_back(":method", http_request.method());
 
@@ -1940,12 +1966,14 @@ private:
         }
         out_hf_vector.emplace_back(":path", path);
 
-        // The regular fields, as the server's rules accept them on receipt: a connection-specific field --
-        // `http2-settings` was missing from this loop's own list -- or one the `connection` header names, a `te` other
-        // than `trailers`, `host` (folded into :authority) and `content-length` (written below) are left out
-        // (append_sent_request_fields, shared with PUSH_PROMISE, Huly QB-1191). A name is lowercase already: the
-        // headers map stores it folded.
-        append_sent_request_fields(http_request, out_hf_vector);
+        // The regular fields, under the clients' rule (append_sendable_request_fields, Huly QB-1191): a field HTTP/1.1
+        // cannot write refuses the request, before anything of it is encoded; a connection-specific field -- or one
+        // the `connection` header names, a `te` other than `trailers`, `host` (folded into :authority) and
+        // `content-length` (written below) -- is left out; a value leaves without the SP and HTAB at its edges. A name
+        // is lowercase already: the headers map stores it folded.
+        if (!append_sendable_request_fields(http_request, out_hf_vector, field_refusal)) [[unlikely]] {
+            return "a header field cannot be sent";
+        }
         // A trailer announcement: the stream ends with a trailer section
         if (const auto trailer = http_request.headers().find("trailer"); trailer != http_request.headers().end() && !trailer->second.empty()) {
             stream_context.client_will_send_trailers = true;
@@ -1959,7 +1987,7 @@ private:
             stream_context.client_will_send_trailers = true;
         }
         if (stream_context.client_will_send_trailers) {
-            if (const char *refused = prepare_trailed_header_block(out_hf_vector, http_request)) {
+            if (const char *refused = prepare_trailed_header_block(out_hf_vector, http_request, true, field_refusal)) {
                 return refused;
             }
         }
@@ -2091,9 +2119,10 @@ private:
      * @param stream_id Stream ID
      * @param error_code Error code
      * @param debug_message Optional debug message
+     * @param tell_the_handler false: the io handler is not told of the reset (cancel_request())
      */
     void
-    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &debug_message = "") noexcept {
+    send_rst_stream(uint32_t stream_id, ErrorCode error_code, const std::string &debug_message = "", bool tell_the_handler = true) noexcept {
         if (!this->ok() || stream_id == 0)
             return;
 
@@ -2119,7 +2148,7 @@ private:
         // Keeping this node through the callback both permits duplicate notification and
         // leaves a dangling iterator if that callback erases it. Touch no stream afterwards.
         if (it != _client_streams.end()) {
-            const bool notify_error = !it->second.response_dispatched;
+            const bool notify_error = tell_the_handler && !it->second.response_dispatched;
             // A stream the server could still send on -- it has not ended it: what it sent before it read the reset is
             // discarded (on(DataFrame), on(HeadersFrame)). After its END_STREAM nothing is in flight, and a frame there
             // stays the error it is (RFC 9113 §5.1).
@@ -2733,11 +2762,7 @@ private:
                         send_rst_stream(stream.id, ErrorCode::PROTOCOL_ERROR, "Conflicting content-length headers");
                         return false;
                     }
-                    if (stream.method != "HEAD" && *parsed > response_body_limit()) {
-                        send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error());
-                        return false;
-                    }
-                    stream.expected_content_length = *parsed;
+                    stream.expected_content_length = *parsed; // judged against the body limit once :status is known (below)
                 }
 
                 if (is_trailers_block) {
@@ -2761,6 +2786,16 @@ private:
                 return false;
             }
             response.status() = *status_code_opt;
+            // A declared length past the client's body limit refuses the response only where it frames content: a 1xx,
+            // a 204, a 304 and a response to HEAD carry none, whatever their `content-length` says (RFC 9110 section
+            // 8.6) -- the exemption should_enforce_response_content_length() applies, as HTTP/1.1 reads such a
+            // response's length as 0. Judged with the field, before :status was known, a 304 that declared the
+            // representation's length past the limit failed 502, and was answered 304 on HTTP/1.1 (Huly QB-1246).
+            if (stream.expected_content_length && *stream.expected_content_length > response_body_limit()
+                && should_enforce_response_content_length(stream)) {
+                send_rst_stream(stream.id, ErrorCode::ENHANCE_YOUR_CALM, body_limit_error());
+                return false;
+            }
         }
 
         return true;
@@ -2842,7 +2877,7 @@ private:
                 trailer_fields_to_send = std::move(*active_stream.queued_trailer_fields);
             } else {
                 bool planned           = false;
-                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send, &planned);
+                trailer_fields_to_send = outgoing_trailer_fields(active_stream.original_request_to_send, &planned, true);
                 if (!planned && _explicit_request_trailers) {
                     return;
                 }
@@ -2930,8 +2965,9 @@ private:
      * @return nullptr, or why the request is refused.
      */
     [[nodiscard]] const char *
-    prepare_bounded_request_headers(const qb::http::Request &request, std::vector<hpack::HeaderField> &fields, Http2ClientStream &stream) {
-        if (const char *refused = prepare_request_headers(request, fields, stream)) {
+    prepare_bounded_request_headers(const qb::http::Request &request, std::vector<hpack::HeaderField> &fields, Http2ClientStream &stream,
+                                    std::string *field_refusal = nullptr) {
+        if (const char *refused = prepare_request_headers(request, fields, stream, field_refusal)) {
             return refused;
         }
         if (_peer_max_header_list_size >= DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE) {
@@ -2940,7 +2976,7 @@ private:
         if (!fits_peer_header_list(stream.id, fields)) {
             return "header list past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
         }
-        if (stream.client_will_send_trailers && !fits_peer_header_list(stream.id, outgoing_trailer_fields(request))) {
+        if (stream.client_will_send_trailers && !fits_peer_header_list(stream.id, outgoing_trailer_fields(request, nullptr, true))) {
             return "trailer section past the server's SETTINGS_MAX_HEADER_LIST_SIZE";
         }
         return nullptr;

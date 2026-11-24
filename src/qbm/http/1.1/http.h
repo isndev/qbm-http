@@ -269,11 +269,11 @@ private:
 
     void
     start_request(Request &&request) {
-        // This runs synchronously from the protocol's noexcept onMessage (and from the noexcept eos event). Routing builds a Context,
-        // decodes path parameters, runs lifecycle hooks and the handler chain, and serializes the response — any of which can throw.
-        // Contain it here so a throw fails the connection instead of escaping the noexcept boundary and calling std::terminate.
-        // The keep-alive override fills a silence: it keeps no request that carries a Connection or a Proxy-Connection field (the
-        try { // parser reads both; one that says `close` ends its connection, RFC 9112 §9.6), nor one with a Transfer-Encoding (§6.1).
+        // Runs synchronously from the protocol's noexcept onMessage (and eos event). Routing — a Context, path parameters, lifecycle hooks, the
+        // handler chain — and serializing the response can each throw: contained here, a throw fails the connection rather than reach
+        // std::terminate through noexcept. The keep-alive override fills a silence: it keeps no request with a Connection or a Proxy-Connection
+        // field (the parser reads both; `close` in either ends the connection, RFC 9112 §9.6), nor one with a Transfer-Encoding (§6.1).
+        try {
             _active_request_method    = request.method();
             _active_should_keep_alive = request.keep_alive;
             if (!request.keep_alive && _keep_alive && !request.has_header("Connection") && !request.has_header("Proxy-Connection")) [[unlikely]]

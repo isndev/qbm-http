@@ -65,49 +65,25 @@ pipe<char>::put<qb::http::Chunk>(const qb::http::Chunk &c) {
 
 namespace qb::http::detail {
 namespace {
-// The rules the HTTP/1.1 serializers apply to a header field (request.cpp, response.cpp), kept apart
-// here: a second caller of theirs made g++ stop inlining them into the serializers' hot loops.
-[[nodiscard]] bool
-trailer_name_is_valid(std::string_view name) noexcept {
-    if (name.empty() || name.size() > qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH) {
-        return false;
-    }
-    return std::all_of(name.begin(), name.end(), [](const char c) {
-        const auto uc = static_cast<unsigned char>(c);
-        return (uc >= 'a' && uc <= 'z') || (uc >= 'A' && uc <= 'Z') || (uc >= '0' && uc <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
-               || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|'
-               || c == '~';
-    });
-}
-
-[[nodiscard]] bool
-trailer_value_is_valid(std::string_view value) noexcept {
-    if (value.size() > qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH) {
-        return false;
-    }
-    return std::all_of(value.begin(), value.end(), [](const char c) {
-        const auto uc = static_cast<unsigned char>(c);
-        return c == '\t' || (uc >= 0x20 && uc != 0x7f);
-    });
-}
-
-/// Refuses, before anything is written, a field of trailers() that cannot travel (Huly QB-1073).
+/// Refuses, before anything is written, a field of trailers() that cannot travel (Huly QB-1073): a field a trailer
+/// section must not carry, or one the serializers' rules refuse (sendable_field_name / sendable_field_value, the three
+/// clients' rules since Huly QB-1191), named.
 void
 check_trailer_section(const Headers &trailers, const char *serializer) {
-    const auto refuse = [serializer](const char *why) {
+    const auto refuse = [serializer](const std::string &why) {
         throw std::length_error(std::string(serializer) + why);
     };
     for (const auto &[name, values] : trailers.headers()) {
         if (is_forbidden_trailer_field(name)) {
-            refuse(": trailers() carries a field a trailer section must not (framing, connection, routing, proxy "
-                   "authentication).");
+            refuse(": " + forbidden_trailer_field_reason("trailer", name)); // named, as the two other clients name it
         }
-        if (!trailer_name_is_valid(name)) {
-            refuse(": trailer field name is invalid or exceeds MAX_HEADER_NAME_LENGTH.");
+        if (!sendable_field_name(name)) {
+            refuse(": " + unsendable_field("trailer", name, nullptr));
         }
         for (const auto &value : values) {
-            if (!trailer_value_is_valid(value)) {
-                refuse(": trailer field value is invalid or exceeds MAX_HEADER_VALUE_LENGTH.");
+            if (!sendable_field_value(value)) {
+                const std::string_view view{value};
+                refuse(": " + unsendable_field("trailer", name, &view));
             }
         }
     }

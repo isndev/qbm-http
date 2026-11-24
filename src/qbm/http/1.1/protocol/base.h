@@ -83,6 +83,56 @@ constexpr std::size_t MAX_BODY_SIZE = 100 * 1024 * 1024;
 constexpr std::size_t MAX_BODY_RESERVE_HINT = 64 * 1024;
 } // namespace qb::http::protocol_limits
 
+namespace qb::http::detail {
+/// A byte a field name may carry: a token character (RFC 9110 section 5.6.2), in either case.
+[[nodiscard]] constexpr bool
+is_field_name_byte(const unsigned char c) noexcept {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '!' || c == '#' || c == '$' || c == '%'
+           || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+}
+
+/// A byte a field value may carry: HTAB, SP and every byte above it but DEL -- not CR, LF, NUL, another control byte or
+/// DEL (RFC 9110 section 5.5).
+[[nodiscard]] constexpr bool
+is_field_value_byte(const unsigned char c) noexcept {
+    return c == '\t' || (c >= 0x20 && c != 0x7F);
+}
+
+/**
+ * @brief Whether a request field's name can be sent: the HTTP/1.1 serializer's rule, which the three clients apply
+ *        (Huly QB-1191): not empty, at most `MAX_HEADER_NAME_LENGTH` octets, token characters alone. A name a client
+ *        cannot send refuses its request, 400 (unsendable_field()).
+ * @details Inline, in each caller's field loop: the serializer's own copy was kept apart for that (a second caller of
+ *          it made g++ stop inlining it into the serializer's loop).
+ */
+[[nodiscard]] inline bool
+sendable_field_name(const std::string_view name) noexcept {
+    return !name.empty() && name.size() <= protocol_limits::MAX_HEADER_NAME_LENGTH
+           && std::all_of(name.begin(), name.end(), [](const char c) { return is_field_name_byte(static_cast<unsigned char>(c)); });
+}
+
+/// Whether a request field's value can be sent: the HTTP/1.1 serializer's rule, at most `MAX_HEADER_VALUE_LENGTH`
+/// octets of is_field_value_byte(); see sendable_field_name(). SP and HTAB at its edges are not part of the value (RFC
+/// 9110 section 5.5): HTTP/1.1 writes them, the receiver strips them, and HTTP/2 and HTTP/3 send the value without them.
+[[nodiscard]] inline bool
+sendable_field_value(const std::string_view value) noexcept {
+    return value.size() <= protocol_limits::MAX_HEADER_VALUE_LENGTH
+           && std::all_of(value.begin(), value.end(), [](const char c) { return is_field_value_byte(static_cast<unsigned char>(c)); });
+}
+
+/**
+ * @brief Why a field cannot be sent, naming it: "request header field `x-a` cannot be sent: its value carries LF" --
+ *        the reason the three clients answer such a request with, 400 (Huly QB-1191). For a field
+ *        sendable_field_name() or sendable_field_value() refuses; a byte that cannot be printed is written `\xNN`. Cold,
+ *        out of line (request.cpp).
+ * @param section What the field is in: "request header", "response header" (the Response serializer's), "request
+ *        trailer", or "trailer" (a serializer's, for a request or a response).
+ * @param name The field's name.
+ * @param value The value refused, or none when the name is.
+ */
+[[nodiscard]] std::string unsendable_field(std::string_view section, std::string_view name, const std::string_view *value);
+} // namespace qb::http::detail
+
 namespace qb::http {
 /**
  * @brief The limits a server applies to every request it reads, on HTTP/1.1, HTTP/2 and HTTP/3 alike (Huly QB-94).
