@@ -9574,6 +9574,72 @@ TEST_F(Http2ClientTest, ANotModifiedThatDeclaresALengthPastTheBodyLimitIsAnswere
     settle();
 }
 
+// ---- What a push takes back is given up without a pass under it (Huly QB-1246, the final review) ----
+
+// withdraw() resets the streams of what a push takes back without telling the protocol's handler. Told, the first reset
+// ran a pass inside withdraw() (on(Http2StreamErrorEvent)), and the callback of a request that pass refused may
+// disconnect, connect again and run the loop, as readme/14 allows: the stream numbers withdraw() still held then named
+// the new connection's requests -- one answered 502 to the program, "request given up by the client", the next reset.
+// Nothing is sent while the limit is 0: B waits, a request the protocol refuses where it is sent. The limit is raised
+// to two streams and a batch of two requests the server never answers is pushed: the pass refuses B, whose callback
+// pushes Y -- another such request, which waits behind the two streams the batch's members hold -- and throws. The push
+// throws and takes the batch back, both streams reset; Y is refused once they are free, and its callback disconnects,
+// connects again, runs the loop until connected and pushes N1 and N2, streams 1 and 3 of the new connection, which the
+// server answers 200.
+TEST_F(Http2ClientTest, WhatAPushTakesBackIsGivenUpWithNoPassThatACallbackCouldReconnectFrom) {
+    Answer      n1, n2; // before the client, which answers what it still holds when it is destroyed
+    int         b = 0, r = 0, y = 0;
+    std::size_t in_flight = 0;
+    bool        up = false, again = false;
+    auto        client = make_test_client();
+    client->set_auto_reconnect(false);
+    client->set_request_timeout(qb::duration::zero());
+    client->connect([&](bool ok, const std::string &) { up = ok; });
+    ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
+    client->set_max_concurrent_streams(0);
+    const auto reconnecting = [&](qb::http::Response response) {
+        ++y;
+        EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST) << response.body().as<std::string>();
+        client->disconnect();
+        client->connect([&](bool ok, const std::string &) { again = ok; });
+        (void) loop_until([&] { return again; }, 3s);
+        (void) client->push_request(reconnect::get_test(), std::ref(n1));
+        (void) client->push_request(reconnect::get_test(), std::ref(n2));
+    };
+    ASSERT_TRUE(client->push_request(unsendable(), [&](qb::http::Response) {
+        ++b;
+        client->push_request(unsendable(), reconnecting); // it waits behind the two streams the batch's members hold
+        in_flight = client->get_active_request_count();
+        throw std::runtime_error("the callback throws, once a pass under it has sent both members of the batch");
+    }));
+    ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
+    client->set_max_concurrent_streams(2);
+    bool threw = false;
+    try {
+        std::vector<qb::http::Request> two;
+        two.push_back(hang());
+        two.push_back(hang());
+        client->push_requests(std::move(two), [&](std::vector<qb::http::Response>) { ++r; });
+    } catch (std::runtime_error const &) {
+        threw = true;
+    }
+    ASSERT_TRUE(threw) << "nothing reached the caller of the push: the case proves nothing";
+    EXPECT_EQ(b, 1);
+    EXPECT_EQ(in_flight, 2u) << "the batch's members were not both in flight: withdraw() had one stream at most to give up";
+    ASSERT_TRUE(loop_until([&] { return y != 0 && again; }, 3s))
+        << "Y's callback did not run, or did not connect again: the case proves nothing";
+    EXPECT_TRUE(loop_until([&] { return n1.count != 0 && n2.count != 0; }, 3s)) << "the new connection's requests were not answered";
+    EXPECT_EQ(n1.status, qb::http::status::OK) << "a request of the new connection was answered by withdraw(): " << n1.body;
+    EXPECT_EQ(n2.status, qb::http::status::OK) << "a stream of the new connection was reset by withdraw(): " << n2.body;
+    EXPECT_TRUE(client->is_connected());
+    settle(200ms);
+    EXPECT_EQ(y, 1);
+    EXPECT_EQ(n1.count + n2.count, 2);
+    client->disconnect();
+    settle();
+    EXPECT_EQ(r, 0) << "the push threw, and what it pushed was answered: two outcomes";
+}
+
 #ifdef QB_WITH_LOGGING
 // What the client contains it says, at WARN, where the build has a logger -- QB_WITH_LOGGING, as here, with the log
 // started at that level; QB_STDOUT_LOGGING writes the same line to the standard output; a build with neither says

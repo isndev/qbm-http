@@ -908,11 +908,14 @@ TEST(Http1Serialization, AMessageHeadCarriesTheVersionOfItsConnection) {
     }
 }
 
-// The Request and the Response serializers refuse the same bytes in a field, by the same two predicates -- those the three
-// clients share, qb::http::detail::sendable_field_name() and sendable_field_value() --, which the Response serializer
-// takes in place of a copy of its own; its reason names the field, as the Request's does (Huly QB-1246: "header name
-// exceeds MAX_HEADER_NAME_LENGTH" or "header value exceeds MAX_HEADER_VALUE_LENGTH", whatever the fault). Each of the 256
-// bytes in a name and in a value, and each bound by one octet.
+// The Request and the Response serializers refuse the bytes RFC 9110 refuses in a field, and the same ones: the Response
+// serializer takes the predicates the Request's and the three clients' share, qb::http::detail::sendable_field_name()
+// and sendable_field_value(), in place of a copy of its own, and its reason names the field, as the Request's does (Huly
+// QB-1246: "header name exceeds MAX_HEADER_NAME_LENGTH" or "header value exceeds MAX_HEADER_VALUE_LENGTH", whatever the
+// fault). Each of the 256 bytes in a name and inside a value, judged by the grammar written out below and never by the
+// predicates under test (the final review: a table that asked them which bytes they accept proved the two serializers
+// agree, not what they accept -- a value predicate that took 0x0B passed it); then the rows qb decides beyond the
+// grammar, each with its reason; and, apart, that the two serializers agree on every row.
 TEST(Http1Serialization, TheRequestAndTheResponseSerializersRefuseTheSameFieldBytes) {
     const auto refusal = [](auto const &message) -> std::optional<std::string> {
         qb::allocator::pipe<char> out;
@@ -923,24 +926,45 @@ TEST(Http1Serialization, TheRequestAndTheResponseSerializersRefuseTheSameFieldBy
         }
         return std::nullopt;
     };
+    // RFC 9110 section 5.6.2: a field name is a token, tchar = ALPHA / DIGIT / one of !#$%&'*+-.^_`|~ (RFC 5234 core
+    // rules: ALPHA = %x41-5A / %x61-7A, DIGIT = %x30-39).
+    const auto tchar = [](const unsigned char c) {
+        return (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) || (c >= 0x30 && c <= 0x39)
+               || (c != 0 && std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) != std::string_view::npos);
+    };
+    // Section 5.5: field-content = field-vchar [ 1*( SP / HTAB / field-vchar ) field-vchar ], field-vchar = VCHAR
+    // (%x21-7E) / obs-text (%x80-FF): inside a value, between two field-vchar, a byte is one of these or SP or HTAB.
+    const auto inside_a_value = [](const unsigned char c) {
+        return (c >= 0x21 && c <= 0x7E) || c >= 0x80 || c == 0x20 || c == 0x09;
+    };
     struct Field {
         std::string name, value;
-        bool        name_refused;
+        bool        refused;
+        bool        by_name; // the row is about its name (else its value)
     };
     std::vector<Field> fields;
     for (int byte = 0; byte < 256; ++byte) {
-        const char c = static_cast<char>(byte);
-        fields.push_back({std::string("x-a") + c, "v", true});
-        fields.push_back({"x-a", std::string("a") + c + "b", false});
+        const auto c = static_cast<unsigned char>(byte);
+        fields.push_back({std::string("x-a") + static_cast<char>(c), "v", !tchar(c), true});
+        fields.push_back({"x-a", std::string("a") + static_cast<char>(c) + "b", !inside_a_value(c), false});
     }
-    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH, 'n'), "v", true});
-    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'n'), "v", true});
-    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'), false});
-    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'), false});
+    // An empty value is one (field-value = *field-content); a name is a token, one tchar at least.
+    fields.push_back({"x-a", "", false, false});
+    fields.push_back({"", "v", true, true});
+    // SP and HTAB at a value's edges are the OWS around it (RFC 9112 section 5), not part of it: the serializers write
+    // them, a receiver strips them -- none refused (the three clients send the value without them).
+    fields.push_back({"x-a", " v", false, false});
+    fields.push_back({"x-a", "\tv", false, false});
+    fields.push_back({"x-a", "v ", false, false});
+    fields.push_back({"x-a", "v\t", false, false});
+    // Beyond the grammar, qb's own bounds (qb::http::protocol_limits), refused deliberately: a name of more than
+    // MAX_HEADER_NAME_LENGTH octets, a value of more than MAX_HEADER_VALUE_LENGTH.
+    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH, 'n'), "v", false, true});
+    fields.push_back({std::string(qb::http::protocol_limits::MAX_HEADER_NAME_LENGTH + 1, 'n'), "v", true, true});
+    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH, 'v'), false, false});
+    fields.push_back({"x-a", std::string(qb::http::protocol_limits::MAX_HEADER_VALUE_LENGTH + 1, 'v'), true, false});
     int refused = 0, sent = 0;
     for (auto const &field : fields) {
-        const bool expected =
-            field.name_refused ? !qb::http::detail::sendable_field_name(field.name) : !qb::http::detail::sendable_field_value(field.value);
         qb::http::Request request{qb::http::method::GET, {"http://example.test/x"}};
         request.set_header(field.name, field.value);
         qb::http::Response response;
@@ -948,19 +972,22 @@ TEST(Http1Serialization, TheRequestAndTheResponseSerializersRefuseTheSameFieldBy
         response.set_header(field.name, field.value);
         const auto by_request = refusal(request), by_response = refusal(response);
         const auto shown = [&] {
-            return "name size " + std::to_string(field.name.size()) + ", value size " + std::to_string(field.value.size()) + ", last name byte "
-                   + std::to_string(static_cast<unsigned char>(field.name.back())) + ", middle value byte "
-                   + std::to_string(field.value.size() > 1 ? static_cast<unsigned char>(field.value[1]) : 0);
+            return std::string(field.by_name ? "name" : "value") + " row: name size " + std::to_string(field.name.size()) + ", value size "
+                   + std::to_string(field.value.size()) + ", last name byte "
+                   + std::to_string(field.name.empty() ? -1 : static_cast<unsigned char>(field.name.back())) + ", middle value byte "
+                   + std::to_string(field.value.size() > 1 ? static_cast<unsigned char>(field.value[1]) : -1);
         };
-        EXPECT_EQ(by_request.has_value(), expected) << shown() << ": " << by_request.value_or("sent");
-        EXPECT_EQ(by_response.has_value(), expected) << shown() << ": " << by_response.value_or("sent");
+        EXPECT_EQ(by_request.has_value(), field.refused) << shown() << ": " << by_request.value_or("sent");
+        EXPECT_EQ(by_response.has_value(), field.refused) << shown() << ": " << by_response.value_or("sent");
+        EXPECT_EQ(by_request.has_value(), by_response.has_value()) << shown() << ": the two serializers disagree";
         if (by_response) {
             EXPECT_TRUE(by_response->starts_with("qb::http::Response serialization: response header field `")) << *by_response;
             EXPECT_NE(by_response->find("cannot be sent"), std::string::npos) << *by_response;
         }
-        (expected ? refused : sent) += 1;
+        (field.refused ? refused : sent) += 1;
     }
-    // Neither side of the table is empty: a predicate that refuses everything, or nothing, fails above.
-    EXPECT_GT(refused, 100);
-    EXPECT_GT(sent, 100);
+    // The grammar's own count, read off the RFC: 77 tchar of the 256 bytes (52 ALPHA, 10 DIGIT, 15 others), 224 inside a
+    // value (94 VCHAR, 128 obs-text, SP, HTAB); then the empty name and the two bounds refused, the 7 other rows sent.
+    EXPECT_EQ(refused, (256 - 77) + (256 - 224) + 3);
+    EXPECT_EQ(sent, 77 + 224 + 7);
 }

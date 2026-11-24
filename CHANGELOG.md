@@ -388,6 +388,11 @@ All notable changes to the qbm-http module are documented here. The format is ba
   the field, the connection kept and the request behind it served; a raw HTTP/2 peer reads one HEADERS, the request
   behind on stream 1; the HTTP/3 client resets no stream; `" v "` arrives as `v`, `"  "` arrives empty, and
   `connection: close` and `te: gzip` are still left out and their request served (pins).
+  The two serializers are held to the grammar RFC 9110 writes, and to each other: a case writes the grammar out and
+  never asks it of the predicates -- each of the 256 bytes in a name (a token) and inside a value (VCHAR, obs-text, SP,
+  HTAB), SP and HTAB at a value's edges sent, an empty name refused, an empty value sent, and qb's two length bounds,
+  its only refusals beyond the grammar. (Its first form took its expectations from the predicates under test, and a
+  value predicate that admitted VT, 0x0B, passed it.)
   Mutants, the whole binary each, the unmutated tree first and the restored tree last: 16 planted, 16 caught -- a value
   that carries any byte, a name that carries SP, a reason that names no field; HTTP/1.1's serializer writing such a
   value, or such a trailer value; on HTTP/2 and on HTTP/3, such a value dropped and the request sent (QB-1191's earlier
@@ -1354,6 +1359,10 @@ All notable changes to the qbm-http module are documented here. The format is ba
   ran a pass that sent them too -- a request that had timed out already, on a stream of its own, reset and answered
   `408` at the next tick. A case: one stream in flight and one queued time out together, and the first `408`'s
   callback pushes -- the server sees two requests, never the queued one, which hears one `408`.
+  That `withdraw()` runs no callback between its resets is held by a case: a push takes back two requests in flight
+  while a request waits whose `400` callback disconnects, connects again, runs the loop until connected and pushes two
+  more -- the new connection's two are answered `200`, neither `502` nor reset. A reset that told the protocol's handler
+  ran that callback between the two, and the streams `withdraw()` still held named the new connection's requests.
   Mutants: 3 planted, 1 caught -- the pass taking stream numbers again. The connection check dropped survives,
   equivalent today: every end of a connection takes its requests out of the registry, and a request sent again takes a
   new number. The reset's guard without the connection's flag survives as before: a callback's close ends the pass
