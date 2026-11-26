@@ -323,7 +323,7 @@ If the QUIC transport closes synchronously while submitting a queued request, th
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:220-280,538-643,954-1222,1225-1287,1316-1376; qbm/http/src/qbm/http/3/protocol/connection.h:1040-1048; qbm/http/tests/system/http3/http3-loopback.cpp:5124-5203,5204-5248,5249-5340 -->
 
 If starting the QUIC connection fails, the connect timer expires, or the peer closes the connection, the client closes the old transport before reporting the failure. Old requests are retired before connection callbacks run, so work those callbacks queue belongs to a new attempt. On retry, qb-io refreshes the endpoint's internally owned native backend, binds its existing I/O watcher to the new UDP socket and starts it again.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:368-425,1257-1313,1404-1424,1594-1636; qb/src/qb/io/async/quic/endpoint.h:99-136,489-518 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:368-425,1257-1313,1404-1424,1594-1636; qb/src/qb/io/async/quic/endpoint.h:99-136,505-534 -->
 
 If you disconnect while a connection attempt is still pending, that attempt's connection callbacks receive one failure. Its timeout is tied to the attempt it was armed for; if you connect again with a longer timeout, the cancelled attempt's timer does not end the new handshake.
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:368-395,538-643,1225-1287,1404-1424; qbm/http/tests/system/http3/http3-loopback.cpp:5056-5086 -->
