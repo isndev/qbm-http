@@ -384,21 +384,22 @@ TEST_F(CoroClientTest, TimeoutYieldsGatewayTimeout) {
 TEST_F(CoroClientTest, TheDumpSaysACoroutineWaitsOnARequest) {
     auto &sched = qb::io::async::coro_scheduler();
     ASSERT_TRUE(sched.set_suspension_tracking(true));
-    bool        done = false;
+    // By value: a case that fails returns while the request is still held, and the coroutine ends on a later turn.
+    auto const  done = std::make_shared<bool>(false);
     std::string on_request;
-    auto        client = [&]() -> qb::io::async::task<void> {
+    auto        client = [](std::shared_ptr<bool> ended, std::string target) -> qb::io::async::task<void> {
         co_await qb::io::async::sleep(1ms);
-        (void) co_await qb::http::GET(qb::http::Request{{url("/blackhole")}}, 300ms);
-        done = true;
+        (void) co_await qb::http::GET(qb::http::Request{{target}}, 300ms);
+        *ended = true;
     };
-    sched.spawn("http-client", client());
+    sched.spawn("http-client", client(done, url("/blackhole")));
     const bool seen     = ServerThread::pump_until([&] {
         for (auto const &p : sched.dump())
             if (p.name == "http-client" && p.kind)
                 on_request = p.kind;
-        return on_request == "http" || done;
+        return on_request == "http" || *done;
     });
-    const bool finished = ServerThread::pump_until([&] { return done; });
+    const bool finished = ServerThread::pump_until([&] { return *done; });
     sched.set_suspension_tracking(false);
 
     EXPECT_TRUE(seen && finished) << "the request never parked or never ended";
@@ -410,18 +411,22 @@ TEST_F(CoroClientTest, TheDumpSaysACoroutineWaitsOnARequest) {
 // ---------------------------------------------------------------------------
 
 TEST_F(CoroClientTest, CallbackApiStillWorks) {
-    std::atomic<bool>  callback_fired{false};
-    qb::http::Response received;
+    // Held by the callback: the one-shot request is the loop's, and answers on a later turn when the case fails first.
+    struct heard {
+        std::atomic<bool>  fired{false};
+        qb::http::Response response;
+    };
+    auto const reply_to = std::make_shared<heard>();
 
-    qb::http::GET(qb::http::Request{{url("/ping")}}, [&](qb::http::async::Reply &&reply) {
-        received       = std::move(reply.response);
-        callback_fired = true;
+    qb::http::GET(qb::http::Request{{url("/ping")}}, [reply_to](qb::http::async::Reply &&reply) {
+        reply_to->response = std::move(reply.response);
+        reply_to->fired    = true;
     });
 
-    ASSERT_TRUE(ServerThread::pump_until([&] { return callback_fired.load(); })) << "callback-style GET never fired";
+    ASSERT_TRUE(ServerThread::pump_until([&] { return reply_to->fired.load(); })) << "callback-style GET never fired";
 
-    EXPECT_EQ(received.status(), qb::http::status::OK);
-    EXPECT_EQ(received.body().template as<std::string>(), "pong");
+    EXPECT_EQ(reply_to->response.status(), qb::http::status::OK);
+    EXPECT_EQ(reply_to->response.body().template as<std::string>(), "pong");
 }
 
 // QB-169: the coroutine API shares the explicit opt-in history contract.

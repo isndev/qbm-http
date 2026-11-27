@@ -489,16 +489,17 @@ TEST(Http2ServerDrain, TheModuleClientsRequestsAreAllAnswered) {
     DrainH2Server server;
     ASSERT_NE(server.port, 0);
 
-    const std::string base   = "https://localhost:" + std::to_string(server.port);
-    auto              client = std::make_shared<qb::http2::Client>(base);
-    client->set_verify_peer(false);
-    client->set_connect_timeout(5s);
-
+    const std::string base = "https://localhost:" + std::to_string(server.port);
+    // Before the client, which answers what it still holds when it is destroyed: a case that fails returns early.
     std::atomic<int>   answered{0};
     qb::http::Response slow;
     qb::http::Response draining;
-    qb::http::Request  slow_request{{base + "/slow?ms=300"}};
-    qb::http::Request  drain_request{{base + "/drain?ms=5000"}};
+    auto               client = std::make_shared<qb::http2::Client>(base);
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
+
+    qb::http::Request slow_request{{base + "/slow?ms=300"}};
+    qb::http::Request drain_request{{base + "/drain?ms=5000"}};
     ASSERT_TRUE(client->push_request(std::move(slow_request), [&](qb::http::Response r) {
         slow = std::move(r);
         ++answered;
