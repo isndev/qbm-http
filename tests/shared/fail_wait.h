@@ -199,4 +199,42 @@ expect_until(Done &&done, std::chrono::milliseconds const budget, char const *co
     return fail_wait::wait(done, budget, helper, turn, true);
 }
 
+/**
+ * @brief Joins a worker thread that this thread's loop serves: turns the loop until @p ended, then joins.
+ *
+ * The net of a case whose worker needs this thread's loop to finish -- the server it talks to runs here. Once a wait of
+ * the case has failed, a bare `join()` waits for a worker that waits for this loop: the case hangs, where it must fail.
+ * The turns happen in a destructor, the case's teardown: it fails nothing, and the kit never fails it. Bounded by
+ * @p budget, after which it joins anyway.
+ */
+class serving_join {
+public:
+    serving_join(std::thread &worker, std::atomic<bool> const &ended, std::chrono::milliseconds const budget) noexcept
+        : _worker(worker)
+        , _ended(ended)
+        , _budget(budget) {}
+    serving_join(serving_join const &)            = delete;
+    serving_join &operator=(serving_join const &) = delete;
+
+    ~serving_join() {
+        auto const until = std::chrono::steady_clock::now() + _budget;
+        while (!_ended.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < until)
+            if (qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT) == 0)
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+        if (_worker.joinable())
+            _worker.join();
+    }
+
+private:
+    std::thread                    &_worker;
+    std::atomic<bool> const        &_ended;
+    std::chrono::milliseconds const _budget;
+};
+
+/// `serving_join`, here and now: @p worker is joined when this returns, this thread's loop turned until @p ended.
+inline void
+join_serving(std::thread &worker, std::atomic<bool> const &ended, std::chrono::milliseconds const budget = std::chrono::seconds(60)) {
+    serving_join const joined{worker, ended, budget};
+}
+
 } // namespace qb::http::test

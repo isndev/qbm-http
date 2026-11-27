@@ -719,16 +719,17 @@ protected:
         return client;
     }
 
-    /// One request; the response once it came.
+    /// One request; the response once it came. The callback writes a state it shares: when the wait fails, this returns
+    /// with the request still held by the client, whose destructor answers it after this frame is gone (Huly QB-1246).
     static std::optional<qb::http::Response>
     get(std::shared_ptr<qb::http3::Client> const &client, std::uint16_t port, std::string const &path, std::string const &method = "GET",
         std::chrono::milliseconds budget = 5s) {
-        std::optional<qb::http::Response> response;
-        qb::http::Request                 request{qb::io::uri(origin(port) + path)};
+        auto const        response = std::make_shared<std::optional<qb::http::Response>>();
+        qb::http::Request request{qb::io::uri(origin(port) + path)};
         request.method() = qb::http::Method(method);
-        EXPECT_TRUE(client->push_request(std::move(request), [&](qb::http::Response r) { response = std::move(r); }));
-        pump([&] { return response.has_value(); }, budget);
-        return response;
+        EXPECT_TRUE(client->push_request(std::move(request), [response](qb::http::Response r) { *response = std::move(r); }));
+        pump([&] { return response->has_value(); }, budget);
+        return *response;
     }
 };
 

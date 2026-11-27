@@ -644,9 +644,11 @@ protected:
         client->set_connect_timeout(5s);
         client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
         client->disable_auto_reconnect();
-        bool connected = false;
-        client->connect([&](bool ok, const std::string &) { connected = ok; });
-        EXPECT_TRUE(pump_until([&] { return connected; }, 10s)) << "the client did not connect";
+        // Shared with the callback: when the wait fails, this returns with the connect still held by the client, whose
+        // destructor answers it after this frame is gone (Huly QB-1246).
+        auto const connected = std::make_shared<bool>(false);
+        client->connect([connected](bool ok, const std::string &) { *connected = ok; });
+        EXPECT_TRUE(pump_until([&] { return *connected; }, 10s)) << "the client did not connect";
         return client;
     }
 

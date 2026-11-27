@@ -216,6 +216,7 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
 
     std::atomic<bool>  client_saw_non_ok{false};
     std::atomic<bool>  worker_failed{false};
+    std::atomic<bool>  worker_ended{false}; // set last by the worker: until then it may need this thread's loop
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -246,10 +247,11 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
             worker_error = std::current_exception();
             worker_failed.store(true, std::memory_order_release);
         }
+        worker_ended.store(true, std::memory_order_release);
     });
 
     pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
-    t.join();
+    qb::http::test::join_serving(t, worker_ended); // the server's turns go on until the worker has ended
 
     if (worker_error) {
         std::rethrow_exception(worker_error);
@@ -283,6 +285,7 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
 
     std::atomic<bool>  any_status_mismatch{false};
     std::atomic<bool>  worker_failed{false};
+    std::atomic<bool>  worker_ended{false}; // set last by the worker: until then it may need this thread's loop
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -305,10 +308,11 @@ TEST(Http1Loopback, AsyncGetRoundTripsOverPlainTcp) {
             worker_error = std::current_exception();
             worker_failed.store(true, std::memory_order_release);
         }
+        worker_ended.store(true, std::memory_order_release);
     });
 
     pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
-    t.join();
+    qb::http::test::join_serving(t, worker_ended); // the server's turns go on until the worker has ended
 
     if (worker_error) {
         std::rethrow_exception(worker_error);
@@ -550,6 +554,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
 
     std::atomic<bool>  client_saw_non_ok{false};
     std::atomic<bool>  worker_failed{false};
+    std::atomic<bool>  worker_ended{false}; // set last by the worker: until then it may need this thread's loop
     std::exception_ptr worker_error;
     std::thread        t([&] {
         try {
@@ -580,10 +585,11 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
             worker_error = std::current_exception();
             worker_failed.store(true, std::memory_order_release);
         }
+        worker_ended.store(true, std::memory_order_release);
     });
 
     pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
-    t.join();
+    qb::http::test::join_serving(t, worker_ended); // the server's turns go on until the worker has ended
 
     if (worker_error) {
         std::rethrow_exception(worker_error);
