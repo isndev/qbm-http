@@ -58,6 +58,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../shared/fail_wait.h"
 #include "../../shared/loopback_server.h"
 #include "../../shared/ssl_test_resource.h"
 #include "../../shared/watchdog.h"
@@ -166,10 +167,13 @@ protected:
      * @brief Pump the single shared loop until @p done holds or @p budget elapses.
      *
      * HTTP/3 loopback runs server AND client on one @c qb::io::async listener, so
-     * this drives both. Fails loud (ADD_FAILURE) on timeout — never hangs.
+     * this drives both. Fails loud (ADD_FAILURE) on timeout — never hangs; under
+     * `QBM_HTTP_TEST_FAIL_WAIT_AT` the wait it names fails at once (fail_wait.h).
      */
     static bool
     pump(const std::function<bool()> &done, std::chrono::milliseconds budget = 5s) {
+        if (qb::http::test::fail_wait::fire("pump"))
+            return false;
         const auto deadline = std::chrono::steady_clock::now() + budget;
         while (!done()) {
             if (std::chrono::steady_clock::now() >= deadline) {

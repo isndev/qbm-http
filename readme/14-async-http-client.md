@@ -449,7 +449,7 @@ Two cautions unique to the HTTP/2 client:
 
 - **`connect(nullptr)` for fire-and-forget.** The callback `connect` has no default-argument overload, so the coroutine `connect()` stays unambiguous. Call `connect(nullptr)` when you do not need a connection callback.
 
-  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:499-503 -->
+  <!-- src: qbm/http/tests/system/http2/http2-client.cpp:500-504 -->
   ```cpp
   http2_client->connect(nullptr);  // queue requests now, flush on handshake
   ```
@@ -512,7 +512,7 @@ namespace qb::http3 {
 
 The callback form, run-to-completion driven by the event loop:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:196-217 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:200-221 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 auto client = qb::http3::make_client("https://127.0.0.1:31943");
@@ -529,7 +529,7 @@ client->disconnect();
 
 And the coroutine form with lazy connect:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:300-311 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:304-315 -->
 ```cpp
 auto client = qb::http3::make_client("https://127.0.0.1:31992");
 client->set_verify_peer(false);  // self-signed local endpoint; default is true

@@ -61,6 +61,8 @@
 #include <qb/io/tcp/listener.h>
 #include <qb/io/udp/socket.h>
 
+#include "fail_wait.h"
+
 namespace qb::http::test {
 
 /**
@@ -283,11 +285,14 @@ public:
      * @param pred   Condition to wait for.
      * @param budget Maximum wall time to pump before failing.
      * @return true if @p pred became true within @p budget; false (with an
-     *         ADD_FAILURE) on timeout.
+     *         ADD_FAILURE) on timeout. Under `QBM_HTTP_TEST_FAIL_WAIT_AT` the wait
+     *         it names fails at once, the same way (fail_wait.h).
      */
     template <typename Pred>
     static bool
     pump_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
+        if (fail_wait::fire("pump_until"))
+            return false;
         const auto deadline = std::chrono::steady_clock::now() + budget;
         while (!pred()) {
             if (std::chrono::steady_clock::now() >= deadline) {

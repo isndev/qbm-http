@@ -74,6 +74,7 @@
 #include <qb/io/tcp/listener.h>
 #include <qb/io/tcp/ssl/listener.h>
 
+#include "../../shared/fail_wait.h"
 #include "../../shared/http2_planned_peer.h"
 #include "../../shared/http2_raw_client.h"
 #include "../../shared/loopback_server.h"
@@ -8392,10 +8393,13 @@ TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTh
 // One case an entry point of the loop. Before, the same exception was taken by qb-io's read dispatch, swallowed by the
 // protocol with the request behind left unsent, or ended the process, by the frame that happened to carry the answer.
 
-/// Runs the loop until @p done or for @p span; nothing leaves it into the case.
+/// Runs the loop until @p done or for @p span; nothing leaves it into the case. Under `QBM_HTTP_TEST_FAIL_WAIT_AT` the
+/// wait it names fails at once, as a wait that reached its end does (fail_wait.h).
 template <typename Done>
 bool
 loop_until(Done &&done, std::chrono::milliseconds const span = 5s) {
+    if (qb::http::test::fail_wait::fire("loop_until"))
+        return false;
     for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until;) {
         if (done())
             return true;
