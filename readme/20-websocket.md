@@ -60,7 +60,7 @@ A WebSocket server session is an ordinary `qb-io` TCP session that starts by par
 
 For a bare WebSocket endpoint, subclass `qb::io::use<Self>::tcp::client<Server>` — an HTTP-parsing TCP session bound to its listener.
 
-<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:108-147 -->
+<!-- src: qbm/http/tests/system/ws/ws-lifecycle.cpp:107-142 -->
 ```cpp
 #include <qbm/http/http.h>
 #include <qb/io/async.h>
@@ -234,7 +234,7 @@ A `sending_http_request` hook still runs synchronously, but a hook that cancels,
 
 For compact, stateless clients, use `qb::http::ws::client` (or `client_secure` for WSS) and register lambdas. Each `on_*` returns `*this` so the calls chain. <!-- src: src/qbm/http/ws/ws.h:2146-2147 -->
 
-<!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:222-258 -->
+<!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:214-250 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -281,7 +281,7 @@ qb::http::ws::client_secure ws;            // = Client<qb::io::transport::stcp>
 ws.connect(qb::io::uri{"wss://localhost:9443/ws"}); // verify_peer defaults to true
 ```
 
-Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:275-378, src/qbm/http/ws/ws.h:1154,1946-1947 -->
+Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:267-370, src/qbm/http/ws/ws.h:1154,1946-1947 -->
 
 ## Pitfalls
 

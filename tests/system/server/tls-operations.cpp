@@ -14,6 +14,7 @@
 #include <qbm/http/http.h>
 #include <qbm/http/2/client.h>
 #include <qbm/http/2/http2.h>
+#include "../../shared/fail_wait.h"
 #include "../../shared/tls_identity.h"
 
 namespace http_tls_operations_test {
@@ -49,13 +50,7 @@ static_assert(requires(H2 &s, qb::io::uri uri) {
 template <typename Predicate>
 bool
 pump_until(Predicate predicate, std::chrono::milliseconds budget = 5s) {
-    const auto end = std::chrono::steady_clock::now() + budget;
-    do {
-        if (predicate())
-            return true;
-        qb::io::async::run_for(1ms);
-    } while (std::chrono::steady_clock::now() < end);
-    return predicate();
+    return qb::http::test::wait_until(predicate, budget, "pump_until", [] { qb::io::async::run_for(1ms); });
 }
 
 ::testing::AssertionResult

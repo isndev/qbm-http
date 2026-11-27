@@ -81,15 +81,7 @@ constexpr int kBindEphemeral = 0;
 template <typename Pred>
 bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!pred()) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return pred();
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
+    return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
 }
 
 std::string

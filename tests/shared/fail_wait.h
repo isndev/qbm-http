@@ -12,9 +12,13 @@
  * `dev/agent/run-fail-wait.py` runs each case of a binary alone with k = 1, 2, ... until the case no longer reaches a
  * k-th wait, and requires every injected failure to end as one failed case.
  *
- * The three wait helpers call `fire()` before they wait: `ServerThread::pump_until` (loopback_server.h), the HTTP/3
- * loopback fixture's `pump()` and the HTTP/2 client cases' `loop_until()`. A wait that fires records one
- * `ADD_FAILURE()` and returns false, which is what the helper itself does at its deadline. After every case, once its
+ * Every deadline wait of the suite is one function of this header: `qb::http::test::wait_until()`, or
+ * `expect_until()`, which also records a failure at its deadline. A test's own helpers (`ServerThread::pump_until`,
+ * the HTTP/3 fixtures' `pump()`, the HTTP/2 cases' `loop_until()`, ...) call them and run no loop of their own, and
+ * `dev/agent/run-fail-wait.py --lint` refuses a loop that turns the event loop until a condition or a deadline
+ * anywhere else under qbm/http/tests -- a window, which always runs its whole span, is not a wait. The wait calls
+ * `fire()` first: a wait that fires records one `ADD_FAILURE()` and returns false, which is what a wait that reached
+ * its deadline returns. After every case, once its
  * fixture is destroyed, a listener turns the calling thread's loop for `k_turn`: what the case left armed runs, as it
  * would under the next case of the binary, and the line it prints says how many waits the case reached.
  *
@@ -28,7 +32,7 @@
  *   - `[fail_wait] injected: wait <k> (<helper>) fails, as at its deadline` -- the failure's message;
  *   - `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for <ms> ms` -- on stderr, per case.
  *
- * It includes gtest and qb-io's `async.h`, and is included by the three helpers' files.
+ * It includes gtest and qb-io's `async.h`, and is included by every test file that waits.
  *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
@@ -42,6 +46,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -117,4 +122,81 @@ inline bool const installed = [] {
     return true;
 }();
 
+/// One non-blocking pass of the calling thread's loop: what a wait turns, by default, between two looks at its condition.
+struct one_pass {
+    void
+    operator()() const {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+};
+
+/// A pass that sleeps `idle` when it invoked nothing: the turn of a wait whose loop may have no watcher due.
+struct pass_or_sleep {
+    std::chrono::microseconds idle;
+
+    void
+    operator()() const {
+        if (qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT) == 0)
+            std::this_thread::sleep_for(idle);
+    }
+};
+
+/// A pass, then a sleep of `idle` whatever it invoked: the turn of a wait that paces itself.
+struct pass_then_sleep {
+    std::chrono::microseconds idle;
+
+    void
+    operator()() const {
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        std::this_thread::sleep_for(idle);
+    }
+};
+
+/// The one deadline wait of the suite, which `wait_until()` and `expect_until()` are: looks at `done`, turns, until it
+/// holds or `budget` has elapsed. Armed, its k-th call returns false at once, its failure recorded (`fire()`).
+template <typename Done, typename Turn>
+bool
+wait(Done &done, std::chrono::milliseconds const budget, char const *const helper, Turn &turn, bool const fails_at_deadline) {
+    if (fire(helper))
+        return false;
+    auto const until = std::chrono::steady_clock::now() + budget;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= until) {
+            if (done())
+                return true;
+            if (fails_at_deadline)
+                ADD_FAILURE() << helper << ": predicate not satisfied within " << budget.count() << "ms";
+            return false;
+        }
+        turn();
+    }
+    return true;
+}
+
 } // namespace qb::http::test::fail_wait
+
+namespace qb::http::test {
+
+/**
+ * @brief Turns the calling thread's loop until @p done holds or @p budget elapses; whether @p done holds.
+ *
+ * The suite's deadline wait: a test that waits for something to happen on its loop calls this (or `expect_until()`),
+ * never a loop of its own -- `dev/agent/run-fail-wait.py --lint` refuses one anywhere else under qbm/http/tests, so
+ * that every wait is one the kit can make fail. It records nothing at its deadline: the caller's assertion names what
+ * did not happen. @p helper names the wait in the kit's line; @p turn is one pass between two looks at @p done
+ * (`fail_wait::one_pass` by default, `fail_wait::pass_or_sleep{1ms}` for a loop that may be idle, or the caller's own).
+ */
+template <typename Done, typename Turn = fail_wait::one_pass>
+bool
+wait_until(Done &&done, std::chrono::milliseconds const budget, char const *const helper = "wait_until", Turn &&turn = Turn{}) {
+    return fail_wait::wait(done, budget, helper, turn, false);
+}
+
+/// `wait_until()` that records a non-fatal failure at its deadline, naming @p helper and @p budget.
+template <typename Done, typename Turn = fail_wait::one_pass>
+bool
+expect_until(Done &&done, std::chrono::milliseconds const budget, char const *const helper = "expect_until", Turn &&turn = Turn{}) {
+    return fail_wait::wait(done, budget, helper, turn, true);
+}
+
+} // namespace qb::http::test

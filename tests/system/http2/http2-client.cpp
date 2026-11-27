@@ -2236,9 +2236,7 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAConnectTimeoutWhoseFailureCallbackRa
         if (++failed != 1)
             return;
         open_at_entry = client->transport().is_open(); // the deadline found TLS done: the end below is this transport's
-        for (const auto until = std::chrono::steady_clock::now() + 5s;
-             client->transport().is_open() && std::chrono::steady_clock::now() < until;)
-            qb::io::async::run(EVRUN_NOWAIT); // the peer's end is read here
+        qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 5s); // the peer's end is read here
         ended_in_pump = !client->transport().is_open();
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 10s));
@@ -2282,9 +2280,7 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAGracefulGoawaysDrainWhoseFailureCall
         EXPECT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
             ++failed;
             failure = response.body().as<std::string>();
-            for (const auto until = std::chrono::steady_clock::now() + 3s;
-                 client->transport().is_open() && std::chrono::steady_clock::now() < until;)
-                qb::io::async::run(EVRUN_NOWAIT); // the peer's end is read here
+            qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 3s); // the peer's end is read here
             ended_in_pump = !client->transport().is_open();
         }));
     }));
@@ -6647,8 +6643,8 @@ TEST_F(Http2ClientTest, AConnectAskedFromACallbackOfALostConnectionThatRunsTheLo
             again    = ok;
         });
         connecting = client->is_connecting();
-        for (const auto until = std::chrono::steady_clock::now() + 500ms; !answered && std::chrono::steady_clock::now() < until;)
-            qb::io::async::run(EVRUN_NOWAIT); // long enough for an attempt started here to connect: TLS and SETTINGS on the loopback
+        // Long enough for an attempt started here to connect: TLS and SETTINGS on the loopback.
+        qb::http::test::wait_until([&] { return answered; }, 500ms);
         answered_in_the_callback = answered;
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == 1; }));
@@ -7204,8 +7200,8 @@ TEST_F(Http2ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
         client->push_request(elsewhere(), [&](qb::http::Response) {
             order.push_back(1);
             client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
-            for (const auto until = std::chrono::steady_clock::now() + 5s; order.size() < 3 && std::chrono::steady_clock::now() < until;)
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT); // the loop turns of this callback: the client's turn, and the response
+            // The loop turns of this callback: the client's turn, and the response.
+            qb::http::test::wait_until([&] { return order.size() >= 3; }, 5s);
         });
         EXPECT_EQ(order, (std::vector<int>{1, 2, 9})) << "the response overtook the refusal owed before it";
         client->disconnect();
@@ -7882,12 +7878,12 @@ TEST_F(Http2ClientTest, AFailedConnectWhoseCallbackThrowsStillAnswersTheRequests
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(first)));
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(second)));
     const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until && !done();) {
+        qb::http::test::wait_until(done, span, "run", [] {
             try {
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             } catch (std::runtime_error const &) {
             }
-        }
+        });
     };
     run(5s, [&] { return told != 0; });
     ASSERT_EQ(told, 1) << "the attempt did not fail: the case proves nothing";
@@ -7922,12 +7918,12 @@ TEST_F(Http2ClientTest, AGracefulGoawaysDrainWhoseCallbackThrowsStillEndsItsTran
         }));
     }));
     const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until && !done();) {
+        qb::http::test::wait_until(done, span, "run", [] {
             try {
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             } catch (std::runtime_error const &) {
             }
-        }
+        });
     };
     run(10s, [&] { return failed != 0; });
     ASSERT_EQ(answered, 1);
@@ -7977,8 +7973,8 @@ TEST_F(Http2ClientTest, AConnectAskedFromACallbackOfALostConnectionHasItsDeadlin
             {
                 qb::http::test::watchdog bound("the loop a callback runs until its connect() is answered", 10s);
                 const auto               until = began + 3s; // a program's loop has no bound
-                while (connect_answers == 0 && std::chrono::steady_clock::now() < until)
-                    qb::io::async::run(EVRUN_NOWAIT);
+                qb::http::test::wait_until([&] { return connect_answers != 0; },
+                                           std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()));
             }
             waited               = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began);
             answered_in_the_loop = connect_answers != 0;
@@ -8034,9 +8030,7 @@ TEST_F(Http2ClientTest, ARequestPushedOnceADeferredConnectTimedOutRidesTheNextAt
         });
         {
             qb::http::test::watchdog bound("the loop a callback runs until its connect() is answered", 10s);
-            const auto               until = std::chrono::steady_clock::now() + 3s;
-            while (connect_answers == 0 && std::chrono::steady_clock::now() < until)
-                qb::io::async::run(EVRUN_NOWAIT);
+            qb::http::test::wait_until([&] { return connect_answers != 0; }, 3s);
         }
         silent.reset();                              // the port is free
         server = reconnect::make_h2_server_on(port); // and serves h2 from here on
@@ -8208,12 +8202,13 @@ TEST_F(Http2ClientTest, ALostConnectionWhoseFirstFailureCallbackThrowsStillRecon
         server.reset(); // the connection is lost
         auto back = reconnect::make_h2_server_on(port);
         ASSERT_TRUE(back->ready()) << "no h2 server on the port the first left: the case proves nothing";
-        for (const auto until = std::chrono::steady_clock::now() + 8s; std::chrono::steady_clock::now() < until && again.count == 0;) {
-            try {
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-            } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
-            }
-        }
+        qb::http::test::wait_until([&] { return again.count != 0; }, 8s, "wait_until",
+                                   [] {
+                                       try {
+                                           qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                       } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
+                                       }
+                                   });
         EXPECT_EQ(failures, 3) << "a request behind the callback that threw was not answered";
         EXPECT_EQ(again.count, 1) << "the request a failure callback pushed back was never served";
         EXPECT_EQ(again.status, qb::http::status::OK) << again.body;
@@ -8242,12 +8237,12 @@ TEST_F(Http2ClientTest, ALostAttemptWhoseConnectCallbackThrowsStillAnswersTheReq
     }));
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(waiting)));
     const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until && !done();) {
+        qb::http::test::wait_until(done, span, "run", [] {
             try {
                 qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
             } catch (std::runtime_error const &) {
             }
-        }
+        });
     };
     run(5s, [&] { return told != 0; });
     ASSERT_EQ(told, 1) << "the attempt was not lost: the case proves nothing";
@@ -8398,14 +8393,7 @@ TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTh
 template <typename Done>
 bool
 loop_until(Done &&done, std::chrono::milliseconds const span = 5s) {
-    if (qb::http::test::fail_wait::fire("loop_until"))
-        return false;
-    for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until;) {
-        if (done())
-            return true;
-        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-    }
-    return done();
+    return qb::http::test::wait_until(std::forward<Done>(done), span, "loop_until");
 }
 
 // Under a response. One stream allowed; A is in flight, B waits for A's stream, and A's callback throws -- a request's,

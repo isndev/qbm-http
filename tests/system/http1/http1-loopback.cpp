@@ -52,15 +52,7 @@ constexpr const char  STRING_MESSAGE[] = "Here is my content test";
 template <typename F>
 bool
 pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20)) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!done()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            ADD_FAILURE() << "pump_loop_until: predicate not satisfied within " << budget.count() << "ms";
-            return false;
-        }
-        async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-    }
-    return true;
+    return qb::http::test::expect_until(done, budget, "pump_loop_until");
 }
 
 // ---- Host-header-on-the-wire fixture -------------------------------------

@@ -178,16 +178,7 @@ bound_port(const qb::http::test::WsServerThread<ServerT> &server) {
 template <typename Pred>
 bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget = 3000ms) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (std::chrono::steady_clock::now() < deadline) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-    ADD_FAILURE() << "pump_until: predicate did not hold within budget";
-    return false;
+    return qb::http::test::expect_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
 }
 
 /// Decode an unmasked Close status code from a 2+ byte payload.
@@ -883,11 +874,7 @@ namespace ws_connected_pumps_test {
 template <typename Done>
 void
 pump_inside_the_callback(Done done) {
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (!done() && std::chrono::steady_clock::now() < deadline) {
-        qb::io::async::run(EVRUN_NOWAIT);
-        std::this_thread::sleep_for(1ms);
-    }
+    qb::http::test::wait_until(done, 2s, "pump_inside_the_callback", qb::http::test::fail_wait::pass_then_sleep{1ms});
 }
 
 } // namespace ws_connected_pumps_test
@@ -1050,11 +1037,11 @@ TEST(WebSocketClientHardening, AConnectionBegunByAHandlerOfAMessageThatWaitedIsS
         // Until the second upgrade request leaves: loop turns, deferred callbacks included -- the connection needs them.
         ws_connected_pumps_test::pump_inside_the_callback([&] { return upgrades == 2; });
         // Then the loop alone until the 101 is in: its watchers run, no deferred callback does.
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (client.negotiated_subprotocol().empty() && std::chrono::steady_clock::now() < deadline) {
-            qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
+                                   [] {
+                                       qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+                                       std::this_thread::sleep_for(1ms);
+                                   });
         second_101_in = !client.negotiated_subprotocol().empty() && connected == 1;
     });
     client.connect(first, 2s);
@@ -1103,9 +1090,8 @@ TEST(WebSocketClientHardening, ADeliveryItsHandlerEndedLeavesTheNextConnectionsE
         if (std::exchange(replaced, true))
             return;
         client.connect(second, 2s);
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (client.negotiated_subprotocol().empty() && std::chrono::steady_clock::now() < deadline)
-            qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+        qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
+                                   [] { qb::io::async::listener::current.loop().run(EVRUN_NOWAIT); });
         qb::http::ws::MessageText hi;
         hi << "hi";
         client << hi;
@@ -1150,14 +1136,10 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWh
         hello << "hello";
         *client << hello;
         // What this closure captured goes with the client: only locals from here.
-        bool const *const gone     = &destroyed;
-        bool *const       in_pump  = &pumping;
-        const auto        deadline = std::chrono::steady_clock::now() + 2s;
-        *in_pump                   = true;
-        while (!*gone && std::chrono::steady_clock::now() < deadline) {
-            qb::io::async::run(EVRUN_NOWAIT);
-            std::this_thread::sleep_for(1ms);
-        }
+        bool const *const gone    = &destroyed;
+        bool *const       in_pump = &pumping;
+        *in_pump                  = true;
+        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
         *in_pump = false;
     });
     client->on_message([&](auto &event) {
@@ -1201,14 +1183,10 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientOn
         hello << "hello";
         *client << hello;
         // What this closure captured goes with the client: only locals from here.
-        bool const *const gone     = &destroyed;
-        bool *const       in_pump  = &pumping;
-        const auto        deadline = std::chrono::steady_clock::now() + 2s;
-        *in_pump                   = true;
-        while (!*gone && std::chrono::steady_clock::now() < deadline) {
-            qb::io::async::run(EVRUN_NOWAIT);
-            std::this_thread::sleep_for(1ms);
-        }
+        bool const *const gone    = &destroyed;
+        bool *const       in_pump = &pumping;
+        *in_pump                  = true;
+        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
         *in_pump = false;
     });
     client->on_message([&](auto &event) {
@@ -1334,14 +1312,10 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWh
         hello << "hello";
         *client << hello;
         // What this closure captured goes with the client: only locals from here.
-        bool const *const gone     = &destroyed;
-        bool *const       in_pump  = &pumping;
-        const auto        deadline = std::chrono::steady_clock::now() + 2s;
-        *in_pump                   = true;
-        while (!*gone && std::chrono::steady_clock::now() < deadline) {
-            qb::io::async::run(EVRUN_NOWAIT);
-            std::this_thread::sleep_for(1ms);
-        }
+        bool const *const gone    = &destroyed;
+        bool *const       in_pump = &pumping;
+        *in_pump                  = true;
+        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
         *in_pump = false;
     });
     client->on_message([&](auto &event) {

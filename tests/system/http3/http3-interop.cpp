@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -217,26 +218,28 @@ run_command_while_pumping(std::string const &command, std::chrono::milliseconds 
     }
     CloseHandle(process.hThread);
 
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
-        if (wait_result == WAIT_OBJECT_0) {
-            DWORD      exit_code     = 0;
-            const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
-            CloseHandle(process.hProcess);
-            CloseHandle(job);
-            return {got_exit_code ? static_cast<int>(exit_code) : -1, false};
-        }
-        if (wait_result == WAIT_FAILED) {
-            CloseHandle(job);
-            WaitForSingleObject(process.hProcess, INFINITE);
-            CloseHandle(process.hProcess);
-            return {-1, false};
-        }
-        if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-            std::this_thread::sleep_for(1ms);
-        }
-    }
+    // How the child ended, once it has: the wait looks at it between two passes of the loop, and stops there.
+    std::optional<CommandResult> ended;
+    qb::http::test::wait_until(
+        [&] {
+            const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
+            if (wait_result == WAIT_OBJECT_0) {
+                DWORD      exit_code     = 0;
+                const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
+                CloseHandle(process.hProcess);
+                CloseHandle(job);
+                ended = CommandResult{got_exit_code ? static_cast<int>(exit_code) : -1, false};
+            } else if (wait_result == WAIT_FAILED) {
+                CloseHandle(job);
+                WaitForSingleObject(process.hProcess, INFINITE);
+                CloseHandle(process.hProcess);
+                ended = CommandResult{-1, false};
+            }
+            return ended.has_value();
+        },
+        timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{1ms});
+    if (ended)
+        return *ended;
 
     CloseHandle(job);
     WaitForSingleObject(process.hProcess, INFINITE);
@@ -252,26 +255,27 @@ run_command_while_pumping(std::string const &command, std::chrono::milliseconds 
         _exit(127);
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    int        status   = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto result = waitpid(pid, &status, WNOHANG);
-        if (result == pid) {
-            if (WIFEXITED(status)) {
-                return {WEXITSTATUS(status), false};
+    // How the child ended, once it has: the wait looks at it between two passes of the loop, and stops there.
+    int                          status = 0;
+    std::optional<CommandResult> ended;
+    qb::http::test::wait_until(
+        [&] {
+            const auto result = waitpid(pid, &status, WNOHANG);
+            if (result == pid) {
+                if (WIFEXITED(status))
+                    ended = CommandResult{WEXITSTATUS(status), false};
+                else if (WIFSIGNALED(status))
+                    ended = CommandResult{128 + WTERMSIG(status), false};
+                else
+                    ended = CommandResult{-1, false};
+            } else if (result < 0) {
+                ended = CommandResult{-1, false};
             }
-            if (WIFSIGNALED(status)) {
-                return {128 + WTERMSIG(status), false};
-            }
-            return {-1, false};
-        }
-        if (result < 0) {
-            return {-1, false};
-        }
-        if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
+            return ended.has_value();
+        },
+        timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{std::chrono::milliseconds(1)});
+    if (ended)
+        return *ended;
 
     kill(pid, SIGTERM);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));

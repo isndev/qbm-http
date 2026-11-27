@@ -681,16 +681,7 @@ protected:
     }
     static bool
     pump(std::function<bool()> const &done, std::chrono::milliseconds budget = 5s) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!done()) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                ADD_FAILURE() << "pump: predicate not satisfied within " << budget.count() << "ms";
-                return false;
-            }
-            if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT))
-                std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        return qb::http::test::expect_until(done, budget, "pump", qb::http::test::fail_wait::pass_or_sleep{1ms});
     }
 };
 

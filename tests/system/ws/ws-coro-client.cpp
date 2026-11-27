@@ -49,6 +49,7 @@
 
 #include <qbm/http/ws.h>
 
+#include "../../shared/fail_wait.h"
 #include "../../shared/ws_loopback.h"
 
 namespace {
@@ -626,11 +627,8 @@ TEST_F(WsCoroClient, EchoesPeerCloseFrame) {
     // Pump the client loop while polling the server-observed echo count with a
     // hard budget. The client's outbound Close echo was queued during receive();
     // these pumps flush it and let the server parse it.
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (echoes.load(std::memory_order_relaxed) == 0u && std::chrono::steady_clock::now() < deadline) {
-        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-        std::this_thread::sleep_for(2ms);
-    }
+    qb::http::test::wait_until([&] { return echoes.load(std::memory_order_relaxed) != 0u; }, 2s, "wait_until",
+                               qb::http::test::fail_wait::pass_then_sleep{2ms});
 
     EXPECT_EQ(echoes.load(std::memory_order_relaxed), 1u) << "a peer-initiated Close must be echoed exactly once";
 }

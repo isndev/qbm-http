@@ -49,6 +49,8 @@
 #include <qb/io/tcp/socket.h>
 #include <qbm/http/http.h>
 
+#include "../../shared/fail_wait.h"
+
 using namespace std::chrono_literals;
 
 namespace listen_start_parity_test {
@@ -86,13 +88,7 @@ public:
 template <typename Pred>
 bool
 pump_until(Pred pred, std::chrono::milliseconds budget) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred())
-            return true;
-        qb::io::async::run_for(5ms);
-    }
-    return pred();
+    return qb::http::test::wait_until(pred, budget, "pump_until", [] { qb::io::async::run_for(5ms); });
 }
 
 class ListenStartParity : public ::testing::Test {

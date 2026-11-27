@@ -497,9 +497,7 @@ TEST_F(CoroClientTest, RedirectAbandonAfterResponseBeforeDeferPreventsNextAttemp
         // No continuation is resumed: destruction here is exactly abandonment of
         // the outstanding awaiter, not cancellation of an already queued frame.
         pending.await_suspend(std::coroutine_handle<>{});
-        const auto deadline = std::chrono::steady_clock::now() + 5s;
-        while (!listener.has_deferred() && std::chrono::steady_clock::now() < deadline)
-            listener.loop().run(EVRUN_NOWAIT);
+        qb::http::test::wait_until([&] { return listener.has_deferred(); }, 5s, "wait_until", [&] { listener.loop().run(EVRUN_NOWAIT); });
         // Drive only native watcher dispatch above. On this successful one-shot
         // connection the first defer is receive()'s queued redirect processing;
         // the listener tail has not run it. No socket-failure defer is accepted.

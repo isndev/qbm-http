@@ -32,6 +32,8 @@
 
 #include <qb/io/tcp/socket.h>
 
+#include "../../shared/fail_wait.h"
+
 using namespace std::chrono_literals;
 
 namespace http1_extraction_test {
@@ -87,14 +89,7 @@ public:
 template <typename Pred>
 bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline)
-            return false;
-        qb::io::async::run(EVRUN_NOWAIT);
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
+    return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
 }
 
 template <typename Session>

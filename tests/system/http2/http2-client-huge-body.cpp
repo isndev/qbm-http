@@ -26,6 +26,7 @@
 
 #include <gtest/gtest.h>
 
+#include "../../shared/fail_wait.h"
 #include "../../shared/http2_planned_peer.h"
 #include "../../shared/ssl_test_resource.h"
 
@@ -39,14 +40,7 @@ namespace http2_client_huge_body_test {
 template <typename Pred>
 [[nodiscard]] bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return false;
-        }
-        qb::io::async::run(EVRUN_NOWAIT);
-    }
-    return true;
+    return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until");
 }
 
 // The request on stream 3 is answered on the same connection, its header named by an index the discarded trailers put

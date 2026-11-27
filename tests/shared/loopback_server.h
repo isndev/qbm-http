@@ -291,17 +291,7 @@ public:
     template <typename Pred>
     static bool
     pump_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
-        if (fail_wait::fire("pump_until"))
-            return false;
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!pred()) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                ADD_FAILURE() << "pump_until: predicate not satisfied within " << budget.count() << "ms (event loop pumped to timeout)";
-                return false;
-            }
-            qb::io::async::run(EVRUN_NOWAIT);
-        }
-        return true;
+        return expect_until(std::forward<Pred>(pred), budget, "pump_until");
     }
 
     /**
