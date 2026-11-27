@@ -517,8 +517,14 @@ TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
     qb::http::ws::MessageText message;
     message << "server-replacement";
     session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_EQ(replacement.await_resume().payload, "server-replacement");
     EXPECT_EQ(resumed, 1);
@@ -534,16 +540,28 @@ TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
     auto next = receive();
     next.handle().resume();
     ASSERT_FALSE(next.handle().done());
-    for (int turn = 0; turn != 16 && !preceding.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || preceding.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(preceding.handle().done());
     EXPECT_EQ(preceding.await_resume().payload, "server-preceding");
     EXPECT_FALSE(next.handle().done());
     qb::http::ws::MessageText next_message;
     next_message << "server-next";
     session.on(EchoCoroSession::WS_Protocol::message{next_message.size(), next_message.data().cbegin(), next_message});
-    for (int turn = 0; turn != 16 && !next.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || next.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(next.handle().done());
     EXPECT_EQ(next.await_resume().payload, "server-next");
     EXPECT_EQ(resumed, 3);
@@ -565,8 +583,14 @@ TEST_F(WsCoroServer, FrameAfterAbandonedNextFrameIsAvailableToTheNextConsumer) {
     session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
     auto replacement = receive();
     replacement.handle().resume();
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done()) << "a dead receiver must not consume the frame";
     EXPECT_EQ(replacement.await_resume().payload, "server-buffered");
 }
@@ -621,8 +645,14 @@ TEST_F(WsCoroServer, RejectedCloseAllowsAValidCloseOnTheSameSession) {
     ASSERT_GT(queued_bytes, 0u);
     qb::http::ws::MessageClose peer(Status::Normal, "valid");
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
-    for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(task.handle().done());
     EXPECT_NO_THROW(task.await_resume());
     EXPECT_TRUE(completed);
@@ -645,8 +675,14 @@ TEST_F(WsCoroServer, ARealConcurrentNextFrameIsStillRejected) {
     qb::http::ws::MessageText message;
     message << "server-first";
     session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
-    for (int turn = 0; turn != 16 && !first.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || first.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(first.handle().done());
     EXPECT_EQ(first.await_resume().payload, "server-first");
 }
@@ -672,8 +708,14 @@ TEST_F(WsCoroServer, AbandonedCloseAllowsAReplacementButRejectsAConcurrentClose)
     const auto                 queued_bytes = session.out().size();
     qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::Normal, "valid");
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_TRUE(replacement.await_resume().ok);
     EXPECT_EQ(session.out().size(), queued_bytes);
@@ -736,8 +778,14 @@ TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
             EXPECT_EQ(qb::http::test::extract_close_code(close_wire), 1001);
         }
         EXPECT_EQ(close_frames, 0) << "http_completion schedules the consumer; it does not resume it inline";
-        for (int turn = 0; turn != 16 && close_frames == 0; ++turn)
-            qb::io::async::coro_scheduler().run_ready();
+        {
+            int turn = 0; // sixteen passes at most
+            qb::http::test::wait_until([&] { return turn == 16 || close_frames != 0; }, 5s, "wait_until",
+                                       [&turn] {
+                                           qb::io::async::coro_scheduler().run_ready();
+                                           ++turn;
+                                       });
+        }
         ASSERT_EQ(close_frames, 1);
         EXPECT_EQ(received.kind, qb::http::ws::IncomingFrame::Kind::Close);
         EXPECT_EQ(received.close_code, 1001);
@@ -748,8 +796,14 @@ TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
             << "close_async after the Close notification must only wait, never republish Close";
 
         session.on(qb::io::async::event::disconnected{static_cast<int>(qb::http::DisconnectedReason::ServerDraining)});
-        for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
-            qb::io::async::coro_scheduler().run_ready();
+        {
+            int turn = 0; // sixteen passes at most
+            qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                       [&turn] {
+                                           qb::io::async::coro_scheduler().run_ready();
+                                           ++turn;
+                                       });
+        }
         ASSERT_TRUE(task.handle().done());
         EXPECT_NO_THROW(task.await_resume());
         EXPECT_TRUE(close_ok);
@@ -785,8 +839,14 @@ TEST_F(WsCoroServer, CloseAwaiterDuringServerDrainWaitsForTheExistingHandshake) 
 
     qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::GoingAway, "drain acknowledged");
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
-    for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
-        qb::io::async::coro_scheduler().run_ready();
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                   [&turn] {
+                                       qb::io::async::coro_scheduler().run_ready();
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(task.handle().done());
     EXPECT_NO_THROW(task.await_resume());
     EXPECT_TRUE(close_ok);

@@ -941,21 +941,23 @@ public:
 bool
 server_closes_after(qb::io::tcp::socket &sock, std::vector<std::uint8_t> const &frame, std::string &received) {
     sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
-    const auto deadline = std::chrono::steady_clock::now() + 3s;
-    char       buf[256];
-    while (std::chrono::steady_clock::now() < deadline) {
-        const int n = sock.read(buf, sizeof(buf));
-        if (n > 0)
-            received.append(buf, static_cast<std::size_t>(n));
-        if (n == 0)
-            return true; // the server's FIN
-        if (n < 0) {
-            if (!qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
-                return true; // reset: closed with bytes unread
-            std::this_thread::sleep_for(5ms);
-        }
-    }
-    return false;
+    char buf[256];
+    bool closed = false;
+    qb::http::test::wait_until([&] { return closed; }, 3s, "server_closes_after",
+                               [&] {
+                                   const int n = sock.read(buf, sizeof(buf));
+                                   if (n > 0)
+                                       received.append(buf, static_cast<std::size_t>(n));
+                                   if (n == 0)
+                                       closed = true; // the server's FIN
+                                   if (n < 0) {
+                                       if (!qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
+                                           closed = true; // reset: closed with bytes unread
+                                       else
+                                           std::this_thread::sleep_for(5ms);
+                                   }
+                               });
+    return closed;
 }
 
 void

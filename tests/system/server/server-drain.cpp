@@ -79,36 +79,36 @@ public:
     void
     send(std::string const &bytes) {
         std::size_t off = 0;
-        const auto  end = std::chrono::steady_clock::now() + 5s;
-        while (off < bytes.size() && std::chrono::steady_clock::now() < end) {
-            const int n = _sock.write(bytes.data() + off, bytes.size() - off);
-            if (n > 0)
-                off += static_cast<std::size_t>(n);
-            else
-                std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::wait_until([&] { return off >= bytes.size(); }, 5s, "send",
+                                   [&] {
+                                       const int n = _sock.write(bytes.data() + off, bytes.size() - off);
+                                       if (n > 0)
+                                           off += static_cast<std::size_t>(n);
+                                       else
+                                           std::this_thread::sleep_for(1ms);
+                                   });
     }
 
     /// Reads until @p done holds, the connection ends, or @p budget elapses.
     template <typename Pred>
     void
     read_until(Pred &&done, std::chrono::milliseconds budget = 5000ms) {
-        char       buffer[4096];
-        const auto end = std::chrono::steady_clock::now() + budget;
-        while (!done() && !closed && std::chrono::steady_clock::now() < end) {
-            const int got = _sock.read(buffer, sizeof(buffer));
-            if (got > 0) {
-                received.append(buffer, static_cast<std::size_t>(got));
-                continue;
-            }
-            // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
-            const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
-            if (error == 0 || !qb::io::socket::not_recv_error(error)) {
-                closed = true;
-                break;
-            }
-            std::this_thread::sleep_for(1ms);
-        }
+        char buffer[4096];
+        qb::http::test::wait_until([&] { return closed || done(); }, budget, "read_until",
+                                   [&] {
+                                       const int got = _sock.read(buffer, sizeof(buffer));
+                                       if (got > 0) {
+                                           received.append(buffer, static_cast<std::size_t>(got));
+                                           return;
+                                       }
+                                       // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
+                                       const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
+                                       if (error == 0 || !qb::io::socket::not_recv_error(error)) {
+                                           closed = true;
+                                           return;
+                                       }
+                                       std::this_thread::sleep_for(1ms);
+                                   });
     }
 
     void
@@ -143,9 +143,7 @@ get(std::string const &target) {
 /// Waits (from the test thread) until the drain reported.
 bool
 wait_for_report(std::chrono::milliseconds budget = 5000ms) {
-    const auto end = std::chrono::steady_clock::now() + budget;
-    while (g_reports.load() == 0 && std::chrono::steady_clock::now() < end)
-        std::this_thread::sleep_for(1ms);
+    qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});
     return g_reports.load() != 0;
 }
 
@@ -531,9 +529,7 @@ TEST(HttpServerDrain, WithNoSessionTheDrainReportsAtOnce) {
 
     ASSERT_TRUE(wait_for_report());
     EXPECT_EQ(g_outcome.load(), static_cast<int>(qb::http::drain_outcome::drained));
-    const auto until = std::chrono::steady_clock::now() + 1s;
-    while (!returned_after_report.load() && std::chrono::steady_clock::now() < until)
-        std::this_thread::sleep_for(1ms);
+    qb::http::test::wait_until([&] { return returned_after_report.load(); }, 1s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     EXPECT_TRUE(returned_after_report.load()) << "the report ran before drain() returned";
     RawClient late(port);
     EXPECT_FALSE(late.connected) << "the listening socket is closed";

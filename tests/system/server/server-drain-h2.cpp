@@ -68,9 +68,7 @@ reset_globals() {
 
 bool
 wait_for_report(std::chrono::milliseconds budget = 5000ms) {
-    const auto end = std::chrono::steady_clock::now() + budget;
-    while (g_reports.load() == 0 && std::chrono::steady_clock::now() < end)
-        std::this_thread::sleep_for(1ms);
+    qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});
     return g_reports.load() != 0;
 }
 
@@ -104,18 +102,19 @@ class H2RawClient {
 
     void
     send(Wire const &wire) {
-        std::size_t off  = 0;
-        const auto  size = wire.input.size();
-        const auto  end  = std::chrono::steady_clock::now() + 5s;
-        while (off < size && std::chrono::steady_clock::now() < end) {
-            const int n = _sock.write(wire.input.cbegin() + off, size - off);
-            if (n > 0)
-                off += static_cast<std::size_t>(n);
-            else if (n < 0)
-                return;
-            else
-                std::this_thread::sleep_for(1ms);
-        }
+        std::size_t off    = 0;
+        const auto  size   = wire.input.size();
+        bool        failed = false;
+        qb::http::test::wait_until([&] { return failed || off >= size; }, 5s, "send",
+                                   [&] {
+                                       const int n = _sock.write(wire.input.cbegin() + off, size - off);
+                                       if (n > 0)
+                                           off += static_cast<std::size_t>(n);
+                                       else if (n < 0)
+                                           failed = true;
+                                       else
+                                           std::this_thread::sleep_for(1ms);
+                                   });
     }
 
 public:
@@ -143,18 +142,17 @@ public:
 
     bool
     complete_handshake(std::chrono::milliseconds budget = 5000ms) {
-        const auto end = std::chrono::steady_clock::now() + budget;
-        while (std::chrono::steady_clock::now() < end) {
-            const int status = _sock.handshake_status();
-            if (status == 1) {
-                _sock.set_nonblocking(true);
-                return true;
-            }
-            if (status < 0)
-                return false;
-            std::this_thread::sleep_for(1ms);
-        }
-        return false;
+        int status = 0;
+        qb::http::test::wait_until(
+            [&] {
+                status = _sock.handshake_status();
+                return status == 1 || status < 0;
+            },
+            budget, "complete_handshake", qb::http::test::fail_wait::nap{1ms});
+        if (status != 1)
+            return false;
+        _sock.set_nonblocking(true);
+        return true;
     }
 
     [[nodiscard]] std::string
@@ -190,20 +188,20 @@ public:
     template <typename Pred>
     void
     read_until(Pred &&done, std::chrono::milliseconds budget = 5000ms) {
-        char       buffer[16384];
-        const auto end = std::chrono::steady_clock::now() + budget;
-        while (!done() && !closed && std::chrono::steady_clock::now() < end) {
-            const int got = _sock.read(buffer, sizeof(buffer));
-            if (got > 0) {
-                _received.append(buffer, static_cast<std::size_t>(got));
-                continue;
-            }
-            if (got < 0) {
-                closed = true;
-                break;
-            }
-            std::this_thread::sleep_for(1ms);
-        }
+        char buffer[16384];
+        qb::http::test::wait_until([&] { return closed || done(); }, budget, "read_until",
+                                   [&] {
+                                       const int got = _sock.read(buffer, sizeof(buffer));
+                                       if (got > 0) {
+                                           _received.append(buffer, static_cast<std::size_t>(got));
+                                           return;
+                                       }
+                                       if (got < 0) {
+                                           closed = true;
+                                           return;
+                                       }
+                                       std::this_thread::sleep_for(1ms);
+                                   });
     }
 
     void
@@ -721,11 +719,8 @@ protected:
 
     template <typename Pred>
     [[nodiscard]] static bool
-    wait_until(Pred &&pred, std::chrono::milliseconds budget) {
-        const auto deadline = Clock::now() + budget;
-        while (!pred() && Clock::now() < deadline)
-            std::this_thread::sleep_for(2ms);
-        return pred();
+    watch_until(Pred &&pred, std::chrono::milliseconds budget) {
+        return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "watch_until", qb::http::test::fail_wait::nap{2ms});
     }
 
     /// A server whose sessions have @p linger; a client whose windows take a response whole; /first answered -- the
@@ -760,14 +755,14 @@ protected:
             return;
         large = raw.request("/large");
         ASSERT_NE(large, 0u);
-        ASSERT_TRUE(wait_until([this] { return asked.queued.load(); }, 10s)) << "/large was not answered";
+        ASSERT_TRUE(watch_until([this] { return asked.queued.load(); }, 10s)) << "/large was not answered";
     }
 
     /// The drain, to its deadline's report (which a case may have asked to take its time).
     void
     drain_to_the_deadline() {
         asked.drain = true;
-        ASSERT_TRUE(wait_until([this] { return asked.outcome.load() >= 0; }, 5s)) << "the drain did not report";
+        ASSERT_TRUE(watch_until([this] { return asked.outcome.load() >= 0; }, 5s)) << "the drain did not report";
         ASSERT_EQ(asked.outcome.load(), static_cast<int>(qb::http::drain_outcome::deadline));
     }
 };
@@ -790,11 +785,11 @@ TEST_F(Http2ServerDrainDelivery, AClientThatTakesALittleAtATimeIsAbortedAtTheBou
     constexpr std::size_t kTake   = std::size_t{256} << 10;
     ASSERT_NO_FATAL_FAILURE(connect(kLinger, kLarge));
     ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
-    const auto end = Clock::now() + 3s;
-    while (asked.released_at.load() == 0 && Clock::now() < end) {
-        raw.read_octets(kTake, 100ms);
-        std::this_thread::sleep_for(250ms);
-    }
+    qb::http::test::wait_until([this] { return asked.released_at.load() != 0; }, 3s, "the release",
+                               [&] {
+                                   raw.read_octets(kTake, 100ms);
+                                   std::this_thread::sleep_for(250ms);
+                               });
     ASSERT_NE(asked.released_at.load(), 0) << "the session outlived the bound of its last delivery: each write restarted it";
     EXPECT_LT(raw.streams[large].data_bytes, kLarge) << "the client took the whole response: the case proves nothing";
     const auto ended = between(asked.drain_at.load(), asked.released_at.load());
@@ -823,7 +818,7 @@ TEST_F(Http2ServerDrainDelivery, ADeliveryCompletedWithinTheBoundHasItsLingering
     EXPECT_TRUE(raw.goaway_seen);
     EXPECT_EQ(raw.goaway_code, kNoError);
     EXPECT_EQ(raw.goaway_last_stream, first) << "the final GOAWAY names the last stream the client opened";
-    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, kLinger + 3s)) << "the session never ended";
+    ASSERT_TRUE(watch_until([this] { return asked.released_at.load() != 0; }, kLinger + 3s)) << "the session never ended";
     EXPECT_NE(asked.lingering_at.load(), 0) << "the session was never seen closing after its peer";
     EXPECT_NE(asked.reason.load(), static_cast<int>(qb::http::DisconnectedReason::ServerDraining))
         << "the delivery's bound ended a session that was delivered: its lingering close ends by itself";
@@ -842,7 +837,7 @@ TEST_F(Http2ServerDrainDelivery, NoBoundRunsOnASessionExtractedDuringItsLastDeli
     ASSERT_NO_FATAL_FAILURE(connect(kLinger));
     asked.extract = true;
     ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
-    ASSERT_TRUE(wait_until([this] { return asked.observed.load(); }, 5s)) << "the extracted session was not read";
+    ASSERT_TRUE(watch_until([this] { return asked.observed.load(); }, 5s)) << "the extracted session was not read";
     ASSERT_TRUE(asked.extracted.load()) << "no session was extracted: the case proves nothing";
     EXPECT_TRUE(asked.up_past_the_bound.load()) << "a timer of the session disconnected it after its connection had left it, with the reason "
                                                 << asked.reason.load() << " (ServerDraining, "
@@ -868,7 +863,7 @@ TEST_F(Http2ServerDrainDelivery, ASessionAlreadyEndedKeepsItsReasonAtTheBound) {
     asked.end_with = kReason;
     asked.hold_ms  = static_cast<int>((kLinger + 100ms).count());
     ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
-    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
+    ASSERT_TRUE(watch_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
     ASSERT_GT(asked.queued_at_deadline.load(), 0u) << "nothing queued at the deadline: its watcher is not pending, the case proves nothing";
     ASSERT_LT(asked.queued_at_deadline.load(), 4096u) << "more than the final frames queued at the deadline: the case proves nothing";
     EXPECT_EQ(asked.lingering_at.load(), 0) << "the session was delivered before the bound: the case proves nothing";
@@ -892,11 +887,11 @@ TEST_F(Http2ServerDrainDelivery, ALingeringSessionIsNotCutByItsInactivityTimeout
     const auto eof_at = Clock::now();
     EXPECT_TRUE(raw.goaway_seen);
     EXPECT_EQ(raw.goaway_code, kNoError);
-    ASSERT_TRUE(wait_until([this] { return asked.lingering_at.load() != 0 || asked.released_at.load() != 0; }, 1s));
+    ASSERT_TRUE(watch_until([this] { return asked.lingering_at.load() != 0 || asked.released_at.load() != 0; }, 1s));
     EXPECT_NE(asked.lingering_at.load(), 0) << "the session was never seen closing after its peer";
     std::this_thread::sleep_for(1000ms); // the client keeps its end open
     raw.close();
-    ASSERT_TRUE(wait_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
+    ASSERT_TRUE(watch_until([this] { return asked.released_at.load() != 0; }, 3s)) << "the session never ended";
     EXPECT_NE(asked.reason.load(), static_cast<int>(qb::http::DisconnectedReason::ByTimeout))
         << "the lingering session was ended by its inactivity timeout";
     const auto ended = between(ticks(eof_at), asked.released_at.load());

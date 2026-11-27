@@ -358,14 +358,16 @@ TEST_F(MiddlewarePipelineTest, HstsIsNotSentOverPlainTcpForAnHttpsAbsoluteTarget
     ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
 
     std::string head;
-    for (int i = 0; i < 400 && head.find("\r\n\r\n") == std::string::npos; ++i) {
-        char buf[512];
-        if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
-            head.append(buf, static_cast<std::size_t>(n));
-        } else {
-            std::this_thread::sleep_for(5ms);
-        }
-    }
+    // 400 reads, 5 ms after each that brought nothing, as a budget.
+    qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 2000ms, "the head",
+                               [&] {
+                                   char buf[512];
+                                   if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
+                                       head.append(buf, static_cast<std::size_t>(n));
+                                   } else {
+                                       std::this_thread::sleep_for(5ms);
+                                   }
+                               });
     sock.close();
     ASSERT_EQ(head.rfind("HTTP/1.1 200", 0), 0u) << head;
     std::string lowered = head;
@@ -394,13 +396,15 @@ TEST_F(MiddlewarePipelineTest, CsrfMiddlewareReadsTheHostFieldOfAnHttp11Request)
                                     + "\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx";
         EXPECT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
         std::string head;
-        for (int i = 0; i < 400 && head.find("\r\n\r\n") == std::string::npos; ++i) {
-            char buf[512];
-            if (const int n = sock.read(buf, sizeof(buf)); n > 0)
-                head.append(buf, static_cast<std::size_t>(n));
-            else
-                std::this_thread::sleep_for(5ms);
-        }
+        // 400 reads, 5 ms after each that brought nothing, as a budget.
+        qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 2000ms, "the head",
+                                   [&] {
+                                       char buf[512];
+                                       if (const int n = sock.read(buf, sizeof(buf)); n > 0)
+                                           head.append(buf, static_cast<std::size_t>(n));
+                                       else
+                                           std::this_thread::sleep_for(5ms);
+                                   });
         sock.close();
         return head.substr(0, head.find("\r\n"));
     };

@@ -203,11 +203,8 @@ struct HandoffFixture {
                     ready.store(true, std::memory_order_release);
                 }
                 cv.notify_all();
-                while (running.load(std::memory_order_acquire)) {
-                    if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                        std::this_thread::sleep_for(2ms);
-                    }
-                }
+                qb::http::test::peer_wait_until([&] { return !running.load(std::memory_order_acquire); }, qb::http::test::fail_wait::never,
+                                                qb::http::test::fail_wait::pass_or_sleep{2ms});
 
                 ws_server.reset();
                 http_server.reset();
@@ -241,13 +238,8 @@ struct HandoffFixture {
     /// path was never taken" -- the second stays a named failure.
     [[nodiscard]] bool
     reached_null_registration(std::chrono::milliseconds budget = 2s) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!saw_null_registration.load(std::memory_order_acquire)) {
-            if (std::chrono::steady_clock::now() >= deadline)
-                return false;
-            std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        return qb::http::test::wait_until([this] { return saw_null_registration.load(std::memory_order_acquire); }, budget,
+                                          "reached_null_registration", qb::http::test::fail_wait::nap{1ms});
     }
 
     ~HandoffFixture() {
@@ -341,20 +333,19 @@ TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
     // drops the socket — it must NEVER send a 101 Switching Protocols.
     std::string response;
     char        buf[512];
-    const auto  deadline = std::chrono::steady_clock::now() + 2s;
-    while (std::chrono::steady_clock::now() < deadline) {
-        int n = sock.read(buf, sizeof(buf));
-        if (n > 0) {
-            response.append(buf, static_cast<std::size_t>(n));
-            if (response.find("\r\n\r\n") != std::string::npos) {
-                break;
-            }
-        } else if (n == 0) {
-            break; // peer closed
-        } else {
-            std::this_thread::sleep_for(2ms);
-        }
-    }
+    bool        ended = false;
+    qb::http::test::wait_until([&] { return ended; }, 2s, "the response",
+                               [&] {
+                                   int n = sock.read(buf, sizeof(buf));
+                                   if (n > 0) {
+                                       response.append(buf, static_cast<std::size_t>(n));
+                                       ended = response.find("\r\n\r\n") != std::string::npos;
+                                   } else if (n == 0) {
+                                       ended = true; // peer closed
+                                   } else {
+                                       std::this_thread::sleep_for(2ms);
+                                   }
+                               });
     sock.close();
 
     EXPECT_EQ(response.find("101"), std::string::npos) << "a non-WS request must not be upgraded; got:\n" << response;

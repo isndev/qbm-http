@@ -1654,35 +1654,43 @@ private:
     bool
     accept_one(qb::io::tcp::ssl::socket &socket) {
         const auto deadline = std::chrono::steady_clock::now() + 20s;
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            if (_listener.accept(socket) == 0 && socket.is_open())
-                break;
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::peer_wait_until([&] { return _release || (_listener.accept(socket) == 0 && socket.is_open()); }, deadline);
         if (!socket.is_open())
             return false;
         socket.set_nonblocking(true);
-        while (!socket.handshake_complete() && !_release && std::chrono::steady_clock::now() < deadline) {
-            if (socket.do_handshake() < 0)
-                return false;
-            if (!socket.handshake_complete())
-                std::this_thread::sleep_for(1ms);
-        }
-        return socket.handshake_complete();
+        bool refused = false;
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (socket.handshake_complete() || _release)
+                    return true;
+                refused = socket.do_handshake() < 0;
+                return refused || socket.handshake_complete();
+            },
+            deadline);
+        return !refused && socket.handshake_complete();
     }
 
     bool
     send_all(qb::io::tcp::ssl::socket &socket, std::string const &bytes) {
-        std::size_t sent = 0;
-        while (!_release && sent < bytes.size()) {
-            const int n = socket.write(bytes.data() + sent, bytes.size() - sent);
-            if (n < 0)
-                return false;
-            sent += static_cast<std::size_t>(n);
-            if (n == 0)
-                std::this_thread::sleep_for(1ms);
-        }
-        return sent == bytes.size();
+        std::size_t sent   = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
+        qb::http::test::peer_wait_until(
+            [&] {
+                while (!_release && sent < bytes.size()) {
+                    const int n = socket.write(bytes.data() + sent, bytes.size() - sent);
+                    if (n < 0) {
+                        failed = true;
+                        return true;
+                    }
+                    sent += static_cast<std::size_t>(n);
+                    if (n == 0)
+                        return false;
+                }
+                return true;
+            },
+            qb::http::test::fail_wait::never);
+        return !failed && sent == bytes.size();
     }
 
     void
@@ -1697,16 +1705,16 @@ private:
             if (!accept_one(socket) || !send_all(socket, empty_settings))
                 return;
             char buffer[16384];
-            while (!_release && socket.read(buffer, sizeof(buffer)) >= 0)
-                std::this_thread::sleep_for(1ms);
+            qb::http::test::peer_wait_until([&] { return _release || socket.read(buffer, sizeof(buffer)) < 0; },
+                                            qb::http::test::fail_wait::never);
             socket.close();
         }
         qb::io::tcp::ssl::socket socket;
         if (!accept_one(socket) || !send_all(socket, open_windows))
             return;
         _stalled = true;
-        while (!_release)
-            std::this_thread::sleep_for(5ms);
+        qb::http::test::peer_wait_until([this] { return _release.load(); }, qb::http::test::fail_wait::never,
+                                        qb::http::test::fail_wait::nap{5ms});
         socket.close();
     }
 
@@ -4069,30 +4077,33 @@ private:
 
     bool
     write_all(qb::io::tcp::ssl::socket &sock, const std::vector<uint8_t> &bytes) {
-        std::size_t off = 0;
-        while (off < bytes.size() && !_release) {
-            const int n = sock.write(bytes.data() + off, bytes.size() - off);
-            if (n < 0) {
-                return false;
-            }
-            if (n == 0) {
-                std::this_thread::sleep_for(1ms);
-            }
-            off += static_cast<std::size_t>(n);
-        }
-        return off == bytes.size();
+        std::size_t off    = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
+        qb::http::test::peer_wait_until(
+            [&] {
+                while (off < bytes.size() && !_release) {
+                    const int n = sock.write(bytes.data() + off, bytes.size() - off);
+                    if (n < 0) {
+                        failed = true;
+                        return true;
+                    }
+                    if (n == 0) {
+                        return false;
+                    }
+                    off += static_cast<std::size_t>(n);
+                }
+                return true;
+            },
+            qb::http::test::fail_wait::never);
+        return !failed && off == bytes.size();
     }
 
     void
     run() {
         const auto               deadline = std::chrono::steady_clock::now() + 30s;
         qb::io::tcp::ssl::socket sock;
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            if (_listener.accept(sock) == 0 && sock.is_open()) {
-                break;
-            }
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::peer_wait_until([&] { return _release || (_listener.accept(sock) == 0 && sock.is_open()); }, deadline);
         if (!sock.is_open()) {
             return;
         }
@@ -4104,115 +4115,125 @@ private:
         bool                     answered     = false;
         char                     buffer[16384];
         bool                     goaway_seen = false;
-        qb::io::tcp::ssl::socket next; // Silent: the client's next connection
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            if (_ping_requested && !_ping_sent && answered) {
-                std::vector<uint8_t> ping;
-                append_frame(ping, 0x6, 0, 0, {1, 2, 3, 4, 5, 6, 7, 8});
-                if (!write_all(sock, ping)) {
-                    _eof = true;
-                    break;
-                }
-                _ping_sent = true;
-            }
-            if (_mode == Mode::Silent && _settings_acked) {
-                // Reads nothing more on this connection: the client's sends pile up. Its next
-                // connection is accepted and its TLS handshake driven.
-                if (!next.is_open()) {
-                    if (_listener.accept(next) == 0 && next.is_open()) {
-                        next.set_nonblocking(true);
-                    }
-                } else {
-                    static_cast<void>(next.read(buffer, sizeof(buffer)));
-                }
-                std::this_thread::sleep_for(1ms);
-                continue;
-            }
-            if (goaway_seen) {
-                // The client's GOAWAY is in: what ends the connection is read from the socket itself
-                // -- 0, the client's FIN; an error, a reset. A FIN followed by a reset still reads 0, so
-                // the peer then answers with its own GOAWAY, twice: a client that only shut its sending
-                // side down still receives it, one that closed its socket resets it.
-                const auto raw = ::recv(sock.native_handle(), buffer, static_cast<int>(sizeof(buffer)), 0);
-                if (raw == 0) {
-                    std::vector<uint8_t> reply;
-                    append_frame(reply, 0x7, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
-                    for (int attempt = 0; attempt < 2 && !_reset; ++attempt) {
-                        std::this_thread::sleep_for(20ms);
-                        _reset = !write_all(sock, reply);
-                    }
-                    _eof = true;
-                    break;
-                }
-                if (raw < 0) {
-                    const int err = qb::io::socket::get_last_errno();
-                    if (qb::io::socket::not_recv_error(err)) {
-                        std::this_thread::sleep_for(1ms);
-                        continue;
-                    }
-                    _reset = true;
-                    _eof   = true;
-                    break;
-                }
-                continue; // a TLS record after the GOAWAY: ignored
-            }
-            const int n = sock.read(buffer, sizeof(buffer));
-            if (n < 0) {
-                _eof = true;
-                break;
-            }
-            if (n == 0) {
-                std::this_thread::sleep_for(1ms);
-                continue;
-            }
-            in.insert(in.end(), buffer, buffer + n);
-            if (!preface_seen) {
-                if (in.size() < preface_size) {
-                    continue;
-                }
-                in.erase(in.begin(), in.begin() + preface_size);
-                preface_seen = true;
-            }
-            while (in.size() >= 9) {
-                const std::size_t length = (std::size_t{in[0]} << 16) | (std::size_t{in[1]} << 8) | in[2];
-                if (in.size() < 9 + length) {
-                    break;
-                }
-                Frame f;
-                f.type      = in[3];
-                f.flags     = in[4];
-                f.stream_id = ((uint32_t{in[5]} << 24) | (uint32_t{in[6]} << 16) | (uint32_t{in[7]} << 8) | in[8]) & 0x7FFFFFFFu;
-                f.payload.assign(in.begin() + 9, in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
-                in.erase(in.begin(), in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
-                if (f.type == 0x4 && (f.flags & 0x1)) {
-                    _settings_acked = true;
-                } else if (f.type == 0x7) {
-                    goaway_seen = true;
-                } else if (f.type == 0x4 && !answered) {
-                    std::vector<uint8_t> reply;
-                    if (_mode == Mode::Silent) {
-                        append_frame(reply, 0x4, 0, 0, {0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF}); // INITIAL_WINDOW_SIZE 2^31-1
-                        const uint32_t inc = 0x7FFFFFFFu - 65535u;
-                        append_frame(reply, 0x8, 0, 0,
-                                     {static_cast<uint8_t>(inc >> 24), static_cast<uint8_t>(inc >> 16), static_cast<uint8_t>(inc >> 8),
-                                      static_cast<uint8_t>(inc)}); // connection window 2^31-1
-                    } else {
-                        append_frame(reply, 0x4, 0, 0, {});
-                    }
-                    append_frame(reply, 0x4, 0x1, 0, {}); // SETTINGS ACK
-                    if (!write_all(sock, reply)) {
+        qb::io::tcp::ssl::socket next;         // Silent: the client's next connection
+        bool                     quit = false; // a write failed: the peer's thread ends there
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (_release)
+                    return true;
+                if (_ping_requested && !_ping_sent && answered) {
+                    std::vector<uint8_t> ping;
+                    append_frame(ping, 0x6, 0, 0, {1, 2, 3, 4, 5, 6, 7, 8});
+                    if (!write_all(sock, ping)) {
                         _eof = true;
-                        return;
+                        return true;
                     }
-                    answered = true;
+                    _ping_sent = true;
                 }
-                std::lock_guard lock(_mutex);
-                _frames.push_back(std::move(f));
-            }
-        }
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(1ms); // Silent: hold the connection until released
-        }
+                if (_mode == Mode::Silent && _settings_acked) {
+                    // Reads nothing more on this connection: the client's sends pile up. Its next
+                    // connection is accepted and its TLS handshake driven.
+                    if (!next.is_open()) {
+                        if (_listener.accept(next) == 0 && next.is_open()) {
+                            next.set_nonblocking(true);
+                        }
+                    } else {
+                        static_cast<void>(next.read(buffer, sizeof(buffer)));
+                    }
+                    std::this_thread::sleep_for(1ms);
+                    return false;
+                }
+                if (goaway_seen) {
+                    // The client's GOAWAY is in: what ends the connection is read from the socket itself
+                    // -- 0, the client's FIN; an error, a reset. A FIN followed by a reset still reads 0, so
+                    // the peer then answers with its own GOAWAY, twice: a client that only shut its sending
+                    // side down still receives it, one that closed its socket resets it.
+                    const auto raw = ::recv(sock.native_handle(), buffer, static_cast<int>(sizeof(buffer)), 0);
+                    if (raw == 0) {
+                        std::vector<uint8_t> reply;
+                        append_frame(reply, 0x7, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0});
+                        int attempt = 0; // two at most, 20 ms before each
+                        qb::http::test::peer_wait_until([&] { return attempt == 2 || _reset; }, qb::http::test::fail_wait::never,
+                                                        [&] {
+                                                            std::this_thread::sleep_for(20ms);
+                                                            _reset = !write_all(sock, reply);
+                                                            ++attempt;
+                                                        });
+                        _eof = true;
+                        return true;
+                    }
+                    if (raw < 0) {
+                        const int err = qb::io::socket::get_last_errno();
+                        if (qb::io::socket::not_recv_error(err)) {
+                            std::this_thread::sleep_for(1ms);
+                            return false;
+                        }
+                        _reset = true;
+                        _eof   = true;
+                        return true;
+                    }
+                    return false; // a TLS record after the GOAWAY: ignored
+                }
+                const int n = sock.read(buffer, sizeof(buffer));
+                if (n < 0) {
+                    _eof = true;
+                    return true;
+                }
+                if (n == 0) {
+                    std::this_thread::sleep_for(1ms);
+                    return false;
+                }
+                in.insert(in.end(), buffer, buffer + n);
+                if (!preface_seen) {
+                    if (in.size() < preface_size) {
+                        return false;
+                    }
+                    in.erase(in.begin(), in.begin() + preface_size);
+                    preface_seen = true;
+                }
+                while (in.size() >= 9) {
+                    const std::size_t length = (std::size_t{in[0]} << 16) | (std::size_t{in[1]} << 8) | in[2];
+                    if (in.size() < 9 + length) {
+                        break;
+                    }
+                    Frame f;
+                    f.type      = in[3];
+                    f.flags     = in[4];
+                    f.stream_id = ((uint32_t{in[5]} << 24) | (uint32_t{in[6]} << 16) | (uint32_t{in[7]} << 8) | in[8]) & 0x7FFFFFFFu;
+                    f.payload.assign(in.begin() + 9, in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                    in.erase(in.begin(), in.begin() + 9 + static_cast<std::ptrdiff_t>(length));
+                    if (f.type == 0x4 && (f.flags & 0x1)) {
+                        _settings_acked = true;
+                    } else if (f.type == 0x7) {
+                        goaway_seen = true;
+                    } else if (f.type == 0x4 && !answered) {
+                        std::vector<uint8_t> reply;
+                        if (_mode == Mode::Silent) {
+                            append_frame(reply, 0x4, 0, 0, {0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF}); // INITIAL_WINDOW_SIZE 2^31-1
+                            const uint32_t inc = 0x7FFFFFFFu - 65535u;
+                            append_frame(reply, 0x8, 0, 0,
+                                         {static_cast<uint8_t>(inc >> 24), static_cast<uint8_t>(inc >> 16), static_cast<uint8_t>(inc >> 8),
+                                          static_cast<uint8_t>(inc)}); // connection window 2^31-1
+                        } else {
+                            append_frame(reply, 0x4, 0, 0, {});
+                        }
+                        append_frame(reply, 0x4, 0x1, 0, {}); // SETTINGS ACK
+                        if (!write_all(sock, reply)) {
+                            _eof = true;
+                            quit = true;
+                            return true;
+                        }
+                        answered = true;
+                    }
+                    std::lock_guard lock(_mutex);
+                    _frames.push_back(std::move(f));
+                }
+                return false;
+            },
+            deadline, qb::http::test::fail_wait::no_turn{});
+        if (quit)
+            return;
+        qb::http::test::peer_wait_until([this] { return _release.load(); }, deadline); // Silent: hold the connection until released
         sock.disconnect();
         sock.close();
     }
@@ -4299,10 +4320,7 @@ TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnr
 
     // The PING reaches the client's socket while its loop does not run: it stays unread.
     peer.send_ping();
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (!peer.ping_sent() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(1ms);
-    }
+    qb::http::test::wait_until([&] { return peer.ping_sent(); }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     ASSERT_TRUE(peer.ping_sent());
     std::this_thread::sleep_for(50ms);
 
@@ -4832,30 +4850,40 @@ TEST(Http2FallbackTimeout, ABodySentSlowlyButSteadilyOverTheHttp11FallbackIsServ
 
     std::string answer;
     const auto  closed_within = [&](std::chrono::milliseconds window) { // reads what comes; true once the connection ended
-        const auto deadline = std::chrono::steady_clock::now() + window;
-        char       buffer[4096];
-        while (std::chrono::steady_clock::now() < deadline) {
-            const int n = sock.read(buffer, sizeof buffer);
-            if (n < 0)
-                return true;
-            if (n > 0)
-                answer.append(buffer, static_cast<std::size_t>(n));
-            else
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return false;
+        char buffer[4096];
+        bool closed = false;
+        qb::http::test::wait_until([&] { return closed; }, window, "closed_within",
+                                   [&] {
+                                       const int n = sock.read(buffer, sizeof buffer);
+                                       if (n < 0)
+                                           closed = true;
+                                       else if (n > 0)
+                                           answer.append(buffer, static_cast<std::size_t>(n));
+                                       else
+                                           std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                   });
+        return closed;
     };
     const auto send = [&](std::string const &bytes) {
-        std::size_t sent = 0;
-        while (sent < bytes.size()) {
-            const int n = sock.write(bytes.data() + sent, bytes.size() - sent);
-            if (n < 0)
-                return false;
-            if (n == 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            sent += static_cast<std::size_t>(n);
-        }
-        return true;
+        std::size_t sent   = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
+        qb::http::test::wait_until(
+            [&] {
+                while (sent < bytes.size()) {
+                    const int n = sock.write(bytes.data() + sent, bytes.size() - sent);
+                    if (n < 0) {
+                        failed = true;
+                        return true;
+                    }
+                    if (n == 0)
+                        return false;
+                    sent += static_cast<std::size_t>(n);
+                }
+                return true;
+            },
+            std::chrono::seconds(10), "send", qb::http::test::fail_wait::nap{});
+        return !failed && sent == bytes.size();
     };
 
     ASSERT_TRUE(send("POST /up HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\n\r\n"));
@@ -4863,10 +4891,9 @@ TEST(Http2FallbackTimeout, ABodySentSlowlyButSteadilyOverTheHttp11FallbackIsServ
         ASSERT_FALSE(closed_within(kTimeout / 4)) << "cut after " << piece << " pieces";
         ASSERT_TRUE(send("x"));
     }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (answer.find("\r\n\r\n") == std::string::npos && std::chrono::steady_clock::now() < deadline
-           && !closed_within(std::chrono::milliseconds(50))) {
-    }
+    bool ended = false; // each turn reads for 50 ms, or until the connection ended
+    qb::http::test::wait_until([&] { return ended || answer.find("\r\n\r\n") != std::string::npos; }, std::chrono::seconds(3), "the answer",
+                               [&] { ended = closed_within(std::chrono::milliseconds(50)); });
     EXPECT_EQ(answer.rfind("HTTP/1.1 200 ", 0), 0u) << answer;
 }
 
@@ -5525,13 +5552,15 @@ TEST(Http2StreamSweepExtraction, NoTickRunsOnASessionExtractedUnderTheSweep) {
     const auto upload = raw.next_header_block("/up");
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
     bool third = false;
-    while (!seen.done.load() && Clock::now() - begun < std::chrono::seconds(12)) {
-        if (!third && Clock::now() - begun > std::chrono::milliseconds(1400)) {
-            third = raw.request("/never") != 0; // a third, stamped a tick later: it outlives the sweep that extracts
-        }
-        (void) raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')); // the session's timeout keeps restarting
-        raw.read_for(std::chrono::milliseconds(250));
-    }
+    qb::http::test::wait_until([&] { return seen.done.load(); }, begun + std::chrono::seconds(12), "the sweep",
+                               [&] {
+                                   if (!third && Clock::now() - begun > std::chrono::milliseconds(1400)) {
+                                       third = raw.request("/never") != 0; // a third, stamped a tick later: it outlives the sweep that extracts
+                                   }
+                                   (void) raw.frame(Raw::DATA, 0, upload.first,
+                                                    std::vector<uint8_t>(1, 'x')); // the session's timeout keeps restarting
+                                   raw.read_for(std::chrono::milliseconds(250));
+                               });
     ASSERT_TRUE(third);
     ASSERT_TRUE(seen.extracted.load()) << "no session was extracted under the sweep: the case proves nothing";
     ASSERT_TRUE(seen.done.load()) << "the observations did not run";
@@ -5667,9 +5696,8 @@ TEST(Http2RefusedBlock, TheSessionArmsItsSweepForARefusedBlockLeftOpen) {
     // the server a dispatch later. A session that stayed to deliver the frame kept its contexts and its output for as
     // long as its client took to read (the eighth independent review; delivering it was written, and withdrawn).
     EXPECT_FALSE(asked.up_after_the_sweep.load()) << "the session outlived the sweep's GOAWAY: it stayed to deliver it";
-    const auto released = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (asked.sessions_left.load() < 0 && std::chrono::steady_clock::now() < released)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    qb::http::test::wait_until([&] { return asked.sessions_left.load() >= 0; }, std::chrono::seconds(3), "wait_until",
+                               qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
     EXPECT_EQ(asked.sessions_left.load(), 0) << "the server still holds the session";
 }
 
@@ -5804,9 +5832,8 @@ run(Plan plan, Seen &seen) {
         Raw raw;
         ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
         ASSERT_NE(raw.request("/held"), 0u);
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.done.load()) << "the session was not read after its release";
@@ -6063,9 +6090,8 @@ expect_the_inactivity_timer_alone_stopped() {
         Raw raw;
         ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
         ASSERT_NE(raw.request("/x"), 0u);
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.extracted.load()) << "no session was extracted: the case proves nothing";
@@ -6165,9 +6191,8 @@ TEST(Http2FallbackIdentity, AProtocolInstalledWhereTheFallbacksWasDoesNotSpeakHt
     ASSERT_EQ(sock.get_alpn_selected_protocol(), "http/1.1");
     const std::string request = "GET /swap HTTP/1.1\r\nHost: localhost\r\n\r\n";
     ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!seen.done.load() && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                               qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
     ASSERT_TRUE(seen.done.load()) << "the swap did not run";
     EXPECT_TRUE(seen.spoke_before.load());
     EXPECT_FALSE(seen.speaks_after_clear.load()) << "no protocol at all";
@@ -6321,13 +6346,13 @@ hang() {
     return request;
 }
 
-/// Runs the loop from inside a callback until @p done, bounded by a watchdog that ends the process, saying so.
+/// Runs the loop from inside a callback until @p done, or for nine seconds: the kit's wait, which the battery can fail.
+/// A loop turn that never returns is bounded by a watchdog that ends the process, saying so.
 template <typename Done>
 void
 run_the_loop_until(Done &&done, char const *const what) {
     qb::http::test::watchdog bound(what, 10s);
-    while (!done())
-        qb::io::async::run(EVRUN_NOWAIT);
+    qb::http::test::wait_until(std::forward<Done>(done), 9s, what, [] { qb::io::async::run(EVRUN_NOWAIT); });
 }
 
 /// What one request was answered with.
@@ -7510,8 +7535,8 @@ TEST_F(Http2ClientTest, AnAnsweredRequestLeavesNoTimeoutArmed) {
 
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++answered; }));
     EXPECT_GT(client->getTimeout(), qb::duration::zero()) << "a request in flight has no deadline armed";
-    while (answered == 0)
-        qb::io::async::run(EVRUN_ONCE); // returns from the turn that brought the response
+    // Each turn blocks until the loop has an event: it returns from the turn that brought the response.
+    qb::http::test::wait_until([&] { return answered != 0; }, 10s, "wait_until", [] { qb::io::async::run(EVRUN_ONCE); });
     EXPECT_EQ(client->getTimeout(), qb::duration::zero()) << "a response left its request's deadline armed";
 
     ASSERT_TRUE(client->push_request(elsewhere(), [&](qb::http::Response) { ++answered; }));

@@ -199,41 +199,53 @@ public:
         if (tcp.set_nonblocking(true) != 0 || SSL_set_fd(ssl, static_cast<int>(tcp.native_handle())) != 1)
             return ::testing::AssertionFailure() << "the socket could not be set up";
         SSL_set_connect_state(ssl);
-        const auto deadline = steady::now() + 5s;
-        for (;;) {
-            ERR_clear_error();
-            const int ret = SSL_do_handshake(ssl);
-            if (ret == 1)
-                return ::testing::AssertionSuccess();
-            const int error = SSL_get_error(ssl, ret);
-            if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
-                return ::testing::AssertionFailure() << "the handshake failed: SSL_get_error " << error;
-            if (steady::now() >= deadline)
-                return ::testing::AssertionFailure() << "the handshake did not complete";
-            std::this_thread::sleep_for(1ms);
-        }
+        ::testing::AssertionResult out = ::testing::AssertionFailure() << "the handshake did not complete";
+        qb::http::test::wait_until(
+            [&] {
+                ERR_clear_error();
+                const int ret = SSL_do_handshake(ssl);
+                if (ret == 1) {
+                    out = ::testing::AssertionSuccess();
+                    return true;
+                }
+                const int error = SSL_get_error(ssl, ret);
+                if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
+                    out = ::testing::AssertionFailure() << "the handshake failed: SSL_get_error " << error;
+                    return true;
+                }
+                return false;
+            },
+            5s, "handshake", qb::http::test::fail_wait::nap{1ms});
+        return out;
     }
 
     /// Writes `what` whole.
     [[nodiscard]] ::testing::AssertionResult
     send(std::string_view what) {
-        const auto  deadline = steady::now() + 5s;
-        std::size_t sent     = 0;
-        while (sent < what.size()) {
-            ERR_clear_error();
-            const int n = SSL_write(ssl, what.data() + sent, static_cast<int>(what.size() - sent));
-            if (n > 0) {
-                sent += static_cast<std::size_t>(n);
-                continue;
-            }
-            const int error = SSL_get_error(ssl, n);
-            if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
-                return ::testing::AssertionFailure() << "SSL_write failed: SSL_get_error " << error;
-            if (steady::now() >= deadline)
-                return ::testing::AssertionFailure() << "the request was not written";
-            std::this_thread::sleep_for(1ms);
-        }
-        return ::testing::AssertionSuccess();
+        std::size_t                sent = 0;
+        ::testing::AssertionResult out  = ::testing::AssertionFailure() << "the request was not written";
+        // Each look writes what the stream takes: all of it, a failure, or a stream that takes no more for now.
+        qb::http::test::wait_until(
+            [&] {
+                while (sent < what.size()) {
+                    ERR_clear_error();
+                    const int n = SSL_write(ssl, what.data() + sent, static_cast<int>(what.size() - sent));
+                    if (n > 0) {
+                        sent += static_cast<std::size_t>(n);
+                        continue;
+                    }
+                    const int error = SSL_get_error(ssl, n);
+                    if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
+                        out = ::testing::AssertionFailure() << "SSL_write failed: SSL_get_error " << error;
+                        return true;
+                    }
+                    return false;
+                }
+                out = ::testing::AssertionSuccess();
+                return true;
+            },
+            5s, "send", qb::http::test::fail_wait::nap{1ms});
+        return out;
     }
 
     /// Reads application octets into `received` until `done(received)` holds; false when the stream ended or the
@@ -241,23 +253,26 @@ public:
     template <typename Done>
     [[nodiscard]] bool
     read_until(Done &&done, std::chrono::milliseconds budget = 5000ms) {
-        const auto deadline = steady::now() + budget;
-        char       buffer[16384];
-        while (!done(received)) {
-            ERR_clear_error();
-            const int n = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
-            if (n > 0) {
-                received.append(buffer, static_cast<std::size_t>(n));
-                continue;
-            }
-            const int error = SSL_get_error(ssl, n);
-            if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
-                return false; // the stream ended: read_to_end() reads how
-            if (steady::now() >= deadline)
-                return false;
-            std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        char buffer[16384];
+        bool ended = false; // the stream ended: read_to_end() reads how
+        // Each look reads what the stream has: until `done`, its end, or a stream that has no more for now.
+        qb::http::test::wait_until(
+            [&] {
+                while (!done(received)) {
+                    ERR_clear_error();
+                    const int n = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
+                    if (n > 0) {
+                        received.append(buffer, static_cast<std::size_t>(n));
+                        continue;
+                    }
+                    const int error = SSL_get_error(ssl, n);
+                    ended           = error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE;
+                    return ended;
+                }
+                return true;
+            },
+            budget, "read_until", qb::http::test::fail_wait::nap{1ms});
+        return !ended && done(received);
     }
 
     /// Reads the stream to its end: the application octets, how TLS ended, then what TCP still carried.
@@ -266,52 +281,58 @@ public:
         TlsEnd     out;
         const auto deadline = steady::now() + budget;
         char       buffer[16384];
-        for (;;) {
-            ERR_clear_error();
-            const int n      = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
-            const int system = n > 0 ? 0 : qb::io::socket::get_last_errno(); // before anything else replaces it
-            if (n > 0) {
-                received.append(buffer, static_cast<std::size_t>(n));
-                continue;
-            }
-            out.error = SSL_get_error(ssl, n);
-            if (out.error != SSL_ERROR_WANT_READ && out.error != SSL_ERROR_WANT_WRITE) {
-                out.first_error = ERR_peek_error();
-                if (out.error == SSL_ERROR_SYSCALL && system != 0) { // a reset: that is its whole end
-                    out.tcp_error = system;
-                    out.received  = received;
-                    return out;
+        enum class stream { open, over, reset } tls = stream::open;
+        // Each look reads what the stream has: until its end, or a stream that has no more for now.
+        qb::http::test::wait_until(
+            [&] {
+                for (;;) {
+                    ERR_clear_error();
+                    const int n      = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
+                    const int system = n > 0 ? 0 : qb::io::socket::get_last_errno(); // before anything else replaces it
+                    if (n > 0) {
+                        received.append(buffer, static_cast<std::size_t>(n));
+                        continue;
+                    }
+                    out.error = SSL_get_error(ssl, n);
+                    if (out.error != SSL_ERROR_WANT_READ && out.error != SSL_ERROR_WANT_WRITE) {
+                        out.first_error = ERR_peek_error();
+                        tls             = stream::over;
+                        if (out.error == SSL_ERROR_SYSCALL && system != 0) { // a reset: that is its whole end
+                            out.tcp_error = system;
+                            tls           = stream::reset;
+                        }
+                        return true;
+                    }
+                    out.error = SSL_ERROR_WANT_READ;
+                    return false;
                 }
-                break;
-            }
-            out.error = SSL_ERROR_WANT_READ;
-            if (steady::now() >= deadline) {
-                out.received = received;
-                return out;
-            }
-            std::this_thread::sleep_for(1ms);
-        }
+            },
+            deadline, "read_to_end", qb::http::test::fail_wait::nap{1ms});
         out.received = received;
+        if (tls != stream::over)
+            return out; // a reset, or the budget: nothing more to read
         // The TLS stream is over. What the TCP connection still carries is read raw: after a close_notify, the FIN.
-        for (;;) {
-            const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
-            if (n > 0) {
-                out.octets_after += static_cast<std::size_t>(n);
-                continue;
-            }
-            if (n == 0) {
-                out.fin = true;
-                break;
-            }
-            const int error = qb::io::socket::get_last_errno();
-            if (!qb::io::socket::not_recv_error(error)) {
-                out.tcp_error = error;
-                break;
-            }
-            if (steady::now() >= deadline)
-                break;
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::wait_until(
+            [&] {
+                for (;;) {
+                    const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
+                    if (n > 0) {
+                        out.octets_after += static_cast<std::size_t>(n);
+                        continue;
+                    }
+                    if (n == 0) {
+                        out.fin = true;
+                        return true;
+                    }
+                    const int error = qb::io::socket::get_last_errno();
+                    if (!qb::io::socket::not_recv_error(error)) {
+                        out.tcp_error = error;
+                        return true;
+                    }
+                    return false;
+                }
+            },
+            deadline, "read_to_end", qb::http::test::fail_wait::nap{1ms});
         return out;
     }
 };
@@ -723,9 +744,7 @@ expect_whole(TlsEnd const &end) {
 /// client may read the end of the connection before the park sees it.
 [[nodiscard]] int
 published(std::atomic<int> const &seen) {
-    const auto deadline = steady::now() + 5s;
-    while (seen.load() == -1 && steady::now() < deadline)
-        std::this_thread::sleep_for(1ms);
+    qb::http::test::wait_until([&] { return seen.load() != -1; }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     return seen.load();
 }
 

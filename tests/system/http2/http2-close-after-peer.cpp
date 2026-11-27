@@ -112,14 +112,8 @@ parse_frames(std::vector<std::uint8_t> const &in, std::size_t at, Each &&each) {
 /// Waits, sleeping, until @p pred holds or @p budget elapses: what the test's thread does while another thread works.
 template <typename Pred>
 bool
-wait_until(Pred &&pred, std::chrono::milliseconds budget) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline)
-            return pred();
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
+watch_until(Pred &&pred, std::chrono::milliseconds budget) {
+    return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "watch_until", qb::http::test::fail_wait::nap{1ms});
 }
 
 /// Runs the test thread's loop -- the client's, and the loop that closes its sockets -- until @p pred holds or @p budget
@@ -266,7 +260,7 @@ protected:
     void
     TearDown() override {
         probe.drop_held = true;
-        static_cast<void>(wait_until([&] { return !probe.holding.load(); }, 5s)); // dropped on the thread it lives on
+        static_cast<void>(watch_until([&] { return !probe.holding.load(); }, 5s)); // dropped on the thread it lives on
         server.reset();
     }
 
@@ -307,7 +301,7 @@ protected:
     /// The server's loop closes no socket after its peer any more.
     [[nodiscard]] bool
     loop_closes_nothing(std::chrono::milliseconds budget = 5s) const {
-        return wait_until([&] { return probe.closing_now.load() == 0; }, budget);
+        return watch_until([&] { return probe.closing_now.load() == 0; }, budget);
     }
 
     [[nodiscard]] static std::size_t
@@ -524,27 +518,31 @@ private:
         append_frame(chunk, kData, 0, 1, std::vector<std::uint8_t>(16384, 'x'));
         std::size_t off   = 0;
         const auto  until = std::chrono::steady_clock::now() + write_window;
-        while (!_quit && std::chrono::steady_clock::now() < until && _written < write_cap) {
-            const int n = _sock.write(chunk.data() + off, chunk.size() - off);
-            if (n < 0) {
-                _write_failed = true;
-                break;
-            }
-            if (n == 0) {
-                wait_for(POLLOUT);
-                continue;
-            }
-            _written += static_cast<std::size_t>(n);
-            off = (off + static_cast<std::size_t>(n)) % chunk.size();
-        }
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (_quit || _written >= write_cap)
+                    return true;
+                const int n = _sock.write(chunk.data() + off, chunk.size() - off);
+                if (n < 0) {
+                    _write_failed = true;
+                    return true;
+                }
+                if (n == 0) {
+                    wait_for(POLLOUT);
+                    return false;
+                }
+                _written += static_cast<std::size_t>(n);
+                off = (off + static_cast<std::size_t>(n)) % chunk.size();
+                return false;
+            },
+            until, qb::http::test::fail_wait::no_turn{});
         _writing_done = true;
     }
 
     void
     read_to_end() {
-        const auto until = std::chrono::steady_clock::now() + 5s;
-        while (std::chrono::steady_clock::now() < until && read_some()) {
-        }
+        qb::http::test::peer_wait_until([this] { return !read_some(); }, 5s,
+                                        qb::http::test::fail_wait::no_turn{}); // each look reads, in a poll of its own
         _reading_done = true;
     }
 
@@ -572,8 +570,7 @@ private:
                 return;
             _provoked = true;
         }
-        while (_command == command::none && !over())
-            std::this_thread::sleep_for(1ms);
+        qb::http::test::peer_wait_until([this] { return _command != command::none || over(); }, qb::http::test::fail_wait::never);
         if (_command == command::write) {
             write_until_refused_now();
             read_to_end();
@@ -583,11 +580,8 @@ private:
     void
     run() {
         _deadline = std::chrono::steady_clock::now() + 60s;
-        while (!over()) {
-            if (_listener.accept(_sock) == 0 && _sock.is_open())
-                break;
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::peer_wait_until([this] { return over() || (_listener.accept(_sock) == 0 && _sock.is_open()); },
+                                        qb::http::test::fail_wait::never);
         if (_sock.is_open()) {
             _sock.set_nonblocking(true);
             play();
@@ -728,7 +722,7 @@ TEST_F(Http2ServerCloseAfterPeerTest, TheErrorGoawayReachesAClientThatWasStillSe
     ASSERT_NO_FATAL_FAILURE(serving(client, port));
     ASSERT_NO_FATAL_FAILURE(connection_error(client));
     const std::size_t pushed = still_sending(client);
-    ASSERT_TRUE(wait_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
+    ASSERT_TRUE(watch_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
     // A reset the server's close sent, if it sent one, has arrived -- nothing on the client's side marks it -- and the one
     // a write into a closed socket draws: the client writes again, and waits as long.
     std::this_thread::sleep_for(300ms);
@@ -751,12 +745,12 @@ TEST_F(Http2ServerCloseAfterPeerTest, AnErrorGoawayLeavesThroughTheLoopUntilTheC
     const std::int64_t sent_at = now_ns();
     ASSERT_NO_FATAL_FAILURE(connection_error(client));
     static_cast<void>(still_sending(client));
-    ASSERT_TRUE(wait_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
+    ASSERT_TRUE(watch_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
     const std::int64_t released_at = probe.released_at.load();
     EXPECT_LT(released_at - sent_at, (session_linger() / 2).count())
         << "the session was released " << ms(released_at - sent_at) << " ms after the error, not at once";
     EXPECT_EQ(probe.closing_at_release.load(), 1) << "the session's descriptor did not go to the loop's closer";
-    EXPECT_TRUE(wait_until([&] { return probe.closing_now.load() == 1; }, 1s)) << "no socket on the loop while the client is open";
+    EXPECT_TRUE(watch_until([&] { return probe.closing_now.load() == 1; }, 1s)) << "no socket on the loop while the client is open";
     ASSERT_TRUE(client.read_until([&] { return client.goaway_seen; })) << "the server's GOAWAY was lost";
     EXPECT_EQ(client.goaway_code, kProtocolError);
 
@@ -785,14 +779,17 @@ TEST_F(Http2ServerCloseAfterPeerTest, AClientThatNeverReadsIsRefusedWithinTheByt
     const auto            t0        = std::chrono::steady_clock::now();
     std::size_t           taken     = 0;
     bool                  refused   = false;
-    while (std::chrono::steady_clock::now() - t0 < 30s && taken < 2 * kAcceptedBound) {
-        const auto write_began = std::chrono::steady_clock::now();
-        if (!client.solicit(per_write)) {
-            refused = std::chrono::steady_clock::now() - write_began < client.write_budget;
-            break;
-        }
-        taken += octets;
-    }
+    bool                  cut       = false; // a write did not go through: refused, or out of its budget
+    qb::http::test::wait_until([&] { return cut || taken >= 2 * kAcceptedBound; }, t0 + 30s, "the refusal",
+                               [&] {
+                                   const auto write_began = std::chrono::steady_clock::now();
+                                   if (!client.solicit(per_write)) {
+                                       refused = std::chrono::steady_clock::now() - write_began < client.write_budget;
+                                       cut     = true;
+                                       return;
+                                   }
+                                   taken += octets;
+                               });
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
     EXPECT_TRUE(refused) << "a client that never reads was not refused: " << taken << " octets taken in " << elapsed.count() << " ms";
     EXPECT_LT(elapsed.count(), (std::chrono::duration_cast<std::chrono::milliseconds>(session_linger()) + 3s).count())
@@ -818,16 +815,21 @@ TEST_F(Http2ServerCloseAfterPeerTest, ASlowReaderBehindALargeResponseDoesNotHold
     ASSERT_TRUE(client.read_until([&] { return client.settings_acked; })) << "the server never acknowledged the SETTINGS";
     const auto large = client.request("/large");
     ASSERT_NE(large, 0u);
-    ASSERT_TRUE(wait_until([&] { return probe.queued.load(); }, 10s)) << "the response was not queued";
+    ASSERT_TRUE(watch_until([&] { return probe.queued.load(); }, 10s)) << "the response was not queued";
 
     const std::int64_t sent_at = now_ns();
     ASSERT_NO_FATAL_FAILURE(connection_error(client));
     // 256 KiB every 250 ms, far below what loopback gives, until the server released the session
-    while (probe.releases.load() == 0 && !client.eof && now_ns() - sent_at < std::chrono::nanoseconds(10s).count()) {
-        const std::size_t burst = client.stream(large).data_bytes + (std::size_t{256} << 10);
-        static_cast<void>(client.read_until([&] { return client.stream(large).data_bytes >= burst; }, 50ms));
-        std::this_thread::sleep_for(250ms);
-    }
+    qb::http::test::wait_until([&] { return probe.releases.load() != 0 || client.eof; },
+                               std::chrono::steady_clock::time_point(
+                                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(sent_at)))
+                                   + 10s,
+                               "the release",
+                               [&] {
+                                   const std::size_t burst = client.stream(large).data_bytes + (std::size_t{256} << 10);
+                                   static_cast<void>(client.read_until([&] { return client.stream(large).data_bytes >= burst; }, 50ms));
+                                   std::this_thread::sleep_for(250ms);
+                               });
     ASSERT_GT(probe.releases.load(), 0) << "a slow reader held the session of an error GOAWAY";
     const std::int64_t released_at = probe.released_at.load();
     EXPECT_LT(released_at - sent_at, session_linger().count())
@@ -848,10 +850,10 @@ TEST_F(Http2ServerCloseAfterPeerTest, TheStreamsOfAConnectionAreCancelledWhenIts
     Http2RawClient client;
     ASSERT_NO_FATAL_FAILURE(serving(client, port));
     ASSERT_NE(client.request("/hold"), 0u);
-    ASSERT_TRUE(wait_until([&] { return probe.holding.load(); }, 10s)) << "the request never reached its handler";
+    ASSERT_TRUE(watch_until([&] { return probe.holding.load(); }, 10s)) << "the request never reached its handler";
     const std::int64_t sent_at = now_ns();
     ASSERT_NO_FATAL_FAILURE(connection_error(client));
-    ASSERT_TRUE(wait_until([&] { return probe.cancelled_at.load() != 0; }, 6s)) << "the context of the stream under way was never cancelled";
+    ASSERT_TRUE(watch_until([&] { return probe.cancelled_at.load() != 0; }, 6s)) << "the context of the stream under way was never cancelled";
     const std::int64_t cancelled_at = probe.cancelled_at.load();
     EXPECT_LT(cancelled_at - sent_at, (session_linger() / 2).count())
         << "the work of a connection the server had ended went on for " << ms(cancelled_at - sent_at) << " ms";
@@ -872,17 +874,20 @@ TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverR
     ASSERT_EQ(sock.get_alpn_selected_protocol(), "h2");
     ASSERT_EQ(sock.set_nonblocking(true), 0);
     const auto write_all = [&](std::vector<std::uint8_t> const &bytes) {
-        std::size_t off      = 0;
-        const auto  deadline = std::chrono::steady_clock::now() + 10s;
-        while (off < bytes.size() && std::chrono::steady_clock::now() < deadline) {
-            const int n = sock.write(bytes.data() + off, bytes.size() - off);
-            if (n < 0)
-                return false;
-            if (n == 0)
-                std::this_thread::sleep_for(1ms);
-            off += static_cast<std::size_t>(std::max(n, 0));
-        }
-        return off == bytes.size();
+        std::size_t off    = 0;
+        bool        failed = false;
+        qb::http::test::wait_until([&] { return failed || off >= bytes.size(); }, 10s, "write_all",
+                                   [&] {
+                                       const int n = sock.write(bytes.data() + off, bytes.size() - off);
+                                       if (n < 0) {
+                                           failed = true;
+                                           return;
+                                       }
+                                       if (n == 0)
+                                           std::this_thread::sleep_for(1ms);
+                                       off += static_cast<std::size_t>(std::max(n, 0));
+                                   });
+        return !failed && off == bytes.size();
     };
     std::vector<std::uint8_t>    in;
     std::size_t                  parsed = 0;
@@ -891,23 +896,28 @@ TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverR
     const auto                   read_until = [&](auto &&done) {
         const auto deadline = std::chrono::steady_clock::now() + 10s;
         char       buffer[16384];
-        while (!done() && std::chrono::steady_clock::now() < deadline) {
-            const int n = sock.read(buffer, sizeof(buffer));
-            if (n < 0)
-                break;
-            if (n == 0) {
-                std::this_thread::sleep_for(1ms);
-                continue;
-            }
-            in.insert(in.end(), buffer, buffer + n);
-            parsed = parse_frames(in, parsed,
-                                  [&](std::uint8_t type, std::uint8_t flags, std::uint32_t, std::uint8_t const *payload, std::size_t length) {
-                                      if (type == kSettings && (flags & kAck) == 0)
-                                          settings = true;
-                                      else if (type == kGoaway && length >= 8 && !goaway)
-                                          goaway = be32(payload + 4);
-                                  });
-        }
+        qb::http::test::wait_until(
+            [&] {
+                if (done())
+                    return true;
+                const int n = sock.read(buffer, sizeof(buffer));
+                if (n < 0)
+                    return true;
+                if (n == 0) {
+                    std::this_thread::sleep_for(1ms);
+                    return false;
+                }
+                in.insert(in.end(), buffer, buffer + n);
+                parsed = parse_frames(
+                    in, parsed, [&](std::uint8_t type, std::uint8_t flags, std::uint32_t, std::uint8_t const *payload, std::size_t length) {
+                        if (type == kSettings && (flags & kAck) == 0)
+                            settings = true;
+                        else if (type == kGoaway && length >= 8 && !goaway)
+                            goaway = be32(payload + 4);
+                    });
+                return false;
+            },
+            deadline, "read_until", qb::http::test::fail_wait::no_turn{});
         return done();
     };
 
@@ -930,21 +940,22 @@ TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverR
     std::size_t taken   = 0;
     bool        refused = false;
     const auto  t0      = std::chrono::steady_clock::now();
-    while (!refused && taken < 2 * kAcceptedBound && std::chrono::steady_clock::now() - t0 < 10s) {
-        const int n = sock.write(more.data(), more.size());
-        if (n < 0)
-            refused = true;
-        else if (n == 0)
-            std::this_thread::sleep_for(1ms);
-        else
-            taken += static_cast<std::size_t>(n);
-    }
+    qb::http::test::wait_until([&] { return refused || taken >= 2 * kAcceptedBound; }, t0 + 10s, "the flood's refusal",
+                               [&] {
+                                   const int n = sock.write(more.data(), more.size());
+                                   if (n < 0)
+                                       refused = true;
+                                   else if (n == 0)
+                                       std::this_thread::sleep_for(1ms);
+                                   else
+                                       taken += static_cast<std::size_t>(n);
+                               });
     EXPECT_TRUE(refused) << "the flooder's writes were never refused: " << taken << " octets taken";
     EXPECT_LT(taken, qb::io::async::detail::closing_socket_byte_budget())
         << "the server's loop read the flooder: its socket took " << taken << " octets after the GOAWAY";
     RecordProperty("octets_taken_after_the_goaway", std::to_string(taken));
     sock.disconnect();
-    ASSERT_TRUE(wait_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
+    ASSERT_TRUE(watch_until([&] { return probe.releases.load() > 0; }, 5s)) << "the server did not end the connection";
     EXPECT_EQ(probe.closing_at_release.load(), 0) << "the flooder's descriptor went to the server's loop";
     EXPECT_EQ(probe.closing_max.load(), 0) << "the server's loop closed the flooder's socket after it";
 }

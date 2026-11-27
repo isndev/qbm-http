@@ -302,11 +302,9 @@ protected:
             if (!listening) {
                 return;
             }
-            while (_gateway_running.load(std::memory_order_acquire)) {
-                if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-            }
+            qb::http::test::peer_wait_until([this] { return !_gateway_running.load(std::memory_order_acquire); },
+                                            qb::http::test::fail_wait::never,
+                                            qb::http::test::fail_wait::pass_or_sleep{std::chrono::milliseconds(1)});
         });
 
         std::unique_lock<std::mutex> lock(_gateway_mtx);

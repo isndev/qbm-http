@@ -38,6 +38,8 @@
 #include <qbm/http/2/protocol/base.h>
 #include <qbm/http/2/protocol/hpack.h>
 
+#include "fail_wait.h"
+
 namespace qb::http::test {
 
 /// One HTTP/2 frame as read from the wire.
@@ -271,24 +273,22 @@ public:
     template <typename Pred>
     bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!pred()) {
-            if (eof || std::chrono::steady_clock::now() >= deadline)
-                return pred();
-            if (!read_some())
-                idle();
-        }
-        return true;
+        wait_until([&] { return eof || pred(); }, budget, "read_until",
+                   [this] {
+                       if (!read_some())
+                           idle();
+                   });
+        return pred();
     }
 
     /// Read whatever comes for `window`, then stop: what the server sent while the test held something back.
     void
     read_for(std::chrono::milliseconds window) {
-        const auto deadline = std::chrono::steady_clock::now() + window;
-        while (!eof && std::chrono::steady_clock::now() < deadline) {
-            if (!read_some())
-                idle();
-        }
+        wait_until([this] { return eof; }, window, "read_for",
+                   [this] {
+                       if (!read_some())
+                           idle();
+                   });
     }
 
     /// Read until `octets` more came from the socket, the connection ends, or `window` elapses: a client that takes a
@@ -296,12 +296,12 @@ public:
     /// 0.2 to 8 MiB in 5 ms as measured (Huly QB-1248). A read brings 64 KiB at most: the amount is met within that.
     void
     read_octets(std::size_t octets, std::chrono::milliseconds window) {
-        const auto        deadline = std::chrono::steady_clock::now() + window;
-        const std::size_t goal     = octets_read + octets;
-        while (!eof && octets_read < goal && std::chrono::steady_clock::now() < deadline) {
-            if (!read_some())
-                idle();
-        }
+        const std::size_t goal = octets_read + octets;
+        wait_until([&] { return eof || octets_read >= goal; }, window, "read_octets",
+                   [this] {
+                       if (!read_some())
+                           idle();
+                   });
     }
 
     [[nodiscard]] RawStream const &
@@ -342,23 +342,23 @@ private:
 
     bool
     write_all(std::vector<uint8_t> const &bytes) {
-        const auto  deadline = std::chrono::steady_clock::now() + write_budget;
-        std::size_t sent     = 0;
-        while (sent < bytes.size()) {
-            const int n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
-            if (n > 0) {
-                sent += static_cast<std::size_t>(n);
-                continue;
-            }
-            if (n < 0) {
-                write_failed = true;
-                return false;
-            }
-            if (std::chrono::steady_clock::now() >= deadline)
-                return false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return true;
+        std::size_t sent   = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
+        wait_until(
+            [&] {
+                int n = 1;
+                while (n > 0 && sent < bytes.size()) {
+                    n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
+                    if (n > 0)
+                        sent += static_cast<std::size_t>(n);
+                }
+                if (n < 0)
+                    failed = write_failed = true;
+                return failed || sent == bytes.size();
+            },
+            write_budget, "write_all", fail_wait::nap{});
+        return !failed && sent == bytes.size();
     }
 
     /// One read; the frames it completes are dispatched. `true` when bytes came.

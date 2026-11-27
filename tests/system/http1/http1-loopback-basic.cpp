@@ -568,9 +568,8 @@ run(Plan plan, Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /held HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -707,9 +706,8 @@ TEST(Http1SessionReason, ALingeringSessionIsNotCutByItsInactivityTimeout) {
         EXPECT_EQ(std::string(buffer, 12), "HTTP/1.1 200");
         std::this_thread::sleep_for(milliseconds(1000)); // the client keeps its end open
         client.disconnect();
-        const auto end = Clock::now() + std::chrono::seconds(4);
-        while (!seen.done.load() && Clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(4), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.done.load()) << "the session was not released";
@@ -811,9 +809,8 @@ run(Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -914,9 +911,8 @@ TEST(Http1SessionReason, ABareSessionEndedInThePassOfTheDrainDeadlineKeepsItsRea
         ASSERT_TRUE(thread.ready());
         qb::io::tcp::socket client;
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -1120,9 +1116,8 @@ run(Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!seen.done.load() && std::chrono::steady_clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -1242,9 +1237,8 @@ TEST(Http1SessionReason, AClosingSessionNotYetDeliveredStillTimesOut) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /late HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        const auto end = Clock::now() + std::chrono::seconds(3);
-        while (!seen.done.load() && Clock::now() < end)
-            std::this_thread::sleep_for(milliseconds(5));
+        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(3), "wait_until",
+                                   qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;

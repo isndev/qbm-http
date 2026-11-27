@@ -178,7 +178,9 @@ bound_port(const qb::http::test::WsServerThread<ServerT> &server) {
 template <typename Pred>
 bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget = 3000ms) {
-    return qb::http::test::expect_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
+    // A pass, a look, a sleep, in that order: the first pass is made here, before the wait's first look.
+    qb::io::async::run(EVRUN_NOWAIT);
+    return qb::http::test::expect_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::sleep_then_pass{1ms});
 }
 
 /// Decode an unmasked Close status code from a 2+ byte payload.

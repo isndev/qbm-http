@@ -234,18 +234,18 @@ struct RawH1 {
     bool
     send(std::string const &request) {
         std::string_view data(request);
-        const auto       deadline = std::chrono::steady_clock::now() + 2s;
-        while (!data.empty()) {
-            const int n = sock.write(data.data(), data.size());
-            if (n > 0) {
-                data.remove_prefix(static_cast<std::size_t>(n));
-                continue;
-            }
-            if (std::chrono::steady_clock::now() >= deadline)
-                return false;
-            std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
+        return qb::http::test::wait_until(
+            [&] {
+                int n = 1;
+                while (n > 0 && !data.empty()) {
+                    n = sock.write(data.data(), data.size());
+                    if (n > 0)
+                        data.remove_prefix(static_cast<std::size_t>(n));
+                }
+                return data.empty();
+            },
+            2s, "send", qb::http::test::fail_wait::nap{1ms});
     }
     bool
     read_some() {
@@ -289,14 +289,12 @@ struct RawH1 {
     template <typename Pred>
     bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!pred()) {
-            if (eof || std::chrono::steady_clock::now() >= deadline)
-                return pred();
-            if (!read_some())
-                std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
+                                   [this] {
+                                       if (!read_some())
+                                           std::this_thread::sleep_for(1ms);
+                                   });
+        return pred();
     }
     /// Forget the response read so far: the next bytes on this connection start another one.
     void
@@ -310,10 +308,11 @@ struct RawH1 {
     }
     void
     read_for(std::chrono::milliseconds window) {
-        const auto deadline = std::chrono::steady_clock::now() + window;
-        while (!eof && std::chrono::steady_clock::now() < deadline)
-            if (!read_some())
-                std::this_thread::sleep_for(1ms);
+        qb::http::test::wait_until([this] { return eof; }, window, "read_for",
+                                   [this] {
+                                       if (!read_some())
+                                           std::this_thread::sleep_for(1ms);
+                                   });
     }
     [[nodiscard]] bool
     header_is(std::string name, std::string value) const {
@@ -407,9 +406,7 @@ TEST_F(SseHttp1Test, AHeadGetsTheHeadAloneAndTheProducerSeesAnEndedStream) {
     EXPECT_TRUE(c.header_is("content-type", "text/event-stream; charset=utf-8")) << c.head;
     c.read_for(50ms);
     EXPECT_TRUE(c.body.empty()) << "the head alone";
-    const auto deadline = std::chrono::steady_clock::now() + 2s;
-    while (!g_events_probe_set && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(1ms);
+    qb::http::test::wait_until([&] { return g_events_probe_set.load(); }, 2s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     ASSERT_TRUE(g_events_probe_set.load()) << "the handler ran its sends";
     EXPECT_TRUE(g_events_ended.load()) << "the stream came back ended: a producer that loops on cancelled() must read ended() too";
     EXPECT_EQ(g_events_written.load(), 0u) << "nothing of the three events was written";

@@ -44,6 +44,8 @@
 #include <gtest/gtest.h>
 #include <qbm/http/http.h>
 
+#include "../../shared/fail_wait.h"
+
 #ifdef QB_HAS_COMPRESSION
 #include <zlib.h>
 
@@ -96,23 +98,28 @@ TEST(BodyUncompressMalformed, EveryMalformedCompressedBodyTerminates) {
     std::thread watchdog([&] {
         std::size_t last = 0;
         int         idle = 0;
-        while (g_running.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            const auto now = g_progress.load(std::memory_order_relaxed);
-            idle           = (now == last) ? idle + 1 : 0;
-            last           = now;
-            if (idle >= 40) { // 10 s with no input completed
-                std::fprintf(stderr,
-                             "\nFATAL: Body::uncompress() stopped making progress after %zu inputs.\n"
-                             "A malformed stream that makes the decompressor consume no input, produce no output\n"
-                             "and never report done spins in the `while (!done && i_processed != body.size())`\n"
-                             "loop, re-allocating body.size() * 2 every turn. Request bodies reach this through\n"
-                             "the compression middleware, so that is a remote DoS on a single-threaded core.\n",
-                             now);
-                std::fflush(stderr);
-                std::abort();
-            }
-        }
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (!g_running.load(std::memory_order_relaxed))
+                    return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                const auto now = g_progress.load(std::memory_order_relaxed);
+                idle           = (now == last) ? idle + 1 : 0;
+                last           = now;
+                if (idle >= 40) { // 10 s with no input completed
+                    std::fprintf(stderr,
+                                 "\nFATAL: Body::uncompress() stopped making progress after %zu inputs.\n"
+                                 "A malformed stream that makes the decompressor consume no input, produce no output\n"
+                                 "and never report done spins in the `while (!done && i_processed != body.size())`\n"
+                                 "loop, re-allocating body.size() * 2 every turn. Request bodies reach this through\n"
+                                 "the compression middleware, so that is a remote DoS on a single-threaded core.\n",
+                                 now);
+                    std::fflush(stderr);
+                    std::abort();
+                }
+                return false;
+            },
+            qb::http::test::fail_wait::never, qb::http::test::fail_wait::no_turn{});
     });
 
     // 1. Every truncation point — the shape that leaves zlib waiting for more input.

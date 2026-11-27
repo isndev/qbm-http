@@ -84,18 +84,22 @@ TEST(HttpServerHugeBody, ABodyAtTheDefaultCapIsServed) {
     const std::string expected = std::to_string(body);
     std::string       received;
     char              buffer[4096];
-    const auto        deadline = std::chrono::steady_clock::now() + 60s;
-    while (std::chrono::steady_clock::now() < deadline && received.find("\r\n\r\n" + expected) == std::string::npos) {
-        const int got = sock.read(buffer, sizeof(buffer));
-        if (got > 0) {
-            received.append(buffer, static_cast<std::size_t>(got));
-            continue;
-        }
-        // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
-        if (const int error = got == 0 ? 0 : qb::io::socket::get_last_errno(); error == 0 || !qb::io::socket::not_recv_error(error))
-            break;
-        std::this_thread::sleep_for(1ms);
-    }
+    bool              ended = false;
+    qb::http::test::wait_until([&] { return ended || received.find("\r\n\r\n" + expected) != std::string::npos; }, 60s, "the answer",
+                               [&] {
+                                   const int got = sock.read(buffer, sizeof(buffer));
+                                   if (got > 0) {
+                                       received.append(buffer, static_cast<std::size_t>(got));
+                                       return;
+                                   }
+                                   // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
+                                   if (const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
+                                       error == 0 || !qb::io::socket::not_recv_error(error)) {
+                                       ended = true;
+                                       return;
+                                   }
+                                   std::this_thread::sleep_for(1ms);
+                               });
     sock.close();
     EXPECT_EQ(received.rfind("HTTP/1.1 200 ", 0), 0u) << "no answer: [" << received.substr(0, 200) << "]";
     EXPECT_NE(received.find("\r\n\r\n" + expected), std::string::npos) << received.substr(0, 400);

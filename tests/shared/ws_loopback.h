@@ -65,6 +65,8 @@
 #include <qb/io/system/sys__socket.h>
 #include <qbm/http/ws/coro.h>
 
+#include "fail_wait.h"
+
 namespace qb::http::test {
 
 using namespace std::chrono_literals;
@@ -149,11 +151,7 @@ struct WsServerThread {
                     ready.store(true, std::memory_order_release);
                 }
                 cv.notify_all();
-                while (running.load(std::memory_order_acquire)) {
-                    if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                        std::this_thread::sleep_for(1ms);
-                    }
-                }
+                peer_wait_until([&] { return !running.load(std::memory_order_acquire); }, fail_wait::never, fail_wait::pass_or_sleep{1ms});
             } catch (const std::exception &e) {
                 {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -234,17 +232,17 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
     sock.write(upgrade.data(), static_cast<int>(upgrade.size()));
 
     std::string response;
-    for (int i = 0; i < 500; ++i) {
-        char buf[512];
-        int  n = sock.read(buf, sizeof(buf));
-        if (n > 0) {
-            response.append(buf, static_cast<std::size_t>(n));
-        }
-        if (response.find("\r\n\r\n") != std::string::npos) {
-            break;
-        }
-        std::this_thread::sleep_for(5ms);
-    }
+    // 500 looks 5 ms apart, as a budget: each look reads what came.
+    wait_until(
+        [&] {
+            char buf[512];
+            int  n = sock.read(buf, sizeof(buf));
+            if (n > 0) {
+                response.append(buf, static_cast<std::size_t>(n));
+            }
+            return response.find("\r\n\r\n") != std::string::npos;
+        },
+        2500ms, "ws handshake", fail_wait::nap{5ms});
     ASSERT_NE(response.find("101"), std::string::npos) << "handshake failed:\n" << response;
 }
 
@@ -258,15 +256,17 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
 [[nodiscard]] inline std::string
 read_http_response(qb::io::tcp::socket &sock) {
     std::string response;
-    for (int i = 0; i < 500 && response.find("\r\n\r\n") == std::string::npos; ++i) {
-        char buf[512];
-        int  n = sock.read(buf, sizeof(buf));
-        if (n > 0) {
-            response.append(buf, static_cast<std::size_t>(n));
-        } else {
-            std::this_thread::sleep_for(5ms);
-        }
-    }
+    // 500 reads, 5 ms after each that brought nothing, as a budget.
+    wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 2500ms, "read_http_response",
+               [&] {
+                   char buf[512];
+                   int  n = sock.read(buf, sizeof(buf));
+                   if (n > 0) {
+                       response.append(buf, static_cast<std::size_t>(n));
+                   } else {
+                       std::this_thread::sleep_for(5ms);
+                   }
+               });
     return response;
 }
 
@@ -331,19 +331,21 @@ read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds 
     const auto  start     = std::chrono::steady_clock::now();
     auto        last_byte = start;
     char        buf[256];
-    while (out.size() < max && std::chrono::steady_clock::now() - start < deadline) {
-        int n = sock.read(buf, sizeof(buf));
-        if (n > 0) {
-            out.append(buf, static_cast<std::size_t>(n));
-            last_byte = std::chrono::steady_clock::now();
-        } else if (n == 0) {
-            break; // peer closed: nothing more is coming
-        } else {
-            if (!out.empty() && std::chrono::steady_clock::now() - last_byte >= quiet)
-                break; // delivered, then went silent
-            std::this_thread::sleep_for(5ms);
-        }
-    }
+    bool        ended = false;
+    wait_until([&] { return ended || out.size() >= max; }, start + deadline, "read_some",
+               [&] {
+                   int n = sock.read(buf, sizeof(buf));
+                   if (n > 0) {
+                       out.append(buf, static_cast<std::size_t>(n));
+                       last_byte = std::chrono::steady_clock::now();
+                   } else if (n == 0) {
+                       ended = true; // peer closed: nothing more is coming
+                   } else if (!out.empty() && std::chrono::steady_clock::now() - last_byte >= quiet) {
+                       ended = true; // delivered, then went silent
+                   } else {
+                       std::this_thread::sleep_for(5ms);
+                   }
+               });
     return out;
 }
 

@@ -326,9 +326,8 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         client.close();
 
         std::optional<std::string> held;
-        const auto                 deadline = std::chrono::steady_clock::now() + 10s;
-        while (!(held = g_closed.take()) && std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(1ms);
+        qb::http::test::wait_until([&] { return (held = g_closed.take()).has_value(); }, 10s, "wait_until",
+                                   qb::http::test::fail_wait::nap{1ms});
         ASSERT_TRUE(held.has_value()) << "the session did not close with bytes queued";
         RecordProperty(std::string("held_octets_") + each.key, std::to_string(held->size()));
         // The premise: nothing written after the large body left -- its last DATA frame, END_STREAM, is still there.
@@ -446,15 +445,26 @@ private:
 
     written
     write_all(qb::io::tcp::ssl::socket &sock, std::vector<uint8_t> const &bytes, std::chrono::steady_clock::time_point deadline) {
-        std::size_t off = 0;
-        while (off < bytes.size() && !_release && !_stop_writing && std::chrono::steady_clock::now() < deadline) {
-            const int n = sock.write(reinterpret_cast<char const *>(bytes.data() + off), bytes.size() - off);
-            if (n < 0)
-                return written::failed;
-            if (n == 0)
-                std::this_thread::sleep_for(1ms);
-            off += static_cast<std::size_t>(n);
-        }
+        std::size_t off    = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, a stop, or a socket that takes no more for now.
+        qb::http::test::peer_wait_until(
+            [&] {
+                while (off < bytes.size() && !_release && !_stop_writing) {
+                    const int n = sock.write(reinterpret_cast<char const *>(bytes.data() + off), bytes.size() - off);
+                    if (n < 0) {
+                        failed = true;
+                        return true;
+                    }
+                    if (n == 0)
+                        return false;
+                    off += static_cast<std::size_t>(n);
+                }
+                return true;
+            },
+            deadline);
+        if (failed)
+            return written::failed;
         return off == bytes.size() ? written::all : written::stopped;
     }
 
@@ -462,11 +472,7 @@ private:
     run() {
         const auto               deadline = std::chrono::steady_clock::now() + 60s;
         qb::io::tcp::ssl::socket sock;
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            if (_listener.accept(sock) == 0 && sock.is_open())
-                break;
-            std::this_thread::sleep_for(1ms);
-        }
+        qb::http::test::peer_wait_until([&] { return _release || (_listener.accept(sock) == 0 && sock.is_open()); }, deadline);
         if (!sock.is_open())
             return;
         sock.set_nonblocking(true);
@@ -488,82 +494,93 @@ private:
         std::size_t          requests     = 0;     // the client's HEADERS frames seen
         std::size_t          sent         = 0;     // frames written that each solicit a reply
         bool                 gave_up      = false; // told to stop, or out of time: nothing more is written
+        bool                 quit         = false; // the SETTINGS could not be written: the peer's thread ends there
         char                 buffer[16384];
-        while (!_release && std::chrono::steady_clock::now() < deadline) {
-            const bool ready = acked && requests >= _plan.requests && (_plan.what == soliciting::pongs || closed_one);
-            gave_up          = gave_up || _stop_writing;
-            if (ready && !gave_up && !_goaway && sent < total && (!_plan.reads || _replies == sent)) {
-                const written round_written = write_all(sock, round, deadline);
-                if (round_written == written::failed) {
-                    _eof = true; // the client ended the connection
-                    break;
-                }
-                sent += _plan.per_batch; // a round cut short counts whole: an upper bound on what was solicited
-                _solicited = sent;
-                gave_up    = round_written == written::stopped;
-                if (!_plan.reads && !gave_up && sent < total)
-                    continue; // a peer that does not read: the next round, nothing read
-            }
-            const int n = sock.read(buffer, sizeof(buffer));
-            if (n < 0) {
-                _eof = true;
-                break;
-            }
-            if (n == 0) {
-                std::this_thread::sleep_for(1ms);
-                continue;
-            }
-            in.insert(in.end(), buffer, buffer + n);
-            if (!preface_seen) {
-                if (in.size() < preface_size)
-                    continue;
-                in.erase(in.begin(), in.begin() + preface_size);
-                preface_seen = true;
-            }
-            std::size_t at = 0;
-            while (in.size() - at >= 9) {
-                const std::uint8_t *head   = in.data() + at;
-                const std::size_t   length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
-                if (in.size() - at < 9 + length)
-                    break;
-                const std::uint8_t  type = head[3], flags = head[4];
-                const std::uint32_t stream =
-                    ((std::uint32_t{head[5]} << 24) | (std::uint32_t{head[6]} << 16) | (std::uint32_t{head[7]} << 8) | head[8]) & 0x7fffffffu;
-                if (type == 0x4 && (flags & 0x1) != 0) {
-                    acked = true;
-                } else if (type == 0x4 && !answered) {
-                    std::vector<uint8_t> reply;
-                    append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
-                    append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
-                    if (write_all(sock, reply, deadline) != written::all) {
-                        _eof = true;
-                        return;
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (_release)
+                    return true;
+                const bool ready = acked && requests >= _plan.requests && (_plan.what == soliciting::pongs || closed_one);
+                gave_up          = gave_up || _stop_writing;
+                if (ready && !gave_up && !_goaway && sent < total && (!_plan.reads || _replies == sent)) {
+                    const written round_written = write_all(sock, round, deadline);
+                    if (round_written == written::failed) {
+                        _eof = true; // the client ended the connection
+                        return true;
                     }
-                    answered = true;
-                } else if (type == 0x1) {
-                    ++requests;
-                    if (stream == 1 && !closed_one) {
-                        std::vector<uint8_t> response;
-                        append_frame(response, 0x1, 0x5, 1, {0x89}); // HEADERS, END_STREAM | END_HEADERS: `:status: 204`
-                        if (write_all(sock, response, deadline) != written::all) {
+                    sent += _plan.per_batch; // a round cut short counts whole: an upper bound on what was solicited
+                    _solicited = sent;
+                    gave_up    = round_written == written::stopped;
+                    if (!_plan.reads && !gave_up && sent < total)
+                        return false; // a peer that does not read: the next round, nothing read
+                }
+                const int n = sock.read(buffer, sizeof(buffer));
+                if (n < 0) {
+                    _eof = true;
+                    return true;
+                }
+                if (n == 0) {
+                    std::this_thread::sleep_for(1ms);
+                    return false;
+                }
+                in.insert(in.end(), buffer, buffer + n);
+                if (!preface_seen) {
+                    if (in.size() < preface_size)
+                        return false;
+                    in.erase(in.begin(), in.begin() + preface_size);
+                    preface_seen = true;
+                }
+                std::size_t at = 0;
+                while (in.size() - at >= 9) {
+                    const std::uint8_t *head   = in.data() + at;
+                    const std::size_t   length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
+                    if (in.size() - at < 9 + length)
+                        break;
+                    const std::uint8_t  type = head[3], flags = head[4];
+                    const std::uint32_t stream =
+                        ((std::uint32_t{head[5]} << 24) | (std::uint32_t{head[6]} << 16) | (std::uint32_t{head[7]} << 8) | head[8])
+                        & 0x7fffffffu;
+                    if (type == 0x4 && (flags & 0x1) != 0) {
+                        acked = true;
+                    } else if (type == 0x4 && !answered) {
+                        std::vector<uint8_t> reply;
+                        append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
+                        append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
+                        if (write_all(sock, reply, deadline) != written::all) {
                             _eof = true;
-                            return;
+                            quit = true;
+                            return true;
                         }
-                        closed_one = true;
+                        answered = true;
+                    } else if (type == 0x1) {
+                        ++requests;
+                        if (stream == 1 && !closed_one) {
+                            std::vector<uint8_t> response;
+                            append_frame(response, 0x1, 0x5, 1, {0x89}); // HEADERS, END_STREAM | END_HEADERS: `:status: 204`
+                            if (write_all(sock, response, deadline) != written::all) {
+                                _eof = true;
+                                quit = true;
+                                return true;
+                            }
+                            closed_one = true;
+                        }
+                    } else if (_plan.what == soliciting::pongs ? (type == 0x6 && (flags & 0x1) != 0) : type == 0x3) {
+                        ++_replies;
+                    } else if (type == 0x7 && length >= 8) {
+                        _goaway_code =
+                            (std::uint32_t{head[13]} << 24) | (std::uint32_t{head[14]} << 16) | (std::uint32_t{head[15]} << 8) | head[16];
+                        _goaway = true;
                     }
-                } else if (_plan.what == soliciting::pongs ? (type == 0x6 && (flags & 0x1) != 0) : type == 0x3) {
-                    ++_replies;
-                } else if (type == 0x7 && length >= 8) {
-                    _goaway_code =
-                        (std::uint32_t{head[13]} << 24) | (std::uint32_t{head[14]} << 16) | (std::uint32_t{head[15]} << 8) | head[16];
-                    _goaway = true;
+                    at += 9 + length;
                 }
-                at += 9 + length;
-            }
-            in.erase(in.begin(), in.begin() + static_cast<std::ptrdiff_t>(at));
-            if (!gave_up && sent == total && _replies == total)
-                _done = true;
-        }
+                in.erase(in.begin(), in.begin() + static_cast<std::ptrdiff_t>(at));
+                if (!gave_up && sent == total && _replies == total)
+                    _done = true;
+                return false;
+            },
+            deadline, qb::http::test::fail_wait::no_turn{});
+        if (quit)
+            return;
         sock.disconnect();
         sock.close();
     }

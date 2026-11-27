@@ -25,6 +25,7 @@
 #include <qb/io/tcp/ssl/listener.h>
 #include <qb/io/tcp/ssl/socket.h>
 
+#include "./fail_wait.h"
 #include "./ssl_test_resource.h"
 
 namespace qb::http::test {
@@ -77,27 +78,33 @@ private:
     void
     run() {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-        while (_ended.load() < _connections && !_release && std::chrono::steady_clock::now() < deadline) {
-            qb::io::tcp::ssl::socket socket;
-            if (_listener.accept(socket) != 0 || !socket.is_open()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            ++_accepted;
-            socket.set_nonblocking(true);
-            while (!socket.handshake_complete() && !_release && std::chrono::steady_clock::now() < deadline) {
-                if (socket.do_handshake() < 0)
-                    break;
-                if (!socket.handshake_complete())
+        bool       nothing  = false; // the last look accepted nothing: the turn sleeps
+        // Each look serves one connection, or finds none to accept.
+        peer_wait_until(
+            [&] {
+                if (_ended.load() >= _connections || _release)
+                    return true;
+                qb::io::tcp::ssl::socket socket;
+                if (_listener.accept(socket) != 0 || !socket.is_open()) {
+                    nothing = true;
+                    return false;
+                }
+                ++_accepted;
+                socket.set_nonblocking(true);
+                peer_wait_until(
+                    [&] { return socket.handshake_complete() || _release || socket.do_handshake() < 0 || socket.handshake_complete(); },
+                    deadline);
+                peer_wait_until([&] { return !socket.handshake_complete() || _release; }, _hold);
+                if (socket.handshake_complete())
+                    ++_ended; // counted before the client can read the end
+                socket.close();
+                return false;
+            },
+            deadline,
+            [&nothing] {
+                if (std::exchange(nothing, false))
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            for (const auto until = std::chrono::steady_clock::now() + _hold;
-                 socket.handshake_complete() && !_release && std::chrono::steady_clock::now() < until;)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            if (socket.handshake_complete())
-                ++_ended; // counted before the client can read the end
-            socket.close();
-        }
+            });
     }
 
     qb::io::tcp::ssl::listener _listener;

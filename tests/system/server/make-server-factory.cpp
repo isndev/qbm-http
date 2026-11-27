@@ -183,46 +183,49 @@ raw_upload(std::uint16_t port, std::string const &head, std::size_t body_bytes, 
     bool              write_open = true;
     char              buffer[4096];
     const auto        deadline = std::chrono::steady_clock::now() + budget;
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool progressed = false;
-        if (write_open && pending.empty() && body_sent < body_bytes) {
-            const auto n = std::min(chunk.size(), body_bytes - body_sent);
-            pending.assign(chunk.data(), n);
-            body_sent += n;
-        }
-        if (write_open && !pending.empty()) {
-            const int written = sock.write(pending.data(), pending.size());
-            if (written > 0) {
-                out.sent += static_cast<std::size_t>(written);
-                pending.erase(0, static_cast<std::size_t>(written));
-                progressed = true;
-            } else if (written < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno())) {
-                out.write_error = qb::io::socket::get_last_errno();
-                write_open      = false; // the server reset the connection: nothing more can be sent
+    qb::http::test::wait_until(
+        [&] {
+            bool progressed = false;
+            if (write_open && pending.empty() && body_sent < body_bytes) {
+                const auto n = std::min(chunk.size(), body_bytes - body_sent);
+                pending.assign(chunk.data(), n);
+                body_sent += n;
             }
-        }
-        const bool uploading = write_open && (!pending.empty() || body_sent < body_bytes);
-        if (!read_after_upload || !uploading) {
-            const int got = sock.read(buffer, sizeof(buffer));
-            if (got > 0) {
-                out.received.append(buffer, static_cast<std::size_t>(got));
-                progressed = true;
-            } else {
-                // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
-                const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
-                if (error == 0) {
-                    out.closed = true;
-                    break;
-                }
-                if (!qb::io::socket::not_recv_error(error)) {
-                    out.read_error = error;
-                    break;
+            if (write_open && !pending.empty()) {
+                const int written = sock.write(pending.data(), pending.size());
+                if (written > 0) {
+                    out.sent += static_cast<std::size_t>(written);
+                    pending.erase(0, static_cast<std::size_t>(written));
+                    progressed = true;
+                } else if (written < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno())) {
+                    out.write_error = qb::io::socket::get_last_errno();
+                    write_open      = false; // the server reset the connection: nothing more can be sent
                 }
             }
-        }
-        if (!progressed)
-            std::this_thread::sleep_for(1ms);
-    }
+            const bool uploading = write_open && (!pending.empty() || body_sent < body_bytes);
+            if (!read_after_upload || !uploading) {
+                const int got = sock.read(buffer, sizeof(buffer));
+                if (got > 0) {
+                    out.received.append(buffer, static_cast<std::size_t>(got));
+                    progressed = true;
+                } else {
+                    // tcp::socket::read() answers -1 at EOF too, with the error cleared to 0.
+                    const int error = got == 0 ? 0 : qb::io::socket::get_last_errno();
+                    if (error == 0) {
+                        out.closed = true;
+                        return true;
+                    }
+                    if (!qb::io::socket::not_recv_error(error)) {
+                        out.read_error = error;
+                        return true;
+                    }
+                }
+            }
+            if (!progressed)
+                std::this_thread::sleep_for(1ms);
+            return false;
+        },
+        deadline, "the exchange", qb::http::test::fail_wait::no_turn{});
     sock.close();
     return out;
 }

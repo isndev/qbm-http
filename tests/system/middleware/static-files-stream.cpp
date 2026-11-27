@@ -216,18 +216,18 @@ public:
 
     bool
     send(std::string_view data, std::chrono::milliseconds budget = 2s) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!data.empty()) {
-            const int n = _sock.write(data.data(), data.size());
-            if (n > 0) {
-                data.remove_prefix(static_cast<std::size_t>(n));
-                continue;
-            }
-            if (std::chrono::steady_clock::now() >= deadline)
-                return false;
-            std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
+        return qb::http::test::wait_until(
+            [&] {
+                int n = 1;
+                while (n > 0 && !data.empty()) {
+                    n = _sock.write(data.data(), data.size());
+                    if (n > 0)
+                        data.remove_prefix(static_cast<std::size_t>(n));
+                }
+                return data.empty();
+            },
+            budget, "send", qb::http::test::fail_wait::nap{1ms});
     }
 
     /// Read what is there, once; true when something came. EOF is recorded.
@@ -252,14 +252,12 @@ public:
     template <typename Pred>
     bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = 20s) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        while (!pred()) {
-            if (eof || std::chrono::steady_clock::now() >= deadline)
-                return pred();
-            if (!read_some())
-                std::this_thread::sleep_for(1ms);
-        }
-        return true;
+        qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
+                                   [this] {
+                                       if (!read_some())
+                                           std::this_thread::sleep_for(1ms);
+                                   });
+        return pred();
     }
 
     void
@@ -337,13 +335,7 @@ request(std::string_view path, std::string_view probe, std::string_view extra = 
 template <typename Pred>
 bool
 wait_for(Pred &&pred, std::chrono::milliseconds budget = 10s) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline)
-            return false;
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
+    return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});
 }
 
 /// One exchange on a fresh connection: the response, parsed (and the raw client's EOF state).
@@ -494,16 +486,17 @@ park_download(RawClient &c, std::uint16_t port, std::string const &probe) {
 /// pauses made.
 inline int
 take_paced(RawClient &c, std::size_t bytes, std::chrono::milliseconds pause, std::chrono::milliseconds budget) {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    int        pauses   = 0;
-    while (std::chrono::steady_clock::now() < deadline && !c.eof && !parse_response(c.buffer, false).complete) {
-        const auto before = c.buffer.size();
-        c.read_until([&] { return c.buffer.size() >= before + bytes || c.eof || parse_response(c.buffer, false).complete; }, 2s);
-        if (c.eof || parse_response(c.buffer, false).complete)
-            break;
-        std::this_thread::sleep_for(pause);
-        ++pauses;
-    }
+    int pauses = 0;
+    qb::http::test::wait_until(
+        [&] { return c.eof || parse_response(c.buffer, false).complete; }, budget, "take_paced",
+        [&] {
+            const auto before = c.buffer.size();
+            c.read_until([&] { return c.buffer.size() >= before + bytes || c.eof || parse_response(c.buffer, false).complete; }, 2s);
+            if (c.eof || parse_response(c.buffer, false).complete)
+                return;
+            std::this_thread::sleep_for(pause);
+            ++pauses;
+        });
     return pauses;
 }
 

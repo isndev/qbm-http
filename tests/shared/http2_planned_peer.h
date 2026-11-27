@@ -36,6 +36,7 @@
 #include <qbm/http/1.1/protocol/base.h>
 #include <qbm/http/2/protocol/hpack.h>
 
+#include "./fail_wait.h"
 #include "./ssl_test_resource.h"
 
 namespace qb::http::test {
@@ -422,12 +423,7 @@ private:
     void
     run() {
         _deadline = std::chrono::steady_clock::now() + _budget;
-        while (!_release && std::chrono::steady_clock::now() < _deadline) {
-            if (_listener.accept(_sock) == 0 && _sock.is_open()) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        peer_wait_until([this] { return _release || (_listener.accept(_sock) == 0 && _sock.is_open()); }, _deadline);
         if (!_sock.is_open()) {
             return;
         }
@@ -473,9 +469,7 @@ private:
                     append_frame(frame, 0x7, 0, 0, {0, 0, 0, 1, 0, 0, 0, 0}); // GOAWAY: last stream 1, NO_ERROR
                     static_cast<void>(send(frame));
                     frame.clear();
-                    for (const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-                         !_release && std::chrono::steady_clock::now() < until;)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    peer_wait_until([this] { return _release.load(); }, std::chrono::milliseconds(500));
                 } else if (_plan == Plan::no_answer) {
                     // nothing is sent: the loop below reads on
                 } else if (_plan == Plan::one_stream_the_second_answered) {

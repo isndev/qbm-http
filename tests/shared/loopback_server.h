@@ -345,11 +345,8 @@ private:
 
         // Pump the server's own loop until asked to stop. EVRUN_NOWAIT + a short
         // back-off avoids a busy spin while keeping shutdown latency low.
-        while (_running.load(std::memory_order_acquire)) {
-            if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
+        peer_wait_until([this] { return !_running.load(std::memory_order_acquire); }, fail_wait::never,
+                        fail_wait::pass_or_sleep{std::chrono::milliseconds(1)});
 
         _ready.store(false, std::memory_order_release);
         _server.reset(); // Destroy the server on the thread it lived on.

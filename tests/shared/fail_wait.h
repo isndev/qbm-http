@@ -1,8 +1,8 @@
 /**
  * @file qbm/http/tests/shared/fail_wait.h
- * @brief A failure planted in the suite's wait helpers, off unless asked for: with `QBM_HTTP_TEST_FAIL_WAIT_AT=k` in
- *        the environment, the k-th wait of the process fails at once, as a wait that reached its deadline does, and
- *        the loop is turned after every case.
+ * @brief The suite's one wait, and a failure planted in it, off unless asked for: with `QBM_HTTP_TEST_FAIL_WAIT_AT=k` in
+ *        the environment, the k-th `wait_until()` / `expect_until()` of the process fails at once, as a wait that
+ *        reached its deadline does, and the loop is turned after every case.
  *
  * What it is for. A case that fails must stay a failure of that case -- its `[  FAILED  ]` line, the rest of the
  * binary run. Since the HTTP clients answer from their destructor every callback they still hold (Huly QB-1246), a
@@ -12,13 +12,20 @@
  * `dev/agent/run-fail-wait.py` runs each case of a binary alone with k = 1, 2, ... until the case no longer reaches a
  * k-th wait, and requires every injected failure to end as one failed case.
  *
- * Every deadline wait of the suite is one function of this header: `qb::http::test::wait_until()`, or
- * `expect_until()`, which also records a failure at its deadline. A test's own helpers (`ServerThread::pump_until`,
- * the HTTP/3 fixtures' `pump()`, the HTTP/2 cases' `loop_until()`, ...) call them and run no loop of their own, and
- * `dev/agent/run-fail-wait.py --lint` refuses a loop that turns the event loop until a condition or a deadline
- * anywhere else under qbm/http/tests -- a window, which always runs its whole span, is not a wait. The wait calls
- * `fire()` first: a wait that fires records one `ADD_FAILURE()` and returns false, which is what a wait that reached
- * its deadline returns. After every case, once its
+ * What a wait is, and where the suite has one. A WAIT is a loop that passes time -- it turns the event loop, sleeps,
+ * or compares the clock -- until a condition ends it. The suite has one such loop, `fail_wait::wait()` here, reached
+ * three ways: `qb::http::test::wait_until()`; `expect_until()`, which also records a failure at its deadline; and
+ * `peer_wait_until()`, for a scripted peer on a thread of its own, which the kit never fails. A test's own helpers
+ * (`ServerThread::pump_until`, the fixtures' `pump()`, the raw clients' `read_until()` and `send()`, ...) call them and
+ * run no loop of their own: `dev/agent/run-fail-wait.py --lint` refuses one anywhere else under qbm/http/tests, and a
+ * second definition of one of the three names. Two loops are no waits: a WINDOW, whose only condition is its bound
+ * (the time, or a count) and which nothing leaves early, always runs its whole span; a loop in a destructor is the net
+ * of a case that has ended. So the kit can fail every `wait_until()` / `expect_until()` the lint counts -- not the
+ * peers' waits, counted apart, and not what waits with no loop of its own (a condition variable's `wait_for`, a
+ * blocking `run_sync()`), which the lint does not see.
+ *
+ * A failable wait calls `fire()` first: a wait that fires records one `ADD_FAILURE()` and returns false, which is what
+ * a wait that reached its deadline returns. After every case, once its
  * fixture is destroyed, a listener turns the calling thread's loop for `k_turn`: what the case left armed runs, as it
  * would under the next case of the binary, and the line it prints says how many waits the case reached.
  *
@@ -152,20 +159,67 @@ struct pass_then_sleep {
     }
 };
 
-/// The one deadline wait of the suite, which `wait_until()` and `expect_until()` are: looks at `done`, turns, until it
-/// holds or `budget` has elapsed. Armed, its k-th call returns false at once, its failure recorded (`fire()`).
+/// A sleep of `idle`, then a pass: the turn of a wait whose caller made the first pass itself, before its first look.
+struct sleep_then_pass {
+    std::chrono::microseconds idle;
+
+    void
+    operator()() const {
+        std::this_thread::sleep_for(idle);
+        qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+    }
+};
+
+/// A sleep of `idle` and no pass: the turn of a wait for what another thread does.
+struct nap {
+    std::chrono::microseconds idle{1000};
+
+    void
+    operator()() const {
+        std::this_thread::sleep_for(idle);
+    }
+};
+
+/// No turn at all: the wait's condition does the waiting itself (a read or a poll that blocks for a bounded time).
+struct no_turn {
+    void
+    operator()() const noexcept {}
+};
+
+/// The bound of a wait that has none: a service loop, which ends when its condition says so.
+inline constexpr std::chrono::steady_clock::time_point never = std::chrono::steady_clock::time_point::max();
+
+/// The instant a wait gives up, from what its caller gave: that instant, or a budget from now.
+inline std::chrono::steady_clock::time_point
+deadline(std::chrono::steady_clock::time_point const until) noexcept {
+    return until;
+}
+template <typename Rep, typename Period>
+std::chrono::steady_clock::time_point
+deadline(std::chrono::duration<Rep, Period> const budget) noexcept {
+    return std::chrono::steady_clock::now() + budget;
+}
+
+/// The thread the cases run on: the one that initialised this, gtest's main thread.
+inline std::thread::id const case_thread = std::this_thread::get_id();
+
+/// The one wait of the suite, which `wait_until()`, `expect_until()` and `peer_wait_until()` are: looks at `done`,
+/// turns, until it holds or `until` is reached. Injected and armed, its k-th call returns false at once, its failure
+/// recorded (`fire()`).
 template <typename Done, typename Turn>
 bool
-wait(Done &done, std::chrono::milliseconds const budget, char const *const helper, Turn &turn, bool const fails_at_deadline) {
-    if (fire(helper))
+wait(Done &done, std::chrono::steady_clock::time_point const until, char const *const helper, Turn &turn, bool const fails_at_deadline,
+     bool const injected) {
+    if (injected && fire(helper))
         return false;
-    auto const until = std::chrono::steady_clock::now() + budget;
+    auto const began = std::chrono::steady_clock::now();
     while (!done()) {
-        if (std::chrono::steady_clock::now() >= until) {
+        if (until != never && std::chrono::steady_clock::now() >= until) { // a service loop reads no clock
             if (done())
                 return true;
             if (fails_at_deadline)
-                ADD_FAILURE() << helper << ": predicate not satisfied within " << budget.count() << "ms";
+                ADD_FAILURE() << helper << ": predicate not satisfied within "
+                              << std::chrono::duration_cast<std::chrono::milliseconds>(until - began).count() << "ms";
             return false;
         }
         turn();
@@ -178,25 +232,44 @@ wait(Done &done, std::chrono::milliseconds const budget, char const *const helpe
 namespace qb::http::test {
 
 /**
- * @brief Turns the calling thread's loop until @p done holds or @p budget elapses; whether @p done holds.
+ * @brief Looks at @p done and turns until it holds or @p bound is reached; whether @p done holds.
  *
- * The suite's deadline wait: a test that waits for something to happen on its loop calls this (or `expect_until()`),
- * never a loop of its own -- `dev/agent/run-fail-wait.py --lint` refuses one anywhere else under qbm/http/tests, so
- * that every wait is one the kit can make fail. It records nothing at its deadline: the caller's assertion names what
- * did not happen. @p helper names the wait in the kit's line; @p turn is one pass between two looks at @p done
- * (`fail_wait::one_pass` by default, `fail_wait::pass_or_sleep{1ms}` for a loop that may be idle, or the caller's own).
+ * The suite's wait: a test that waits for something to happen calls this (or `expect_until()`), never a loop of its
+ * own -- `dev/agent/run-fail-wait.py --lint` refuses, anywhere else under qbm/http/tests, a loop that passes time until
+ * a condition ends it -- so that every such wait is one the kit can make fail. It records nothing at its deadline: the
+ * caller's assertion names what did not happen. @p bound is a budget from now or a `steady_clock` instant; @p helper
+ * names the wait in the kit's line; @p turn is what happens between two looks at @p done: one pass of this thread's
+ * loop by default (`fail_wait::one_pass`), a pass and a sleep (`pass_or_sleep`, `pass_then_sleep`, `sleep_then_pass`),
+ * a sleep alone for what another thread does (`nap`), nothing when @p done itself blocks (`no_turn`), or the caller's.
  */
-template <typename Done, typename Turn = fail_wait::one_pass>
+template <typename Done, typename Bound, typename Turn = fail_wait::one_pass>
 bool
-wait_until(Done &&done, std::chrono::milliseconds const budget, char const *const helper = "wait_until", Turn &&turn = Turn{}) {
-    return fail_wait::wait(done, budget, helper, turn, false);
+wait_until(Done &&done, Bound const &bound, char const *const helper = "wait_until", Turn &&turn = Turn{}) {
+    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, false, true);
 }
 
-/// `wait_until()` that records a non-fatal failure at its deadline, naming @p helper and @p budget.
-template <typename Done, typename Turn = fail_wait::one_pass>
+/// `wait_until()` that records a non-fatal failure at its deadline, naming @p helper and the time it waited.
+template <typename Done, typename Bound, typename Turn = fail_wait::one_pass>
 bool
-expect_until(Done &&done, std::chrono::milliseconds const budget, char const *const helper = "expect_until", Turn &&turn = Turn{}) {
-    return fail_wait::wait(done, budget, helper, turn, true);
+expect_until(Done &&done, Bound const &bound, char const *const helper = "expect_until", Turn &&turn = Turn{}) {
+    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, true, true);
+}
+
+/**
+ * @brief The wait of a scripted peer on a thread of its own: `wait_until()` that the kit never fails.
+ *
+ * A peer the case scripts -- a raw server or client run by a `std::thread` -- waits for its script's next step here.
+ * Failing such a wait would not be a wait of the case reaching its deadline but a peer that misbehaves, so the kit
+ * leaves it alone, and the lint counts these calls apart from the ones it can fail. It is for a thread of the peer's
+ * own only: called on the thread the cases run on, it records a failure -- a case's wait is `wait_until()`. @p bound may
+ * be `fail_wait::never` for a service loop; @p turn is a sleep of 1 ms by default.
+ */
+template <typename Done, typename Bound, typename Turn = fail_wait::nap>
+bool
+peer_wait_until(Done &&done, Bound const &bound, Turn &&turn = Turn{}) {
+    if (std::this_thread::get_id() == fail_wait::case_thread)
+        ADD_FAILURE() << "[fail_wait] peer_wait_until() on the thread the cases run on: a case's wait is wait_until()";
+    return fail_wait::wait(done, fail_wait::deadline(bound), "peer_wait_until", turn, false, false);
 }
 
 /**

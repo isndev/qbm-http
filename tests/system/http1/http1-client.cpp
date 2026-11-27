@@ -632,48 +632,51 @@ public:
     [[nodiscard]] std::string
     read_until(std::string const &marker, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
         std::string out;
-        const auto  deadline = std::chrono::steady_clock::now() + budget;
         char        buffer[4096];
-        while (std::chrono::steady_clock::now() < deadline && out.find(marker) == std::string::npos) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(_fd, &fds);
-            timeval    tv{0, 50 * 1000};
-            const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
-            if (ready < 0 && errno == EINTR) {
-                continue;
-            }
-            if (ready < 0) {
-                throw std::runtime_error("select failed");
-            }
-            if (ready == 0) {
-                continue;
-            }
-            const auto n = ::recv(_fd, buffer, static_cast<int>(sizeof(buffer)), 0);
-            if (n <= 0) {
-                break;
-            }
-            out.append(buffer, static_cast<std::size_t>(n));
-        }
+        bool        ended = false;
+        // Each turn waits up to 50 ms for the socket, in select().
+        qb::http::test::wait_until([&] { return ended || out.find(marker) != std::string::npos; }, budget, "read_until",
+                                   [&] {
+                                       fd_set fds;
+                                       FD_ZERO(&fds);
+                                       FD_SET(_fd, &fds);
+                                       timeval    tv{0, 50 * 1000};
+                                       const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
+                                       if (ready < 0 && errno == EINTR) {
+                                           return;
+                                       }
+                                       if (ready < 0) {
+                                           throw std::runtime_error("select failed");
+                                       }
+                                       if (ready == 0) {
+                                           return;
+                                       }
+                                       const auto n = ::recv(_fd, buffer, static_cast<int>(sizeof(buffer)), 0);
+                                       if (n <= 0) {
+                                           ended = true;
+                                           return;
+                                       }
+                                       out.append(buffer, static_cast<std::size_t>(n));
+                                   });
         return out;
     }
 
     [[nodiscard]] bool
     closes_within(std::chrono::milliseconds budget) {
-        const auto deadline = std::chrono::steady_clock::now() + budget;
-        char       c;
-        while (std::chrono::steady_clock::now() < deadline) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(_fd, &fds);
-            timeval    tv{0, 50 * 1000};
-            const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
-            if (ready > 0) {
-                const auto n = ::recv(_fd, &c, 1, MSG_PEEK);
-                return n == 0;
-            }
-        }
-        return false;
+        char                c;
+        std::optional<bool> closed; // set by the turn that found the socket readable
+        qb::http::test::wait_until([&] { return closed.has_value(); }, budget, "closes_within",
+                                   [&] {
+                                       fd_set fds;
+                                       FD_ZERO(&fds);
+                                       FD_SET(_fd, &fds);
+                                       timeval    tv{0, 50 * 1000};
+                                       const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
+                                       if (ready > 0) {
+                                           closed = ::recv(_fd, &c, 1, MSG_PEEK) == 0;
+                                       }
+                                   });
+        return closed.value_or(false);
     }
 };
 
@@ -4068,40 +4071,42 @@ private:
         std::size_t                      next     = 0;
         std::vector<qb::io::tcp::socket> peers; // every connection accepted, served side by side: a client may
         std::vector<std::string>         input; // leave one open (retired, not closed) and open the next
-        while (!_stop && next < _script.size() && std::chrono::steady_clock::now() < deadline) {
-            bool idle = true;
-            if (qb::io::tcp::socket accepted = _listener.accept(); accepted.is_open()) {
-                static_cast<void>(accepted.set_nonblocking(true));
-                peers.push_back(std::move(accepted));
-                input.emplace_back();
-                ++connections;
-                idle = false;
-            }
-            for (std::size_t i = 0; i < peers.size() && next < _script.size(); ++i) {
-                if (!peers[i].is_open()) {
-                    continue;
-                }
-                char      buffer[1024];
-                const int n = peers[i].read(buffer, sizeof(buffer));
-                if (n == 0) {
-                    peers[i].close(); // the client closed this connection
-                    continue;
-                }
-                if (n < 0) {
-                    continue; // nothing to read yet
-                }
-                idle = false;
-                input[i].append(buffer, static_cast<std::size_t>(n));
-                for (auto end = input[i].find("\r\n\r\n"); end != std::string::npos && next < _script.size(); end = input[i].find("\r\n\r\n")) {
-                    input[i].erase(0, end + 4); // a request without a body: the client sends HEAD and GET
-                    const auto &response = _script[next++];
-                    static_cast<void>(peers[i].write(response.data(), response.size()));
-                }
-            }
-            if (idle) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
+        qb::http::test::peer_wait_until([&] { return _stop || next >= _script.size(); }, deadline,
+                                        [&] {
+                                            bool idle = true;
+                                            if (qb::io::tcp::socket accepted = _listener.accept(); accepted.is_open()) {
+                                                static_cast<void>(accepted.set_nonblocking(true));
+                                                peers.push_back(std::move(accepted));
+                                                input.emplace_back();
+                                                ++connections;
+                                                idle = false;
+                                            }
+                                            for (std::size_t i = 0; i < peers.size() && next < _script.size(); ++i) {
+                                                if (!peers[i].is_open()) {
+                                                    continue;
+                                                }
+                                                char      buffer[1024];
+                                                const int n = peers[i].read(buffer, sizeof(buffer));
+                                                if (n == 0) {
+                                                    peers[i].close(); // the client closed this connection
+                                                    continue;
+                                                }
+                                                if (n < 0) {
+                                                    continue; // nothing to read yet
+                                                }
+                                                idle = false;
+                                                input[i].append(buffer, static_cast<std::size_t>(n));
+                                                for (auto end = input[i].find("\r\n\r\n"); end != std::string::npos && next < _script.size();
+                                                     end      = input[i].find("\r\n\r\n")) {
+                                                    input[i].erase(0, end + 4); // a request without a body: the client sends HEAD and GET
+                                                    const auto &response = _script[next++];
+                                                    static_cast<void>(peers[i].write(response.data(), response.size()));
+                                                }
+                                            }
+                                            if (idle) {
+                                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                            }
+                                        });
     }
 
     qb::io::tcp::listener    _listener;
@@ -4712,11 +4717,14 @@ private:
     run() {
         const auto          deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         qb::io::tcp::socket peer;
-        while (!_stop && !peer.is_open() && std::chrono::steady_clock::now() < deadline) {
-            peer = _listener.accept();
-            if (!peer.is_open())
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (_stop || peer.is_open())
+                    return true;
+                peer = _listener.accept();
+                return peer.is_open();
+            },
+            deadline);
         if (!peer.is_open() || peer.set_nonblocking(false) != 0)
             return;
         std::string request;
@@ -4732,19 +4740,22 @@ private:
         if (peer.set_nonblocking(true) != 0)
             return;
         const auto put = [&](std::string_view bytes) {
-            while (!bytes.empty()) {
-                const int n = peer.write(bytes.data(), bytes.size());
-                if (n > 0) {
-                    bytes.remove_prefix(static_cast<std::size_t>(n));
-                    continue;
-                }
-                if (n < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno()))
-                    return false; // the client closed: a body past its limit
-                if (_stop || std::chrono::steady_clock::now() >= deadline)
-                    return false; // nobody reads any more, and the case is over
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            return true;
+            // Each look writes what the socket takes. It ends on all of it, on a client that closed (a body past its
+            // limit), or once the case is over; at the deadline nobody reads any more.
+            qb::http::test::peer_wait_until(
+                [&] {
+                    while (!bytes.empty()) {
+                        const int n = peer.write(bytes.data(), bytes.size());
+                        if (n > 0) {
+                            bytes.remove_prefix(static_cast<std::size_t>(n));
+                            continue;
+                        }
+                        return (n < 0 && !qb::io::socket::not_send_error(qb::io::socket::get_last_errno())) || _stop;
+                    }
+                    return true;
+                },
+                deadline);
+            return bytes.empty();
         };
         const std::string piece(kMiB, 'b');
         bool              written = put(_head);
@@ -4762,8 +4773,8 @@ private:
             peer.close();
             return;
         }
-        while (!_stop && std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        qb::http::test::peer_wait_until([this] { return _stop.load(); }, deadline,
+                                        qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
     }
 
     qb::io::tcp::listener _listener;

@@ -50,6 +50,8 @@
 
 #include <qbm/http/ws.h>
 
+#include "../../shared/fail_wait.h"
+
 namespace {
 
 struct CoroutineCleanup {
@@ -304,8 +306,14 @@ TEST(WsCloseFrameNegative, AbandonedReceiveAllowsAReplacementReceiver) {
     qb::http::ws::MessageText message;
     message << "replacement";
     ws.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_EQ(replacement.await_resume().payload, "replacement");
     EXPECT_EQ(resumed, 1);
@@ -321,16 +329,28 @@ TEST(WsCloseFrameNegative, AbandonedReceiveAllowsAReplacementReceiver) {
     auto next = receive();
     next.handle().resume();
     ASSERT_FALSE(next.handle().done());
-    for (int turn = 0; turn != 16 && !preceding.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || preceding.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(preceding.handle().done());
     EXPECT_EQ(preceding.await_resume().payload, "preceding");
     EXPECT_FALSE(next.handle().done());
     qb::http::ws::MessageText next_message;
     next_message << "next";
     ws.on(qb::http::ws::coro_client<>::message{next_message.size(), next_message.data().cbegin(), next_message});
-    for (int turn = 0; turn != 16 && !next.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || next.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(next.handle().done());
     EXPECT_EQ(next.await_resume().payload, "next");
     EXPECT_EQ(resumed, 3);
@@ -357,8 +377,14 @@ TEST(WsCloseFrameNegative, FrameArrivingAfterReceiveAbandonIsBufferedForTheNextR
     EXPECT_EQ(resumed, 0);
     auto replacement = receive();
     replacement.handle().resume();
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done()) << "a frame must not be delivered to a dead completion";
     EXPECT_EQ(replacement.await_resume().payload, "buffered-after-abandon");
     EXPECT_EQ(resumed, 1);
@@ -381,8 +407,14 @@ TEST(WsCloseFrameNegative, ARealConcurrentReceiverIsStillRejected) {
     qb::http::ws::MessageText message;
     message << "first";
     ws.on(qb::http::ws::coro_client<>::message{message.size(), message.data().cbegin(), message});
-    for (int turn = 0; turn != 16 && !first.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || first.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(first.handle().done());
     EXPECT_EQ(first.await_resume().payload, "first");
 }
@@ -414,8 +446,14 @@ TEST(WsCloseFrameNegative, RejectedCloseAllowsAValidCloseOnTheSameClient) {
         const auto                 queued_bytes = ws.out().size();
         qb::http::ws::MessageClose echo(Status::Normal, "valid");
         ws.on(qb::http::ws::coro_client<>::closed{echo.size(), echo.data().cbegin(), echo});
-        for (int turn = 0; turn != 16 && !task.handle().done(); ++turn)
-            qb::io::async::run(EVRUN_NOWAIT);
+        {
+            int turn = 0; // sixteen passes at most
+            qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                       [&turn] {
+                                           qb::io::async::run(EVRUN_NOWAIT);
+                                           ++turn;
+                                       });
+        }
         ASSERT_TRUE(task.handle().done());
         EXPECT_NO_THROW(task.await_resume());
         EXPECT_TRUE(completed);
@@ -445,8 +483,14 @@ TEST(WsCloseFrameNegative, AbandonedCloseAllowsAReplacementButRejectsAConcurrent
     const auto                 queued_bytes = ws.out().size();
     qb::http::ws::MessageClose peer(qb::http::ws::CloseStatus::Normal, "valid");
     ws.on(qb::http::ws::coro_client<>::closed{peer.size(), peer.data().cbegin(), peer});
-    for (int turn = 0; turn != 16 && !replacement.handle().done(); ++turn)
-        qb::io::async::run(EVRUN_NOWAIT);
+    {
+        int turn = 0; // sixteen passes at most
+        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                   [&turn] {
+                                       qb::io::async::run(EVRUN_NOWAIT);
+                                       ++turn;
+                                   });
+    }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_TRUE(replacement.await_resume().ok);
     EXPECT_EQ(ws.out().size(), queued_bytes);
@@ -495,8 +539,14 @@ drain_buffered(Receive receive) {
     for (;;) {
         auto pending = receive();
         pending.handle().resume();
-        for (int turn = 0; turn != 16 && !pending.handle().done(); ++turn)
-            qb::io::async::run(EVRUN_NOWAIT);
+        {
+            int turn = 0; // sixteen passes at most
+            qb::http::test::wait_until([&] { return turn == 16 || pending.handle().done(); }, std::chrono::seconds(5), "wait_until",
+                                       [&turn] {
+                                           qb::io::async::run(EVRUN_NOWAIT);
+                                           ++turn;
+                                       });
+        }
         if (!pending.handle().done())
             return payloads;
         payloads.push_back(pending.await_resume().payload);

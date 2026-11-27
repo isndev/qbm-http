@@ -379,15 +379,17 @@ raw_request_response(std::uint16_t port, const std::string &raw) {
     sock.write(raw.data(), static_cast<int>(raw.size()));
 
     std::string response;
-    for (int i = 0; i < 600 && response.find("\r\n\r\n") == std::string::npos; ++i) {
-        char buf[512];
-        int  n = sock.read(buf, sizeof(buf));
-        if (n > 0) {
-            response.append(buf, static_cast<std::size_t>(n));
-        } else {
-            std::this_thread::sleep_for(2ms);
-        }
-    }
+    // 600 reads, 2 ms after each that brought nothing, as a budget.
+    qb::http::test::wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 1200ms, "raw response",
+                               [&] {
+                                   char buf[512];
+                                   int  n = sock.read(buf, sizeof(buf));
+                                   if (n > 0) {
+                                       response.append(buf, static_cast<std::size_t>(n));
+                                   } else {
+                                       std::this_thread::sleep_for(2ms);
+                                   }
+                               });
     sock.close();
     return response;
 }
