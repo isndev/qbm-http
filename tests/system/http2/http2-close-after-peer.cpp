@@ -684,13 +684,13 @@ TEST_F(Http2ClientCloseAfterPeerTest, AServerThatWritesWithoutReadingIntoAConnec
         SCOPED_TRACE(each.name);
         ClosingPeer peer(each.provoke);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, whose destructor answers what it still holds
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected());
         ASSERT_TRUE(pump_until([&] { return peer.ready(); }, 10s)) << "the SETTINGS exchange did not end";
         if (each.provoke == ClosingPeer::provoke::nothing) {
             client->disconnect();
         } else {
-            std::optional<qb::http::Response> response;
             ASSERT_TRUE(client->push_request(get("/pending"), [&](qb::http::Response r) { response = std::move(r); }));
             ASSERT_TRUE(pump_until([&] { return response.has_value(); }, 10s)) << "the client did not end the connection";
             EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: HEADERS frame received on idle client stream");
@@ -961,10 +961,10 @@ TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedA
         SCOPED_TRACE("a connection error that is no flood");
         ClosingPeer peer(ClosingPeer::provoke::idle_stream_headers);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, whose destructor answers what it still holds
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected());
-        const qb::duration                linger = client->linger();
-        std::optional<qb::http::Response> response;
+        const qb::duration linger = client->linger();
         ASSERT_TRUE(client->push_request(get("/pending"), [&](qb::http::Response r) { response = std::move(r); }));
         ASSERT_TRUE(pump_until([&] { return response.has_value(); }, 10s)) << "the client did not end the connection";
         EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: HEADERS frame received on idle client stream");
@@ -981,7 +981,8 @@ TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedA
         SCOPED_TRACE(set ? "a flood, the client's linger set to 750 ms" : "a flood, the client's default linger");
         ClosingPeer peer(ClosingPeer::provoke::empty_data_flood);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, whose destructor answers what it still holds
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected());
         if (set)
             client->set_linger(*set);
@@ -991,7 +992,6 @@ TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedA
             closing_max = std::max(closing_max, qb::io::async::detail::closing_sockets());
             return true;
         };
-        std::optional<qb::http::Response> response;
         ASSERT_TRUE(client->push_request(get("/flood"), [&](qb::http::Response r) { response = std::move(r); }));
         ASSERT_TRUE(pump_until([&] { return sampled() && response.has_value(); }, 20s)) << "the client did not end the flood";
         EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: Excessive frames making no progress (flood)");
@@ -1021,12 +1021,14 @@ TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedA
 TEST_F(Http2ClientCloseAfterPeerTest, ALingerTheApplicationSetsDuringAFloodsCloseIsKept) {
     ClosingPeer peer(ClosingPeer::provoke::empty_data_flood);
     ASSERT_NE(peer.port(), 0);
-    auto client = connected_client(peer.port());
+    std::optional<qb::http::Response> response; // before the client, whose destructor answers what it still holds
+    auto                              client = connected_client(peer.port());
     ASSERT_TRUE(client->is_connected());
-    std::optional<qb::http::Response> response;
-    ASSERT_TRUE(client->push_request(get("/flood"), [&](qb::http::Response r) {
+    // The client by a weak reference: when the destructor answers this callback, there is no client to set.
+    ASSERT_TRUE(client->push_request(get("/flood"), [&response, alive = std::weak_ptr<qb::http2::Client>(client)](qb::http::Response r) {
         response = std::move(r);
-        client->set_linger(1500ms);
+        if (auto const c = alive.lock())
+            c->set_linger(1500ms);
     }));
     ASSERT_TRUE(pump_until([&] { return response.has_value(); }, 20s)) << "the client did not end the flood";
     EXPECT_EQ(response->body().as<std::string>(), "GOAWAY sent by client: Excessive frames making no progress (flood)");
