@@ -1504,14 +1504,15 @@ All notable changes to the qbm-http module are documented here. The format is ba
   1.5 s where the program had set QUIC's to 300 ms; one given up for "QUIC idle timeout" before a connect timeout of
   four seconds, under an idle timeout of one, with nothing added when the four seconds come; with no connect timeout, an
   address QUIC gives up at 300 ms (the `connect()` failed there); the broadcast address, whose datagram `sendto()`
-  refuses -- qb's QUIC endpoint never asks its socket for broadcast --, alone and before an address that answers (its callback heard `false` inside `connect()`, six deep for a
-  callback that dials again); a server whose certificate is not verified, twice in the list, one attempt; a lookup that
-  outlasts the timeout; an attempt started with nothing left of the timeout (three addresses were dialled from inside
-  one another); two addresses under a connect timeout of one second, where the first has all of it and no share is armed
-  -- the loop's count of watchers against a lone address, and against a share that is armed. Seven mutants of the
-  resolution, six caught; the seventh -- `connect()` handing on the end of its lookup for its start -- needs a lookup
-  that lasts, which no case makes; what is done with that moment is held (the timeout counted from the end of the lookup
-  is caught), with the mutants of the fallback, under Changed.
+  refuses -- qb's QUIC endpoint never asks its socket for broadcast --, alone and before an address that answers (its
+  callback heard `false` inside `connect()`, six deep for a callback that dials again); a server whose certificate is
+  not verified, twice in the list, one attempt; a lookup that outlasts the timeout; an attempt started with nothing
+  left of the timeout (three addresses were dialled from inside one another); two addresses under a connect timeout of
+  one second, where the first has all of it and no share is armed -- the loop's count of watchers against a lone
+  address, and against a share that is armed. Seven mutants of the resolution, six caught; the seventh -- `connect()`
+  handing on the end of its lookup for its start -- needs a lookup that lasts, which no case makes; what is done with
+  that moment is held (the timeout counted from the end of the lookup is caught), with the mutants of the fallback,
+  under Changed.
 
 - **The HTTP/1.1, HTTP/2 and HTTP/3 clients are destroyed under one contract (Huly QB-1246).** The three destructors
   differed in what a program hears, and none was safe after the event loop in every state. `qb::http1::Client`,
