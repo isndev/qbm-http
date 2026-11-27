@@ -35,6 +35,9 @@
  *
  * REQUIRES: ssl + live. This TU stays inside the `if(QB_HAS_SSL)` block.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -399,10 +402,9 @@ protected:
 TEST_F(Http2ClientTest, ACookieHeaderSplitIntoSeveralFieldLinesIsReadWhole) {
     // RFC 9113 8.2.3: an HTTP/2 client may split the Cookie header into one field line per cookie-pair (browsers do,
     // for HPACK); the server reads them all, as if joined with "; " (Huly QB-1174).
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -426,10 +428,10 @@ TEST_F(Http2ClientTest, ACookieHeaderSplitIntoSeveralFieldLinesIsReadWhole) {
 TEST_F(Http2ClientTest, CsrfMiddlewareReadsTheAuthorityAndTheFetchMetadataOfAnHttp2Request) {
     // The h2 server rebuilds the URI from :scheme and :authority and sends no Host: the middleware compares Origin with
     // that authority. Header names arrive in lower case (Huly QB-95).
-    auto                              client = make_test_client();
-    std::array<qb::http::Response, 3> responses;
     std::atomic<int>                  done{0};
-    auto                              post = [&](std::size_t const slot, std::vector<std::pair<std::string, std::string>> const &headers) {
+    std::array<qb::http::Response, 3> responses;
+    auto                              client = make_test_client();
+    auto                              post   = [&](std::size_t const slot, std::vector<std::pair<std::string, std::string>> const &headers) {
         qb::http::Request request;
         request.method() = qb::http::Method::POST;
         request.uri()    = qb::io::uri("/csrf/post");
@@ -458,10 +460,9 @@ TEST_F(Http2ClientTest, ACookieHeaderTheParserRefusesDoesNotStopTheServer) {
     // Cookie lines that each fit the field limits (8192) but join past max_cookie_header_size (16 KiB) make
     // parse_cookie_header() throw -- the one refusal left since a malformed pair is dropped instead (QB-95). The server
     // ignores the cookies of such a request, as the HTTP/1.1 server does, and keeps serving (Huly QB-1174).
-    auto client = make_test_client();
-
     std::atomic<int>   responses{0};
     qb::http::Response refused, after;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -491,10 +492,9 @@ TEST_F(Http2ClientTest, ACookieHeaderTheParserRefusesDoesNotStopTheServer) {
 }
 
 TEST_F(Http2ClientTest, SimpleGetRequest) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -515,8 +515,8 @@ TEST_F(Http2ClientTest, SimpleGetRequest) {
 }
 
 TEST_F(Http2ClientTest, InformationalResponsesCompleteCallbackAndCoroutineOnlyOnFinal) {
-    auto              client = make_test_client();
     int               calls  = 0;
+    auto              client = make_test_client();
     qb::http::Request request{qb::http::method::POST, qb::io::uri("/api/informational")};
     request.body() = "callback-body";
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response response) {
@@ -536,10 +536,9 @@ TEST_F(Http2ClientTest, InformationalResponsesCompleteCallbackAndCoroutineOnlyOn
 }
 
 TEST_F(Http2ClientTest, PostRequestEchoesBody) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::POST;
@@ -563,10 +562,9 @@ TEST_F(Http2ClientTest, PostRequestEchoesBody) {
 }
 
 TEST_F(Http2ClientTest, ErrorStatusIsPropagated) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -591,10 +589,9 @@ TEST_F(Http2ClientTest, ErrorStatusIsPropagated) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, LargeResponseIsReassembledAcrossDataFrames) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -628,10 +625,9 @@ TEST_F(Http2ClientTest, LargeResponseIsReassembledAcrossDataFrames) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, FlowControlledLargeResponseCompletesIntact) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -662,10 +658,9 @@ TEST_F(Http2ClientTest, FlowControlledLargeResponseCompletesIntact) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, ConcurrentRequestsAreEachAnswered) {
-    auto client = make_test_client();
-
     std::atomic<int>                responses_received{0};
-    std::vector<qb::http::Response> responses(3);
+    std::vector<qb::http::Response> responses(3); // before the client, which answers what it still holds when it is destroyed
+    auto                            client = make_test_client();
 
     for (int i = 0; i < 3; ++i) {
         qb::http::Request request;
@@ -690,10 +685,9 @@ TEST_F(Http2ClientTest, ConcurrentRequestsAreEachAnswered) {
 }
 
 TEST_F(Http2ClientTest, BatchRequestsPreserveOrder) {
-    auto client = make_test_client();
-
     std::atomic<bool>               batch_completed{false};
     std::vector<qb::http::Response> batch_responses;
+    auto                            client = make_test_client();
 
     std::vector<qb::http::Request> requests;
     for (int i = 0; i < 3; ++i) {
@@ -722,13 +716,13 @@ TEST_F(Http2ClientTest, BatchRequestsPreserveOrder) {
 }
 
 TEST_F(Http2ClientTest, CompletedBatchCanDisconnectInsideItsCallback) {
-    auto                           client = make_test_client(); // owner survives the callback
-    std::vector<qb::http::Request> requests;
+    int                             calls = 0;
+    std::vector<qb::http::Response> responses;
+    auto                            client = make_test_client(); // owner survives the callback
+    std::vector<qb::http::Request>  requests;
     requests.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/301"));
     requests.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/302"));
 
-    int                             calls = 0;
-    std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> result) {
         ++calls;
         responses = std::move(result);
@@ -746,9 +740,9 @@ TEST_F(Http2ClientTest, CompletedBatchCanDisconnectInsideItsCallback) {
 }
 
 TEST_F(Http2ClientTest, CompletedBatchCallbackCanQueueAnotherBatch) {
-    auto                            client      = make_test_client();
     int                             first_calls = 0, second_calls = 0;
     std::vector<qb::http::Response> first_responses, second_responses;
+    auto                            client = make_test_client();
     std::vector<qb::http::Request>  first;
     first.emplace_back(qb::http::method::GET, qb::io::uri("/api/users/401"));
 
@@ -774,14 +768,16 @@ TEST_F(Http2ClientTest, CompletedBatchCallbackCanQueueAnotherBatch) {
 }
 
 TEST_F(Http2ClientTest, ResponseCallbackMayReleaseLastClientOwner) {
-    auto                             client                 = make_test_client();
-    std::weak_ptr<qb::http2::Client> weak_client            = client;
     int                              calls                  = 0;
     bool                             alive_after_owner_drop = false;
+    std::weak_ptr<qb::http2::Client> weak_client; // before the client, which answers what it still holds when it is destroyed
+    auto                             client = make_test_client();
+    weak_client                             = client;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/403")}, [&](qb::http::Response response) {
         ++calls;
         EXPECT_EQ(response.status(), qb::http::status::OK);
-        client.reset();
+        if (!weak_client.expired()) // not under the client's destructor (a case that failed): nothing left to drop
+            client.reset();
         alive_after_owner_drop = !weak_client.expired();
     }));
 
@@ -796,11 +792,10 @@ TEST_F(Http2ClientTest, ResponseCallbackMayReleaseLastClientOwner) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, StreamResetIsMappedToTheCorrectConcurrentRequest) {
-    auto client = make_test_client();
-
     std::atomic<int>   responses_received{0};
     qb::http::Response ok_response;
     qb::http::Response reset_response;
+    auto               client = make_test_client();
 
     qb::http::Request ok_request;
     ok_request.method() = qb::http::Method::GET;
@@ -834,10 +829,9 @@ TEST_F(Http2ClientTest, StreamResetIsMappedToTheCorrectConcurrentRequest) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, HeadResponseAllowsMetadataContentLengthWithoutBody) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::HEAD;
@@ -859,10 +853,9 @@ TEST_F(Http2ClientTest, HeadResponseAllowsMetadataContentLengthWithoutBody) {
 }
 
 TEST_F(Http2ClientTest, ResponseTrailersCompleteStream) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -887,10 +880,9 @@ TEST_F(Http2ClientTest, ResponseTrailersCompleteStream) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, GracefulDisconnectDrainsInflightRequest) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -936,13 +928,12 @@ TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
     const std::uint16_t port = http1_only_server.port();
     ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
 
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
-    client->set_verify_peer(false);
-    client->set_connect_timeout(5s);
-
     std::atomic<bool> callback_called{false};
     std::atomic<bool> connected{true};
     std::string       error_message;
+    auto              client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
 
     client->connect([&](bool ok, const std::string &err) {
         connected       = ok;
@@ -966,10 +957,9 @@ TEST_F(Http2ClientTest, ConnectFailsWhenServerDoesNotOfferH2) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, UnknownPathIsAnsweredWithNotFound) {
-    auto client = make_test_client();
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -991,11 +981,10 @@ TEST_F(Http2ClientTest, NotFoundStreamDoesNotPoisonAdjacentStream) {
     // A 404 stream must complete in isolation: a concurrent, well-routed stream
     // on the SAME connection still answers normally. Proves per-stream response
     // dispatch keeps the connection and sibling streams healthy.
-    auto client = make_test_client();
-
     std::atomic<int>   responses_received{0};
     qb::http::Response good_response;
     qb::http::Response missing_response;
+    auto               client = make_test_client();
 
     qb::http::Request good_request;
     good_request.method() = qb::http::Method::GET;
@@ -1066,10 +1055,9 @@ TEST_F(Http2ClientTest, Http1FallbackPostEchoesBodyOverAlpn) {
 // ---------------------------------------------------------------------------
 
 TEST_F(Http2ClientTest, AbruptDisconnectWithInflightStreamsIsClean) {
-    auto client = make_test_client();
-
     std::atomic<int>   response_count{0};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::GET;
@@ -1122,8 +1110,9 @@ namespace {
 // It used to go out as stream 2^31+1, masked to 1 on the wire: the server reset a
 // stream it had already seen and the request never completed.
 TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
-    auto client    = make_test_client();
-    bool connected = false;
+    bool                            connected = false;
+    std::vector<qb::http::Response> responses;
+    auto                            client = make_test_client();
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
 
@@ -1131,7 +1120,6 @@ TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
     ASSERT_NE(protocol, nullptr);
     qb::protocol::http2::ProtocolTestPeer<qb::http2::Client::H2Protocol>::set_next_stream_id(*protocol, 0x7FFFFFFFu);
 
-    std::vector<qb::http::Response> responses;
     for (int i = 0; i < 2; ++i) {
         qb::http::Request request;
         request.method() = qb::http::Method::GET;
@@ -1159,7 +1147,9 @@ TEST_F(Http2ClientTest, ExhaustedStreamIdsRenewTheConnection) {
 // refused up front, its admissible members included (Huly QB-1063): HTTP/1 and
 // HTTP/3 (Huly QB-499) admit member by member.
 TEST_F(Http2ClientTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
-    auto client = make_test_client();
+    int                             calls = 0;
+    std::vector<qb::http::Response> out;
+    auto                            client = make_test_client();
     client->set_max_pending_requests(2);
 
     std::vector<qb::http::Request> reqs;
@@ -1170,8 +1160,6 @@ TEST_F(Http2ClientTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
         reqs.push_back(std::move(r));
     }
 
-    int                             calls = 0;
-    std::vector<qb::http::Response> out;
     EXPECT_FALSE(client->push_requests(reqs, [&](std::vector<qb::http::Response> rs) {
         out = std::move(rs);
         ++calls;
@@ -1197,13 +1185,13 @@ TEST_F(Http2ClientTest, BatchPastThePendingLimitRefusesOnlyTheMembersOverIt) {
 // Connecting to a port with no listener fails via the transport connect-completion
 // path (TCP/SSL connection failed), invoking the connect callback with success=false.
 TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
-    const auto dead   = qb::http::test::ephemeral_port(); // bound then closed -> refused
-    auto       client = qb::http2::make_client("https://localhost:" + std::to_string(dead));
+    const auto        dead = qb::http::test::ephemeral_port(); // bound then closed -> refused
+    std::atomic<bool> cb{false};
+    std::atomic<bool> ok{true};
+    auto              client = qb::http2::make_client("https://localhost:" + std::to_string(dead));
     client->set_verify_peer(false);
     client->set_connect_timeout(2s);
 
-    std::atomic<bool> cb{false};
-    std::atomic<bool> ok{true};
     client->connect([&](bool o, const std::string &) {
         ok = o;
         cb = true;
@@ -1223,12 +1211,12 @@ TEST_F(Http2ClientTest, ConnectToRefusedPortFails) {
 // synchronously with a 503 and push_request returns false — the single-request
 // twin of BatchPastThePendingLimitRefusesOnlyTheMembersOverIt.
 TEST_F(Http2ClientTest, SingleRequestOverPendingLimitIsRejectedWith503) {
-    auto client = make_test_client();
-    client->set_max_pending_requests(0); // the very first push already exceeds the bound
-
     std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request  request;
+    auto               client = make_test_client();
+    client->set_max_pending_requests(0); // the very first push already exceeds the bound
+
+    qb::http::Request request;
     request.method() = qb::http::Method::GET;
     request.uri()    = qb::io::uri("/api/test");
 
@@ -1264,10 +1252,10 @@ TEST_F(Http2ClientTest, NullCallbackRequestsAreRejectedWithoutSideEffects) {
 // An empty batch completes immediately by invoking the callback with an empty
 // vector (the requests.empty() early-out), no connection required.
 TEST_F(Http2ClientTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
-    auto client = make_test_client();
-
     bool                            done = false;
     std::vector<qb::http::Response> out{qb::http::Response{}}; // pre-seed non-empty
+    auto                            client = make_test_client();
+
     EXPECT_TRUE(client->push_requests(std::vector<qb::http::Request>{}, [&](std::vector<qb::http::Response> rs) {
         out  = std::move(rs);
         done = true;
@@ -1279,11 +1267,11 @@ TEST_F(Http2ClientTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
 // A request whose (absolute) URI uses a non-https scheme is rejected with a
 // synthesized BAD_REQUEST (prepare_request https guard) before it hits the wire.
 TEST_F(Http2ClientTest, NonHttpsRequestIsRejectedWithBadRequest) {
-    auto client = make_test_client();
-
     std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request  request;
+    auto               client = make_test_client();
+
+    qb::http::Request request;
     request.method() = qb::http::Method::GET;
     request.uri()    = qb::io::uri("http://localhost:" + std::to_string(_port) + "/api/test");
 
@@ -1299,11 +1287,11 @@ TEST_F(Http2ClientTest, NonHttpsRequestIsRejectedWithBadRequest) {
 // An absolute request whose origin differs from the client's base origin is
 // rejected with BAD_REQUEST (prepare_request same-origin guard).
 TEST_F(Http2ClientTest, CrossOriginRequestIsRejectedWithBadRequest) {
-    auto client = make_test_client();
-
     std::atomic<bool>  done{false};
     qb::http::Response response;
-    qb::http::Request  request;
+    auto               client = make_test_client();
+
+    qb::http::Request request;
     request.method() = qb::http::Method::GET;
     request.uri()    = qb::io::uri("https://example.invalid:8443/api/test");
 
@@ -1322,7 +1310,9 @@ TEST_F(Http2ClientTest, CrossOriginRequestIsRejectedWithBadRequest) {
 // inside the batch loop), the valid member round-trips a real 200 over the live
 // h2 connection. Exercises the batch's partial-error accounting.
 TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
-    auto client = make_test_client();
+    std::atomic<bool>               done{false};
+    std::vector<qb::http::Response> out;
+    auto                            client = make_test_client();
 
     std::vector<qb::http::Request> reqs;
     {
@@ -1338,8 +1328,6 @@ TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
         reqs.push_back(std::move(good));
     }
 
-    std::atomic<bool>               done{false};
-    std::vector<qb::http::Response> out;
     ASSERT_TRUE(client->push_requests(std::move(reqs), [&](std::vector<qb::http::Response> rs) {
         out  = std::move(rs);
         done = true;
@@ -1360,7 +1348,9 @@ TEST_F(Http2ClientTest, BatchWithInvalidMemberPreservesOrderAndErrors) {
 // pass used to hand that member over as a default-constructed Response -- a 200
 // with no body, indistinguishable from a success (Huly QB-495).
 TEST_F(Http2ClientTest, BatchFailureKeepsReceivedResponsesAndAnswersTheRestWith503) {
-    auto client = make_test_client();
+    std::atomic<int>                calls{0};
+    std::vector<qb::http::Response> out;
+    auto                            client = make_test_client();
 
     std::vector<qb::http::Request> reqs(3);
     reqs[0].method() = qb::http::Method::HEAD;
@@ -1370,8 +1360,6 @@ TEST_F(Http2ClientTest, BatchFailureKeepsReceivedResponsesAndAnswersTheRestWith5
     reqs[2].method() = qb::http::Method::GET;
     reqs[2].uri()    = qb::io::uri("/api/hang"); // never answered
 
-    std::atomic<int>                calls{0};
-    std::vector<qb::http::Response> out;
     ASSERT_TRUE(client->push_requests(std::move(reqs), [&](std::vector<qb::http::Response> rs) {
         out = std::move(rs);
         ++calls;
@@ -1403,11 +1391,12 @@ TEST_F(Http2ClientTest, BatchFailureKeepsReceivedResponsesAndAnswersTheRestWith5
 // _max_concurrent_streams loop bound). All three still complete over the one
 // connection.
 TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
-    auto client = make_test_client();
+    std::atomic<int>                received{0};
+    std::atomic<int>                control_replies{0};
+    std::vector<qb::http::Response> responses(3); // before the client, which answers what it still holds when it is destroyed
+    auto                            client = make_test_client();
     client->set_max_concurrent_streams(1);
 
-    std::atomic<int>                received{0};
-    std::vector<qb::http::Response> responses(3);
     for (int i = 0; i < 3; ++i) {
         qb::http::Request request;
         request.method() = qb::http::Method::GET;
@@ -1424,8 +1413,7 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
     EXPECT_EQ(_server->server().serialized_active(), 1);
     EXPECT_EQ(_server->server().serialized_peak(), 1);
 
-    auto             control = make_test_client();
-    std::atomic<int> control_replies{0};
+    auto control = make_test_client();
     for (int released = 1; released <= 3; ++released) {
         qb::http::Request release;
         release.method() = qb::http::Method::GET;
@@ -1459,16 +1447,16 @@ TEST_F(Http2ClientTest, MaxConcurrentStreamsSerializesRequests) {
 }
 
 TEST_F(Http2ClientTest, FailedSendCallbackMayDisconnectAndQueueAnotherRequest) {
-    auto client = make_test_client();
+    int                warmup_calls      = 0;
+    int                failed_send_calls = 0, followup_calls = 0;
+    qb::http::Response followup_response;
+    auto               client = make_test_client();
     client->set_max_concurrent_streams(60); // above the server's advertised 50
-    int warmup_calls = 0;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/400")}, [&](qb::http::Response response) {
         EXPECT_EQ(response.status(), qb::http::status::OK);
         ++warmup_calls;
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return warmup_calls == 1; }));
-    int                failed_send_calls = 0, followup_calls = 0;
-    qb::http::Response followup_response;
 
     for (int i = 0; i < 51; ++i) {
         ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [&](qb::http::Response response) {
@@ -1494,25 +1482,27 @@ TEST_F(Http2ClientTest, FailedSendCallbackMayDisconnectAndQueueAnotherRequest) {
 }
 
 TEST_F(Http2ClientTest, FailedSendCallbackMayReleaseLastClientOwner) {
-    auto client = make_test_client();
+    int                              warmup_calls          = 0;
+    int                              failed_send_calls     = 0;
+    bool                             alive_inside_callback = false;
+    std::weak_ptr<qb::http2::Client> weak_client; // before the client, which answers what it still holds when it is destroyed
+    auto                             client = make_test_client();
     client->set_max_concurrent_streams(60);
-    std::weak_ptr<qb::http2::Client> weak_client  = client;
-    int                              warmup_calls = 0;
+    weak_client = client;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/users/400")}, [&](qb::http::Response response) {
         EXPECT_EQ(response.status(), qb::http::status::OK);
         ++warmup_calls;
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return warmup_calls == 1; }));
 
-    int  failed_send_calls     = 0;
-    bool alive_inside_callback = false;
     for (int i = 0; i < 50; ++i) {
         ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [](qb::http::Response) {}));
     }
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri("/api/hang")}, [&](qb::http::Response response) {
         EXPECT_EQ(response.body().as<std::string>(), "Failed to send HTTP/2 request");
         ++failed_send_calls;
-        client.reset();
+        if (!weak_client.expired()) // not under the client's destructor (a case that failed): nothing left to drop
+            client.reset();
         alive_inside_callback = !weak_client.expired();
     }));
     EXPECT_EQ(failed_send_calls, 1);
@@ -2279,9 +2269,9 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAGracefulGoawaysDrainWhoseFailureCall
     auto       planned = std::make_unique<qb::http::test::Http2PlannedPeer>(qb::http::test::Http2PlannedPeer::Plan::goaway_then_close, 30s);
     const auto port    = planned->port();
     ASSERT_NE(port, 0);
+    bool up     = false;
     auto client = reconnect::make_client_for(port);
     client->set_auto_reconnect(false);
-    bool up = false;
     client->connect([&](bool ok, const std::string &) { up = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
     client->set_request_timeout(200ms); // from here: the connection is up, the deadline bounds the request alone
@@ -2366,9 +2356,13 @@ TEST_F(Http2ClientTest, AnEarlierCloseFlushLimitNeverEndsALaterCloseWhileItsCall
 TEST_F(Http2ClientTest, AutoReconnectBacksOffThroughThePolicyUntilTheRunIsExhausted) {
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
-
     std::vector<std::pair<int, qb::duration>> retries;
+    std::vector<reconnect::Failure>           failures;
+    bool                                      exhausted = false;
+    std::function<void(qb::http::Response)>   on_response;
+    bool                                      again  = false;
+    auto                                      client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}
                                       .with_initial_delay(40ms)
                                       .with_multiplier(2.0)
@@ -2383,9 +2377,6 @@ TEST_F(Http2ClientTest, AutoReconnectBacksOffThroughThePolicyUntilTheRunIsExhaus
                                           EXPECT_EQ(client->reconnect_attempts(), attempt + 1);
                                       }));
 
-    std::vector<reconnect::Failure>         failures;
-    bool                                    exhausted = false;
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response r) {
         failures.push_back({std::chrono::steady_clock::now(), r.status(), r.body().template as<std::string>()});
         if (failures.back().body.find("exhausted") != std::string::npos) {
@@ -2431,7 +2422,6 @@ TEST_F(Http2ClientTest, AutoReconnectBacksOffThroughThePolicyUntilTheRunIsExhaus
 
     // The next push is a fresh intent: it auto-connects at once and starts a run of its own; this
     // callback does not push back, so that run never begins (no work waits) and the count resets.
-    bool again = false;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
         EXPECT_EQ(r.status(), qb::http::status::SERVICE_UNAVAILABLE);
         again = true;
@@ -2447,13 +2437,13 @@ TEST_F(Http2ClientTest, AutoReconnectBacksOffThroughThePolicyUntilTheRunIsExhaus
 TEST_F(Http2ClientTest, ZeroMaxAttemptsNeverReconnects) {
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    int                      on_retry_calls = 0;
+    std::vector<std::string> verdicts;
+    auto                     client = reconnect::make_client_for(reconnect::port_of(*http1_only));
 
-    int on_retry_calls = 0;
     client->enable_auto_reconnect(
         qb::http2::RetryPolicy{}.with_max_attempts(0).with_jitter(false).with_on_retry([&](int, qb::duration) { ++on_retry_calls; }));
 
-    std::vector<std::string> verdicts;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
         verdicts.push_back(r.body().template as<std::string>());
         ASSERT_TRUE(client->push_request(reconnect::get_test(),
@@ -2479,16 +2469,16 @@ TEST_F(Http2ClientTest, ReconnectionSucceedsWhenTheServerComesBackDuringTheWait)
     const std::uint16_t port = silent.local_endpoint().port();
     ASSERT_NE(port, 0);
 
-    auto client = reconnect::make_client_for(port);
+    std::vector<std::pair<int, qb::duration>> retries;
+    std::vector<reconnect::Failure>           failures;
+    std::optional<qb::http::Response>         served;
+    std::function<void(qb::http::Response)>   on_response;
+    auto                                      client = reconnect::make_client_for(port);
     client->set_connect_timeout(300ms); // the silent listener is left on this, not on a refusal
 
-    std::vector<std::pair<int, qb::duration>> retries;
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(800ms).with_jitter(false).with_on_retry(
         [&](int attempt, qb::duration delay) { retries.emplace_back(attempt, delay); }));
 
-    std::vector<reconnect::Failure>         failures;
-    std::optional<qb::http::Response>       served;
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response r) {
         if (r.status() == qb::http::status::OK) {
             served = std::move(r);
@@ -2527,14 +2517,14 @@ TEST_F(Http2ClientTest, ReconnectionSucceedsWhenTheServerComesBackDuringTheWait)
 TEST_F(Http2ClientTest, ExplicitDisconnectCancelsTheScheduledAttempt) {
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    int                                     retries = 0;
+    std::vector<std::string>                verdicts;
+    std::function<void(qb::http::Response)> on_response;
+    auto                                    client = reconnect::make_client_for(reconnect::port_of(*http1_only));
 
-    int retries = 0;
     client->enable_auto_reconnect(
         qb::http2::RetryPolicy{}.with_initial_delay(150ms).with_jitter(false).with_on_retry([&](int, qb::duration) { ++retries; }));
 
-    std::vector<std::string>                verdicts;
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response r) {
         verdicts.push_back(r.body().template as<std::string>());
         if (verdicts.size() < 3) { // keep the run alive through attempt 1; stop pushing after that
@@ -2573,10 +2563,10 @@ TEST_F(Http2ClientTest, ExplicitDisconnectCancelsTheScheduledAttempt) {
 // to get nothing, and a coroutine awaiting connect() hung), and the late completion of the
 // connector is dropped rather than bringing the client up behind the caller's back.
 TEST_F(Http2ClientTest, DisconnectWhileConnectingFailsTheConnectCallbackAndDropsTheLateCompletion) {
-    auto client = make_test_client();
-
     std::optional<bool> outcome;
     std::string         message;
+    auto                client = make_test_client();
+
     client->connect([&](bool ok, const std::string &err) {
         outcome = ok;
         message = err;
@@ -2617,16 +2607,16 @@ TEST_F(Http2ClientTest, DisconnectWhileConnectingFailsTheConnectCallbackAndDrops
 // second time by the transport's own disconnected pass, nor a third by the dispose pass, which is
 // what a retry callback saw until 3.2.
 TEST_F(Http2ClientTest, ExplicitDisconnectFailsTheInFlightRequestOnceAndStartsNoRun) {
-    auto client  = make_test_client();
-    int  retries = 0;
+    int                               retries   = 0;
+    bool                              connected = false;
+    std::vector<std::string>          verdicts;
+    std::optional<qb::http::Response> served;
+    auto                              client = make_test_client();
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false).with_on_retry([&](int, qb::duration) { ++retries; }));
 
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
 
-    std::vector<std::string>          verdicts;
-    std::optional<qb::http::Response> served;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
         verdicts.push_back(r.body().template as<std::string>());
         ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response again) {
@@ -2662,11 +2652,14 @@ TEST_F(Http2ClientTest, ExplicitDisconnectFailsTheInFlightRequestOnceAndStartsNo
 // The client is a few connect-timeouts old when the disconnect fires, so the deferred attempt also
 // runs on a freshly stamped deadline rather than the closed connection's.
 TEST_F(Http2ClientTest, ADeferredConnectAndAFollowUpPushBothReachTheReconnectedServer) {
-    auto client = make_test_client();
+    bool                              connected = false;
+    std::vector<std::string>          verdicts;
+    std::optional<qb::http::Response> served;
+    std::optional<qb::http::Response> second;
+    auto                              client = make_test_client();
     client->set_connect_timeout(200ms);
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_jitter(false));
 
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
     const auto older_than_the_timeout = std::chrono::steady_clock::now() + 350ms;
@@ -2675,8 +2668,6 @@ TEST_F(Http2ClientTest, ADeferredConnectAndAFollowUpPushBothReachTheReconnectedS
     }
     ASSERT_TRUE(client->is_connected());
 
-    std::vector<std::string>          verdicts;
-    std::optional<qb::http::Response> served;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
         verdicts.push_back(r.body().template as<std::string>());
         ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response again) {
@@ -2689,7 +2680,6 @@ TEST_F(Http2ClientTest, ADeferredConnectAndAFollowUpPushBothReachTheReconnectedS
     }));
     client->disconnect(); // the verdict's push connects, deferred behind this close
     ASSERT_TRUE(client->is_connecting());
-    std::optional<qb::http::Response> second;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) { second = std::move(r); }));
 
     ASSERT_TRUE(ServerThread::pump_until([&] { return (served.has_value() && second.has_value()) || verdicts.size() > 1; }));
@@ -2712,19 +2702,19 @@ TEST_F(Http2ClientTest, WorkPushedBackFromAPeerDropIsServedByTheReconnectionRun)
     ASSERT_TRUE(first->ready()) << "could not start the first server";
     const std::uint16_t port = reconnect::port_of(*first);
 
-    auto client = reconnect::make_client_for(port);
-    client->set_connect_timeout(3s);
     std::vector<std::pair<int, qb::duration>> retries;
+    bool                                      connected = false;
+    std::vector<std::string>                  verdicts;
+    std::optional<qb::http::Response>         served;
+    std::function<void(qb::http::Response)>   on_response;
+    auto                                      client = reconnect::make_client_for(port);
+    client->set_connect_timeout(3s);
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_initial_delay(500ms).with_jitter(false).with_on_retry(
         [&](int attempt, qb::duration delay) { retries.emplace_back(attempt, delay); }));
 
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected; }));
 
-    std::vector<std::string>                verdicts;
-    std::optional<qb::http::Response>       served;
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response r) {
         if (r.status() == qb::http::status::OK) {
             served = std::move(r);
@@ -2769,13 +2759,13 @@ TEST_F(Http2ClientTest, WorkPushedBackFromAPeerDropIsServedByTheReconnectionRun)
 TEST_F(Http2ClientTest, WithAutoReconnectOffAPushFromAFailureCallbackConnectsOnItsOwn) {
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    int                      on_retry_calls = 0;
+    std::vector<std::string> verdicts;
+    auto                     client = reconnect::make_client_for(reconnect::port_of(*http1_only));
 
-    int on_retry_calls = 0;
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}.with_on_retry([&](int, qb::duration) { ++on_retry_calls; }));
     client->disable_auto_reconnect(); // keeps the policy, disarms the run
 
-    std::vector<std::string> verdicts;
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response r) {
         verdicts.push_back(r.body().template as<std::string>());
         ASSERT_TRUE(client->push_request(reconnect::get_test(),
@@ -2803,9 +2793,11 @@ TEST_F(Http2ClientTest, WithAutoReconnectOffAPushFromAFailureCallbackConnectsOnI
 TEST_F(Http2ClientTest, JitterSpreadsTheWaitsOfARun) {
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    std::vector<long long>                  waits_ms;
+    bool                                    exhausted = false;
+    std::function<void(qb::http::Response)> on_response;
+    auto                                    client = reconnect::make_client_for(reconnect::port_of(*http1_only));
 
-    std::vector<long long> waits_ms;
     client->enable_auto_reconnect(qb::http2::RetryPolicy{}
                                       .with_initial_delay(40ms)
                                       .with_multiplier(1.0)
@@ -2816,8 +2808,6 @@ TEST_F(Http2ClientTest, JitterSpreadsTheWaitsOfARun) {
                                           waits_ms.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(delay).count());
                                       }));
 
-    bool                                    exhausted = false;
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response r) {
         if (r.body().template as<std::string>().find("exhausted") != std::string::npos) {
             exhausted = true;
@@ -3286,6 +3276,7 @@ TEST(Http2ServerLifecycle, AProtocolInstalledWhereTheSessionsWasIsNotTakenForIt)
     });
     server.router().compile();
     ASSERT_TRUE(configure_owner_loop(server));
+    std::optional<qb::http::drain_outcome> outcome;
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
     client->set_verify_peer(false);
     client->set_request_timeout(5s);
@@ -3312,7 +3303,6 @@ TEST(Http2ServerLifecycle, AProtocolInstalledWhereTheSessionsWasIsNotTakenForIt)
     }
     EXPECT_FALSE(session->reset_stream(stream_id)) << "the session ran a protocol it did not install";
     EXPECT_FALSE(session->http2_speaks_http()) << "the replacement is taken for the protocol the session negotiated";
-    std::optional<qb::http::drain_outcome> outcome;
     ASSERT_TRUE(server.drain(qb::duration::zero(), [&](qb::http::drain_outcome o) { outcome = o; }));
     ASSERT_TRUE(outcome.has_value());
     EXPECT_TRUE(*outcome == qb::http::drain_outcome::drained) << "the drain waited for a session that no longer speaks HTTP";
@@ -3797,10 +3787,10 @@ TEST(Http2ServerLifecycle, DrainPostCanClearTheActiveProtocolBeforeAnotherCandid
     });
     server.router().compile();
     ASSERT_TRUE(configure_owner_loop(server));
+    std::vector<std::shared_ptr<ReplyObservation>> replies;
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
     client->set_verify_peer(false);
     client->set_request_timeout(5s);
-    std::vector<std::shared_ptr<ReplyObservation>> replies;
     for (int index = 0; index != 2; ++index) {
         auto reply = std::make_shared<ReplyObservation>();
         replies.push_back(reply);
@@ -3880,13 +3870,13 @@ TEST(Http2ServerLifecycle, DrainReclaimsMoreThanFiftyContextsFromValidWavesAcros
     });
     server.router().compile();
     ASSERT_TRUE(configure_owner_loop(server));
+    std::vector<std::shared_ptr<ReplyObservation>> replies;
     auto client = qb::http2::make_client("https://localhost:" + std::to_string(server.transport().local_endpoint().port()));
     client->set_verify_peer(false);
     client->set_request_timeout(5s);
     client->set_max_concurrent_streams(40);
-    std::vector<std::shared_ptr<ReplyObservation>> replies;
-    std::vector<std::weak_ptr<Context>>            weak;
-    std::shared_ptr<H2Session>                     session;
+    std::vector<std::weak_ptr<Context>> weak;
+    std::shared_ptr<H2Session>          session;
     for (std::size_t wave = 0; wave != 2; ++wave) {
         if (session)
             session->start();
@@ -4264,15 +4254,15 @@ protected:
 TEST_F(Http2ClientGoawayTest, ExplicitDisconnectSendsGoawayBeforeClosing) {
     RawH2Peer peer(RawH2Peer::Mode::Reading);
     ASSERT_NE(peer.port(), 0);
-    auto client    = make_client(peer.port());
-    bool connected = false;
+    bool                              connected = false;
+    std::optional<qb::http::Response> response;
+    auto                              client = make_client(peer.port());
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
 
     qb::http::Request request; // one the peer never answers
     request.method() = qb::http::Method::GET;
     request.uri()    = qb::io::uri("/pending");
-    std::optional<qb::http::Response> response;
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return peer.count(0x1) == 1; })); // its HEADERS arrived
 
@@ -4305,8 +4295,8 @@ TEST_F(Http2ClientGoawayTest, ExplicitDisconnectSendsGoawayBeforeClosing) {
 TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnreadServerBytes) {
     RawH2Peer peer(RawH2Peer::Mode::Reading);
     ASSERT_NE(peer.port(), 0);
-    auto client    = make_client(peer.port());
     bool connected = false;
+    auto client    = make_client(peer.port());
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
 
@@ -4330,8 +4320,9 @@ TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnr
 TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinTheFlushLimit) {
     RawH2Peer peer(RawH2Peer::Mode::Silent);
     ASSERT_NE(peer.port(), 0);
-    auto client    = make_client(peer.port());
-    bool connected = false;
+    bool connected   = false;
+    bool reconnected = false;
+    auto client      = make_client(peer.port());
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return connected && peer.settings_acked(); }));
 
@@ -4351,7 +4342,6 @@ TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinT
     // the client reconnects is the moment the close was done.
     const auto started = std::chrono::steady_clock::now();
     client->disconnect();
-    bool reconnected = false;
     client->connect([&](bool ok, const std::string &) { reconnected = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return reconnected; }, 10s)) << "a peer that stopped reading held the close";
     const auto elapsed = std::chrono::steady_clock::now() - started;
@@ -4371,7 +4361,9 @@ TEST_F(Http2ClientGoawayTest, DisconnectFromAPeerThatStoppedReadingClosesWithinT
 namespace http2_client_trailers_test {
 
 TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
-    auto client = make_test_client();
+    std::optional<qb::http::Response> response;
+    int                               calls  = 0;
+    auto                              client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::POST;
@@ -4380,8 +4372,6 @@ TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
     request.set_header("trailer", "X-Checksum");
     request.set_header("x-checksum", "cafe");
 
-    std::optional<qb::http::Response> response;
-    int                               calls = 0;
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
         response = std::move(r);
         ++calls;
@@ -4404,7 +4394,9 @@ TEST_F(Http2ClientTest, RequestSettingItsAnnouncedTrailersCompletesOnce) {
 // protocol keeps that stream open for send_request_trailers(), and the client
 // used to inherit it: the request never ended (Huly QB-1061).
 TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
-    auto client = make_test_client();
+    std::optional<qb::http::Response> response;
+    int                               calls  = 0;
+    auto                              client = make_test_client();
 
     qb::http::Request request;
     request.method() = qb::http::Method::POST;
@@ -4412,8 +4404,6 @@ TEST_F(Http2ClientTest, RequestAnnouncingUnsetTrailersCompletesPromptly) {
     request.body()   = R"({"t":2})";
     request.set_header("trailer", "X-Checksum"); // announced, never set
 
-    std::optional<qb::http::Response> response;
-    int                               calls = 0;
     ASSERT_TRUE(client->push_request(request, [&](qb::http::Response r) {
         response = std::move(r);
         ++calls;
@@ -4653,11 +4643,11 @@ TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdStreamsAndMaxFileSizeNoLon
     const auto port = server->port();
 
     const auto get = [port](std::string const &path) {
-        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+        std::optional<qb::http::Response> response;
+        auto                              client = qb::http2::make_client("https://localhost:" + std::to_string(port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
-        std::optional<qb::http::Response> response;
-        qb::http::Request                 request;
+        qb::http::Request request;
         request.method() = qb::http::Method::GET;
         request.uri()    = qb::io::uri(path);
         EXPECT_TRUE(client->push_request(request, [&](qb::http::Response r) { response = std::move(r); }));
@@ -4909,9 +4899,10 @@ protected:
         client->set_connect_timeout(5s);
         client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
         client->disable_auto_reconnect();
-        bool connected = false;
-        client->connect([&](bool ok, const std::string &) { connected = ok; });
-        EXPECT_TRUE(ServerThread::pump_until([&] { return connected; }));
+        // Shared with the callback: a client that did not connect here calls it after this has returned, when it is destroyed.
+        auto connected = std::make_shared<bool>(false);
+        client->connect([connected](bool ok, const std::string &) { *connected = ok; });
+        EXPECT_TRUE(ServerThread::pump_until([&] { return *connected; }));
         return client;
     }
 
@@ -4934,9 +4925,9 @@ protected:
 TEST_F(Http2ClientCrossingTest, ADataCrossingTheClientsResetLeavesTheOtherRequestOfTheConnectionServed) {
     Http2PlannedPeer peer(Http2PlannedPeer::Plan::body_past_its_content_length);
     ASSERT_NE(peer.port(), 0);
-    auto client = connected_client(peer.port());
+    std::optional<qb::http::Response> large, other; // before the client, which answers what it still holds when it is destroyed
+    auto                              client = connected_client(peer.port());
     ASSERT_TRUE(client->is_connected()) << "the client did not connect";
-    std::optional<qb::http::Response> large, other;
     ASSERT_TRUE(client->push_request(get("/large"), [&](qb::http::Response r) { large = std::move(r); }));
     ASSERT_TRUE(client->push_request(get("/other"), [&](qb::http::Response r) { other = std::move(r); }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return (large.has_value() && other.has_value()) || peer.eof(); }, 30s));
@@ -4980,9 +4971,9 @@ TEST_F(Http2ClientCrossingTest, ARequestTheClientsOwnGoawayFailsNamesTheClientsR
         SCOPED_TRACE(each.reason);
         Http2PlannedPeer peer(each.plan);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, which answers what it still holds when it is destroyed
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected()) << "the client did not connect";
-        std::optional<qb::http::Response> response;
         ASSERT_TRUE(client->push_request(get("/pending"), [&](qb::http::Response r) { response = std::move(r); }));
         ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); }, 10s)) << "the client did not close the connection";
         EXPECT_EQ(response->status(), qb::http::status::SERVICE_UNAVAILABLE);
@@ -5010,9 +5001,9 @@ TEST_F(Http2ClientCrossingTest, ARequestTheClientsOwnGoawayFailsNamesTheClientsR
 TEST_F(Http2ClientCrossingTest, ADataAfterTheResponseEndedIsAConnectionErrorOfTypeStreamClosed) {
     Http2PlannedPeer peer(Http2PlannedPeer::Plan::data_after_the_response_completed);
     ASSERT_NE(peer.port(), 0);
-    auto client = connected_client(peer.port());
+    std::optional<qb::http::Response> ended, waiting; // before the client, which answers what it still holds when it is destroyed
+    auto                              client = connected_client(peer.port());
     ASSERT_TRUE(client->is_connected()) << "the client did not connect";
-    std::optional<qb::http::Response> ended, waiting;
     ASSERT_TRUE(client->push_request(get("/ended"), [&](qb::http::Response r) { ended = std::move(r); }));
     ASSERT_TRUE(client->push_request(get("/waiting"), [&](qb::http::Response r) { waiting = std::move(r); }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return ended.has_value() && waiting.has_value(); }, 10s))
@@ -5041,9 +5032,9 @@ TEST_F(Http2ClientCrossingTest, AFloodOfEmptyDataFramesEndsTheConnectionAndAFewN
         SCOPED_TRACE("a flood of empty DATA frames");
         Http2PlannedPeer peer(Http2PlannedPeer::Plan::empty_data_flood);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, which answers what it still holds when it is destroyed
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected()) << "the client did not connect";
-        std::optional<qb::http::Response> response;
         ASSERT_TRUE(client->push_request(get("/flood"), [&](qb::http::Response r) { response = std::move(r); }));
         ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); }, 10s));
         EXPECT_EQ(response->status(), qb::http::status::SERVICE_UNAVAILABLE) << response->body().as<std::string>();
@@ -5059,9 +5050,9 @@ TEST_F(Http2ClientCrossingTest, AFloodOfEmptyDataFramesEndsTheConnectionAndAFewN
         SCOPED_TRACE("200 chunks, three empty DATA frames after each");
         Http2PlannedPeer peer(Http2PlannedPeer::Plan::empty_data_between_chunks);
         ASSERT_NE(peer.port(), 0);
-        auto client = connected_client(peer.port());
+        std::optional<qb::http::Response> response; // before the client, which answers what it still holds when it is destroyed
+        auto                              client = connected_client(peer.port());
         ASSERT_TRUE(client->is_connected()) << "the client did not connect";
-        std::optional<qb::http::Response> response;
         ASSERT_TRUE(client->push_request(get("/chunks"), [&](qb::http::Response r) { response = std::move(r); }));
         ASSERT_TRUE(ServerThread::pump_until([&] { return response.has_value(); }, 10s));
         EXPECT_EQ(response->status(), qb::http::status::OK) << response->body().as<std::string>();
@@ -6264,18 +6255,19 @@ protected:
     /// The responses to @p paths, requested at once on the client's one connection.
     std::vector<std::optional<qb::http::Response>>
     get_all(std::vector<const char *> const &paths) {
-        std::vector<std::optional<qb::http::Response>> responses(paths.size());
+        // Shared with the callbacks: a request not answered here is answered by TearDown()'s close, once the case has returned.
+        auto responses = std::make_shared<std::vector<std::optional<qb::http::Response>>>(paths.size());
         for (std::size_t i = 0; i < paths.size(); ++i) {
             qb::http::Request request;
             request.method() = qb::http::Method::GET;
             request.uri()    = qb::io::uri(paths[i]);
-            EXPECT_TRUE(client->push_request(request, [&responses, i](qb::http::Response r) { responses[i] = std::move(r); }));
+            EXPECT_TRUE(client->push_request(request, [responses, i](qb::http::Response r) { (*responses)[i] = std::move(r); }));
         }
         client->connect(nullptr);
         EXPECT_TRUE(qb::http::test::ServerThread<Server>::pump_until([&responses] {
-            return std::all_of(responses.begin(), responses.end(), [](auto const &r) { return r.has_value(); });
+            return std::all_of(responses->begin(), responses->end(), [](auto const &r) { return r.has_value(); });
         })) << "not every request was answered";
-        return responses;
+        return *responses;
     }
 };
 } // namespace http2_client_body_limit_test
@@ -6431,6 +6423,8 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAFailureInsideACallbackOfAFailureStil
             inner_answered = true;
             inner_ok       = ok_again;
         });
+        if (!asked)
+            return; // refused, and never answered: the destructor of a case that failed answers this callback
         run_the_loop_until([&] { return inner_answered; }, "the loop a callback of a failed connect() runs until the next attempt fails");
         server = reconnect::make_h2_server_on(port); // there for the attempt the run schedules
         if (!server->ready())
@@ -6702,7 +6696,6 @@ struct Told : qb::http2::Client {
 
 /// A callback that pushes its request back at every refusal -- it never gives up -- and then does one thing more.
 struct Relaunch {
-    std::shared_ptr<qb::http2::Client> client;
     std::function<qb::http::Request()> request = elsewhere; ///< the request the client refuses
     int                                pushes = 0, calls = 0, depth = 0, deepest = 0, cap = 200;
     int                                loop_turns         = 0; ///< the loop turns this callback is running, one inside the other
@@ -6710,6 +6703,7 @@ struct Relaunch {
     int                                under_another      = 0; ///< calls made under another one with no such turn between the two
     std::function<void()>              then               = [] {
     }; ///< what the callback does once it has pushed its request back
+    std::shared_ptr<qb::http2::Client> client; ///< last, so destroyed first: its destructor still calls `request` and `then`
 
     void
     push() {
@@ -6746,7 +6740,8 @@ struct Relaunch {
 TEST_F(Http2ClientTest, ARequestPushedBackAtEveryRefusalIsNeverAnsweredFromInsideItsOwnPush) {
     for (const std::string_view refusal : {"another origin", "the bound of the queue", "a send the connection cannot take"}) {
         SCOPED_TRACE(refusal);
-        int      held = 0; // before the client: its callbacks count here
+        int      held = 0, warm = 0; // before the client: its callbacks count here
+        bool     up = false;
         Relaunch r;
         r.client = make_test_client();
         r.client->set_auto_reconnect(false);
@@ -6755,10 +6750,9 @@ TEST_F(Http2ClientTest, ARequestPushedBackAtEveryRefusalIsNeverAnsweredFromInsid
             r.client->set_max_pending_requests(0);
             r.request = reconnect::get_test;
         } else if (refusal == "a send the connection cannot take") {
-            bool up = false;
             r.client->connect([&](bool ok, const std::string &) { up = ok; });
             ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
-            int warm = 0; // a round trip first: the server's limit of concurrent streams comes with its SETTINGS
+            // A round trip first: the server's limit of concurrent streams comes with its SETTINGS.
             r.client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++warm; });
             ASSERT_TRUE(ServerThread::pump_until([&] { return warm == 1; }));
             r.client->set_max_concurrent_streams(200); // the client would send more than the server takes
@@ -6794,6 +6788,7 @@ TEST_F(Http2ClientTest, ARequestPushedBackThenACallTheClientAnswersByItselfIsNev
     for (const std::string_view call : {"an empty batch", "a connect() on a connected client"}) {
         SCOPED_TRACE(call);
         int      answered = 0, answered_under_the_callback = 0; // before the client: its callbacks count here
+        bool     up = false;
         Relaunch r;
         r.client = make_test_client();
         r.client->set_auto_reconnect(false);
@@ -6806,7 +6801,6 @@ TEST_F(Http2ClientTest, ARequestPushedBackThenACallTheClientAnswersByItselfIsNev
                 }));
             };
         } else {
-            bool up = false;
             r.client->connect([&](bool ok, const std::string &) { up = ok; });
             ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
             r.then = [&] {
@@ -6929,11 +6923,11 @@ TEST_F(Http2ClientTest, TheFailuresOfADisconnectACallbackCallsAreHeardOnTheClien
     for (const std::string_view what : {"a request in flight", "a batch in flight", "a request in the queue", "a connect() still waiting"}) {
         SCOPED_TRACE(what);
         int  heard = 0, heard_inside_the_call = -1; // before the client: its callbacks count here
+        int  asked  = 0;                            // the requests the server must have routed before the close
         auto client = make_test_client();
         client->set_auto_reconnect(false);
         client->set_request_timeout(qb::duration::zero());
         const auto routed = _server->server().hang_routed();
-        int        asked  = 0; // the requests the server must have routed before the close
         const auto start  = [&] {
             if (what == "a request in the queue") { // behind the connection its push asks for: closed before the loop turns
                 client->push_request(hang(), [&](qb::http::Response) { ++heard; });
@@ -7329,10 +7323,11 @@ TEST_F(Http2ClientTest, AnEmptyBatchPushedWithARefusalOwedWhoseCallbackDropsTheL
         int         destroyed = 0, destroyed_when_the_batch_heard = -1, kept_heard = 0, batch_heard = 0;
         auto        client = owned == "apart" ? std::shared_ptr<Told>(new Told(url(), destroyed)) : std::make_shared<Told>(url(), destroyed);
         auto *const raw    = client.get();
-        raw->push_request(elsewhere(), [&](qb::http::Response) {
-            raw->push_request(elsewhere(), [&](qb::http::Response) { // kept for its turn
+        raw->push_request(elsewhere(), [&, raw](qb::http::Response) { // `raw` by value: it is declared after the client
+            raw->push_request(elsewhere(), [&](qb::http::Response) {  // kept for its turn
                 ++kept_heard;
-                client.reset(); // the last reference
+                if (destroyed == 0) // the last reference -- not under the client's destructor (a case that failed)
+                    client.reset();
             });
         });
         EXPECT_EQ(kept_heard, 0);
@@ -7361,13 +7356,13 @@ TEST_F(Http2ClientTest, ACallbackTheDestructorHearsThatRunsTheLoopEndsCleanly) {
         int                   destroyed = 0, kept = 0, answers = 0, first = 0;      // before the client: its callbacks count here
         int                   destroyed_when_heard = -1;                            // 1: heard by the destructor, the object's end begun
         int                   second = 0, second_under_the_first = 0, in_first = 0; // a second answer owed behind the first
+        bool                  up = false;
         std::vector<bool>     accepted;
         std::shared_ptr<Told> client(new Told(url(), destroyed));
         auto *const           raw = client.get();
         raw->set_verify_peer(false);
         raw->set_connect_timeout(5s);
         if (with == "a response on its way") {
-            bool up = false;
             raw->connect([&](bool ok, const std::string &) { up = ok; });
             ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
             raw->push_request(reconnect::get_test(), [&](qb::http::Response) { ++first; }); // sent at once: in flight
@@ -7559,18 +7554,20 @@ TEST_F(Http2ClientTest, ACallbackThatDropsTheLastReferenceEndsCleanlyWhoeverCall
             ASSERT_TRUE(server->ready());
             origin = "https://localhost:" + std::to_string(reconnect::port_of(*server));
         }
+        bool                  up = false; // before the client, which answers what it still holds when it is destroyed
+        std::function<void()> drop;       // and so is what its callbacks call: assigned once the client is there
         std::shared_ptr<Told> client(new Told(origin, destroyed));
         auto *const           raw = client.get();
         raw->set_verify_peer(false);
         raw->set_connect_timeout(5s);
         raw->set_auto_reconnect(false);
-        const auto drop = [&] {
+        drop = [&] {
             ++heard;
             destroyed_when_heard = destroyed;
-            client.reset(); // the last reference
+            if (destroyed == 0) // the last reference -- not under the client's destructor (a case that failed)
+                client.reset();
         };
         const auto connected = [&] {
-            bool up = false;
             raw->connect([&](bool ok, const std::string &) { up = ok; });
             return ServerThread::pump_until([&] { return up; });
         };
@@ -8140,7 +8137,8 @@ TEST_F(Http2ClientTest, ACallbackUnderAPushThatDropsTheLastReferenceAndThrowsLea
         ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == before + 1; }));
         ASSERT_TRUE(raw->push_request(unsendable(), [&](qb::http::Response) {
             ++b;
-            client.reset(); // the last reference
+            if (destroyed == 0) // the last reference -- not under the client's destructor (a case that failed)
+                client.reset();
             throw std::runtime_error("the callback of the request that waited drops the client and throws");
         }));
         ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
@@ -8449,10 +8447,11 @@ TEST_F(Http2ClientTest, AResponseCallbackThatThrowsIsContainedAndTheRequestBehin
 // refuses), and the callback of that request throws; another is in flight. The process lives, the connection stays, the
 // other request is not failed and the next is served. The frame's handler is noexcept: the process ended.
 TEST_F(Http2ClientTest, ACallbackOfARequestTheServerResetsThatThrowsIsContained) {
-    Answer held, after; // before the client, which answers what it still holds when it is destroyed
-    int    reset  = 0;
-    bool   up     = false;
-    auto   client = make_test_client();
+    Answer      held, after; // before the client, which answers what it still holds when it is destroyed
+    int         reset = 0;
+    bool        up    = false;
+    std::string why;
+    auto        client = make_test_client();
     client->set_auto_reconnect(false);
     client->set_request_timeout(qb::duration::zero());
     client->connect([&](bool ok, const std::string &) { up = ok; });
@@ -8463,7 +8462,6 @@ TEST_F(Http2ClientTest, ACallbackOfARequestTheServerResetsThatThrowsIsContained)
     qb::http::Request refused_by_the_server;
     refused_by_the_server.method() = qb::http::Method::GET;
     refused_by_the_server.uri()    = qb::io::uri(std::string("/api/test?q=a\x80") + "z");
-    std::string why;
     ASSERT_TRUE(client->push_request(std::move(refused_by_the_server), [&](qb::http::Response response) {
         ++reset;
         why = response.body().as<std::string>();
@@ -8628,14 +8626,14 @@ TEST_F(Http2ClientTest, ARetryHookThatThrowsIsContainedAndTheRunGoesOn) {
     bool exhausted  = false;
     auto http1_only = reconnect::make_http1_only_server();
     ASSERT_TRUE(http1_only->ready());
-    auto client = reconnect::make_client_for(reconnect::port_of(*http1_only));
+    std::function<void(qb::http::Response)> on_response;
+    auto                                    client = reconnect::make_client_for(reconnect::port_of(*http1_only));
     client->enable_auto_reconnect(
         qb::http2::RetryPolicy{}.with_initial_delay(20ms).with_multiplier(1.0).with_jitter(false).with_max_attempts(3).with_on_retry(
             [&](int, qb::duration) {
                 ++hooks;
                 throw std::runtime_error("the retry hook throws");
             }));
-    std::function<void(qb::http::Response)> on_response;
     on_response = [&](qb::http::Response response) {
         ++failures;
         if (response.body().as<std::string>().find("exhausted") != std::string::npos) {
@@ -9027,18 +9025,19 @@ TEST_F(Http2ClientTest, WhatWaitsForTheStreamOfARequestThatTimesOutIsSentAtOnce)
 TEST_F(Http2ClientTest, WhatAPushTakesBackIsNamedByItsNumberAndNothingElseIsTakenBack) {
     for (const std::string_view form : {"the same object", "a request, a batch of its number", "a batch, a request of its number"}) {
         SCOPED_TRACE(form);
-        int        r = 0, p = 0, x = 0; // before the client, which answers what it still holds when it is destroyed
-        int        p_status = -1;
-        bool       up       = false;
-        auto       client   = make_test_client();
-        const auto u        = unsendable();
+        int                   r = 0, p = 0, x = 0; // before the client, which answers what it still holds when it is destroyed
+        int                   p_status     = -1;
+        bool                  up           = false;
+        int                   served       = 0; // the request or the batch served first, so that the two numbers meet
+        const auto            u            = unsendable();
+        const bool            r_is_a_batch = form == "a batch, a request of its number";
+        const bool            p_is_a_batch = form == "a request, a batch of its number";
+        std::function<void()> push_p; // what X's callback calls: assigned once the client is there
+        auto                  client = make_test_client();
         client->set_auto_reconnect(false);
         client->set_request_timeout(qb::duration::zero());
         client->connect([&](bool ok, const std::string &) { up = ok; });
         ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
-        const bool r_is_a_batch = form == "a batch, a request of its number";
-        const bool p_is_a_batch = form == "a request, a batch of its number";
-        int        served       = 0; // the request or the batch served first, so that the two numbers meet
         if (p_is_a_batch) {
             std::vector<qb::http::Request> one;
             one.push_back(reconnect::get_test());
@@ -9049,7 +9048,7 @@ TEST_F(Http2ClientTest, WhatAPushTakesBackIsNamedByItsNumberAndNothingElseIsTake
             ASSERT_TRUE(loop_until([&] { return served == 1; }));
         }
         client->set_max_concurrent_streams(0);
-        const auto push_p = [&] {
+        push_p = [&] {
             if (p_is_a_batch) {
                 std::vector<qb::http::Request> two{u, u};
                 client->push_requests(std::move(two), [&](std::vector<qb::http::Response> responses) {
@@ -9587,17 +9586,20 @@ TEST_F(Http2ClientTest, ANotModifiedThatDeclaresALengthPastTheBodyLimitIsAnswere
 // connects again, runs the loop until connected and pushes N1 and N2, streams 1 and 3 of the new connection, which the
 // server answers 200.
 TEST_F(Http2ClientTest, WhatAPushTakesBackIsGivenUpWithNoPassThatACallbackCouldReconnectFrom) {
-    Answer      n1, n2; // before the client, which answers what it still holds when it is destroyed
-    int         b = 0, r = 0, y = 0;
-    std::size_t in_flight = 0;
-    bool        up = false, again = false;
-    auto        client = make_test_client();
+    Answer                                  n1, n2; // before the client, which answers what it still holds when it is destroyed
+    int                                     b = 0, r = 0, y = 0;
+    std::size_t                             in_flight = 0;
+    bool                                    up = false, again = false;
+    std::function<void(qb::http::Response)> reconnecting; // what a callback of the client calls: assigned once it is there
+    auto                                    client = make_test_client();
     client->set_auto_reconnect(false);
     client->set_request_timeout(qb::duration::zero());
     client->connect([&](bool ok, const std::string &) { up = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
     client->set_max_concurrent_streams(0);
-    const auto reconnecting = [&](qb::http::Response response) {
+    reconnecting = [&](qb::http::Response response) {
+        if (client.use_count() == 0)
+            return; // under the client's destructor (a case that failed): nothing to reconnect, no loop to run there
         ++y;
         EXPECT_EQ(response.status(), qb::http::status::BAD_REQUEST) << response.body().as<std::string>();
         client->disconnect();

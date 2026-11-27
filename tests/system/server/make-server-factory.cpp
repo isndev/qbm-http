@@ -26,6 +26,9 @@
  *   - The cert-missing `GTEST_SKIP` + `check_test_certs_exist()` helper is
  *     replaced by the shared `certs_available()` HARD prerequisite.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -618,12 +621,11 @@ protected:
 };
 
 TEST_F(Http2MakeServerTest, PingHttp2Server) {
-    auto client = std::make_shared<qb::http2::Client>(base_url());
-    client->set_verify_peer(false); // self-signed test cert
-    client->set_connect_timeout(5s);
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false); // self-signed test cert
+    client->set_connect_timeout(5s);
 
     qb::http::Request request{{base_url() + "/ping_http2"}};
     request.method() = qb::http::Method::GET;
@@ -649,12 +651,11 @@ TEST_F(Http2MakeServerTest, PingHttp2Server) {
 // body to completion. Asserting the reassembled sentinels proves end-to-end
 // integrity across many flow-controlled DATA frames.
 TEST_F(Http2MakeServerTest, FactoryServerStreamsLargeFlowControlledResponse) {
-    auto client = std::make_shared<qb::http2::Client>(base_url());
-    client->set_verify_peer(false);
-    client->set_connect_timeout(5s);
-
     std::atomic<bool>  response_received{false};
     qb::http::Response response;
+    auto               client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
 
     qb::http::Request request{{base_url() + "/big_http2"}};
     request.method() = qb::http::Method::GET;
@@ -681,12 +682,11 @@ TEST_F(Http2MakeServerTest, FactoryServerStreamsLargeFlowControlledResponse) {
 // exercising the server session's multiplexed request dispatch + per-stream
 // response/cleanup across a real socket.
 TEST_F(Http2MakeServerTest, FactoryServerMultiplexesConcurrentStreams) {
-    auto client = std::make_shared<qb::http2::Client>(base_url());
-    client->set_verify_peer(false);
-    client->set_connect_timeout(5s);
-
     std::atomic<int>                responses_received{0};
     std::vector<qb::http::Response> responses(2);
+    auto                            client = std::make_shared<qb::http2::Client>(base_url());
+    client->set_verify_peer(false);
+    client->set_connect_timeout(5s);
 
     for (int i = 0; i < 2; ++i) {
         qb::http::Request request{{base_url() + "/ping_http2"}};

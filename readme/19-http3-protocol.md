@@ -106,7 +106,7 @@ The HTTP/3 adapter returns QUIC receive credit as it processes body DATA, so req
 An HTTP/3 server is constructed with `qb::http3::make_server()`. It exposes the same `Router` as every other server in the module, so routes, middleware, controllers, and contexts behave identically — the transport is the only thing that differs.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:195-208 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:198-211 (adapted)
 #include <qbm/http/http.h>
 
 #ifdef QBM_HTTP_HAS_HTTP3
@@ -132,7 +132,7 @@ server->listen(qb::io::uri("https://0.0.0.0:4433"), "cert.pem", "key.pem");
 Custom sessions follow the same CRTP shape as HTTP/2:
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:73-82
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:76-85
 class CustomHttp3Session;
 using CustomHttp3Server = qb::http3::Server<CustomHttp3Session>;
 
@@ -167,10 +167,10 @@ The server reads every request under its limits (`set_request_limits`, Huly QB-9
 `push_request` connects lazily on the first request, multiplexes over the live QUIC connection thereafter, and invokes the callback on the I/O thread when the response (or an error response) is ready.
 
 The QUIC `max_streams_bidi` setting limits client-initiated streams open at once, not the total requests one connection can serve. For a request stream delivered through ngtcp2's `stream_open` callback, qb's native backend returns one bidirectional slot on close; ngtcp2 renews implicitly opened streams itself. In the loopback test, 130 sequential requests complete on one connection under the default 100-stream quota. This stream-count credit is separate from request timeouts and the client's pending-work cap.
-<!-- src: qb/src/qb/io/quic.cpp:1122,1626-1653; qbm/http/tests/system/http3/http3-loopback.cpp:1370-1429 -->
+<!-- src: qb/src/qb/io/quic.cpp:1122,1626-1653; qbm/http/tests/system/http3/http3-loopback.cpp:1375-1437 -->
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:210-221 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:213-224 (adapted)
 auto client = qb::http3::make_client("https://127.0.0.1:4433");
 client->set_verify_peer(false);   // self-signed dev certificate only
 
@@ -209,7 +209,7 @@ if (result) {
 `push_requests` issues a vector of requests concurrently over independent QUIC streams and completes once with the responses in submission order:
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:676-686 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:684-692 (adapted)
 std::vector<qb::http::Request> requests;
 requests.emplace_back(qb::io::uri("/item/1"));
 requests.emplace_back(qb::io::uri("/item/2"));
@@ -270,7 +270,7 @@ A field a request's `connection` header names leaves in neither section, as on H
 HTTP/2 and HTTP/3 use **different transports** — TCP/TLS for HTTP/1.1 and HTTP/2, UDP/QUIC for HTTP/3 — so they cannot share a socket. `qb::http::make_dual_stack_server()` runs both servers behind a single route facade, registering each route on *both* routers. It returns a `std::unique_ptr<qb::http::dual_stack_server<...>>`.
 
 ```cpp
-// src: qbm/http/tests/system/http3/http3-loopback.cpp:5675-5685 (adapted)
+// src: qbm/http/tests/system/http3/http3-loopback.cpp:5735-5745 (adapted)
 auto server = qb::http::make_dual_stack_server();
 
 server->router().get("/shared", [](auto ctx) {
@@ -314,19 +314,19 @@ server->close();               // tear down the UDP endpoint
 ```
 
 On the **client** side, a server-initiated GOAWAY sets an internal shutdown flag. Its pending-request callbacks run with `503 Service Unavailable`, and new same-origin requests are rejected with `503` while shutdown is in progress. If one of those callbacks calls `client->disconnect()` during the native HTTP/3 read, `is_connected()` becomes false at once. GOAWAY can still invoke other pending-request callbacks during that read; destruction of the protocol, QUIC close and failure of still-active requests wait until the read returns. A `connect(callback)` asked during that interval is accepted and waits: its handshake starts once the read has returned and the close has run, and its callback hears that attempt's outcome, never inside the call (Huly QB-1246; it heard `false` there, and a callback that dials again on `false` called itself without end). New requests are refused, `503` -- heard on the client's turn of the loop when one of its callbacks pushes them --, and the explicit close itself starts no automatic reconnect.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:314-341,538-643,728-736,850-873,1557-1568,1639-1702; qbm/http/tests/system/http3/http3-loopback.cpp:1993-2091 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:314-341,538-643,728-736,850-873,1557-1568,1639-1702; qbm/http/tests/system/http3/http3-loopback.cpp:2004-2102 -->
 
 An ordinary `disconnect()` also marks the client down before it invokes failure callbacks. New requests from those callbacks are refused, `503`, until the close finishes: the refusal is heard on the client's turn of the loop, not inside the push, so a callback that pushes back at every failure is never called from inside its own push (bound such a retry all the same, and give it a delay: it spins otherwise, one push a turn). With callbacks that run no loop turn of their own, no callback of a client is called inside another one of the same client: nesting is exactly one outside the destructor. A callback that runs the loop -- `qb::io::async::run()`, `run_once()`, `run_until()`, `run_sync()` -- receives inside that loop whatever the client owes, its own refusals included: one that pushes a refused request back and then runs the loop recurses once per refusal. To relaunch without nesting, push back and return. A `connect()` from one of them is accepted and starts once the close has finished, so its callback hears the new attempt's outcome -- its connect timeout counted from the moment it was asked, for that wait and the attempt together --; a `disconnect()` before the attempt starts gives it up, and its callback hears `false` from that close. A connection lost during a read is torn down when the read returns, and a `connect()` asked in between waits for that teardown the same way -- and is given up the same way by a `disconnect()` made from a failure callback of that teardown: `disconnect()` never starts a `connect()` asked before it; one its own callbacks ask starts at its end. The coroutine `connect()` is the exception: awaited from a callback of a close or of a failure -- a connection lost or closed by the server, an attempt that failed or timed out --, it completes `false` without waiting for an attempt, "HTTP/3 connection is closing" -- an answer the client gives by itself, heard on its turn of the loop, which a `run_sync()` runs. The attempt it would wait for cannot start before a close's callback returns, and most failures -- a connection lost or closed by the server, a failed handshake -- run their callbacks inside the endpoint's dispatch, which delivers an attempt's `connected` only once it has returned: a `run_sync()` of it there would never return. The three that do not -- an attempt's timeout (run from a timer), an attempt that cannot start (heard on a later turn of the loop), and a request whose submission, made outside the endpoint's dispatch, closed its connection -- answer the same: one rule for every close and failure. A `connect()` whose attempt cannot start -- its host resolves to no address, its UDP socket cannot be opened or bound, the network refuses the first datagram of its last address -- returns `true`, and its callback hears `false` on a later turn of the loop, "Unable to start QUIC connection"; a `WARN` line says what could not start. Only a client with no shared owner answers by the return value alone. A callback may release the last external `shared_ptr` to the client: event dispatch keeps the object alive through the endpoint's outer handler and releases it on a later loop turn. Explicit cancellation of an active request likewise retains the client through its callback and stream reset. The pending-request drain keeps the client alive too and rechecks the live protocol and connection before each submission, including after a failed submission calls user code.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:27-66,538-643,794-827,954-1222,1584-1602,1639-1702,1705-1732; qbm/http/tests/system/http3/http3-loopback.cpp:2093-2118,2124-2180,6360-6386 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:27-66,538-643,794-827,954-1222,1584-1602,1639-1702,1705-1732; qbm/http/tests/system/http3/http3-loopback.cpp:2104-2131,2137-2193,6419-6447 -->
 
 If the QUIC transport closes synchronously while submitting a queued request, the client completes that request with `503` even though it has left the pending queue and has not yet entered the active registry. A submission that an exception cuts short ends the connection before the exception goes on, and gives its request one outcome. The close is the one the submission deferred -- the transport lost under it, a `disconnect()` called there -- or, with none, the client's own, "HTTP/3 submission cut short by an exception": the engine hands its bytes to the transport before it is told how many went, an exception between the two makes it write them again, and a peer that advertises a QPACK dynamic table then reads an encoder instruction twice. Cut short inside the program's own `push_request()`, `push_requests()` or `co_await` for that request, the exception is that outcome: what the call pushed is taken back -- a whole batch, its members already in flight included --, no callback is called and no awaiter completed. Cut short where the loop submits, or under a call made for another request, the request hears `503`, once, as any refusal the client gives by itself: inside that call, or on the client's turn when a callback of this client is on the stack or something is owed. The other requests the connection carried fail once each. An exception that cuts no submission short leaves a push the same way: when the callback of a request the engine refuses under that push throws, the push takes back what it pushed, unanswered, and the connection stays. The reset of a stream the client abandons -- for a refusal, a cancellation, a timeout -- has a `try` of its own: one that cannot be written takes no answer away and does not stop the pass behind it. This notification still runs if an old request's failure callback throws during teardown. What a callback the loop brought throws -- a response, a failure, a connection that comes up, fails or is lost, a server's GOAWAY, a timeout, a refusal where the loop submits, the client's turn -- is contained by the client where it calls that callback and logged at WARN ("exception escaped an HTTP/3 client callback; contained") where the build has a logger (`QB_WITH_LOGGING`, the default, or `QB_STDOUT_LOGGING`; [A callback should not throw](./14-async-http-client.md) says where the line goes): the other callbacks are called, the request behind is submitted, and the connection stays -- a response's callback that threw ended it, through the engine's callback, and failed what waited behind. Under a call of the program it reaches that call once it has finished for the others: an explicit `disconnect()` answers every request and completes the transport cleanup, then rethrows the first exception; a push takes back what it pushed -- queued, in flight (its stream is then reset with `H3_REQUEST_CANCELLED`, as a cancellation resets it, which frees it for what waits; an answer that still comes finds no request) or refused with that answer not yet heard -- and still submits what waited behind the request whose callback threw; `cancel_request()` resets its stream and submits what waited for it. What one more callback throws under the same call is dropped. What else throws under nghttp3's native callback path -- an allocation -- becomes a protocol callback failure.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:220-280,538-643,954-1222,1225-1287,1316-1376; qbm/http/src/qbm/http/3/protocol/connection.h:1040-1048; qbm/http/tests/system/http3/http3-loopback.cpp:5124-5203,5204-5248,5249-5340 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:220-280,538-643,954-1222,1225-1287,1316-1376; qbm/http/src/qbm/http/3/protocol/connection.h:1040-1048; qbm/http/tests/system/http3/http3-loopback.cpp:5181-5260,5261-5305,5306-5397 -->
 
 If starting the QUIC connection fails, the connect timer expires, or the peer closes the connection, the client closes the old transport before reporting the failure. Old requests are retired before connection callbacks run, so work those callbacks queue belongs to a new attempt. On retry, qb-io refreshes the endpoint's internally owned native backend, binds its existing I/O watcher to the new UDP socket and starts it again.
 <!-- src: qbm/http/src/qbm/http/3/client.cpp:368-425,1257-1313,1404-1424,1594-1636; qb/src/qb/io/async/quic/endpoint.h:99-136,505-534 -->
 
 If you disconnect while a connection attempt is still pending, that attempt's connection callbacks receive one failure. Its timeout is tied to the attempt it was armed for; if you connect again with a longer timeout, the cancelled attempt's timer does not end the new handshake.
-<!-- src: qbm/http/src/qbm/http/3/client.cpp:368-395,538-643,1225-1287,1404-1424; qbm/http/tests/system/http3/http3-loopback.cpp:5056-5086 -->
+<!-- src: qbm/http/src/qbm/http/3/client.cpp:368-395,538-643,1225-1287,1404-1424; qbm/http/tests/system/http3/http3-loopback.cpp:5111-5143 -->
 
 ## Limits and guards
 

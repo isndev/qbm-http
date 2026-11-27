@@ -9,6 +9,9 @@
  * module's own client on the one loop, with the peer's acknowledgements as the proof that the events arrived before
  * `end()`. The HTTP/2 and HTTP/3 parts compile under their gates; the HTTP/1.1 part always.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -697,14 +700,23 @@ TEST_F(SseHttp3Test, EventsAreAcknowledgedBeforeTheEndAndTheBodyIsWhole) {
     auto              server = qb::http3::make_server();
     install_routes(server->router());
     ASSERT_TRUE(server->listen(qb::io::uri(origin), qb::http::test::ssl_cert_path(), qb::http::test::ssl_key_path()));
-    auto client = qb::http3::make_client(origin);
-    client->set_verify_peer(false);
     std::optional<qb::http::Response> response;
+    bool                              pending_seen = false; // the pieces were in flight before the peer acknowledged them
+    int                               framing      = -1;
+    std::optional<qb::http::Response> last;
+    std::optional<qb::http::Response> coro;
+    std::optional<qb::http::Response> beat;
+    std::optional<qb::http::Response> dropped;
+    std::optional<qb::http::Response> after;
+    std::optional<qb::http::Response> hooked;
+    std::optional<qb::http::Response> head;
+    std::optional<qb::http::Response> hooked_async;
+    std::optional<qb::http::Response> hooked_async_head;
+    auto                              client = qb::http3::make_client(origin);
+    client->set_verify_peer(false);
     ASSERT_TRUE(
         client->push_request(qb::http::Request{qb::io::uri(origin + "/events")}, [&](qb::http::Response r) { response = std::move(r); }));
-    const std::size_t three        = kEvent1.size() + kEvent2.size() + kEvent3.size();
-    bool              pending_seen = false; // the pieces were in flight before the peer acknowledged them
-    int               framing      = -1;
+    const std::size_t three = kEvent1.size() + kEvent2.size() + kEvent3.size();
     ASSERT_TRUE(pump([&] {
         if (!g_probe)
             return false;
@@ -724,19 +736,16 @@ TEST_F(SseHttp3Test, EventsAreAcknowledgedBeforeTheEndAndTheBodyIsWhole) {
     EXPECT_TRUE(response->header("connection").empty()) << "hop-by-hop: never on HTTP/3";
     EXPECT_EQ(response->body().template as<std::string>(), kEvent1 + kEvent2 + kEvent3 + kEvent4);
     // Last-Event-ID and the coroutine sender, on the same connection.
-    std::optional<qb::http::Response> last;
-    qb::http::Request                 with_id{qb::io::uri(origin + "/last")};
+    qb::http::Request with_id{qb::io::uri(origin + "/last")};
     with_id.set_header("Last-Event-ID", "41");
     ASSERT_TRUE(client->push_request(std::move(with_id), [&](qb::http::Response r) { last = std::move(r); }));
     ASSERT_TRUE(pump([&] { return last.has_value(); }));
     EXPECT_EQ(last->body().template as<std::string>(), "event: resume\ndata: 41\n\n");
-    std::optional<qb::http::Response> coro;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(origin + "/coro")}, [&](qb::http::Response r) { coro = std::move(r); }));
     ASSERT_TRUE(pump([&] { return coro.has_value(); }));
     EXPECT_EQ(coro->body().template as<std::string>(), "data: 0\n\ndata: 1\n\ndata: 2\n\n");
     // The heartbeat beats while the stream is held, and a dropped stream resets its stream (502), the connection serving on.
     g_release = false;
-    std::optional<qb::http::Response> beat;
     ASSERT_TRUE(
         client->push_request(qb::http::Request{qb::io::uri(origin + "/heartbeat")}, [&](qb::http::Response r) { beat = std::move(r); }));
     ASSERT_TRUE(pump([&] { return g_probe && g_probe().written >= 13 + 4 * 3; }, 2s)) << "the retry line and three comments";
@@ -746,18 +755,15 @@ TEST_F(SseHttp3Test, EventsAreAcknowledgedBeforeTheEndAndTheBodyIsWhole) {
     const auto beats = beat->body().template as<std::string>();
     EXPECT_EQ(beats.substr(0, 13), "retry: 2500\n\n");
     EXPECT_NE(beats.find(": \n\n"), std::string::npos) << beats;
-    std::optional<qb::http::Response> dropped;
     ASSERT_TRUE(
         client->push_request(qb::http::Request{qb::io::uri(origin + "/dropped")}, [&](qb::http::Response r) { dropped = std::move(r); }));
     ASSERT_TRUE(pump([&] { return dropped.has_value(); }));
     EXPECT_EQ(dropped->status(), qb::http::status::BAD_GATEWAY) << "the handle died before end(): the stream was reset";
-    std::optional<qb::http::Response> after;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(origin + "/last")}, [&](qb::http::Response r) { after = std::move(r); }));
     ASSERT_TRUE(pump([&] { return after.has_value(); }));
     EXPECT_EQ(after->status(), qb::http::status::OK) << "the connection serves on";
     // The response-sent hook, once per response: a synchronous streamed GET, then a HEAD.
     g_post_sent = g_post_sent_completed = 0;
-    std::optional<qb::http::Response> hooked;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(origin + "/hooked")}, [&](qb::http::Response r) { hooked = std::move(r); }));
     ASSERT_TRUE(pump([&] { return hooked.has_value(); }));
     EXPECT_EQ(hooked->body().template as<std::string>(), "data: once\n\n");
@@ -765,7 +771,6 @@ TEST_F(SseHttp3Test, EventsAreAcknowledgedBeforeTheEndAndTheBodyIsWhole) {
     qb::io::async::run(EVRUN_NOWAIT);
     EXPECT_EQ(g_post_sent.load(), 1) << "once: not from mark_response_sent() AND attach_context()";
     EXPECT_EQ(g_post_sent_completed.load(), 1) << "after the context completed";
-    std::optional<qb::http::Response> head;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::HEAD, qb::io::uri(origin + "/hooked")},
                                      [&](qb::http::Response r) { head = std::move(r); }));
     ASSERT_TRUE(pump([&] { return head.has_value(); }));
@@ -776,14 +781,12 @@ TEST_F(SseHttp3Test, EventsAreAcknowledgedBeforeTheEndAndTheBodyIsWhole) {
     EXPECT_EQ(g_post_sent.load(), 2) << "once more for the HEAD";
     // A coroutine that begins its stream after route() returned: the FIN the drain forwards at once must not run the
     // hook before the stream completed the context, nor drop the session's last reference to it.
-    std::optional<qb::http::Response> hooked_async;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::io::uri(origin + "/hooked-async")},
                                      [&](qb::http::Response r) { hooked_async = std::move(r); }));
     ASSERT_TRUE(pump([&] { return hooked_async.has_value() && g_post_sent.load() >= 3; }));
     qb::io::async::run(EVRUN_NOWAIT);
     EXPECT_EQ(hooked_async->body().template as<std::string>(), "data: once\n\n");
     EXPECT_EQ(g_post_sent.load(), 3);
-    std::optional<qb::http::Response> hooked_async_head;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::HEAD, qb::io::uri(origin + "/hooked-async")},
                                      [&](qb::http::Response r) { hooked_async_head = std::move(r); }));
     ASSERT_TRUE(pump([&] { return hooked_async_head.has_value() && g_post_sent.load() >= 4; }));

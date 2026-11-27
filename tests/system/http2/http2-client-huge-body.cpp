@@ -10,6 +10,9 @@
  * connection did. It is discarded now (RFC 9113 §5.1). The same with a body past its content-length is a case of
  * http2-client.cpp, which every run builds.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -55,17 +58,17 @@ TEST(Http2ClientHugeBody, ADataCrossingTheResetOfABodyPastTheLimitLeavesTheOther
     qb::io::async::init();
     Http2PlannedPeer peer(Http2PlannedPeer::Plan::body_past_the_limit, std::chrono::seconds(90));
     ASSERT_NE(peer.port(), 0);
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    bool                              connected = false;
+    std::optional<qb::http::Response> large, other;
+    auto                              client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false);
     client->set_connect_timeout(5s);
     client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
     client->disable_auto_reconnect();
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(pump_until([&] { return connected; }, 10s)) << "the client did not connect";
 
-    std::optional<qb::http::Response> large, other;
-    qb::http::Request                 first, second;
+    qb::http::Request first, second;
     first.method()  = qb::http::Method::GET;
     first.uri()     = qb::io::uri("/large");
     second.method() = qb::http::Method::GET;
@@ -102,18 +105,18 @@ TEST(Http2ClientHugeBody, UnderALimitOfNoneABodyPastTheDefaultIsDelivered) {
     qb::io::async::init();
     Http2PlannedPeer peer(Http2PlannedPeer::Plan::body_past_the_limit, std::chrono::seconds(90));
     ASSERT_NE(peer.port(), 0);
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    bool                              connected = false;
+    std::optional<qb::http::Response> large, other;
+    auto                              client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false);
     client->set_connect_timeout(5s);
     client->set_request_timeout(90s);
     client->disable_auto_reconnect();
     client->set_max_body_size(0);
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(pump_until([&] { return connected; }, 10s)) << "the client did not connect";
 
-    std::optional<qb::http::Response> large, other;
-    qb::http::Request                 first, second;
+    qb::http::Request first, second;
     first.method()  = qb::http::Method::GET;
     first.uri()     = qb::io::uri("/large");
     second.method() = qb::http::Method::GET;

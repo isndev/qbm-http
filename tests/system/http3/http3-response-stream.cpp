@@ -20,6 +20,9 @@
  *
  * Gated on `QBM_HTTP_HAS_HTTP3`.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -741,8 +744,8 @@ protected:
 TEST_F(Http3ResponseStreamTest, PiecesAreAcknowledgedByThePeerBeforeTheStreamEnds) {
     const auto                        port   = qb::http::test::ephemeral_udp_port();
     auto                              server = make_server(port);
-    auto                              client = make_client(port);
     std::optional<qb::http::Response> response;
+    auto                              client = make_client(port);
     EXPECT_TRUE(
         client->push_request(qb::http::Request{qb::io::uri(origin(port) + "/pieces")}, [&](qb::http::Response r) { response = std::move(r); }));
     ASSERT_TRUE(pump([&] { return g.stream && g.stream->pending() == 0 && g.stream->written() == 16; }))
@@ -919,8 +922,8 @@ TEST_F(Http3ResponseStreamTest, APeerThatCreditsItsWindowInBurstsFinishesUnderTh
 TEST_F(Http3ResponseStreamTest, TheClientLeavingCancelsTheStream) {
     const auto                        port   = qb::http::test::ephemeral_udp_port();
     auto                              server = make_server(port);
-    auto                              client = make_client(port);
     std::optional<qb::http::Response> response;
+    auto                              client = make_client(port);
     EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri(origin(port) + "/forever")},
                                      [&](qb::http::Response r) { response = std::move(r); }));
     ASSERT_TRUE(pump([&] { return g.stream && g.stream->written() >= 100; }));

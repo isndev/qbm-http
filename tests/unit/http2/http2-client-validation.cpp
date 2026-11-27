@@ -32,6 +32,9 @@
  * same-origin rejection is built on it and these are the most direct, fixture-
  * free assertions of that contract.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -155,13 +158,13 @@ TEST(Http2ClientConfigTest, ConfigurationAccessorsRoundTrip) {
 // and is rejected synchronously with 503 "pending request limit reached", failing
 // the request and returning false — without ever connecting.
 TEST(Http2ClientConfigTest, PendingRequestLimitRejectsValidatedRequestWith503) {
-    auto client = qb::http2::make_client("https://localhost:443");
-    client->set_max_pending_requests(0);
-
     bool               done = false;
     qb::http::Response response;
-    qb::http::Request  request{qb::io::uri("https://localhost:443/ping")};
-    const bool         queued = client->push_request(std::move(request), [&](qb::http::Response res) {
+    auto               client = qb::http2::make_client("https://localhost:443");
+    client->set_max_pending_requests(0);
+
+    qb::http::Request request{qb::io::uri("https://localhost:443/ping")};
+    const bool        queued = client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
         done     = true;
     });
@@ -182,11 +185,11 @@ TEST(Http2ClientConfigTest, PendingRequestLimitRejectsValidatedRequestWith503) {
 // An empty batch is a synchronous no-op completion: the callback fires with an
 // empty vector and the client never connects (push_requests "requests.empty()").
 TEST(Http2ClientConfigTest, EmptyBatchCompletesImmediatelyWithEmptyVector) {
-    auto client = qb::http2::make_client("https://localhost:443");
-
     bool                            done = false;
-    std::vector<qb::http::Response> responses{qb::http::Response{}}; // pre-seed non-empty
-    const bool                      queued = client->push_requests({}, [&](std::vector<qb::http::Response> res) {
+    std::vector<qb::http::Response> responses{qb::http::Response{}}; // pre-seed non-empty; before the client, as `done`
+    auto                            client = qb::http2::make_client("https://localhost:443");
+
+    const bool queued = client->push_requests({}, [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
         done      = true;
     });
@@ -220,12 +223,12 @@ TEST(Http2ClientConfigTest, EmptyCallbacksAreRejectedWithoutSideEffects) {
 // ---------------------------------------------------------------------------
 
 TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
-    auto client = qb::http2::make_client("https://localhost:1");
-    client->set_connect_timeout(10ms);
-
     bool               done = false;
     qb::http::Response response;
-    qb::http::Request  request{qb::io::uri("http://localhost:1/plain")};
+    auto               client = qb::http2::make_client("https://localhost:1");
+    client->set_connect_timeout(10ms);
+
+    qb::http::Request request{qb::io::uri("http://localhost:1/plain")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
         done     = true;
@@ -246,11 +249,11 @@ TEST(Http2ClientConfigTest, RejectsPlainHttpAbsoluteRequestWithoutConnecting) {
 }
 
 TEST(Http2ClientConfigTest, RejectsCrossOriginAbsoluteRequestWithoutConnecting) {
-    auto client = qb::http2::make_client("https://localhost:443");
-
     bool               done = false;
     qb::http::Response response;
-    qb::http::Request  request{qb::io::uri("https://example.com:443/other")};
+    auto               client = qb::http2::make_client("https://localhost:443");
+
+    qb::http::Request request{qb::io::uri("https://example.com:443/other")};
     ASSERT_TRUE(client->push_request(std::move(request), [&](qb::http::Response res) {
         response = std::move(res);
         done     = true;
@@ -269,15 +272,15 @@ TEST(Http2ClientConfigTest, RejectsCrossOriginAbsoluteRequestWithoutConnecting) 
 }
 
 TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
-    auto client = qb::http2::make_client("https://localhost:1");
+    bool                            done = false;
+    std::vector<qb::http::Response> responses;
+    auto                            client = qb::http2::make_client("https://localhost:1");
     client->set_connect_timeout(10ms);
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("http://localhost:1/plain"));
     requests.emplace_back(qb::io::uri("ws://localhost:1/ws"));
 
-    bool                            done = false;
-    std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
         done      = true;
@@ -299,15 +302,15 @@ TEST(Http2ClientConfigTest, BatchRejectsInvalidSchemesWithoutConnecting) {
 }
 
 TEST(Http2ClientConfigTest, BatchRejectsCrossOriginRequestsAndPreservesOrder) {
-    auto client = qb::http2::make_client("https://localhost:443");
+    bool                            done = false;
+    std::vector<qb::http::Response> responses;
+    auto                            client = qb::http2::make_client("https://localhost:443");
 
     std::vector<qb::http::Request> requests;
     requests.emplace_back(qb::io::uri("https://example.com/first"));        // cross-origin host
     requests.emplace_back(qb::io::uri("http://localhost/plain"));           // wrong scheme
     requests.emplace_back(qb::io::uri("https://localhost:444/wrong-port")); // cross-origin port
 
-    bool                            done = false;
-    std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
         done      = true;
@@ -352,21 +355,19 @@ TEST(Http2ClientConfigTest, CoroPushRequestRejectsCrossOriginWithoutConnecting) 
 // ---------------------------------------------------------------------------
 
 TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePasses) {
-    auto client = qb::http2::make_client("https://localhost:1");
-    client->set_auto_reconnect(false);
-
-    auto make_get_request = [](const std::string &path) {
-        qb::http::Request req;
-        req.method() = qb::http::Method::GET;
-        req.uri()    = qb::io::uri(path);
-        return req;
-    };
-
     bool             first_batch_callback_called  = false;
     bool             second_batch_callback_called = false;
     std::size_t      second_batch_response_count  = 0;
     qb::http::Status first_batch_status{0}; // 0: no callback yet
     qb::http::Status second_batch_status{0};
+    auto             make_get_request = [](const std::string &path) { // before the client too: a callback it answers calls it
+        qb::http::Request req;
+        req.method() = qb::http::Method::GET;
+        req.uri()    = qb::io::uri(path);
+        return req;
+    };
+    auto client = qb::http2::make_client("https://localhost:1"); // what the callbacks write is declared above
+    client->set_auto_reconnect(false);
 
     ASSERT_TRUE(client->push_requests({make_get_request("/first")}, [&](std::vector<qb::http::Response> responses) {
         first_batch_callback_called = true;
@@ -404,7 +405,9 @@ TEST(Http2ClientReentrancyTest, BatchCallbackMayQueueAnotherBatchAcrossFailurePa
 // ---------------------------------------------------------------------------
 
 TEST(Http2ClientReentrancyTest, FailurePassAnswersUnansweredBatchMembersWith503) {
-    auto client = qb::http2::make_client("https://localhost:1");
+    int                             calls = 0;
+    std::vector<qb::http::Response> responses;
+    auto                            client = qb::http2::make_client("https://localhost:1");
     client->set_auto_reconnect(false);
 
     std::vector<qb::http::Request> requests;
@@ -412,8 +415,6 @@ TEST(Http2ClientReentrancyTest, FailurePassAnswersUnansweredBatchMembersWith503)
     requests.emplace_back(qb::io::uri("http://localhost:1/plain")); // refused at admission: 400
     requests.emplace_back(qb::io::uri("https://localhost:1/third"));
 
-    int                             calls = 0;
-    std::vector<qb::http::Response> responses;
     ASSERT_TRUE(client->push_requests(std::move(requests), [&](std::vector<qb::http::Response> res) {
         responses = std::move(res);
         ++calls;

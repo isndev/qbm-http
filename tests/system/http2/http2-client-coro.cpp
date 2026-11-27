@@ -26,6 +26,9 @@
  *
  * REQUIRES: ssl + live. This TU stays inside the `if(QB_HAS_SSL)` block.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -177,11 +180,10 @@ TEST_F(CoroH2ClientTest, ConnectAwaiterYieldsConnectResult) {
 }
 
 TEST_F(CoroH2ClientTest, MultipleConnectCallbacksShareOneHandshake) {
-    auto client = make_test_client();
-
     std::atomic<int>         callbacks{0};
     std::atomic<int>         successes{0};
     std::vector<std::string> errors(2);
+    auto                     client = make_test_client();
 
     ASSERT_TRUE(client->connect([&](bool ok, const std::string &error) {
         ++callbacks;
@@ -237,11 +239,11 @@ TEST_F(CoroH2ClientTest, PushRequestNormalizesCustomHeaderNamesToHttp2Lowercase)
 }
 
 TEST_F(CoroH2ClientTest, CoAwaitConnectThenPushRequestInsideCoroutine) {
-    auto client = make_test_client();
-
     qb::http::Response captured;
-    bool               connected        = false;
-    auto               connect_and_post = [&]() -> qb::io::async::task<void> {
+    bool               connected = false;
+    auto               client    = make_test_client();
+
+    auto connect_and_post = [&]() -> qb::io::async::task<void> {
         auto cr   = co_await client->connect();
         connected = cr.ok;
         if (!connected)
@@ -289,7 +291,9 @@ TEST_F(CoroH2ClientTest, PushRequestsBatchAwaiterYieldsOrderedResponses) {
 // ---------------------------------------------------------------------------
 
 TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackExactlyOnce) {
-    auto client = make_test_client();
+    std::atomic<int>   callbacks{0};
+    qb::http::Response response;
+    auto               client = make_test_client();
     // Connect BEFORE arming the timeout. The request timeout starts at push_request(), so on an
     // unconnected client its budget has to cover the TCP connect, the TLS handshake and the
     // HTTP/2 preface as well — and when it does not, the request times out while still PENDING
@@ -299,9 +303,6 @@ TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackExactlyOnce) {
     // an idle one — a latent load-sensitivity, not a flake in the product.
     ASSERT_TRUE(qb::http::run_sync(client->connect())) << "handshake failed before the timeout case could start";
     client->set_request_timeout(50ms);
-
-    std::atomic<int>   callbacks{0};
-    qb::http::Response response;
 
     qb::http::Request req;
     req.method() = qb::http::Method::GET;
@@ -330,14 +331,13 @@ TEST_F(CoroH2ClientTest, ActiveRequestTimeoutCompletesCallbackExactlyOnce) {
 }
 
 TEST_F(CoroH2ClientTest, MultipleActiveRequestTimeoutsEachCompleteOnce) {
-    auto client = make_test_client();
+    std::atomic<int>                callbacks{0};
+    std::vector<qb::http::Response> responses(2);
+    auto                            client = make_test_client();
     // Same reason as the case above: the handshake must not be inside the 50 ms budget, or these
     // requests time out on the PENDING path and stop testing the active one.
     ASSERT_TRUE(qb::http::run_sync(client->connect())) << "handshake failed before the timeout case could start";
     client->set_request_timeout(50ms);
-
-    std::atomic<int>                callbacks{0};
-    std::vector<qb::http::Response> responses(2);
 
     for (std::size_t i = 0; i < responses.size(); ++i) {
         qb::http::Request req;
@@ -367,10 +367,9 @@ TEST_F(CoroH2ClientTest, MultipleActiveRequestTimeoutsEachCompleteOnce) {
 // ---------------------------------------------------------------------------
 
 TEST_F(CoroH2ClientTest, InteropWithCallbackApiUnchanged) {
-    auto client = make_test_client();
-
     std::atomic<bool>  done{false};
     qb::http::Response response;
+    auto               client = make_test_client();
 
     qb::http::Request req;
     req.method() = qb::http::Method::GET;

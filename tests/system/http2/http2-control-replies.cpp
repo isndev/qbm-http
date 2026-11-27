@@ -30,6 +30,9 @@
  *     long as the server sent. Once the socket's buffers are full a thousand queue and the client closes the
  *     connection: the request it had in flight fails with the guard's reason, named once as the client's.
  *
+ * A case declares what its callbacks write BEFORE its client: a client answers every callback it still holds from its
+ * destructor (Huly QB-1246), and a case that fails returns early, so state declared after the client is dead by then.
+ *
  * @author qb - C++ Actor Framework
  * @copyright Copyright (c) 2011-2026 qb - isndev (cpp.actor)
  * Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
@@ -597,10 +600,10 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatPingsItsClientPastTheThousa
         "the client's session counts what its socket took: the protocol reads it (Huly QB-1270)");
     SolicitingPeer peer({SolicitingPeer::soliciting::pongs, 6, 500});
     ASSERT_NE(peer.port(), 0);
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    bool connected = false;
+    auto client    = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false); // self-signed test cert
     client->set_connect_timeout(5s);
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.done() || peer.goaway() || peer.eof(); }, 60s))
@@ -620,14 +623,14 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatPingsItsClientPastTheThousa
 TEST_F(Http2ClientControlRepliesWireTest, AServerWhoseFramesFallOnAClosedStreamIsNeverCutWhileItReads) {
     SolicitingPeer peer({SolicitingPeer::soliciting::resets, 6, 500, true, 1});
     ASSERT_NE(peer.port(), 0);
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    bool connected = false;
+    bool answered  = false;
+    auto client    = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false); // self-signed test cert
     client->set_connect_timeout(5s);
     client->disable_auto_reconnect();
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
-    bool answered = false;
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/closed")},
                                      [&](qb::http::Response response) { answered = response.status() == qb::http::status::NO_CONTENT; }));
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return peer.done() || peer.goaway() || peer.eof(); }, 60s))
@@ -656,16 +659,16 @@ TEST_F(Http2ClientControlRepliesWireTest, AServerThatNeverReadsIsCutOnceAThousan
     constexpr std::size_t rounds    = (std::size_t{64} << 20) / 13 / per_round + 1; // 64 MiB of RST_STREAM frames
     SolicitingPeer        peer({SolicitingPeer::soliciting::resets, rounds, per_round, false, 2});
     ASSERT_NE(peer.port(), 0);
-    auto client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
+    bool                       connected = false;
+    bool                       answered  = false;
+    std::optional<std::string> in_flight; // how the request the server never answers ended
+    auto                       client = qb::http2::make_client("https://localhost:" + std::to_string(peer.port()));
     client->set_verify_peer(false); // self-signed test cert
     client->set_connect_timeout(5s);
     client->set_request_timeout(120s); // the request in flight ends with the connection, not on its own
     client->disable_auto_reconnect();
-    bool connected = false;
     client->connect([&](bool ok, const std::string &) { connected = ok; });
     ASSERT_TRUE(ServerThread<GuardServer>::pump_until([&] { return connected; }));
-    bool                       answered = false;
-    std::optional<std::string> in_flight; // how the request the server never answers ended
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/closed")},
                                      [&](qb::http::Response response) { answered = response.status() == qb::http::status::NO_CONTENT; }));
     ASSERT_TRUE(client->push_request(qb::http::Request{qb::http::method::GET, qb::io::uri("/in-flight")},
