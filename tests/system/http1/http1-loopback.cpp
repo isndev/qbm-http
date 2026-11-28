@@ -55,6 +55,15 @@ pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::s
     return qb::http::test::expect_until(done, budget, "pump_loop_until");
 }
 
+/// The same for a worker thread, which turns a loop of its own while the case's thread serves: a peer's wait, which the
+/// kit never fails; a deadline reached is a failure all the same.
+template <typename F>
+void
+worker_pump_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20)) {
+    EXPECT_TRUE(qb::http::test::peer_wait_until(done, budget, qb::http::test::fail_wait::one_pass{}))
+        << "worker_pump_until: predicate not satisfied within " << budget.count() << "ms";
+}
+
 // ---- Host-header-on-the-wire fixture -------------------------------------
 
 class HostHeaderCaptureServer;
@@ -241,7 +250,7 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
                 client << qb::http::Chunk(STRING_MESSAGE, sizeof(STRING_MESSAGE) - 1) << qb::http::Chunk();
             }
 
-            pump_loop_until([] { return all_done(); });
+            worker_pump_until([] { return all_done(); });
             client_saw_non_ok.store(client.saw_non_ok.load());
         } catch (...) {
             worker_error = std::current_exception();
@@ -370,7 +379,8 @@ std::atomic<std::size_t> CookieEchoClient::cookie_count_seen{0};
 std::string              CookieEchoClient::session_cookie_seen;
 
 // Send a fixed raw HTTP/1.1 request over a connected socket and drain the
-// response header block (bounded), returning the accumulated bytes.
+// response header block (bounded), returning the accumulated bytes. For a worker
+// thread, while the case's thread serves: its wait is a peer's.
 std::string
 raw_request_response(std::uint16_t port, const std::string &raw) {
     qb::io::tcp::socket sock;
@@ -379,17 +389,17 @@ raw_request_response(std::uint16_t port, const std::string &raw) {
     sock.write(raw.data(), static_cast<int>(raw.size()));
 
     std::string response;
-    // 600 reads, 2 ms after each that brought nothing, as a budget.
-    qb::http::test::wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 1200ms, "raw response",
-                               [&] {
-                                   char buf[512];
-                                   int  n = sock.read(buf, sizeof(buf));
-                                   if (n > 0) {
-                                       response.append(buf, static_cast<std::size_t>(n));
-                                   } else {
-                                       std::this_thread::sleep_for(2ms);
-                                   }
-                               });
+    // 600 reads, 2 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 600 x 16 ms as a budget.
+    qb::http::test::peer_wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 9600ms,
+                                    [&] {
+                                        char buf[512];
+                                        int  n = sock.read(buf, sizeof(buf));
+                                        if (n > 0) {
+                                            response.append(buf, static_cast<std::size_t>(n));
+                                        } else {
+                                            std::this_thread::sleep_for(2ms);
+                                        }
+                                    });
     sock.close();
     return response;
 }
@@ -581,7 +591,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
                 client << r;
             }
 
-            pump_loop_until([] { return all_done(); });
+            worker_pump_until([] { return all_done(); });
             client_saw_non_ok.store(client.saw_non_ok.load());
         } catch (...) {
             worker_error = std::current_exception();

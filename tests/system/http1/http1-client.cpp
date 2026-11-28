@@ -3740,6 +3740,7 @@ TEST(Http1ClientTest, RedirectThrowingFinalCallbackIsContainedOnceAndReleasesCap
     // A dedicated thread gives this lifetime oracle a fresh thread-local listener.
     // No cleanup runs before its final no-work and capture-release assertions.
     std::thread([] {
+        const qb::http::test::fail_wait::case_on_this_thread here; // the body of the case: its waits are this thread's
         qb::io::async::init();
         auto &listener = qb::io::async::listener::current;
         RecordProperty("inherited_active_watchers", listener.loop().active_count());
@@ -4725,19 +4726,27 @@ private:
                 return peer.is_open();
             },
             deadline);
-        if (!peer.is_open() || peer.set_nonblocking(false) != 0)
+        // Read and written without blocking: against a client that has stopped reading and left the connection open, a
+        // blocking write never returns and this thread is never joined -- the case would hang instead of failing.
+        if (!peer.is_open() || peer.set_nonblocking(true) != 0)
             return;
         std::string request;
         char        buffer[1024];
-        while (request.find("\r\n\r\n") == std::string::npos) {
-            const int n = peer.read(buffer, sizeof(buffer));
-            if (n <= 0)
-                return;
-            request.append(buffer, static_cast<std::size_t>(n));
-        }
-        // Written without blocking: against a client that has stopped reading and left the connection open, a blocking
-        // write never returns and this thread is never joined -- the case would hang instead of failing.
-        if (peer.set_nonblocking(true) != 0)
+        bool        gone = false; // the client closed, or its connection failed, before its request was whole
+        // Each look reads what has come of the request.
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (_stop)
+                    return true;
+                const int n = peer.read(buffer, sizeof(buffer));
+                if (n > 0)
+                    request.append(buffer, static_cast<std::size_t>(n));
+                else if (n == 0 || !qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
+                    gone = true;
+                return gone || request.find("\r\n\r\n") != std::string::npos;
+            },
+            deadline);
+        if (gone || request.find("\r\n\r\n") == std::string::npos)
             return;
         const auto put = [&](std::string_view bytes) {
             // Each look writes what the socket takes. It ends on all of it, on a client that closed (a body past its
@@ -4759,14 +4768,17 @@ private:
         };
         const std::string piece(kMiB, 'b');
         bool              written = put(_head);
-        for (std::size_t left = _body; written && left;) {
-            const auto n = std::min(left, piece.size());
-            if (_chunked) {
-                written = put(hex(n) + "\r\n") && put(std::string_view(piece).substr(0, n)) && put("\r\n");
-            } else
-                written = put(std::string_view(piece).substr(0, n));
-            left -= n;
-        }
+        std::size_t       left    = _body;
+        // Each turn writes one piece of the body, at most 1 MiB of it.
+        qb::http::test::peer_wait_until([&] { return !written || left == 0; }, deadline,
+                                        [&] {
+                                            const auto n = std::min(left, piece.size());
+                                            if (_chunked) {
+                                                written = put(hex(n) + "\r\n") && put(std::string_view(piece).substr(0, n)) && put("\r\n");
+                                            } else
+                                                written = put(std::string_view(piece).substr(0, n));
+                                            left -= n;
+                                        });
         if (written && _chunked)
             written = put("0\r\n\r\n");
         if (_close) {
@@ -5045,6 +5057,21 @@ statuses(std::string const &all) {
     return out;
 }
 
+// What a connection that stays open answers, read until the statuses of @p expected are in: @p reads reads at most, of
+// three seconds each.
+std::string
+read_statuses(raw_socket &peer, std::string_view expected, int reads) {
+    std::string all;
+    int         made = 0;
+    qb::http::test::wait_until([&] { return made == reads || statuses(all).size() >= expected.size(); },
+                               std::chrono::seconds(3) * reads + std::chrono::seconds(2), "read_statuses",
+                               [&] {
+                                   all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+                                   ++made;
+                               });
+    return all;
+}
+
 const std::string http10_chunked =
     "POST /up HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
 } // namespace http1_framing_on_the_wire_test
@@ -5096,9 +5123,7 @@ TEST(Http1ClientTest, AnHttp10RequestWithTransferEncodingIsServedThenItsConnecti
         raw_socket peer(thread.port());
         peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\nPOST /up HTTP/1.0\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc"
                       "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
-        std::string all;
-        for (int reads = 0; reads < 6 && statuses(all).size() < std::string_view("200 200 200").size(); ++reads)
-            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        const std::string all = read_statuses(peer, "200 200 200", 6);
         EXPECT_EQ(statuses(all), "200 200 200") << all;
     }
 }
@@ -5150,9 +5175,7 @@ TEST(Http1ClientTest, TheKeepAliveOverrideNeverKeepsARequestThatSaysClose) {
           std::string("POST /up HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")}) {
         raw_socket peer(thread.port());
         peer.send_all("GET /persist HTTP/1.1\r\nHost: a\r\n\r\n" + kept + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
-        std::string all;
-        for (int reads = 0; reads < 6 && statuses(all).size() < std::string_view("200 200 200").size(); ++reads)
-            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        const std::string all = read_statuses(peer, "200 200 200", 6);
         EXPECT_EQ(statuses(all), "200 200 200") << kept << all;
     }
 }
@@ -5199,9 +5222,7 @@ TEST(Http1ClientTest, ARequestThatSaysCloseEndsItsConnectionWhateverElseItsConne
           std::string("GET /now HTTP/1.1\r\nHost: a\r\nConnection: close\tx\r\n\r\n")}) { // one option, `close<HTAB>x`: not `close`
         raw_socket peer(thread.port());
         peer.send_all(kept + "GET /now HTTP/1.1\r\nHost: a\r\n\r\n");
-        std::string all;
-        for (int reads = 0; reads < 4 && statuses(all).size() < std::string_view("200 200").size(); ++reads)
-            all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+        const std::string all = read_statuses(peer, "200 200", 4);
         EXPECT_EQ(statuses(all), "200 200") << kept << all;
     }
 }

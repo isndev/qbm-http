@@ -9,35 +9,54 @@
  * case whose callbacks capture locals declared AFTER its client crashes when it fails: it returns early, those locals
  * die first, and the client's destructor writes into them -- under ASan a stack-use-after-scope that ends the binary
  * with no summary and no later case. Such a case passes as long as nothing fails, so no green run can see it.
- * `dev/agent/run-fail-wait.py` runs each case of a binary alone with k = 1, 2, ... until the case no longer reaches a
- * k-th wait, and requires every injected failure to end as one failed case.
+ * `dev/agent/run-fail-wait.py` runs each case of a binary alone, one wait failed a run, and requires every injected
+ * failure to end as one failed case.
  *
- * What a wait is, and where the suite has one. A WAIT is a loop that passes time -- it turns the event loop, sleeps,
- * or compares the clock -- until a condition ends it. The suite has one such loop, `fail_wait::wait()` here, reached
- * three ways: `qb::http::test::wait_until()`; `expect_until()`, which also records a failure at its deadline; and
- * `peer_wait_until()`, for a scripted peer on a thread of its own, which the kit never fails. A test's own helpers
- * (`ServerThread::pump_until`, the fixtures' `pump()`, the raw clients' `read_until()` and `send()`, ...) call them and
- * run no loop of their own: `dev/agent/run-fail-wait.py --lint` refuses one anywhere else under qbm/http/tests, and a
- * second definition of one of the three names. Two loops are no waits: a WINDOW, whose only condition is its bound
- * (the time, or a count) and which nothing leaves early, always runs its whole span; a loop in a destructor is the net
- * of a case that has ended. So the kit can fail every `wait_until()` / `expect_until()` the lint counts -- not the
- * peers' waits, counted apart, and not what waits with no loop of its own (a condition variable's `wait_for`, a
- * blocking `run_sync()`), which the lint does not see.
+ * What a wait is, and what holds that this is the one. A WAIT is a loop that passes time -- it turns the event loop,
+ * sleeps, polls, compares the clock, or calls a function of the tests that does -- until a condition ends it. The kit's
+ * is `fail_wait::wait()` here, reached three ways: `qb::http::test::wait_until()`; `expect_until()`, which also records
+ * a failure at its deadline; and `peer_wait_until()`, for a scripted peer on a thread of its own, which the kit never
+ * fails. A test's own helpers (`ServerThread::pump_until`, the fixtures' `pump()`, the raw clients' `read_until()` and
+ * `send()`, ...) call them and run no loop of their own: `dev/agent/run-fail-wait.py --lint` refuses, anywhere else
+ * under qbm/http/tests, every such loop it can read, a second declaration of one of the three names, and a call of
+ * `fail_wait::wait()` itself. Two loops are no waits: a WINDOW, whose only condition is its bound (the time, a count,
+ * the items of a range) and which nothing leaves early, always runs its whole span; a loop in a destructor is the net
+ * of a case that has ended. What the lint reads is text, and that is its limit -- its docstring lists what it cannot
+ * see (a wait with no loop of its own, such as a condition variable's `wait_for` or a blocking `run_sync()`; a pass
+ * behind a function defined outside the tests, a pointer or a macro; a loop on a socket made blocking; recursion and
+ * `goto`). So the claim is the lint's: every wait it can read is this one, and the kit can fail each `wait_until()` /
+ * `expect_until()` it counts -- not the peers' waits, counted apart.
+ *
+ * The wait itself is one look a turn: it looks at its condition, gives up if its deadline has passed, turns, and looks
+ * again -- never twice with no turn between, so a condition that does something (reads a socket, accepts a
+ * connection) does it once a turn, and not once more after the deadline.
+ *
+ * Whose thread. `wait_until()` and `expect_until()` are the waits of the case, on the thread the cases run on: called on
+ * another thread they record a failure, as `peer_wait_until()` does on the cases' thread -- a failure injected off the
+ * cases' thread would be numbered by a race and recorded behind the case's back. A case whose body runs on a thread of
+ * its own says so there, with a `fail_wait::case_on_this_thread` that lives as long as that body.
  *
  * A failable wait calls `fire()` first: a wait that fires records one `ADD_FAILURE()` and returns false, which is what
- * a wait that reached its deadline returns. After every case, once its
- * fixture is destroyed, a listener turns the calling thread's loop for `k_turn`: what the case left armed runs, as it
- * would under the next case of the binary, and the line it prints says how many waits the case reached.
+ * a wait that reached its deadline returns. After every case, once its fixture is destroyed, a listener turns the
+ * calling thread's loop for `k_turn`: what the case left armed runs, as it would under the next case of the binary,
+ * and the lines it prints say which waits the case reached, and where.
  *
- * Unset, nothing changes: `fire()` reads a value computed once and returns false, no listener is installed and nothing
- * is printed. A value that is set but is not a positive number ends the process (exit 2) before the first case, saying
- * so -- a battery that misspelt its number must not read as one whose waits were never reached.
+ * What the variable may say: `k`, the k-th failable wait of the process fails; `0`, none does -- the run a case gets
+ * with the kit armed and nothing failed; `K+J`, past the K-th wait, the first wait of the J-th STRETCH fails -- a
+ * stretch being consecutive waits at one place in the source (one `wait_until()` or `expect_until()` call, reached
+ * again and again: a helper writing a thousand frames), which the runner fails once, at its first wait, in a case that
+ * reaches more waits than it fails one by one. Unset, nothing changes: `fire()` reads a value computed once and returns
+ * false, no listener is installed and nothing is printed. Anything else ends the process (exit 2) before the first
+ * case, saying so -- a battery that misspelt its number must not read as one whose waits were never reached.
  *
  * Every line it prints starts with `[fail_wait] `, which is what the runner reads:
- *   - `[fail_wait] armed: wait <k> of this process fails` -- on stdout, before the first case: a death test's child
- *     runs the binary again, and the death test matches what that child writes to stderr;
- *   - `[fail_wait] injected: wait <k> (<helper>) fails, as at its deadline` -- the failure's message;
- *   - `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for <ms> ms` -- on stderr, per case.
+ *   - `[fail_wait] armed: wait <k> of this process fails` (or `no wait of this process fails`, or `past wait <K>, the
+ *     first wait of stretch <J> fails`) -- on stdout, before the first case: a death test's child runs the binary
+ *     again, and the death test matches what that child writes to stderr;
+ *   - `[fail_wait] injected: wait <k> (<helper>) at <file>:<line> fails, as at its deadline` -- the failure's message;
+ *   - after a case, on stderr: `[fail_wait] site <file>:<line> (<helper>): <n> waits, the first wait <k>` for every
+ *     place a wait was reached from, `[fail_wait] past wait <K>: <n> waits opened a stretch` under `K+J`, then
+ *     `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for <ms> ms`.
  *
  * It includes gtest and qb-io's `async.h`, and is included by every test file that waits.
  *
@@ -48,12 +67,17 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <source_location>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -61,70 +85,147 @@
 
 namespace qb::http::test::fail_wait {
 
-/// The environment variable that arms the kit: the number of the wait, counted from 1 over the process, that fails.
+/// The environment variable that arms the kit: `k`, `0` or `K+J` (see the file's header).
 inline constexpr char const *k_variable = "QBM_HTTP_TEST_FAIL_WAIT_AT";
 
 /// How long the loop is turned after every case once the kit is armed.
 inline constexpr std::chrono::milliseconds k_turn{300};
 
-/// The wait that fails, 0 when the kit is off. A value that is set but is not a positive number ends the process.
-inline int
-target() noexcept {
-    static int const k = [] {
+/// What the variable asks for.
+struct plan {
+    bool armed   = false; ///< the variable is set: the listener is installed, the waits are counted
+    int  at      = 0;     ///< `k`: the wait that fails, counted from 1 over the process; 0, none
+    int  past    = 0;     ///< `K+J`: the wait past which stretches are counted
+    int  stretch = 0;     ///< `K+J`: the stretch whose first wait fails, counted from 1 past `past`; 0 unless that form
+};
+
+/// The variable, read once. A value that is set and is none of the three forms ends the process.
+inline plan const &
+asked() noexcept {
+    static plan const said = [] {
+        plan              out;
         char const *const value = std::getenv(k_variable);
         if (value == nullptr)
-            return 0;
+            return out;
         char      *end = nullptr;
         long const n   = std::strtol(value, &end, 10);
-        if (end == value || *end != '\0' || n < 1 || n > INT_MAX) {
-            std::fprintf(stderr, "[fail_wait] %s=\"%s\" is not a positive number: nothing runs\n", k_variable, value);
+        bool       ok  = end != value && n >= 0 && n <= INT_MAX;
+        long       j   = 0;
+        if (ok && *end == '+') {
+            char const *const second = end + 1;
+            j                        = std::strtol(second, &end, 10);
+            ok                       = end != second && j >= 1 && j <= INT_MAX;
+        }
+        if (!ok || *end != '\0') {
+            std::fprintf(stderr, "[fail_wait] %s=\"%s\" names no wait (k, 0 or K+J): nothing runs\n", k_variable, value);
             std::fflush(stderr);
             std::_Exit(2);
         }
-        return static_cast<int>(n);
+        out.armed = true;
+        if (j != 0) {
+            out.past    = static_cast<int>(n);
+            out.stretch = static_cast<int>(j);
+        } else
+            out.at = static_cast<int>(n);
+        return out;
     }();
-    return k;
+    return said;
 }
 
-/// The waits the process reached so far, fired or not; counted only while the kit is armed.
-inline std::atomic<int> &
-reached() noexcept {
-    static std::atomic<int> count{0};
-    return count;
+/// A place in the source a failable wait was reached from, and how often.
+struct site {
+    char const *file;
+    unsigned    line;
+    char const *helper; ///< the name its first wait gave
+    int         count;
+    int         first; ///< the number of its first wait
+};
+
+/// What the kit counts once armed: the waits reached, where from, and the stretches they make.
+struct book {
+    std::mutex        guard;
+    int               reached   = 0; ///< failable waits reached so far, fired or not
+    int               stretches = 0; ///< waits past `plan::past` whose place differs from the wait before them
+    char const       *file      = nullptr;
+    unsigned          line      = 0; ///< the place of the last wait reached
+    std::vector<site> sites;
+};
+
+inline book &
+kept() noexcept {
+    static book *const one = new book; // never destroyed: a wait may be reached while the process ends
+    return *one;
 }
 
-/// Called by a wait helper before it waits: true when this wait is the one that fails, its failure recorded.
+/// A source file's name without its directories.
+inline char const *
+leaf(char const *path) noexcept {
+    char const *name = path;
+    for (char const *c = path; *c != '\0'; ++c)
+        if (*c == '/' || *c == '\\')
+            name = c + 1;
+    return name;
+}
+
+/// Called by a failable wait before it waits: true when this wait is the one that fails, its failure recorded.
 inline bool
-fire(char const *const helper) {
-    int const k = target();
-    if (k == 0)
+fire(char const *const helper, std::source_location const &where) {
+    plan const &said = asked();
+    if (!said.armed)
         return false;
-    if (reached().fetch_add(1, std::memory_order_relaxed) + 1 != k)
+    book                 &b = kept();
+    std::lock_guard const lock(b.guard);
+    int const             k     = ++b.reached;
+    bool const            opens = b.file == nullptr || b.line != where.line() || std::strcmp(b.file, where.file_name()) != 0;
+    b.file                      = where.file_name();
+    b.line                      = where.line();
+    auto const known = std::find_if(b.sites.begin(), b.sites.end(),
+                                    [&](site const &s) { return s.line == where.line() && std::strcmp(s.file, where.file_name()) == 0; });
+    if (known == b.sites.end())
+        b.sites.push_back({where.file_name(), where.line(), helper, 1, k});
+    else
+        ++known->count;
+    if (opens && k > said.past)
+        ++b.stretches;
+    if (said.stretch != 0 ? !(opens && k > said.past && b.stretches == said.stretch) : k != said.at)
         return false;
-    ADD_FAILURE() << "[fail_wait] injected: wait " << k << " (" << helper << ") fails, as at its deadline";
+    ADD_FAILURE() << "[fail_wait] injected: wait " << k << " (" << helper << ") at " << leaf(where.file_name()) << ':' << where.line()
+                  << " fails, as at its deadline";
     return true;
 }
 
-/// Turns the loop after every case, once the case's fixture is gone, and says how many waits it reached.
+/// Turns the loop after every case, once the case's fixture is gone, and says which waits it reached.
 class after_case final : public ::testing::EmptyTestEventListener {
 public:
     void
     OnTestEnd(::testing::TestInfo const &info) override {
         for (auto const until = std::chrono::steady_clock::now() + k_turn; std::chrono::steady_clock::now() < until;)
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+        book                 &b = kept();
+        std::lock_guard const lock(b.guard);
+        for (site const &s : b.sites)
+            std::fprintf(stderr, "[fail_wait] site %s:%u (%s): %d waits, the first wait %d\n", leaf(s.file), s.line, s.helper, s.count,
+                         s.first);
+        if (asked().stretch != 0)
+            std::fprintf(stderr, "[fail_wait] past wait %d: %d waits opened a stretch\n", asked().past, b.stretches);
         std::fprintf(stderr, "[fail_wait] after %s.%s: %d waits reached, the loop turned for %lld ms\n", info.test_suite_name(), info.name(),
-                     reached().load(std::memory_order_relaxed), static_cast<long long>(k_turn.count()));
+                     b.reached, static_cast<long long>(k_turn.count()));
         std::fflush(stderr);
     }
 };
 
 /// Installs the listener before the first case when the kit is armed; nothing at all otherwise.
 inline bool const installed = [] {
-    int const k = target();
-    if (k == 0)
+    plan const &said = asked();
+    if (!said.armed)
         return false;
     ::testing::UnitTest::GetInstance()->listeners().Append(new after_case);
-    std::fprintf(stdout, "[fail_wait] armed: wait %d of this process fails\n", k);
+    if (said.stretch != 0)
+        std::fprintf(stdout, "[fail_wait] armed: past wait %d, the first wait of stretch %d fails\n", said.past, said.stretch);
+    else if (said.at != 0)
+        std::fprintf(stdout, "[fail_wait] armed: wait %d of this process fails\n", said.at);
+    else
+        std::fprintf(stdout, "[fail_wait] armed: no wait of this process fails\n");
     std::fflush(stdout);
     return true;
 }();
@@ -186,8 +287,15 @@ struct no_turn {
     operator()() const noexcept {}
 };
 
-/// The bound of a wait that has none: a service loop, which ends when its condition says so.
-inline constexpr std::chrono::steady_clock::time_point never = std::chrono::steady_clock::time_point::max();
+/// The bound of a wait that has none: a peer's service loop, which ends when its condition says so. A type of its own,
+/// which only `peer_wait_until()` takes: a wait the kit can fail always has a deadline.
+struct never_t {
+    explicit constexpr never_t() noexcept = default;
+};
+inline constexpr never_t never{};
+
+/// The instant no wait reaches: what `never` is to the wait's loop, which then reads no clock.
+inline constexpr std::chrono::steady_clock::time_point no_deadline = std::chrono::steady_clock::time_point::max();
 
 /// The instant a wait gives up, from what its caller gave: that instant, or a budget from now.
 inline std::chrono::steady_clock::time_point
@@ -200,31 +308,68 @@ deadline(std::chrono::duration<Rep, Period> const budget) noexcept {
     return std::chrono::steady_clock::now() + budget;
 }
 
+/// The same for a peer's wait, which may have none.
+inline std::chrono::steady_clock::time_point
+peer_deadline(never_t) noexcept {
+    return no_deadline;
+}
+template <typename Bound>
+std::chrono::steady_clock::time_point
+peer_deadline(Bound const &bound) noexcept {
+    return deadline(bound);
+}
+
 /// The thread the cases run on: the one that initialised this, gtest's main thread.
 inline std::thread::id const case_thread = std::this_thread::get_id();
 
-/// The one wait of the suite, which `wait_until()`, `expect_until()` and `peer_wait_until()` are: looks at `done`,
-/// turns, until it holds or `until` is reached. Injected and armed, its k-th call returns false at once, its failure
-/// recorded (`fire()`).
+/// True on a thread that a `case_on_this_thread` declared the case's.
+inline thread_local bool case_declared_here = false;
+
+/// Declares, for as long as it lives, that the body of the case runs on the calling thread -- a case that hands its
+/// whole body to a `std::thread` and joins it. The case's waits are then that thread's.
+class case_on_this_thread {
+public:
+    case_on_this_thread() noexcept
+        : _before(case_declared_here) {
+        case_declared_here = true;
+    }
+    case_on_this_thread(case_on_this_thread const &)            = delete;
+    case_on_this_thread &operator=(case_on_this_thread const &) = delete;
+    ~case_on_this_thread() {
+        case_declared_here = _before;
+    }
+
+private:
+    bool const _before;
+};
+
+/// Whether the calling thread is the one the case's body runs on.
+inline bool
+on_the_cases_thread() noexcept {
+    return case_declared_here || std::this_thread::get_id() == case_thread;
+}
+
+/// The one wait of the suite, which `wait_until()`, `expect_until()` and `peer_wait_until()` are: one look at `done` a
+/// turn -- a look, the deadline, a turn -- until it holds or `until` has passed. Injected and armed, the call the
+/// variable names returns false at once, its failure recorded (`fire()`).
 template <typename Done, typename Turn>
 bool
 wait(Done &done, std::chrono::steady_clock::time_point const until, char const *const helper, Turn &turn, bool const fails_at_deadline,
-     bool const injected) {
-    if (injected && fire(helper))
+     bool const injected, std::source_location const &where) {
+    if (injected && fire(helper, where))
         return false;
     auto const began = std::chrono::steady_clock::now();
-    while (!done()) {
-        if (until != never && std::chrono::steady_clock::now() >= until) { // a service loop reads no clock
-            if (done())
-                return true;
+    for (;;) {
+        if (done())
+            return true;
+        if (until != no_deadline && std::chrono::steady_clock::now() >= until) { // a service loop reads no clock
             if (fails_at_deadline)
                 ADD_FAILURE() << helper << ": predicate not satisfied within "
-                              << std::chrono::duration_cast<std::chrono::milliseconds>(until - began).count() << "ms";
+                              << std::chrono::round<std::chrono::milliseconds>(until - began).count() << "ms";
             return false;
         }
         turn();
     }
-    return true;
 }
 
 } // namespace qb::http::test::fail_wait
@@ -241,18 +386,26 @@ namespace qb::http::test {
  * names the wait in the kit's line; @p turn is what happens between two looks at @p done: one pass of this thread's
  * loop by default (`fail_wait::one_pass`), a pass and a sleep (`pass_or_sleep`, `pass_then_sleep`, `sleep_then_pass`),
  * a sleep alone for what another thread does (`nap`), nothing when @p done itself blocks (`no_turn`), or the caller's.
+ * @p done is looked at once a turn. It is the case's wait: off the thread the cases run on it records a failure
+ * (`fail_wait::case_on_this_thread`). @p where is the caller's place in the source, which the kit's lines name.
  */
 template <typename Done, typename Bound, typename Turn = fail_wait::one_pass>
 bool
-wait_until(Done &&done, Bound const &bound, char const *const helper = "wait_until", Turn &&turn = Turn{}) {
-    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, false, true);
+wait_until(Done &&done, Bound const &bound, char const *const helper = "wait_until", Turn &&turn = Turn{},
+           std::source_location const where = std::source_location::current()) {
+    if (!fail_wait::on_the_cases_thread())
+        ADD_FAILURE() << "[fail_wait] wait_until() off the thread the cases run on (" << helper << "): a peer's wait is peer_wait_until()";
+    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, false, true, where);
 }
 
 /// `wait_until()` that records a non-fatal failure at its deadline, naming @p helper and the time it waited.
 template <typename Done, typename Bound, typename Turn = fail_wait::one_pass>
 bool
-expect_until(Done &&done, Bound const &bound, char const *const helper = "expect_until", Turn &&turn = Turn{}) {
-    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, true, true);
+expect_until(Done &&done, Bound const &bound, char const *const helper = "expect_until", Turn &&turn = Turn{},
+             std::source_location const where = std::source_location::current()) {
+    if (!fail_wait::on_the_cases_thread())
+        ADD_FAILURE() << "[fail_wait] expect_until() off the thread the cases run on (" << helper << "): a peer's wait is peer_wait_until()";
+    return fail_wait::wait(done, fail_wait::deadline(bound), helper, turn, true, true, where);
 }
 
 /**
@@ -267,9 +420,9 @@ expect_until(Done &&done, Bound const &bound, char const *const helper = "expect
 template <typename Done, typename Bound, typename Turn = fail_wait::nap>
 bool
 peer_wait_until(Done &&done, Bound const &bound, Turn &&turn = Turn{}) {
-    if (std::this_thread::get_id() == fail_wait::case_thread)
+    if (fail_wait::on_the_cases_thread())
         ADD_FAILURE() << "[fail_wait] peer_wait_until() on the thread the cases run on: a case's wait is wait_until()";
-    return fail_wait::wait(done, fail_wait::deadline(bound), "peer_wait_until", turn, false, false);
+    return fail_wait::wait(done, fail_wait::peer_deadline(bound), "peer_wait_until", turn, false, false, std::source_location::current());
 }
 
 /**

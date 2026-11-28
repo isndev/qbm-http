@@ -536,21 +536,25 @@ template <typename Receive>
 std::vector<std::string>
 drain_buffered(Receive receive) {
     std::vector<std::string> payloads;
-    for (;;) {
-        auto pending = receive();
-        pending.handle().resume();
-        {
-            int turn = 0; // sixteen passes at most
-            qb::http::test::wait_until([&] { return turn == 16 || pending.handle().done(); }, std::chrono::seconds(5), "wait_until",
-                                       [&turn] {
-                                           qb::io::async::run(EVRUN_NOWAIT);
-                                           ++turn;
-                                       });
-        }
-        if (!pending.handle().done())
-            return payloads;
-        payloads.push_back(pending.await_resume().payload);
-    }
+    bool                     empty = false; // a receive found nothing buffered
+    // Each turn is one receive, given sixteen passes of the loop to complete.
+    qb::http::test::wait_until([&] { return empty; }, std::chrono::seconds(30), "drain_buffered",
+                               [&] {
+                                   auto pending = receive();
+                                   pending.handle().resume();
+                                   int turn = 0; // sixteen passes at most
+                                   qb::http::test::wait_until([&] { return turn == 16 || pending.handle().done(); }, std::chrono::seconds(5),
+                                                              "wait_until",
+                                                              [&turn] {
+                                                                  qb::io::async::run(EVRUN_NOWAIT);
+                                                                  ++turn;
+                                                              });
+                                   if (pending.handle().done())
+                                       payloads.push_back(pending.await_resume().payload);
+                                   else
+                                       empty = true;
+                               });
+    return payloads;
 }
 
 template <typename Endpoint>

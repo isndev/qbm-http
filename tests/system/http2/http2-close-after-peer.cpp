@@ -292,8 +292,15 @@ protected:
     still_sending(Http2RawClient &client) {
         client.write_budget = 300ms;
         std::size_t pushed  = 0;
-        while (pushed < std::size_t{256} << 10 && client.solicit(16))
-            pushed += 16 * 17;
+        bool        refused = false; // the socket took no more within the budget of a write
+        // Each turn is one write of sixteen PING frames: 964 of them at most, each within its own budget.
+        qb::http::test::wait_until([&] { return refused || pushed >= std::size_t{256} << 10; }, 60s, "still sending",
+                                   [&] {
+                                       if (client.solicit(16))
+                                           pushed += 16 * 17;
+                                       else
+                                           refused = true;
+                                   });
         client.write_budget = 2s;
         return pushed;
     }
@@ -421,20 +428,36 @@ private:
     /// Write all of @p bytes; false once the connection is gone or the time is up.
     bool
     send(std::vector<std::uint8_t> const &bytes) {
-        std::size_t off = 0;
-        while (off < bytes.size()) {
-            if (over())
-                return false;
-            const int n = _sock.write(bytes.data() + off, bytes.size() - off);
-            if (n < 0)
-                return false;
-            if (n == 0) {
-                wait_for(POLLOUT);
-                continue;
-            }
-            off += static_cast<std::size_t>(n);
-        }
-        return true;
+        std::size_t off    = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now, which
+        // the turn then polls.
+        qb::http::test::peer_wait_until(
+            [&] {
+                if (over()) {
+                    failed = true;
+                    return true;
+                }
+                int n = 1;
+                while (n > 0 && off < bytes.size()) {
+                    n = _sock.write(bytes.data() + off, bytes.size() - off);
+                    if (n > 0)
+                        off += static_cast<std::size_t>(n);
+                }
+                failed = n < 0;
+                return failed || off == bytes.size();
+            },
+            _deadline, [this] { wait_for(POLLOUT); });
+        return !failed && off == bytes.size();
+    }
+    /// Reads until @p done holds; false once the connection is over or the time is up first.
+    template <typename Done>
+    bool
+    read_until(Done &&done) {
+        bool gone = false;
+        // Each look reads once, in a poll of its own (read_some()).
+        return qb::http::test::peer_wait_until([&] { return done() || (gone = !read_some()); }, _deadline, qb::http::test::fail_wait::no_turn{})
+               && !gone;
     }
     /// One read, its complete frames taken in; false once the connection is over or the time is up.
     bool
@@ -500,16 +523,19 @@ private:
         std::size_t pongs = _pongs;
         if (!send(round(10000)))
             return false;
-        while (_goaways == 0) {
-            while (_pongs == pongs && _goaways == 0) {
-                if (!read_some())
-                    return false;
-            }
-            pongs = _pongs;
-            if (_goaways == 0 && !send(round(1000)))
-                return false;
-        }
-        return true;
+        bool gone = false;
+        // Each turn waits for the PONG of the round before, then sends the next one: until the client's GOAWAY.
+        qb::http::test::peer_wait_until([&] { return gone || _goaways != 0; }, _deadline,
+                                        [&] {
+                                            if (!read_until([&] { return _pongs != pongs || _goaways != 0; })) {
+                                                gone = true;
+                                                return;
+                                            }
+                                            pongs = _pongs;
+                                            if (_goaways == 0 && !send(round(1000)))
+                                                gone = true;
+                                        });
+        return !gone && _goaways != 0;
     }
 
     void
@@ -548,17 +574,11 @@ private:
 
     void
     play() {
-        while (!(_answered && _acked)) {
-            if (!read_some())
-                return;
-        }
+        if (!read_until([this] { return _answered && _acked; }))
+            return;
         _ready = true;
-        if (_provoke != provoke::nothing) {
-            while (!_request_seen) {
-                if (!read_some())
-                    return;
-            }
-        }
+        if (_provoke != provoke::nothing && !read_until([this] { return _request_seen; }))
+            return;
         if (_provoke == provoke::idle_stream_headers) {
             std::vector<std::uint8_t> frame;
             append_frame(frame, kHeaders, kEndStream | kEndHeaders, 5, {0x88}); // stream 5: idle, the client's request is 1

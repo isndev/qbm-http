@@ -530,11 +530,17 @@ TEST_F(Http2StreamWireTest, TheStreamWindowBoundsTheServerAndAWindowUpdateResume
     EXPECT_GE(g.max_pending.load(), std::size_t{32} * 1024) << "the windows held the pieces: pending() counts them";
     EXPECT_FALSE(g.wait_verdict_seen) << "nothing is refused for a window: `wait` is for the hard cap";
     // Grant the window piece by piece: each update lets 16 KiB more go, and the connection's window too.
-    for (int i = 0; i < 20 && !c.stream(id).end_stream; ++i) {
-        ASSERT_TRUE(c.window_update(id, 16384));
-        ASSERT_TRUE(c.window_update(0, 16384));
-        c.read_for(30ms);
-    }
+    int  grants  = 0;
+    bool granted = true; // every WINDOW_UPDATE was written
+    qb::http::test::wait_until([&] { return !granted || grants == 20 || c.stream(id).end_stream; }, 60s, "the window, granted piece by piece",
+                               [&] {
+                                   granted = c.window_update(id, 16384) && c.window_update(0, 16384);
+                                   if (!granted)
+                                       return;
+                                   c.read_for(30ms);
+                                   ++grants;
+                               });
+    ASSERT_TRUE(granted);
     ASSERT_TRUE(c.read_until([&] { return c.stream(id).end_stream; }));
     EXPECT_EQ(c.stream(id).data_bytes, std::size_t{256} * 1024);
     EXPECT_GE(g.waits.load(), 1);

@@ -232,7 +232,7 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
     sock.write(upgrade.data(), static_cast<int>(upgrade.size()));
 
     std::string response;
-    // 500 looks 5 ms apart, as a budget: each look reads what came.
+    // 500 looks 5 ms apart, each reading what came: such a sleep is 16 ms on Windows, so 500 x 16 ms as a budget.
     wait_until(
         [&] {
             char buf[512];
@@ -242,7 +242,7 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
             }
             return response.find("\r\n\r\n") != std::string::npos;
         },
-        2500ms, "ws handshake", fail_wait::nap{5ms});
+        8000ms, "ws handshake", fail_wait::nap{5ms});
     ASSERT_NE(response.find("101"), std::string::npos) << "handshake failed:\n" << response;
 }
 
@@ -256,8 +256,8 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
 [[nodiscard]] inline std::string
 read_http_response(qb::io::tcp::socket &sock) {
     std::string response;
-    // 500 reads, 5 ms after each that brought nothing, as a budget.
-    wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 2500ms, "read_http_response",
+    // 500 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 500 x 16 ms as a budget.
+    wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 8000ms, "read_http_response",
                [&] {
                    char buf[512];
                    int  n = sock.read(buf, sizeof(buf));

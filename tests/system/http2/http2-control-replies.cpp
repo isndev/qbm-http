@@ -214,7 +214,9 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatReadsMaySolicitRepliesPastTheThou
         };
         const std::size_t before = replies();
         std::size_t       asked  = 0;
-        for (int batch = 0; batch < 6 && !client.goaway_seen && !client.eof; ++batch) {
+        for (int batch = 0; batch < 6; ++batch) {
+            if (client.goaway_seen || client.eof)
+                continue; // the connection was closed on it: nothing more is solicited
             ASSERT_TRUE(client.solicit(500, settings ? Http2RawClient::soliciting::settings : Http2RawClient::soliciting::pings));
             asked += 500;
             ASSERT_TRUE(client.read_until([&] { return replies() - before == asked || client.goaway_seen; }, 30s))
@@ -309,10 +311,12 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         const std::size_t before    = read();
         std::size_t       solicited = 0;
         bool              taking    = true; // the server still takes what the client writes
-        while (taking && solicited * reply.size() < kFlood) {
-            taking = client.solicit(999, what, closed) && client.request("/served") != 0;
-            solicited += 999;
-        }
+        // Each turn is one batch written, and a request: until a write the connection refuses, or the whole flood.
+        qb::http::test::wait_until([&] { return !taking || solicited * reply.size() >= kFlood; }, kBudget * 4, "the flood",
+                                   [&] {
+                                       taking = client.solicit(999, what, closed) && client.request("/served") != 0;
+                                       solicited += 999;
+                                   });
         // The flood ends on a write the closed connection refuses: the session closed it at the verdict.
         EXPECT_TRUE(client.write_failed) << "the flood stopped after " << solicited << " solicited without the connection breaking";
         // Now the client reads. A server that still serves answers one last request, after everything else it wrote.
@@ -530,7 +534,8 @@ private:
                     in.erase(in.begin(), in.begin() + preface_size);
                     preface_seen = true;
                 }
-                std::size_t at = 0;
+                std::size_t          at = 0;
+                std::vector<uint8_t> out; // written once the frames of this read are taken in: the loop over them waits for nothing
                 while (in.size() - at >= 9) {
                     const std::uint8_t *head   = in.data() + at;
                     const std::size_t   length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
@@ -543,25 +548,13 @@ private:
                     if (type == 0x4 && (flags & 0x1) != 0) {
                         acked = true;
                     } else if (type == 0x4 && !answered) {
-                        std::vector<uint8_t> reply;
-                        append_frame(reply, 0x4, 0, 0, {});   // our SETTINGS
-                        append_frame(reply, 0x4, 0x1, 0, {}); // the ACK of the client's
-                        if (write_all(sock, reply, deadline) != written::all) {
-                            _eof = true;
-                            quit = true;
-                            return true;
-                        }
+                        append_frame(out, 0x4, 0, 0, {});   // our SETTINGS
+                        append_frame(out, 0x4, 0x1, 0, {}); // the ACK of the client's
                         answered = true;
                     } else if (type == 0x1) {
                         ++requests;
                         if (stream == 1 && !closed_one) {
-                            std::vector<uint8_t> response;
-                            append_frame(response, 0x1, 0x5, 1, {0x89}); // HEADERS, END_STREAM | END_HEADERS: `:status: 204`
-                            if (write_all(sock, response, deadline) != written::all) {
-                                _eof = true;
-                                quit = true;
-                                return true;
-                            }
+                            append_frame(out, 0x1, 0x5, 1, {0x89}); // HEADERS, END_STREAM | END_HEADERS: `:status: 204`
                             closed_one = true;
                         }
                     } else if (_plan.what == soliciting::pongs ? (type == 0x6 && (flags & 0x1) != 0) : type == 0x3) {
@@ -574,6 +567,11 @@ private:
                     at += 9 + length;
                 }
                 in.erase(in.begin(), in.begin() + static_cast<std::ptrdiff_t>(at));
+                if (!out.empty() && write_all(sock, out, deadline) != written::all) {
+                    _eof = true;
+                    quit = true;
+                    return true;
+                }
                 if (!gave_up && sent == total && _replies == total)
                     _done = true;
                 return false;

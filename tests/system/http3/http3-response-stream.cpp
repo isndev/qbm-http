@@ -888,15 +888,20 @@ TEST_F(Http3ResponseStreamTest, APeerThatCreditsItsWindowInBurstsFinishesUnderTh
     const auto     started = std::chrono::steady_clock::now();
     ASSERT_TRUE(peer.open());
     ASSERT_TRUE(pump([&] { return peer.first_bytes >= 16 * 1024; }));
-    int credits = 0;
-    while (!peer.first_fin && !peer.first_reset && credits < 64) {
-        pump_for(100ms);
-        peer.credit(256 * 1024);
-        ++credits;
-        ASSERT_TRUE(pump(
-            [&] { return peer.first_fin || peer.first_reset || peer.first_bytes >= 16 * 1024 + std::size_t{256} * 1024 * credits - 1024; }, 5s))
-            << "credit " << credits << " brought nothing";
-    }
+    int  credits = 0;
+    bool brought = true; // every credit brought its octets
+    // Each turn is one credit, 100 ms after the one before, and what it brings: until the FIN, sixty-four at most.
+    qb::http::test::wait_until(
+        [&] { return !brought || peer.first_fin || peer.first_reset || credits == 64; }, 60s, "the credits",
+        [&] {
+            pump_for(100ms);
+            peer.credit(256 * 1024);
+            ++credits;
+            brought = pump(
+                [&] { return peer.first_fin || peer.first_reset || peer.first_bytes >= 16 * 1024 + std::size_t{256} * 1024 * credits - 1024; },
+                5s);
+        });
+    ASSERT_TRUE(brought) << "credit " << credits << " brought nothing";
     const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     EXPECT_FALSE(peer.first_reset) << "a peer that keeps crediting is not a stalled one";
     EXPECT_TRUE(peer.first_fin) << "the download never ended (" << credits << " credits, " << peer.first_bytes << " bytes)";

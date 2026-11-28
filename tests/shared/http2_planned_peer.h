@@ -185,23 +185,38 @@ private:
     /// Write all of @p bytes; false once the connection is gone or the time is up.
     bool
     send(const std::vector<uint8_t> &bytes) {
-        std::size_t off = 0;
-        while (off < bytes.size()) {
-            if (over()) {
-                return false;
-            }
-            const int n = _sock.write(reinterpret_cast<const char *>(bytes.data() + off), bytes.size() - off);
-            if (n < 0) {
-                _eof = true;
-                return false;
-            }
-            if (n == 0) {
-                wait_for(POLLOUT);
-                continue;
-            }
-            off += static_cast<std::size_t>(n);
-        }
-        return true;
+        std::size_t off    = 0;
+        bool        failed = false;
+        // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now, which
+        // the turn then polls.
+        peer_wait_until(
+            [&] {
+                if (over()) {
+                    failed = true;
+                    return true;
+                }
+                int n = 1;
+                while (n > 0 && off < bytes.size()) {
+                    n = _sock.write(reinterpret_cast<const char *>(bytes.data() + off), bytes.size() - off);
+                    if (n > 0) {
+                        off += static_cast<std::size_t>(n);
+                    }
+                }
+                if (n < 0) {
+                    _eof = failed = true;
+                }
+                return failed || off == bytes.size();
+            },
+            _deadline, [this] { wait_for(POLLOUT); });
+        return !failed && off == bytes.size();
+    }
+    /// Read until @p done holds; false once the connection is gone or the time is up first.
+    template <typename Done>
+    bool
+    read_until(Done &&done) {
+        bool gone = false;
+        // Each look reads once, in a poll of its own (read_some()).
+        return peer_wait_until([&] { return done() || (gone = !read_some()); }, _deadline, fail_wait::no_turn{}) && !gone;
     }
     /// Read what the client sent, if anything, and take its frames in; false once the connection is gone or the time is up.
     bool
@@ -227,7 +242,8 @@ private:
             _in.erase(_in.begin(), _in.begin() + 24);
             _preface_seen = true;
         }
-        std::size_t at = 0;
+        std::size_t          at = 0;
+        std::vector<uint8_t> reply; // written once the frames of this read are taken in: the loop over them waits for nothing
         while (_in.size() - at >= 9) {
             const uint8_t    *head   = _in.data() + at;
             const std::size_t length = (std::size_t{head[0]} << 16) | (std::size_t{head[1]} << 8) | head[2];
@@ -238,14 +254,10 @@ private:
             const uint32_t stream_id = be32(head + 5) & 0x7FFFFFFFu;
             const uint8_t *payload   = head + 9;
             if (type == 0x4 && (flags & 0x1) == 0 && !_answered) {
-                std::vector<uint8_t> reply;
                 append_frame(reply, 0x4, 0, 0,
                              _plan == Plan::one_stream_the_second_answered ? std::vector<uint8_t>{0, 3, 0, 0, 0, 1} // MAX_CONCURRENT_STREAMS 1
                                                                            : std::vector<uint8_t>{});               // our SETTINGS
                 append_frame(reply, 0x4, 0x1, 0, {});                                                               // the ACK of the client's
-                if (!send(reply)) {
-                    return false;
-                }
                 _answered = true;
             } else if (type == 0x1) {
                 std::lock_guard lock(_mutex);
@@ -277,17 +289,13 @@ private:
             at += 9 + length;
         }
         _in.erase(_in.begin(), _in.begin() + static_cast<std::ptrdiff_t>(at));
-        return true;
+        return reply.empty() || send(reply);
     }
     /// Read until the windows let @p octets go on @p stream_id (and on the connection); false if they never do.
     bool
     wait_for_window(uint32_t stream_id, std::size_t octets, std::size_t connection_octets) {
-        while (window(stream_id) < static_cast<int64_t>(octets) || _connection_window < static_cast<int64_t>(connection_octets)) {
-            if (!read_some()) {
-                return false;
-            }
-        }
-        return true;
+        return read_until(
+            [&] { return window(stream_id) >= static_cast<int64_t>(octets) && _connection_window >= static_cast<int64_t>(connection_octets); });
     }
 
     void
@@ -308,13 +316,20 @@ private:
         std::vector<uint8_t>       bytes;
         append_frame(bytes, 0x0, 0, 1, chunk);
         std::size_t sent = 0;
-        while (sent + frame <= qb::http::protocol_limits::MAX_BODY_SIZE) { // the body up to the limit, within the windows
-            if (!wait_for_window(1, frame, frame) || !send(bytes)) {
-                return;
-            }
-            window(1) -= static_cast<int64_t>(frame);
-            _connection_window -= static_cast<int64_t>(frame);
-            sent += frame;
+        bool        gone = false;
+        // The body up to the limit, within the windows: each turn sends one frame once they let it go.
+        peer_wait_until([&] { return gone || sent + frame > qb::http::protocol_limits::MAX_BODY_SIZE; }, _deadline,
+                        [&] {
+                            if (!wait_for_window(1, frame, frame) || !send(bytes)) {
+                                gone = true;
+                                return;
+                            }
+                            window(1) -= static_cast<int64_t>(frame);
+                            _connection_window -= static_cast<int64_t>(frame);
+                            sent += frame;
+                        });
+        if (gone || sent + frame <= qb::http::protocol_limits::MAX_BODY_SIZE) {
+            return; // the connection is gone, or the time is up
         }
         play_crossing(block, chunk);
     }
@@ -380,17 +395,19 @@ private:
         if (!send(round(10000))) {
             return;
         }
-        while (!_goaway) {
-            while (_pongs == pongs && !_goaway) {
-                if (!read_some()) {
-                    return;
-                }
-            }
-            pongs = _pongs;
-            if (!_goaway && !send(round(1000))) {
-                return;
-            }
-        }
+        bool gone = false;
+        // Each turn waits for the PONG of the round before, then sends the next one: until the client's GOAWAY.
+        peer_wait_until([&] { return gone || _goaway; }, _deadline,
+                        [&] {
+                            if (!read_until([&] { return _pongs != pongs || _goaway; })) {
+                                gone = true;
+                                return;
+                            }
+                            pongs = _pongs;
+                            if (!_goaway && !send(round(1000))) {
+                                gone = true;
+                            }
+                        });
     }
 
     /// A GOAWAY naming 2^31-1, 100 more each one lower, and a PING in one write; once the PONG is back, the 200 of stream 1
@@ -410,10 +427,8 @@ private:
         if (!send(frames)) {
             return;
         }
-        while (_pongs == pongs && !_goaway) {
-            if (!read_some()) {
-                return;
-            }
+        if (!read_until([&] { return _pongs != pongs || _goaway; })) {
+            return;
         }
         std::vector<uint8_t> answer;
         append_frame(answer, 0x1, 0x5, 1, {0x88}); // HEADERS, END_STREAM | END_HEADERS, stream 1: `:status: 200`
@@ -432,11 +447,7 @@ private:
                                              || _plan == Plan::data_after_the_response_completed
                                          ? 2u
                                          : 1u;
-        while (_requests.size() < requests) {
-            if (!read_some()) {
-                break;
-            }
-        }
+        static_cast<void>(read_until([&] { return _requests.size() >= requests; }));
         if (_requests.size() >= requests) {
             if (_plan == Plan::body_past_the_limit) {
                 play_body_past_the_limit();
@@ -473,8 +484,7 @@ private:
                 } else if (_plan == Plan::no_answer) {
                     // nothing is sent: the loop below reads on
                 } else if (_plan == Plan::one_stream_the_second_answered) {
-                    while (_requests.size() < 2 && read_some()) {
-                    }
+                    static_cast<void>(read_until([this] { return _requests.size() >= 2; }));
                     if (_requests.size() >= 2) {
                         append_frame(frame, 0x1, 0x5, _requests[1], {0x88}); // HEADERS, END_STREAM | END_HEADERS: `:status: 200`
                     }
@@ -493,7 +503,8 @@ private:
                 }
             }
         }
-        while (_plan != Plan::goaway_then_close && read_some()) {
+        if (_plan != Plan::goaway_then_close) {
+            static_cast<void>(read_until([] { return false; })); // reads on, until the connection is gone or the time is up
         }
         _sock.disconnect();
         _sock.close();

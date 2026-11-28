@@ -392,6 +392,10 @@ private:
                 frames.push_back(std::move(f));
         }
         _in.erase(_in.begin(), _in.begin() + static_cast<std::ptrdiff_t>(at));
+        if (!_acks.empty()) { // the ACKs this read's frames asked for, in one write: the loop over them waits for nothing
+            (void) write_all(_acks);
+            _acks.clear();
+        }
         return true;
     }
 
@@ -402,20 +406,14 @@ private:
                 if (f.flags & ACK) {
                     settings_acked = true;
                     ++settings_acks;
-                } else {
-                    std::vector<uint8_t> out;
-                    append_frame(out, SETTINGS, ACK, 0, {});
-                    (void) write_all(out);
-                }
+                } else
+                    append_frame(_acks, SETTINGS, ACK, 0, {});
                 break;
             case PING:
-                if (f.flags & ACK) {
+                if (f.flags & ACK)
                     ++pongs;
-                } else {
-                    std::vector<uint8_t> out;
-                    append_frame(out, PING, ACK, 0, f.payload);
-                    (void) write_all(out);
-                }
+                else
+                    append_frame(_acks, PING, ACK, 0, f.payload);
                 break;
             case GOAWAY:
                 goaway_seen = true;
@@ -475,6 +473,7 @@ private:
 
     qb::io::tcp::ssl::socket     _sock;
     std::vector<uint8_t>         _in;
+    std::vector<uint8_t>         _acks; ///< the ACKs a read's frames asked for, written when the read is taken in
     std::vector<uint8_t>         _block;
     std::uint32_t                _block_stream     = 0;
     bool                         _block_end_stream = false;

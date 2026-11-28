@@ -249,7 +249,7 @@ llm/qbm-http.llm.api.md	parameter_validator.h:35-35	bdccc56f9657	struct Paramete
 llm/qbm-http.llm.api.md	protocol/connection.h:1841-1841	93331a7177d4	control_stream_acknowledged() const noexcept {
 llm/qbm-http.llm.api.md	protocol/connection.h:80-80	f34c4add2bb2	inline constexpr std::uint64_t max_field_section_size = 1024 * 1024;
 llm/qbm-http.llm.api.md	protocol/connection.h:983-983	e710b5de4f17	answer_refused_request(std::uint64_t stream_id, stream_state &st, qb:...
-llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1429	5c788c83bf47	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
+llm/qbm-http.llm.api.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1436	33b630b03433	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.api.md	rate_limit.h:142-142	cc4621c8922c	client_id_extractor(std::function<std::string(const Context<SessionTy...
 llm/qbm-http.llm.api.md	rate_limit.h:167-167	d1f5abc327d8	trust_forwarded_headers(bool enabled = true) noexcept {
 llm/qbm-http.llm.api.md	rate_limit.h:348-348	40568f99af7c	class RateLimitMiddleware final : public IMiddleware<SessionType> {
@@ -512,7 +512,7 @@ llm/qbm-http.llm.md	3/dual_stack.h:322-322	83353ce82899	drain(qb::duration deadl
 llm/qbm-http.llm.md	3/http3.h:536-623	6e79b15144e4	shutdown_notice_wait(std::uint64_t connection_id) const noexcept {
 llm/qbm-http.llm.md	3/http3.h:818-820	144eaff4112b	set_request_limits(qb::http::request_limits const &limits) noexcept {
 llm/qbm-http.llm.md	3/http3.h:916-959	2e074dea8c73	graceful_shutdown() {
-llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1429	5c788c83bf47	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
+llm/qbm-http.llm.md	qbm/http/tests/system/http3/http3-loopback.cpp:1367-1436	33b630b03433	TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:301-320	d7b73835a1df	Client::~Client() {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:356-388	863e87e38aa8	Client::connect(ConnectionCallback callback) {
 llm/qbm-http.llm.md	src/qbm/http/1.1/client.cpp:419-435	e5097a1162dc	Client::disconnect() {

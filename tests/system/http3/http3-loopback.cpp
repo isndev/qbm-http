@@ -1394,8 +1394,11 @@ TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
     EXPECT_EQ(server->connected_events.load(), 1);
     EXPECT_TRUE(client->is_connected());
 
-    int completed = 2;
+    int  completed = 2;
+    bool failed    = false; // a request failed: the ones behind it are not made
     for (int i = 0; i < 128; ++i) {
+        if (failed)
+            continue;
         done          = false;
         response      = qb::http::Response{};
         bool accepted = false;
@@ -1406,18 +1409,22 @@ TEST_F(Http3LoopbackTest, SequentialRequestsReuseOneConnection) {
             });
         } catch (std::exception const &error) {
             ADD_FAILURE() << "stream " << i << " could not open: " << error.what();
-            break;
+            failed = true;
+            continue;
         }
         if (!accepted) {
             ADD_FAILURE() << "stream " << i << " was rejected";
-            break;
+            failed = true;
+            continue;
         }
         if (!pump([&] { return done; }, 1s)) {
-            break;
+            failed = true;
+            continue;
         }
         if (response.status() != qb::http::status::OK || response.body().as<std::string>() != std::to_string(i) || !client->is_connected()) {
             ADD_FAILURE() << "request " << i << " failed after " << completed << " responses on one connection";
-            break;
+            failed = true;
+            continue;
         }
         ++completed;
     }

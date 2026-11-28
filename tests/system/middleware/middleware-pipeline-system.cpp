@@ -358,8 +358,8 @@ TEST_F(MiddlewarePipelineTest, HstsIsNotSentOverPlainTcpForAnHttpsAbsoluteTarget
     ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
 
     std::string head;
-    // 400 reads, 5 ms after each that brought nothing, as a budget.
-    qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 2000ms, "the head",
+    // 400 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 400 x 16 ms as a budget.
+    qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
                                [&] {
                                    char buf[512];
                                    if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
@@ -396,8 +396,8 @@ TEST_F(MiddlewarePipelineTest, CsrfMiddlewareReadsTheHostFieldOfAnHttp11Request)
                                     + "\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx";
         EXPECT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
         std::string head;
-        // 400 reads, 5 ms after each that brought nothing, as a budget.
-        qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 2000ms, "the head",
+        // 400 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 400 x 16 ms as a budget.
+        qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
                                    [&] {
                                        char buf[512];
                                        if (const int n = sock.read(buf, sizeof(buf)); n > 0)

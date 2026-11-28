@@ -312,27 +312,32 @@ public:
         if (tls != stream::over)
             return out; // a reset, or the budget: nothing more to read
         // The TLS stream is over. What the TCP connection still carries is read raw: after a close_notify, the FIN.
+        // Each look reads once: octets, the FIN, an error, or nothing for now.
+        bool idle = false;
         qb::http::test::wait_until(
             [&] {
-                for (;;) {
-                    const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
-                    if (n > 0) {
-                        out.octets_after += static_cast<std::size_t>(n);
-                        continue;
-                    }
-                    if (n == 0) {
-                        out.fin = true;
-                        return true;
-                    }
-                    const int error = qb::io::socket::get_last_errno();
-                    if (!qb::io::socket::not_recv_error(error)) {
-                        out.tcp_error = error;
-                        return true;
-                    }
-                    return false;
+                const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
+                idle        = n <= 0;
+                if (n > 0) {
+                    out.octets_after += static_cast<std::size_t>(n);
+                    return false; // the next look reads on
                 }
+                if (n == 0) {
+                    out.fin = true;
+                    return true;
+                }
+                const int error = qb::io::socket::get_last_errno();
+                if (!qb::io::socket::not_recv_error(error)) {
+                    out.tcp_error = error;
+                    return true;
+                }
+                return false;
             },
-            deadline, "read_to_end", qb::http::test::fail_wait::nap{1ms});
+            deadline, "read_to_end",
+            [&idle] {
+                if (idle)
+                    std::this_thread::sleep_for(1ms);
+            });
         return out;
     }
 };

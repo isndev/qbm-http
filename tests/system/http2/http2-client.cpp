@@ -4191,6 +4191,7 @@ private:
                     in.erase(in.begin(), in.begin() + preface_size);
                     preface_seen = true;
                 }
+                std::vector<uint8_t> reply; // written once the frames of this read are taken in: the loop over them waits for nothing
                 while (in.size() >= 9) {
                     const std::size_t length = (std::size_t{in[0]} << 16) | (std::size_t{in[1]} << 8) | in[2];
                     if (in.size() < 9 + length) {
@@ -4207,7 +4208,6 @@ private:
                     } else if (f.type == 0x7) {
                         goaway_seen = true;
                     } else if (f.type == 0x4 && !answered) {
-                        std::vector<uint8_t> reply;
                         if (_mode == Mode::Silent) {
                             append_frame(reply, 0x4, 0, 0, {0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF}); // INITIAL_WINDOW_SIZE 2^31-1
                             const uint32_t inc = 0x7FFFFFFFu - 65535u;
@@ -4218,15 +4218,15 @@ private:
                             append_frame(reply, 0x4, 0, 0, {});
                         }
                         append_frame(reply, 0x4, 0x1, 0, {}); // SETTINGS ACK
-                        if (!write_all(sock, reply)) {
-                            _eof = true;
-                            quit = true;
-                            return true;
-                        }
                         answered = true;
                     }
                     std::lock_guard lock(_mutex);
                     _frames.push_back(std::move(f));
+                }
+                if (!reply.empty() && !write_all(sock, reply)) {
+                    _eof = true;
+                    quit = true;
+                    return true;
                 }
                 return false;
             },
@@ -5245,10 +5245,18 @@ TEST_F(Http2NativeTimeout, AHeaderBlockSentSlowlyStillEndsATimeoutAfterItsFirstH
     ASSERT_GE(block.second.size(), 16u) << "too short a block to dribble past the timeout";
     const auto first = Clock::now();
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_STREAM, block.first, slice(block.second, 0, 1)));
-    std::size_t at = 1;
-    while (at + 1 < block.second.size() && !ended_within(kTimeout / 4) // one octet a quarter of the timeout apart, never the last
-           && raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
-        ++at;
+    std::size_t at   = 1;
+    bool        over = false; // the connection ended, or took no more
+    // One octet a quarter of the timeout apart, never the last: each turn waits a quarter, then sends the next.
+    qb::http::test::wait_until([&] { return over || at + 1 >= block.second.size(); },
+                               kTimeout / 4 * static_cast<int>(block.second.size()) + std::chrono::seconds(5), "a block dribbled",
+                               [&] {
+                                   if (ended_within(kTimeout / 4)
+                                       || !raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
+                                       over = true;
+                                   else
+                                       ++at;
+                               });
     expect_ended_a_timeout_after(first, "a header block dribbled in CONTINUATION frames");
 }
 
@@ -5270,8 +5278,16 @@ TEST_F(Http2NativeTimeout, EmptyDataFramesDoNotHoldTheConnection) {
     const auto block   = raw.next_header_block("/up");
     const auto headers = Clock::now();
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, block.first, block.second));
-    for (int frame = 0; frame < 12 && !ended_within(kTimeout / 4) && raw.frame(Raw::DATA, 0, block.first, {}); ++frame) {
-    } // a quarter of the timeout apart, three timeouts at most, nothing in them
+    int  frames = 0;
+    bool over   = false; // the connection ended, or took no more
+    // A quarter of the timeout apart, three timeouts at most, nothing in them: each turn waits a quarter, then sends one.
+    qb::http::test::wait_until([&] { return over || frames == 12; }, kTimeout * 3 + std::chrono::seconds(5), "empty DATA frames",
+                               [&] {
+                                   if (ended_within(kTimeout / 4) || !raw.frame(Raw::DATA, 0, block.first, {}))
+                                       over = true;
+                                   else
+                                       ++frames;
+                               });
     expect_ended_a_timeout_after(headers, "empty DATA frames");
 }
 
@@ -5399,11 +5415,20 @@ TEST_F(Http2StreamSweep, ARequestItsHandlerDoesNotAnswerIsResetOnAConnectionThat
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
     // An octet of the upload a quarter of the timeout apart: the session's timeout keeps restarting, the server has
     // nothing to write. Five timeouts at most: the reset is due between one and two.
-    for (int piece = 0; piece < 20; ++piece) {
-        if (raw.read_until([&] { return raw.streams[never].reset || ended(raw); }, kTimeout / 4))
-            break;
-        ASSERT_TRUE(raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')));
-    }
+    int        pieces = 0;
+    bool       taken  = true; // the connection took every piece
+    const auto swept  = [&] {
+        return raw.streams[never].reset || ended(raw);
+    };
+    // Each turn reads for a quarter of the timeout, then sends the next piece: until the reset, twenty pieces at most.
+    qb::http::test::wait_until([&] { return !taken || pieces == 20 || swept(); }, kTimeout * 5 + std::chrono::seconds(5), "the sweep",
+                               [&] {
+                                   if (raw.read_until(swept, kTimeout / 4))
+                                       return;
+                                   taken = raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x'));
+                                   ++pieces;
+                               });
+    ASSERT_TRUE(taken);
     const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begun);
     ASSERT_FALSE(ended(raw)) << "the connection ended";
     ASSERT_TRUE(raw.streams[never].reset) << "a connection that writes nothing was never swept";
@@ -5448,10 +5473,17 @@ TEST_F(Http2StreamSweep, AHookThatClearsTheProtocolsUnderTheSweepsResetEndsOnlyI
     // -- not the end of the connection -- and the hook runs under the sweep's reset.
     const auto upload = raw.next_header_block("/up");
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
-    for (int piece = 0; piece < 20 && !raw.read_until([&] { return raw.eof; }, kTimeout / 4); ++piece) {
-        if (!raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')))
-            break; // the connection ended under the write
-    }
+    int  pieces = 0;
+    bool over   = false; // the connection ended: read so, or under a write
+    // Each turn reads for a quarter of the timeout, then sends the next piece: twenty pieces at most.
+    qb::http::test::wait_until([&] { return over || pieces == 20; }, kTimeout * 5 + std::chrono::seconds(5), "the swept upload",
+                               [&] {
+                                   if (raw.read_until([&] { return raw.eof; }, kTimeout / 4)
+                                       || !raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')))
+                                       over = true;
+                                   else
+                                       ++pieces;
+                               });
     ASSERT_TRUE(raw.eof || raw.read_until([&] { return raw.eof; }, kTimeout)) << "the swept request's hook did not end its connection";
     EXPECT_EQ(cancelled.load(), 1);
 
@@ -6346,13 +6378,14 @@ hang() {
     return request;
 }
 
-/// Runs the loop from inside a callback until @p done, or for nine seconds: the kit's wait, which the battery can fail.
-/// A loop turn that never returns is bounded by a watchdog that ends the process, saying so.
+/// Runs the loop from inside a callback until @p done; whether it came. Nine seconds without it are a failure of the
+/// case, recorded here and naming @p what: the kit's wait, which the battery can fail. A loop turn that never returns is
+/// bounded by a watchdog that ends the process, saying so.
 template <typename Done>
-void
+bool
 run_the_loop_until(Done &&done, char const *const what) {
     qb::http::test::watchdog bound(what, 10s);
-    qb::http::test::wait_until(std::forward<Done>(done), 9s, what, [] { qb::io::async::run(EVRUN_NOWAIT); });
+    return qb::http::test::expect_until(std::forward<Done>(done), 9s, what, [] { qb::io::async::run(EVRUN_NOWAIT); });
 }
 
 /// What one request was answered with.
@@ -6516,10 +6549,11 @@ TEST_F(Http2ClientTest, ARequestPushedFromACallbackOfAConnectACloseRefusedIsNotF
     EXPECT_EQ(answer.status, qb::http::status::OK) << answer.body;
 }
 
-/// Runs the loop from inside a callback until the client's transport has ended -- the peer's end is read there.
-inline void
+/// Runs the loop from inside a callback until the client's transport has ended -- the peer's end is read there; a
+/// transport still open after nine seconds is a failure of the case, recorded by the wait.
+inline bool
 run_the_loop_until_the_transport_ends(qb::http2::Client &client) {
-    run_the_loop_until([&] { return !client.transport().is_open(); }, "the loop a callback of a close runs until the peer's end");
+    return run_the_loop_until([&] { return !client.transport().is_open(); }, "the loop a callback of a close runs until the peer's end");
 }
 
 // A close ends the transport it found and no other. It calls the callbacks of what it ends before it ends that transport:
@@ -6625,8 +6659,8 @@ TEST_F(Http2ClientTest, AGracefulGoawaysDrainWhoseCallbackSawTheNextConnectionCo
                 return;
             failure = response.body().as<std::string>();
             client->set_request_timeout(qb::duration::zero()); // no deadline for what rides the next connection
-            run_the_loop_until([&] { return !client->transport().is_open(); }, "the loop a callback of a drain runs until the peer's end");
-            ended_in_the_callback = true;
+            ended_in_the_callback =
+                run_the_loop_until([&] { return !client->transport().is_open(); }, "the loop a callback of a drain runs until the peer's end");
             planned.reset();                             // the port is free
             server = reconnect::make_h2_server_on(port); // and serves from here on
             if (server->ready())
