@@ -54,9 +54,11 @@
  *     first wait of stretch <J> fails`) -- on stdout, before the first case: a death test's child runs the binary
  *     again, and the death test matches what that child writes to stderr;
  *   - `[fail_wait] injected: wait <k> (<helper>) at <file>:<line> fails, as at its deadline` -- the failure's message;
- *   - after a case, on stderr: `[fail_wait] site <file>:<line> (<helper>): <n> waits, the first wait <k>` for every
- *     place a wait was reached from, `[fail_wait] past wait <K>: <n> waits opened a stretch` under `K+J`, then
- *     `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for <ms> ms`.
+ *   - after a case, on stderr: `[fail_wait] site <file>:<line> (<helper>): <n> waits, the first wait <k>, stretch <j>
+ *     past wait <K>` for every place a wait was reached from (the stretch its first wait opened, 0 when that wait is
+ *     not past K: `K+j` names it again whatever the waits before it count), `[fail_wait] past wait <K>: <n> waits
+ *     opened a stretch` under `K+J`, then `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for
+ *     <ms> ms`.
  *
  * It includes gtest and qb-io's `async.h`, and is included by every test file that waits.
  *
@@ -138,7 +140,8 @@ struct site {
     unsigned    line;
     char const *helper; ///< the name its first wait gave
     int         count;
-    int         first; ///< the number of its first wait
+    int         first;   ///< the number of its first wait
+    int         stretch; ///< the stretch that wait opened, counted past `plan::past`; 0 when it is not past it
 };
 
 /// What the kit counts once armed: the waits reached, where from, and the stretches they make.
@@ -181,12 +184,12 @@ fire(char const *const helper, std::source_location const &where) {
     b.line                      = where.line();
     auto const known = std::find_if(b.sites.begin(), b.sites.end(),
                                     [&](site const &s) { return s.line == where.line() && std::strcmp(s.file, where.file_name()) == 0; });
-    if (known == b.sites.end())
-        b.sites.push_back({where.file_name(), where.line(), helper, 1, k});
-    else
-        ++known->count;
     if (opens && k > said.past)
         ++b.stretches;
+    if (known == b.sites.end())
+        b.sites.push_back({where.file_name(), where.line(), helper, 1, k, k > said.past ? b.stretches : 0});
+    else
+        ++known->count;
     if (said.stretch != 0 ? !(opens && k > said.past && b.stretches == said.stretch) : k != said.at)
         return false;
     ADD_FAILURE() << "[fail_wait] injected: wait " << k << " (" << helper << ") at " << leaf(where.file_name()) << ':' << where.line()
@@ -204,8 +207,8 @@ public:
         book                 &b = kept();
         std::lock_guard const lock(b.guard);
         for (site const &s : b.sites)
-            std::fprintf(stderr, "[fail_wait] site %s:%u (%s): %d waits, the first wait %d\n", leaf(s.file), s.line, s.helper, s.count,
-                         s.first);
+            std::fprintf(stderr, "[fail_wait] site %s:%u (%s): %d waits, the first wait %d, stretch %d past wait %d\n", leaf(s.file), s.line,
+                         s.helper, s.count, s.first, s.stretch, asked().past);
         if (asked().stretch != 0)
             std::fprintf(stderr, "[fail_wait] past wait %d: %d waits opened a stretch\n", asked().past, b.stretches);
         std::fprintf(stderr, "[fail_wait] after %s.%s: %d waits reached, the loop turned for %lld ms\n", info.test_suite_name(), info.name(),
