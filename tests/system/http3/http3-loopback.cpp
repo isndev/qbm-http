@@ -171,7 +171,9 @@ protected:
      * `QBM_HTTP_TEST_FAIL_WAIT_AT` the wait it names fails at once (fail_wait.h).
      */
     static bool
-    pump(const std::function<bool()> &done, std::chrono::milliseconds budget = 5s) {
+    pump(const std::function<bool()> &done, std::chrono::milliseconds budget = 5s,
+         std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::expect_until(done, budget, "pump", qb::http::test::fail_wait::pass_or_sleep{1ms});
     }
 };
@@ -1601,8 +1603,9 @@ TEST_F(Http3LoopbackTest, BodyOverLimitRefusesTheStreamNotTheConnection) {
     auto               client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
 
-    auto post = [&](std::size_t size) {
-        qb::http::Request request{qb::http::method::POST, qb::io::uri("/limited")};
+    auto post = [&](std::size_t size, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        qb::http::Request                            request{qb::http::method::POST, qb::io::uri("/limited")};
         request.body() = std::string(size, 'x');
         done           = false;
         response       = qb::http::Response{};
@@ -2350,16 +2353,16 @@ TEST_F(Http3LoopbackTest, ARedialAskedOfAConnectionLostDuringItsReadConnectsOnce
             losing->lose_connection(); // from nghttp3's read: the teardown is deferred
             dial_accepted = redial.dial();
         }));
-        qb::http::test::wait_until([&] { return redial.heard_true + redial.heard_false != 0; }, 5s, "wait_until",
-                                   [] {
-                                       try {
-                                           if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
-                                               std::this_thread::sleep_for(1ms);
-                                           }
-                                       } catch (std::runtime_error const &) {
-                                           // what the failure callback threw, where the loop lets it out
-                                       }
-                                   });
+        qb::http::test::expect_until([&] { return redial.heard_true + redial.heard_false != 0; }, 5s, "wait_until",
+                                     [] {
+                                         try {
+                                             if (!qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT)) {
+                                                 std::this_thread::sleep_for(1ms);
+                                             }
+                                         } catch (std::runtime_error const &) {
+                                             // what the failure callback threw, where the loop lets it out
+                                         }
+                                     });
         EXPECT_EQ(first_calls, 1);
         EXPECT_EQ(held_calls, a_failure_callback_throws ? 1 : 0);
         EXPECT_TRUE(dial_accepted);
@@ -3307,7 +3310,7 @@ TEST_F(Http3LoopbackTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
             order.push_back(1);
             client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
             // The loop turns of this callback: the client's turn, and the response.
-            qb::http::test::wait_until([&] { return order.size() >= 3; }, 5s);
+            qb::http::test::expect_until([&] { return order.size() >= 3; }, 5s);
         });
         EXPECT_EQ(order, (std::vector<int>{1, 2, 9})) << "the response overtook the refusal owed before it";
         client->disconnect();
@@ -5326,15 +5329,15 @@ TEST_F(Http3LoopbackTest, ThrowingRequestFailureStillNotifiesConnectCallback) {
         EXPECT_FALSE(ok);
     }));
 
-    qb::http::test::wait_until([&] { return connect_calls != 0; }, 1s, "wait_until",
-                               [] {
-                                   try {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                   } catch (std::runtime_error const &) {
-                                       // Direct callers may receive the first application exception after cleanup.
-                                   }
-                                   std::this_thread::sleep_for(1ms);
-                               });
+    qb::http::test::expect_until([&] { return connect_calls != 0; }, 1s, "wait_until",
+                                 [] {
+                                     try {
+                                         qb::io::async::run(EVRUN_NOWAIT);
+                                     } catch (std::runtime_error const &) {
+                                         // Direct callers may receive the first application exception after cleanup.
+                                     }
+                                     std::this_thread::sleep_for(1ms);
+                                 });
     EXPECT_EQ(request_calls, 1);
     EXPECT_EQ(connect_calls, 1);
     EXPECT_FALSE(client->is_connecting());
@@ -5366,14 +5369,14 @@ TEST_F(Http3LoopbackTest, ThrowingConnectSuccessCallbackStillFlushesPendingReque
         EXPECT_TRUE(ok);
     }));
 
-    qb::http::test::wait_until([&] { return response_calls == 1 && second_connect_calls == 1; }, 1s, "wait_until",
-                               [] {
-                                   try {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                   } catch (std::runtime_error const &) {
-                                   }
-                                   std::this_thread::sleep_for(1ms);
-                               });
+    qb::http::test::expect_until([&] { return response_calls == 1 && second_connect_calls == 1; }, 1s, "wait_until",
+                                 [] {
+                                     try {
+                                         qb::io::async::run(EVRUN_NOWAIT);
+                                     } catch (std::runtime_error const &) {
+                                     }
+                                     std::this_thread::sleep_for(1ms);
+                                 });
     EXPECT_EQ(first_connect_calls, 1);
     EXPECT_EQ(second_connect_calls, 1);
     EXPECT_EQ(response_calls, 1);
@@ -5455,7 +5458,8 @@ TEST_F(Http3LoopbackTest, StreamStateFollowsRequestsInFlightNotRequestsServed) {
     auto              client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
 
-    auto exchange = [&](int count) {
+    auto exchange = [&](int count, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         for (int i = 0; i < count; ++i) {
             done = false;
             got  = qb::http::status::INTERNAL_SERVER_ERROR;
@@ -6292,7 +6296,8 @@ TEST_F(Http3LoopbackTest, StaticFilesStreamABodyOverTheStreamThresholdAndMaxFile
     auto client = qb::http3::make_client(https_origin(port));
     client->set_verify_peer(false);
 
-    const auto get = [&](std::string const &path) {
+    const auto get = [&](std::string const &path, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         // The callback owns what it writes: a late one, after a pump that timed out, writes into its own state.
         auto state = std::make_shared<std::optional<qb::http::Response>>();
         EXPECT_TRUE(client->push_request(qb::http::Request{qb::io::uri(https_origin(port) + path)},
@@ -6892,7 +6897,7 @@ TEST_F(Http3LoopbackTest, GracefulShutdownSendsTheNoticeThenTheFinalGoawayARound
     // Pumped without pump()'s idle sleep: its 1 ms nap after a pass that invokes nothing is the server's minimal
     // wait, so a pass that ran before the notice's datagram was readable let the final GOAWAY leave during the
     // nap, and the peer then read both in consecutive passes -- the spacing measured was the harness's.
-    qb::http::test::wait_until([&] { return peer.closed; }, 5s);
+    qb::http::test::expect_until([&] { return peer.closed; }, 5s);
     ASSERT_TRUE(peer.closed) << "the connection did not close within 5 s of graceful_shutdown()";
     ASSERT_EQ(peer.goaway_ids.size(), 2u);
     EXPECT_EQ(peer.goaway_ids[0], (std::uint64_t{1} << 62) - 4) << "the notice names the largest stream id";
@@ -7167,8 +7172,9 @@ TEST_F(Http3LoopbackTest, ASubmissionCutShortEndsTheConnectionWhoseEngineItLeftB
         request.body() = pattern(size, salt);
         return request;
     };
-    const auto round = [&](int const count) {
-        static constexpr std::size_t sizes[] = {0, 16, 1000, 20000, 70000};
+    const auto round = [&](int const count, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        static constexpr std::size_t                 sizes[] = {0, 16, 1000, 20000, 70000};
         right = wrong = failed = 0;
         why.clear();
         for (int i = 0; i < count; ++i) {
@@ -7799,13 +7805,13 @@ TEST_F(Http3LoopbackTest, ALostConnectionWhoseFirstFailureCallbackThrowsStillSer
     server->close(); // the connection is lost
     auto back = serve();
     ASSERT_TRUE(back->listen(qb::io::uri(https_origin(port)), cert_path(), key_path())) << "no server on the port the first left";
-    qb::http::test::wait_until([&] { return again != 0; }, 8s, "wait_until",
-                               [] {
-                                   try {
-                                       qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-                                   } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
-                                   }
-                               });
+    qb::http::test::expect_until([&] { return again != 0; }, 8s, "wait_until",
+                                 [] {
+                                     try {
+                                         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                     } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
+                                     }
+                                 });
     EXPECT_EQ(failures, 3) << "a request behind the callback that threw was not answered";
     EXPECT_EQ(again, 1) << "the request a failure callback pushed back was never served";
     EXPECT_EQ(again_status, qb::http::status::OK);
@@ -7844,13 +7850,13 @@ TEST_F(Http3LoopbackTest, AServersGoawayWhoseFirstCallbackThrowsStillRefusesTheO
     });
     ASSERT_TRUE(pump([&] { return kept.size() == 1; }));
     server->graceful_shutdown();
-    qb::http::test::wait_until([&] { return second != 0; }, 5s, "wait_until",
-                               [] {
-                                   try {
-                                       qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-                                   } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
-                                   }
-                               });
+    qb::http::test::expect_until([&] { return second != 0; }, 5s, "wait_until",
+                                 [] {
+                                     try {
+                                         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                     } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
+                                     }
+                                 });
     EXPECT_EQ(first, 1);
     EXPECT_EQ(second, 1) << "the request behind the callback that threw was never answered";
     EXPECT_EQ(said, "HTTP/3 server is shutting down") << "it was failed with its connection, not refused by the GOAWAY";
@@ -8012,7 +8018,7 @@ TEST_F(Http3LoopbackTest, AResponseCallbackThatThrowsIsContainedAndTheRequestBeh
             b_status = response.status();
             b_body   = response.body().as<std::string>();
         });
-        qb::http::test::wait_until([&] { return b != 0; }, 3s);
+        qb::http::test::expect_until([&] { return b != 0; }, 3s);
         EXPECT_EQ(a, 1);
         EXPECT_EQ(b, 1) << "the request that waited for that stream was not answered";
         EXPECT_EQ(b_status, qb::http::status::OK) << "it was failed with the connection: " << b_body;
@@ -8058,7 +8064,7 @@ TEST_F(Http3LoopbackTest, ARefusalWhoseCallbackThrowsUnderAPassTheLoopRunsIsCont
         c_body   = response.body().as<std::string>();
     });
     ASSERT_EQ(b, 0) << "the request that waits was answered already: the case proves nothing";
-    qb::http::test::wait_until([&] { return c != 0; }, 3s);
+    qb::http::test::expect_until([&] { return c != 0; }, 3s);
     EXPECT_EQ(a, 1);
     EXPECT_EQ(b, 1);
     EXPECT_EQ(c, 1) << "the request behind the refusal was not answered";
@@ -8092,7 +8098,7 @@ TEST_F(Http3LoopbackTest, AConnectCallbackThatThrowsOnSuccessIsContainedAndWhatW
         ++waiting;
         status = response.status();
     });
-    qb::http::test::wait_until([&] { return waiting != 0; }, 3s);
+    qb::http::test::expect_until([&] { return waiting != 0; }, 3s);
     EXPECT_EQ(told, 1);
     EXPECT_EQ(waiting, 1);
     EXPECT_EQ(status, qb::http::status::OK);

@@ -627,8 +627,8 @@ TEST_F(WsCoroClient, EchoesPeerCloseFrame) {
     // Pump the client loop while polling the server-observed echo count with a
     // hard budget. The client's outbound Close echo was queued during receive();
     // these pumps flush it and let the server parse it.
-    qb::http::test::wait_until([&] { return echoes.load(std::memory_order_relaxed) != 0u; }, 2s, "wait_until",
-                               qb::http::test::fail_wait::pass_then_sleep{2ms});
+    qb::http::test::expect_until([&] { return echoes.load(std::memory_order_relaxed) != 0u; }, 2s, "wait_until",
+                                 qb::http::test::fail_wait::pass_then_sleep{2ms});
 
     EXPECT_EQ(echoes.load(std::memory_order_relaxed), 1u) << "a peer-initiated Close must be echoed exactly once";
 }

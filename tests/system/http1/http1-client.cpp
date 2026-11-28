@@ -599,6 +599,11 @@ public:
             if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
                 throw std::runtime_error("connect failed");
             }
+            // Non-blocking once connected: a write that the socket cannot take now waits in the kit, failable, never
+            // in send() (the reads wait in select(), within their turn).
+            if (qb::io::socket::set_nonblocking(fd, true) != 0) {
+                throw std::runtime_error("set_nonblocking failed");
+            }
             _fd = fd;
         } catch (...) {
             QB_CLOSESOCKET(fd);
@@ -615,73 +620,86 @@ public:
     raw_socket(raw_socket const &)            = delete;
     raw_socket &operator=(raw_socket const &) = delete;
 
+    /// Writes all of @p wire, or throws: each look sends what the socket takes, one `send()` a look.
     void
-    send_all(std::string const &wire) {
-        const char *data      = wire.data();
-        std::size_t remaining = wire.size();
-        while (remaining) {
-            const auto sent = ::send(_fd, data, static_cast<int>(remaining), 0);
-            if (sent <= 0) {
-                throw std::runtime_error("send failed");
-            }
-            data += sent;
-            remaining -= static_cast<std::size_t>(sent);
-        }
+    send_all(std::string const &wire, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  sent   = 0;
+        bool                                         failed = false;
+        const bool                                   whole  = qb::http::test::wait_until(
+            [&] {
+                const auto n = ::send(_fd, wire.data() + sent, static_cast<int>(wire.size() - sent), 0);
+                if (n > 0)
+                    sent += static_cast<std::size_t>(n);
+                else if (n == 0 || !qb::io::socket::not_send_error(qb::io::socket::get_last_errno()))
+                    failed = true;
+                return failed || sent == wire.size();
+            },
+            5s, "send_all", qb::http::test::fail_wait::pass_or_sleep{1ms});
+        if (!whole || failed)
+            throw std::runtime_error("send failed");
     }
 
     [[nodiscard]] std::string
-    read_until(std::string const &marker, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
-        std::string out;
-        char        buffer[4096];
-        bool        ended = false;
+    read_until(std::string const &marker, std::chrono::milliseconds budget = std::chrono::seconds(5),
+               std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::string                                  out;
+        char                                         buffer[4096];
+        bool                                         ended = false;
         // Each turn waits up to 50 ms for the socket, in select().
-        qb::http::test::wait_until([&] { return ended || out.find(marker) != std::string::npos; }, budget, "read_until",
-                                   [&] {
-                                       fd_set fds;
-                                       FD_ZERO(&fds);
-                                       FD_SET(_fd, &fds);
-                                       timeval    tv{0, 50 * 1000};
-                                       const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
-                                       if (ready < 0 && errno == EINTR) {
-                                           return;
-                                       }
-                                       if (ready < 0) {
-                                           throw std::runtime_error("select failed");
-                                       }
-                                       if (ready == 0) {
-                                           return;
-                                       }
-                                       const auto n = ::recv(_fd, buffer, static_cast<int>(sizeof(buffer)), 0);
-                                       if (n <= 0) {
-                                           ended = true;
-                                           return;
-                                       }
-                                       out.append(buffer, static_cast<std::size_t>(n));
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return ended || out.find(marker) != std::string::npos; }, budget, "read_until",
+                                                           [&] {
+                                                               fd_set fds;
+                                                               FD_ZERO(&fds);
+                                                               FD_SET(_fd, &fds);
+                                                               timeval    tv{0, 50 * 1000};
+                                                               const auto ready =
+                                                                   ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
+                                                               if (ready < 0 && errno == EINTR) {
+                                                                   return;
+                                                               }
+                                                               if (ready < 0) {
+                                                                   throw std::runtime_error("select failed");
+                                                               }
+                                                               if (ready == 0) {
+                                                                   return;
+                                                               }
+                                                               const auto n = ::recv(_fd, buffer, static_cast<int>(sizeof(buffer)), 0);
+                                                               if (n <= 0) {
+                                                                   ended = true;
+                                                                   return;
+                                                               }
+                                                               out.append(buffer, static_cast<std::size_t>(n));
+                                                           }),
+                                "the caller reads what it returns");
         return out;
     }
 
     [[nodiscard]] bool
-    closes_within(std::chrono::milliseconds budget) {
-        char                c;
-        std::optional<bool> closed; // set by the turn that found the socket readable
-        qb::http::test::wait_until([&] { return closed.has_value(); }, budget, "closes_within",
-                                   [&] {
-                                       fd_set fds;
-                                       FD_ZERO(&fds);
-                                       FD_SET(_fd, &fds);
-                                       timeval    tv{0, 50 * 1000};
-                                       const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
-                                       if (ready > 0) {
-                                           closed = ::recv(_fd, &c, 1, MSG_PEEK) == 0;
-                                       }
-                                   });
-        return closed.value_or(false);
+    closes_within(std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        char                                         c;
+        std::optional<bool>                          closed; // set by the turn that found the socket readable
+        return qb::http::test::wait_until([&] { return closed.has_value(); }, budget, "closes_within",
+                                          [&] {
+                                              fd_set fds;
+                                              FD_ZERO(&fds);
+                                              FD_SET(_fd, &fds);
+                                              timeval    tv{0, 50 * 1000};
+                                              const auto ready = ::select(static_cast<int>(_fd) + 1, &fds, nullptr, nullptr, &tv);
+                                              if (ready > 0) {
+                                                  closed = ::recv(_fd, &c, 1, MSG_PEEK) == 0;
+                                              }
+                                          })
+               && *closed;
     }
 };
 
 qb::http::async::RedirectReply
-request_with_redirects(qb::http::Request req, qb::http::RedirectOptions options = {}, bool verify_peer = true) {
+request_with_redirects(qb::http::Request req, qb::http::RedirectOptions options = {}, bool verify_peer = true,
+                       std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     struct Observation {
         qb::http::async::RedirectReply result;
         unsigned                       delivered = 0;
@@ -1131,8 +1149,9 @@ TEST(Http1ClientTest, AnAnsweredRequestLeavesNoTimerArmed) {
         int                         answers = 0; // declared before the clients: their destructors may still answer
         std::vector<std::ptrdiff_t> seen;        // the count as each callback reads it
         LoopbackHttp1Server         server;
-        const auto                  in_flight = [&](int queued) {
-            auto client = qb::http1::make_client(server.url("/"));
+        const auto                  in_flight = [&](int queued, std::source_location const where = std::source_location::current()) {
+            qb::http::test::fail_wait::called_from const caller{where};
+            auto                                         client = qb::http1::make_client(server.url("/"));
             for (int i = 0; i < 1 + queued; ++i) {
                 client->push_request(request(qb::http::method::GET, "/never"), [&](qb::http::Response) {
                     ++answers;
@@ -2679,14 +2698,15 @@ connect_twice(qb::http1::Client &client, qb::http1::ConnectResult &first, qb::ht
 /// run_sync(client->connect()), which returns at once, `false`, and nothing connects for it.
 void
 reconnection_turned_off_by_the_failure_ahead(char const *const target, qb::duration const timeout, qb::http::status const first_status,
-                                             char const *const from) {
-    std::optional<LoopbackHttp1Server> server{std::in_place};
-    Blocked                            blocked;
-    int                                answered = 0, failed = 0;
-    bool                               connected = false;
-    qb::http::status                   first = qb::http::status::OK, status = qb::http::status::OK;
-    std::string                        text;
-    auto                               client = qb::http1::make_client(server->url(""));
+                                             char const *const from, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::optional<LoopbackHttp1Server>           server{std::in_place};
+    Blocked                                      blocked;
+    int                                          answered = 0, failed = 0;
+    bool                                         connected = false;
+    qb::http::status                             first = qb::http::status::OK, status = qb::http::status::OK;
+    std::string                                  text;
+    auto                                         client = qb::http1::make_client(server->url(""));
     client->connect([&](bool ok, std::string const &) { connected = ok; });
     ASSERT_TRUE(ServerThread<Http1ClientTestServer>::pump_until([&] { return connected; }));
     client->set_request_timeout(timeout); // armed for the first as it is sent: at once, the client connected
@@ -4488,7 +4508,8 @@ Session::Session(Server &server)
 
 // The status of every response the peer reads before the connection ends, in order.
 std::string
-statuses(raw_socket &peer) {
+statuses(raw_socket &peer, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     const auto  all = peer.read_until("\r\n\r\n\r\n\r\n", std::chrono::seconds(3)); // never sent: everything until the close
     std::string out;
     for (auto at = all.find("HTTP/1.1 "); at != std::string::npos; at = all.find("HTTP/1.1 ", at + 1))
@@ -5043,7 +5064,8 @@ Session::Session(Server &server)
 
 // Everything the peer reads until the connection ends (the marker is never sent).
 std::string
-until_close(raw_socket &peer) {
+until_close(raw_socket &peer, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return peer.read_until("\r\n\r\n\r\n\r\n", std::chrono::seconds(3));
 }
 
@@ -5060,15 +5082,17 @@ statuses(std::string const &all) {
 // What a connection that stays open answers, read until the statuses of @p expected are in: @p reads reads at most, of
 // three seconds each.
 std::string
-read_statuses(raw_socket &peer, std::string_view expected, int reads) {
-    std::string all;
-    int         made = 0;
-    qb::http::test::wait_until([&] { return made == reads || statuses(all).size() >= expected.size(); },
-                               std::chrono::seconds(3) * reads + std::chrono::seconds(2), "read_statuses",
-                               [&] {
-                                   all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
-                                   ++made;
-                               });
+read_statuses(raw_socket &peer, std::string_view expected, int reads, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::string                                  all;
+    int                                          made = 0;
+    qb::http::test::discard(qb::http::test::wait_until([&] { return made == reads || statuses(all).size() >= expected.size(); },
+                                                       std::chrono::seconds(3) * reads + std::chrono::seconds(2), "read_statuses",
+                                                       [&] {
+                                                           all += peer.read_until("\r\n\r\n", std::chrono::seconds(3));
+                                                           ++made;
+                                                       }),
+                            "the caller counts the statuses in what it returns");
     return all;
 }
 

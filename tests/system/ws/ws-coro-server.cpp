@@ -232,9 +232,10 @@ class RefusingCoroServer : public qb::io::use<RefusingCoroServer<R>>::tcp::templ
 // The raw response to one upgrade request sent to a RefusingCoroServer<R>.
 template <Refusal R>
 std::string
-refused_upgrade_response() {
-    WsServerThread<RefusingCoroServer<R>> server{0};
-    qb::io::tcp::socket                   sock;
+refused_upgrade_response(std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    WsServerThread<RefusingCoroServer<R>>        server{0};
+    qb::io::tcp::socket                          sock;
     if (sock.connect(qb::io::uri{"tcp://localhost:" + std::to_string(server.port)}) != 0) {
         ADD_FAILURE() << "could not connect to the refusing server";
         return {};
@@ -519,11 +520,12 @@ TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
     session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_EQ(replacement.await_resume().payload, "server-replacement");
@@ -542,11 +544,12 @@ TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
     ASSERT_FALSE(next.handle().done());
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || preceding.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || preceding.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(preceding.handle().done());
     EXPECT_EQ(preceding.await_resume().payload, "server-preceding");
@@ -556,11 +559,12 @@ TEST_F(WsCoroServer, AbandonedNextFrameReleasesOnlyItsOwnConsumerSlot) {
     session.on(EchoCoroSession::WS_Protocol::message{next_message.size(), next_message.data().cbegin(), next_message});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || next.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || next.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(next.handle().done());
     EXPECT_EQ(next.await_resume().payload, "server-next");
@@ -585,11 +589,12 @@ TEST_F(WsCoroServer, FrameAfterAbandonedNextFrameIsAvailableToTheNextConsumer) {
     replacement.handle().resume();
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(replacement.handle().done()) << "a dead receiver must not consume the frame";
     EXPECT_EQ(replacement.await_resume().payload, "server-buffered");
@@ -647,11 +652,12 @@ TEST_F(WsCoroServer, RejectedCloseAllowsAValidCloseOnTheSameSession) {
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(task.handle().done());
     EXPECT_NO_THROW(task.await_resume());
@@ -677,11 +683,12 @@ TEST_F(WsCoroServer, ARealConcurrentNextFrameIsStillRejected) {
     session.on(EchoCoroSession::WS_Protocol::message{message.size(), message.data().cbegin(), message});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || first.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || first.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(first.handle().done());
     EXPECT_EQ(first.await_resume().payload, "server-first");
@@ -710,11 +717,12 @@ TEST_F(WsCoroServer, AbandonedCloseAllowsAReplacementButRejectsAConcurrentClose)
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::run(EVRUN_NOWAIT);
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || replacement.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::run(EVRUN_NOWAIT);
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(replacement.handle().done());
     EXPECT_TRUE(replacement.await_resume().ok);
@@ -780,11 +788,12 @@ TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
         EXPECT_EQ(close_frames, 0) << "http_completion schedules the consumer; it does not resume it inline";
         {
             int turn = 0; // sixteen passes at most
-            qb::http::test::wait_until([&] { return turn == 16 || close_frames != 0; }, 5s, "wait_until",
-                                       [&turn] {
-                                           qb::io::async::coro_scheduler().run_ready();
-                                           ++turn;
-                                       });
+            qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || close_frames != 0; }, 5s, "wait_until",
+                                                               [&turn] {
+                                                                   qb::io::async::coro_scheduler().run_ready();
+                                                                   ++turn;
+                                                               }),
+                                    "sixteen passes at most: the case asserts done() right after");
         }
         ASSERT_EQ(close_frames, 1);
         EXPECT_EQ(received.kind, qb::http::ws::IncomingFrame::Kind::Close);
@@ -798,11 +807,12 @@ TEST_F(WsCoroServer, CloseConsumerWaitsWithoutPublishingAnotherClose) {
         session.on(qb::io::async::event::disconnected{static_cast<int>(qb::http::DisconnectedReason::ServerDraining)});
         {
             int turn = 0; // sixteen passes at most
-            qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
-                                       [&turn] {
-                                           qb::io::async::coro_scheduler().run_ready();
-                                           ++turn;
-                                       });
+            qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                                               [&turn] {
+                                                                   qb::io::async::coro_scheduler().run_ready();
+                                                                   ++turn;
+                                                               }),
+                                    "sixteen passes at most: the case asserts done() right after");
         }
         ASSERT_TRUE(task.handle().done());
         EXPECT_NO_THROW(task.await_resume());
@@ -841,11 +851,12 @@ TEST_F(WsCoroServer, CloseAwaiterDuringServerDrainWaitsForTheExistingHandshake) 
     session.on(EchoCoroSession::WS_Protocol::close{peer.size(), peer.data().cbegin(), peer});
     {
         int turn = 0; // sixteen passes at most
-        qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
-                                   [&turn] {
-                                       qb::io::async::coro_scheduler().run_ready();
-                                       ++turn;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return turn == 16 || task.handle().done(); }, 5s, "wait_until",
+                                                           [&turn] {
+                                                               qb::io::async::coro_scheduler().run_ready();
+                                                               ++turn;
+                                                           }),
+                                "sixteen passes at most: the case asserts done() right after");
     }
     ASSERT_TRUE(task.handle().done());
     EXPECT_NO_THROW(task.await_resume());

@@ -597,7 +597,9 @@ protected:
     }
 
     static bool
-    pump(std::function<bool()> const &done, std::chrono::milliseconds budget = 5s) {
+    pump(std::function<bool()> const &done, std::chrono::milliseconds budget = 5s,
+         std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::expect_until(done, budget, "pump", qb::http::test::fail_wait::pass_or_sleep{1ms});
     }
 
@@ -723,9 +725,10 @@ protected:
     /// with the request still held by the client, whose destructor answers it after this frame is gone (Huly QB-1246).
     static std::optional<qb::http::Response>
     get(std::shared_ptr<qb::http3::Client> const &client, std::uint16_t port, std::string const &path, std::string const &method = "GET",
-        std::chrono::milliseconds budget = 5s) {
-        auto const        response = std::make_shared<std::optional<qb::http::Response>>();
-        qb::http::Request request{qb::io::uri(origin(port) + path)};
+        std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        auto const                                   response = std::make_shared<std::optional<qb::http::Response>>();
+        qb::http::Request                            request{qb::io::uri(origin(port) + path)};
         request.method() = qb::http::Method(method);
         EXPECT_TRUE(client->push_request(std::move(request), [response](qb::http::Response r) { *response = std::move(r); }));
         pump([&] { return response->has_value(); }, budget);
@@ -891,7 +894,7 @@ TEST_F(Http3ResponseStreamTest, APeerThatCreditsItsWindowInBurstsFinishesUnderTh
     int  credits = 0;
     bool brought = true; // every credit brought its octets
     // Each turn is one credit, 100 ms after the one before, and what it brings: until the FIN, sixty-four at most.
-    qb::http::test::wait_until(
+    qb::http::test::expect_until(
         [&] { return !brought || peer.first_fin || peer.first_reset || credits == 64; }, 60s, "the credits",
         [&] {
             pump_for(100ms);

@@ -204,7 +204,8 @@ protected:
 // between two units of progress, its 1001st PING closed the connection.
 TEST_F(Http2ControlRepliesWireTest, AClientThatReadsMaySolicitRepliesPastTheThousandth) {
     // Each kind on a connection of its own, and judged on its own: a fatal assertion ends that kind, not the test.
-    const auto reads = [&](const bool settings) {
+    const auto reads = [&](const bool settings, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(settings ? "SETTINGS" : "PING");
         Http2RawClient client;
         ASSERT_TRUE(client.connect(port));
@@ -286,7 +287,8 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
          "Excessive frames on closed streams (HTTP/2 reset flood)"},
     };
     // Each flood on a connection of its own, and judged on its own: a fatal assertion ends that flood, not the test.
-    const auto never_reads = [&](const flood &each) {
+    const auto never_reads = [&](const flood &each, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(each.name);
         const soliciting       what  = each.what;
         const std::string_view reply = each.reply;
@@ -312,11 +314,13 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         std::size_t       solicited = 0;
         bool              taking    = true; // the server still takes what the client writes
         // Each turn is one batch written, and a request: until a write the connection refuses, or the whole flood.
-        qb::http::test::wait_until([&] { return !taking || solicited * reply.size() >= kFlood; }, kBudget * 4, "the flood",
-                                   [&] {
-                                       taking = client.solicit(999, what, closed) && client.request("/served") != 0;
-                                       solicited += 999;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return !taking || solicited * reply.size() >= kFlood; }, kBudget * 4,
+                                                           "the flood",
+                                                           [&] {
+                                                               taking = client.solicit(999, what, closed) && client.request("/served") != 0;
+                                                               solicited += 999;
+                                                           }),
+                                "the case expects the broken write right after");
         // The flood ends on a write the closed connection refuses: the session closed it at the verdict.
         EXPECT_TRUE(client.write_failed) << "the flood stopped after " << solicited << " solicited without the connection breaking";
         // Now the client reads. A server that still serves answers one last request, after everything else it wrote.
@@ -330,8 +334,8 @@ TEST_F(Http2ControlRepliesWireTest, AClientThatNeverReadsIsCutOnceAThousandRepli
         client.close();
 
         std::optional<std::string> held;
-        qb::http::test::wait_until([&] { return (held = g_closed.take()).has_value(); }, 10s, "wait_until",
-                                   qb::http::test::fail_wait::nap{1ms});
+        qb::http::test::expect_until([&] { return (held = g_closed.take()).has_value(); }, 10s, "wait_until",
+                                     qb::http::test::fail_wait::nap{1ms});
         ASSERT_TRUE(held.has_value()) << "the session did not close with bytes queued";
         RecordProperty(std::string("held_octets_") + each.key, std::to_string(held->size()));
         // The premise: nothing written after the large body left -- its last DATA frame, END_STREAM, is still there.

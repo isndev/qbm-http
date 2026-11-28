@@ -177,7 +177,8 @@ bound_port(const qb::http::test::WsServerThread<ServerT> &server) {
  */
 template <typename Pred>
 bool
-pump_until(Pred &&pred, std::chrono::milliseconds budget = 3000ms) {
+pump_until(Pred &&pred, std::chrono::milliseconds budget = 3000ms, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     // A pass, a look, a sleep, in that order: the first pass is made here, before the wait's first look.
     qb::io::async::run(EVRUN_NOWAIT);
     return qb::http::test::expect_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::sleep_then_pass{1ms});
@@ -330,8 +331,9 @@ public:
 // Raw-socket helper: send a custom upgrade with a chosen key and return the
 // server's HTTP response (status line + headers).
 [[nodiscard]] std::string
-drive_bad_key_handshake(int port, std::string_view key) {
-    qb::io::tcp::socket sock;
+drive_bad_key_handshake(int port, std::string_view key, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::io::tcp::socket                          sock;
     EXPECT_EQ(sock.connect(qb::io::uri{"tcp://localhost:" + std::to_string(port)}), 0);
     (void) sock.set_nonblocking(true);
 
@@ -540,7 +542,8 @@ ExtensionResponseSession::on(qb::io::async::event::disconnected &&) {
 }
 
 void
-run_extension_response_case(bool select_unoffered_extension) {
+run_extension_response_case(bool select_unoffered_extension, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     qb::io::async::init();
 
     std::atomic<int>                                        requests{0};
@@ -875,8 +878,10 @@ namespace ws_connected_pumps_test {
 /// Loop turns until `done()`, or two seconds on a host too busy to answer: a callback's own wait.
 template <typename Done>
 void
-pump_inside_the_callback(Done done) {
-    qb::http::test::wait_until(done, 2s, "pump_inside_the_callback", qb::http::test::fail_wait::pass_then_sleep{1ms});
+pump_inside_the_callback(Done done, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::http::test::discard(qb::http::test::wait_until(done, 2s, "pump_inside_the_callback", qb::http::test::fail_wait::pass_then_sleep{1ms}),
+                            "a pass inside a callback: the case asserts what it waited for once the callback returns");
 }
 
 } // namespace ws_connected_pumps_test
@@ -1039,11 +1044,12 @@ TEST(WebSocketClientHardening, AConnectionBegunByAHandlerOfAMessageThatWaitedIsS
         // Until the second upgrade request leaves: loop turns, deferred callbacks included -- the connection needs them.
         ws_connected_pumps_test::pump_inside_the_callback([&] { return upgrades == 2; });
         // Then the loop alone until the 101 is in: its watchers run, no deferred callback does.
-        qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
-                                   [] {
-                                       qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
-                                       std::this_thread::sleep_for(1ms);
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
+                                                           [] {
+                                                               qb::io::async::listener::current.loop().run(EVRUN_NOWAIT);
+                                                               std::this_thread::sleep_for(1ms);
+                                                           }),
+                                "second_101_in records it, which the case asserts");
         second_101_in = !client.negotiated_subprotocol().empty() && connected == 1;
     });
     client.connect(first, 2s);
@@ -1092,8 +1098,9 @@ TEST(WebSocketClientHardening, ADeliveryItsHandlerEndedLeavesTheNextConnectionsE
         if (std::exchange(replaced, true))
             return;
         client.connect(second, 2s);
-        qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
-                                   [] { qb::io::async::listener::current.loop().run(EVRUN_NOWAIT); });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return !client.negotiated_subprotocol().empty(); }, 2s, "wait_until",
+                                                           [] { qb::io::async::listener::current.loop().run(EVRUN_NOWAIT); }),
+                                "the case asserts what the second connection said");
         qb::http::ws::MessageText hi;
         hi << "hi";
         client << hi;
@@ -1141,7 +1148,9 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWh
         bool const *const gone    = &destroyed;
         bool *const       in_pump = &pumping;
         *in_pump                  = true;
-        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
+        qb::http::test::discard(
+            qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms}),
+            "a pass inside the callback until the client is gone: the case asserts what it heard");
         *in_pump = false;
     });
     client->on_message([&](auto &event) {
@@ -1188,7 +1197,9 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientOn
         bool const *const gone    = &destroyed;
         bool *const       in_pump = &pumping;
         *in_pump                  = true;
-        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
+        qb::http::test::discard(
+            qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms}),
+            "a pass inside the callback until the client is gone: the case asserts what it heard");
         *in_pump = false;
     });
     client->on_message([&](auto &event) {
@@ -1317,7 +1328,9 @@ TEST(WebSocketClientHardening, AHandlerOfAMessageThatWaitedMayDestroyTheClientWh
         bool const *const gone    = &destroyed;
         bool *const       in_pump = &pumping;
         *in_pump                  = true;
-        qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
+        qb::http::test::discard(
+            qb::http::test::wait_until([gone] { return *gone; }, 2s, "wait_until", qb::http::test::fail_wait::pass_then_sleep{1ms}),
+            "a pass inside the callback until the client is gone: the case asserts what it heard");
         *in_pump = false;
     });
     client->on_message([&](auto &event) {
@@ -1972,7 +1985,8 @@ DEFINE_BAD_FRAME_SERVER(InvalidCloseUtf8Session, InvalidCloseUtf8Server, bad_fra
 // Drive a bad-frame scenario and assert the precise Close code the client emitted.
 template <typename ServerT>
 void
-run_bad_frame_scenario(std::uint16_t expected_close_code) {
+run_bad_frame_scenario(std::uint16_t expected_close_code, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     qb::io::async::init();
 
     ServerProbeResult                       result;

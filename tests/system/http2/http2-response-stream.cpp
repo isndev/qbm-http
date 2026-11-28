@@ -182,8 +182,10 @@ bulk(std::shared_ptr<Stream> stream) {
 /// output held between the marks and drained a sip at a time is what the sibling cases are measured against.
 template <typename Stop>
 std::size_t
-sip(Http2RawClient &c, std::uint32_t b, std::size_t bytes, std::chrono::milliseconds pause, std::uint64_t &credited, Stop &&stop) {
-    const auto before = c.stream(b).data_bytes;
+sip(Http2RawClient &c, std::uint32_t b, std::size_t bytes, std::chrono::milliseconds pause, std::uint64_t &credited, Stop &&stop,
+    std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    const auto                                   before = c.stream(b).data_bytes;
     c.read_until([&] { return c.stream(b).data_bytes >= before + bytes || stop() || c.eof; }, 500ms);
     if (c.stream(b).data_bytes + (std::uint64_t{4} << 20) > credited) {
         (void) c.window_update(0, 8u << 20);
@@ -457,7 +459,8 @@ protected:
 
     template <typename Pred>
     static bool
-    wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s) {
+    wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});
     }
 };
@@ -532,14 +535,16 @@ TEST_F(Http2StreamWireTest, TheStreamWindowBoundsTheServerAndAWindowUpdateResume
     // Grant the window piece by piece: each update lets 16 KiB more go, and the connection's window too.
     int  grants  = 0;
     bool granted = true; // every WINDOW_UPDATE was written
-    qb::http::test::wait_until([&] { return !granted || grants == 20 || c.stream(id).end_stream; }, 60s, "the window, granted piece by piece",
-                               [&] {
-                                   granted = c.window_update(id, 16384) && c.window_update(0, 16384);
-                                   if (!granted)
-                                       return;
-                                   c.read_for(30ms);
-                                   ++grants;
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return !granted || grants == 20 || c.stream(id).end_stream; }, 60s,
+                                                       "the window, granted piece by piece",
+                                                       [&] {
+                                                           granted = c.window_update(id, 16384) && c.window_update(0, 16384);
+                                                           if (!granted)
+                                                               return;
+                                                           c.read_for(30ms);
+                                                           ++grants;
+                                                       }),
+                            "the case asserts granted right after, then reads the end");
     ASSERT_TRUE(granted);
     ASSERT_TRUE(c.read_until([&] { return c.stream(id).end_stream; }));
     EXPECT_EQ(c.stream(id).data_bytes, std::size_t{256} * 1024);
@@ -739,11 +744,11 @@ TEST_F(Http2StreamWireTest, AStalledDownloadIsCutWhileASiblingStreamKeepsTheConn
     const auto  give_up      = std::chrono::steady_clock::now() + 4s;
     std::size_t last_growth  = 0;
     std::size_t prior_growth = 0;
-    qb::http::test::wait_until([&] { return c.stream(a).reset || c.eof; }, give_up, "the cut",
-                               [&] {
-                                   prior_growth = last_growth;
-                                   last_growth  = sip(c, b, 256 * 1024, 50ms, credited, [&] { return c.stream(a).reset; });
-                               });
+    qb::http::test::expect_until([&] { return c.stream(a).reset || c.eof; }, give_up, "the cut",
+                                 [&] {
+                                     prior_growth = last_growth;
+                                     last_growth  = sip(c, b, 256 * 1024, 50ms, credited, [&] { return c.stream(a).reset; });
+                                 });
     ASSERT_TRUE(c.stream(a).reset) << "the stalled download was never cut beside a flowing sibling";
     const auto now      = std::chrono::steady_clock::now();
     const auto cut      = std::chrono::duration_cast<std::chrono::milliseconds>(now - parked);
@@ -779,7 +784,7 @@ TEST_F(Http2StreamWireTest, AHealthyReaderTakingItsDownloadInBurstsFinishesUnder
     ASSERT_NE(id, 0u);
     int  bursts = 0;
     bool came   = true; // every burst so far came within its five seconds
-    qb::http::test::wait_until(
+    qb::http::test::expect_until(
         [&] { return !came || c.stream(id).end_stream || c.stream(id).reset || c.eof; }, 100s, "the bursts",
         [&] {
             const auto before = c.stream(id).data_bytes;
@@ -820,7 +825,7 @@ TEST_F(Http2StreamWireTest, AnIdleProducerBesideABusySiblingIsNeverCut) {
     ASSERT_NE(a, 0u);
     const auto  give_up     = std::chrono::steady_clock::now() + 5s;
     std::size_t last_growth = 0;
-    qb::http::test::wait_until(
+    qb::http::test::expect_until(
         [&] { return c.stream(a).end_stream || c.stream(a).reset || c.eof; }, give_up, "the end of A",
         [&] { last_growth = sip(c, b, 256 * 1024, 50ms, credited, [&] { return c.stream(a).end_stream || c.stream(a).reset; }); });
     EXPECT_FALSE(c.stream(a).reset) << "an idle producer is not a stalled peer";

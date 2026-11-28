@@ -232,8 +232,9 @@ struct RawH1 {
         return sock.connect_v4("127.0.0.1", port) == 0 && sock.set_nonblocking(true) == 0;
     }
     bool
-    send(std::string const &request) {
-        std::string_view data(request);
+    send(std::string const &request, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::string_view                             data(request);
         // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
         return qb::http::test::wait_until(
             [&] {
@@ -288,13 +289,14 @@ struct RawH1 {
     }
     template <typename Pred>
     bool
-    read_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
-        qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
-                                   [this] {
-                                       if (!read_some())
-                                           std::this_thread::sleep_for(1ms);
-                                   });
-        return pred();
+    read_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        return qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
+                                          [this] {
+                                              if (!read_some())
+                                                  std::this_thread::sleep_for(1ms);
+                                          })
+               && pred();
     }
     /// Forget the response read so far: the next bytes on this connection start another one.
     void
@@ -307,12 +309,14 @@ struct RawH1 {
         chunks   = 0;
     }
     void
-    read_for(std::chrono::milliseconds window) {
-        qb::http::test::wait_until([this] { return eof; }, window, "read_for",
-                                   [this] {
-                                       if (!read_some())
-                                           std::this_thread::sleep_for(1ms);
-                                   });
+    read_for(std::chrono::milliseconds window, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        qb::http::test::discard(qb::http::test::wait_until([this] { return eof; }, window, "read_for",
+                                                           [this] {
+                                                               if (!read_some())
+                                                                   std::this_thread::sleep_for(1ms);
+                                                           }),
+                                "a window: it reads for its whole span, unless the connection ends");
     }
     [[nodiscard]] bool
     header_is(std::string name, std::string value) const {
@@ -406,7 +410,7 @@ TEST_F(SseHttp1Test, AHeadGetsTheHeadAloneAndTheProducerSeesAnEndedStream) {
     EXPECT_TRUE(c.header_is("content-type", "text/event-stream; charset=utf-8")) << c.head;
     c.read_for(50ms);
     EXPECT_TRUE(c.body.empty()) << "the head alone";
-    qb::http::test::wait_until([&] { return g_events_probe_set.load(); }, 2s, "wait_until", qb::http::test::fail_wait::nap{1ms});
+    qb::http::test::expect_until([&] { return g_events_probe_set.load(); }, 2s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     ASSERT_TRUE(g_events_probe_set.load()) << "the handler ran its sends";
     EXPECT_TRUE(g_events_ended.load()) << "the stream came back ended: a producer that loops on cancelled() must read ended() too";
     EXPECT_EQ(g_events_written.load(), 0u) << "nothing of the three events was written";
@@ -677,7 +681,9 @@ protected:
         g_probe   = nullptr;
     }
     static bool
-    pump(std::function<bool()> const &done, std::chrono::milliseconds budget = 5s) {
+    pump(std::function<bool()> const &done, std::chrono::milliseconds budget = 5s,
+         std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::expect_until(done, budget, "pump", qb::http::test::fail_wait::pass_or_sleep{1ms});
     }
 };

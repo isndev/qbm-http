@@ -237,7 +237,8 @@ struct HandoffFixture {
     /// behind the close, so a bound of 2 s separates "the worker has not written yet" from "the dead
     /// path was never taken" -- the second stays a named failure.
     [[nodiscard]] bool
-    reached_null_registration(std::chrono::milliseconds budget = 2s) {
+    reached_null_registration(std::chrono::milliseconds budget = 2s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until([this] { return saw_null_registration.load(std::memory_order_acquire); }, budget,
                                           "reached_null_registration", qb::http::test::fail_wait::nap{1ms});
     }
@@ -334,18 +335,18 @@ TEST_F(WsCoroHandoff, NonWebSocketRequestToWsRouteIsNotUpgraded) {
     std::string response;
     char        buf[512];
     bool        ended = false;
-    qb::http::test::wait_until([&] { return ended; }, 2s, "the response",
-                               [&] {
-                                   int n = sock.read(buf, sizeof(buf));
-                                   if (n > 0) {
-                                       response.append(buf, static_cast<std::size_t>(n));
-                                       ended = response.find("\r\n\r\n") != std::string::npos;
-                                   } else if (n == 0) {
-                                       ended = true; // peer closed
-                                   } else {
-                                       std::this_thread::sleep_for(2ms);
-                                   }
-                               });
+    qb::http::test::expect_until([&] { return ended; }, 2s, "the response",
+                                 [&] {
+                                     int n = sock.read(buf, sizeof(buf));
+                                     if (n > 0) {
+                                         response.append(buf, static_cast<std::size_t>(n));
+                                         ended = response.find("\r\n\r\n") != std::string::npos;
+                                     } else if (n == 0) {
+                                         ended = true; // peer closed
+                                     } else {
+                                         std::this_thread::sleep_for(2ms);
+                                     }
+                                 });
     sock.close();
 
     EXPECT_EQ(response.find("101"), std::string::npos) << "a non-WS request must not be upgraded; got:\n" << response;

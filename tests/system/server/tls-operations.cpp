@@ -49,7 +49,8 @@ static_assert(requires(H2 &s, qb::io::uri uri) {
 
 template <typename Predicate>
 bool
-pump_until(Predicate predicate, std::chrono::milliseconds budget = 5s) {
+pump_until(Predicate predicate, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(predicate, budget, "pump_until", [] { qb::io::async::run_for(1ms); });
 }
 
@@ -65,8 +66,9 @@ connect_tcp(Socket &socket, uint16_t port, std::vector<std::string> protocols, s
 }
 
 ::testing::AssertionResult
-handshake(Socket &socket) {
-    int state = 0;
+handshake(Socket &socket, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    int                                          state = 0;
     if (!pump_until([&] {
             state = socket.handshake_status();
             return state != 0;
@@ -92,10 +94,11 @@ expect_identity(Socket const &socket, std::string const &name) {
 // Real HTTP/1.1 over the TLS socket, also used for the h2 listener's fallback.
 // Content-Length and the full literal reply are checked; no sleep decides success.
 ::testing::AssertionResult
-http1_exchange(Socket &socket) {
-    constexpr std::string_view request = "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    std::size_t                sent    = 0;
-    std::string                response;
+http1_exchange(Socket &socket, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    constexpr std::string_view                   request = "GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    std::size_t                                  sent    = 0;
+    std::string                                  response;
     if (!pump_until([&] {
             if (sent < request.size()) {
                 const auto n = socket.write(request.data() + sent, request.size() - sent);
@@ -351,8 +354,9 @@ TEST(HttpTlsOperations, Http2KeepAliveContinuesAcrossRotation) {
             bool               done = false;
             qb::http::Response response;
         };
-        auto request = [&]() {
-            auto result = std::make_shared<Result>();
+        auto request = [&](std::source_location const where = std::source_location::current()) {
+            qb::http::test::fail_wait::called_from const caller{where};
+            auto                                         result = std::make_shared<Result>();
             EXPECT_TRUE(client->push_request(qb::http::Request{{origin + "/ping"}}, [result](qb::http::Response r) {
                 result->response = std::move(r);
                 result->done     = true;

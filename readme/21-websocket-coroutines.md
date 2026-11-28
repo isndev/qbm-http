@@ -104,7 +104,7 @@ Sending is not a coroutine: `operator<<` queues an outbound frame on the reactor
 The coroutine client inherits the subprotocol API from the shared CRTP base. Offer tokens in preference order before `connect()`; read the server's selection after it resolves.
 
 ```cpp
-// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:362-379 -->
+// <!-- src: qbm/http/tests/system/ws/ws-coro-server.cpp:363-380 -->
 qb::http::ws::coro_client ws;
 ws.set_subprotocols({"chat.v1", "chat.v2"});
 

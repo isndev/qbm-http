@@ -112,7 +112,8 @@ parse_frames(std::vector<std::uint8_t> const &in, std::size_t at, Each &&each) {
 /// Waits, sleeping, until @p pred holds or @p budget elapses: what the test's thread does while another thread works.
 template <typename Pred>
 bool
-watch_until(Pred &&pred, std::chrono::milliseconds budget) {
+watch_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "watch_until", qb::http::test::fail_wait::nap{1ms});
 }
 
@@ -120,7 +121,8 @@ watch_until(Pred &&pred, std::chrono::milliseconds budget) {
 /// elapses. Unlike ServerThread::pump_until it fails nothing: the caller's assertion names what did not happen.
 template <typename Pred>
 bool
-pump_until(Pred &&pred, std::chrono::milliseconds budget) {
+pump_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until",
                                       qb::http::test::fail_wait::pass_or_sleep{std::chrono::microseconds(200)});
 }
@@ -272,7 +274,8 @@ protected:
 
     /// A connection that served a request: the raw client's preface and SETTINGS, ours acknowledged, `/served` answered.
     static void
-    serving(Http2RawClient &client, std::uint16_t port) {
+    serving(Http2RawClient &client, std::uint16_t port, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(client.connect(port));
         ASSERT_TRUE(client.read_until([&] { return client.settings_acked; })) << "the server never acknowledged the SETTINGS";
         const auto served = client.request("/served");
@@ -282,32 +285,36 @@ protected:
 
     /// A HEADERS on stream 0, a connection error: the server answers GOAWAY(PROTOCOL_ERROR) and ends the connection.
     static void
-    connection_error(Http2RawClient &client) {
+    connection_error(Http2RawClient &client, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(client.frame(kHeaders, kEndStream | kEndHeaders, 0, {0x88}));
     }
 
     /// PING frames behind the connection error, which the server will never read: as many as the socket takes within
     /// 300 ms, 256 KiB at most. The client was still sending when the server ended the connection.
     static std::size_t
-    still_sending(Http2RawClient &client) {
+    still_sending(Http2RawClient &client, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         client.write_budget = 300ms;
         std::size_t pushed  = 0;
         bool        refused = false; // the socket took no more within the budget of a write
         // Each turn is one write of sixteen PING frames: 964 of them at most, each within its own budget.
-        qb::http::test::wait_until([&] { return refused || pushed >= std::size_t{256} << 10; }, 60s, "still sending",
-                                   [&] {
-                                       if (client.solicit(16))
-                                           pushed += 16 * 17;
-                                       else
-                                           refused = true;
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return refused || pushed >= std::size_t{256} << 10; }, 60s, "still sending",
+                                                           [&] {
+                                                               if (client.solicit(16))
+                                                                   pushed += 16 * 17;
+                                                               else
+                                                                   refused = true;
+                                                           }),
+                                "it returns what was pushed: refused or not is the caller's to judge");
         client.write_budget = 2s;
         return pushed;
     }
 
     /// The server's loop closes no socket after its peer any more.
     [[nodiscard]] bool
-    loop_closes_nothing(std::chrono::milliseconds budget = 5s) const {
+    loop_closes_nothing(std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
         return watch_until([&] { return probe.closing_now.load() == 0; }, budget);
     }
 
@@ -509,7 +516,8 @@ private:
     /// and a PING, and again at each PONG, until the client's GOAWAY -- the shape of http2_planned_peer.h's empty-data
     /// flood. A round is one write the client reads whole: when it cuts the flood, nothing is left unread on its side.
     bool
-    flood() {
+    flood(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         static constexpr std::array<std::uint8_t, 8> opaque{'q', 'b', '-', '1', '2', '7', '0', 7};
         const auto                                   round = [&](int empty_frames) {
             std::vector<std::uint8_t> frames;
@@ -573,7 +581,8 @@ private:
     }
 
     void
-    play() {
+    play(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         if (!read_until([this] { return _answered && _acked; }))
             return;
         _ready = true;
@@ -598,7 +607,8 @@ private:
     }
 
     void
-    run() {
+    run(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         _deadline = std::chrono::steady_clock::now() + 60s;
         qb::http::test::peer_wait_until([this] { return over() || (_listener.accept(_sock) == 0 && _sock.is_open()); },
                                         qb::http::test::fail_wait::never);
@@ -652,8 +662,9 @@ protected:
     }
 
     [[nodiscard]] static std::shared_ptr<qb::http2::Client>
-    connected_client(std::uint16_t port) {
-        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+    connected_client(std::uint16_t port, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        auto                                         client = qb::http2::make_client("https://localhost:" + std::to_string(port));
         client->set_verify_peer(false); // self-signed test cert
         client->set_connect_timeout(5s);
         client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
@@ -694,7 +705,8 @@ TEST_F(Http2ClientCloseAfterPeerTest, AServerThatWritesWithoutReadingIntoAConnec
         std::uint32_t        code; // the client's GOAWAY
     };
     // Each way on a connection of its own, and judged on its own: a fatal assertion ends that way, not the test.
-    const auto ends = [&](ending const &each) {
+    const auto ends = [&](ending const &each, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(each.name);
         ClosingPeer peer(each.provoke);
         ASSERT_NE(peer.port(), 0);
@@ -800,16 +812,17 @@ TEST_F(Http2ServerCloseAfterPeerTest, AClientThatNeverReadsIsRefusedWithinTheByt
     std::size_t           taken     = 0;
     bool                  refused   = false;
     bool                  cut       = false; // a write did not go through: refused, or out of its budget
-    qb::http::test::wait_until([&] { return cut || taken >= 2 * kAcceptedBound; }, t0 + 30s, "the refusal",
-                               [&] {
-                                   const auto write_began = std::chrono::steady_clock::now();
-                                   if (!client.solicit(per_write)) {
-                                       refused = std::chrono::steady_clock::now() - write_began < client.write_budget;
-                                       cut     = true;
-                                       return;
-                                   }
-                                   taken += octets;
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return cut || taken >= 2 * kAcceptedBound; }, t0 + 30s, "the refusal",
+                                                       [&] {
+                                                           const auto write_began = std::chrono::steady_clock::now();
+                                                           if (!client.solicit(per_write)) {
+                                                               refused = std::chrono::steady_clock::now() - write_began < client.write_budget;
+                                                               cut     = true;
+                                                               return;
+                                                           }
+                                                           taken += octets;
+                                                       }),
+                            "the case expects the refusal right after");
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
     EXPECT_TRUE(refused) << "a client that never reads was not refused: " << taken << " octets taken in " << elapsed.count() << " ms";
     EXPECT_LT(elapsed.count(), (std::chrono::duration_cast<std::chrono::milliseconds>(session_linger()) + 3s).count())
@@ -840,16 +853,16 @@ TEST_F(Http2ServerCloseAfterPeerTest, ASlowReaderBehindALargeResponseDoesNotHold
     const std::int64_t sent_at = now_ns();
     ASSERT_NO_FATAL_FAILURE(connection_error(client));
     // 256 KiB every 250 ms, far below what loopback gives, until the server released the session
-    qb::http::test::wait_until([&] { return probe.releases.load() != 0 || client.eof; },
-                               std::chrono::steady_clock::time_point(
-                                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(sent_at)))
-                                   + 10s,
-                               "the release",
-                               [&] {
-                                   const std::size_t burst = client.stream(large).data_bytes + (std::size_t{256} << 10);
-                                   static_cast<void>(client.read_until([&] { return client.stream(large).data_bytes >= burst; }, 50ms));
-                                   std::this_thread::sleep_for(250ms);
-                               });
+    qb::http::test::expect_until([&] { return probe.releases.load() != 0 || client.eof; },
+                                 std::chrono::steady_clock::time_point(
+                                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::nanoseconds(sent_at)))
+                                     + 10s,
+                                 "the release",
+                                 [&] {
+                                     const std::size_t burst = client.stream(large).data_bytes + (std::size_t{256} << 10);
+                                     static_cast<void>(client.read_until([&] { return client.stream(large).data_bytes >= burst; }, 50ms));
+                                     std::this_thread::sleep_for(250ms);
+                                 });
     ASSERT_GT(probe.releases.load(), 0) << "a slow reader held the session of an error GOAWAY";
     const std::int64_t released_at = probe.released_at.load();
     EXPECT_LT(released_at - sent_at, session_linger().count())
@@ -893,52 +906,55 @@ TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverR
     ASSERT_EQ(sock.connect_v4("127.0.0.1", port), 0);
     ASSERT_EQ(sock.get_alpn_selected_protocol(), "h2");
     ASSERT_EQ(sock.set_nonblocking(true), 0);
-    const auto write_all = [&](std::vector<std::uint8_t> const &bytes) {
-        std::size_t off    = 0;
-        bool        failed = false;
-        qb::http::test::wait_until([&] { return failed || off >= bytes.size(); }, 10s, "write_all",
-                                   [&] {
-                                       const int n = sock.write(bytes.data() + off, bytes.size() - off);
-                                       if (n < 0) {
-                                           failed = true;
-                                           return;
-                                       }
-                                       if (n == 0)
-                                           std::this_thread::sleep_for(1ms);
-                                       off += static_cast<std::size_t>(std::max(n, 0));
-                                   });
-        return !failed && off == bytes.size();
+    const auto write_all = [&](std::vector<std::uint8_t> const &bytes, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  off    = 0;
+        bool                                         failed = false;
+        return qb::http::test::wait_until([&] { return failed || off >= bytes.size(); }, 10s, "write_all",
+                                          [&] {
+                                              const int n = sock.write(bytes.data() + off, bytes.size() - off);
+                                              if (n < 0) {
+                                                  failed = true;
+                                                  return;
+                                              }
+                                              if (n == 0)
+                                                  std::this_thread::sleep_for(1ms);
+                                              off += static_cast<std::size_t>(std::max(n, 0));
+                                          })
+               && !failed;
     };
     std::vector<std::uint8_t>    in;
     std::size_t                  parsed = 0;
     std::optional<std::uint32_t> goaway;
     bool                         settings   = false; // the server's SETTINGS
-    const auto                   read_until = [&](auto &&done) {
-        const auto deadline = std::chrono::steady_clock::now() + 10s;
-        char       buffer[16384];
-        qb::http::test::wait_until(
-            [&] {
-                if (done())
-                    return true;
-                const int n = sock.read(buffer, sizeof(buffer));
-                if (n < 0)
-                    return true;
-                if (n == 0) {
-                    std::this_thread::sleep_for(1ms);
-                    return false;
-                }
-                in.insert(in.end(), buffer, buffer + n);
-                parsed = parse_frames(
-                    in, parsed, [&](std::uint8_t type, std::uint8_t flags, std::uint32_t, std::uint8_t const *payload, std::size_t length) {
-                        if (type == kSettings && (flags & kAck) == 0)
-                            settings = true;
-                        else if (type == kGoaway && length >= 8 && !goaway)
-                            goaway = be32(payload + 4);
-                    });
-                return false;
-            },
-            deadline, "read_until", qb::http::test::fail_wait::no_turn{});
-        return done();
+    const auto                   read_until = [&](auto &&done, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        const auto                                   deadline = std::chrono::steady_clock::now() + 10s;
+        char                                         buffer[16384];
+        return qb::http::test::wait_until(
+                   [&] {
+                       if (done())
+                           return true;
+                       const int n = sock.read(buffer, sizeof(buffer));
+                       if (n < 0)
+                           return true;
+                       if (n == 0) {
+                           std::this_thread::sleep_for(1ms);
+                           return false;
+                       }
+                       in.insert(in.end(), buffer, buffer + n);
+                       parsed = parse_frames(
+                           in, parsed,
+                           [&](std::uint8_t type, std::uint8_t flags, std::uint32_t, std::uint8_t const *payload, std::size_t length) {
+                               if (type == kSettings && (flags & kAck) == 0)
+                                   settings = true;
+                               else if (type == kGoaway && length >= 8 && !goaway)
+                                   goaway = be32(payload + 4);
+                           });
+                       return false;
+                   },
+                   deadline, "read_until", qb::http::test::fail_wait::no_turn{})
+               && done();
     };
 
     std::vector<std::uint8_t> preface(HTTP2_CONNECTION_PREFACE.begin(), HTTP2_CONNECTION_PREFACE.end());
@@ -960,16 +976,17 @@ TEST_F(Http2ServerCloseAfterPeerTest, AFloodingConnectionIsClosedAtOnceAndNeverR
     std::size_t taken   = 0;
     bool        refused = false;
     const auto  t0      = std::chrono::steady_clock::now();
-    qb::http::test::wait_until([&] { return refused || taken >= 2 * kAcceptedBound; }, t0 + 10s, "the flood's refusal",
-                               [&] {
-                                   const int n = sock.write(more.data(), more.size());
-                                   if (n < 0)
-                                       refused = true;
-                                   else if (n == 0)
-                                       std::this_thread::sleep_for(1ms);
-                                   else
-                                       taken += static_cast<std::size_t>(n);
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return refused || taken >= 2 * kAcceptedBound; }, t0 + 10s, "the flood's refusal",
+                                                       [&] {
+                                                           const int n = sock.write(more.data(), more.size());
+                                                           if (n < 0)
+                                                               refused = true;
+                                                           else if (n == 0)
+                                                               std::this_thread::sleep_for(1ms);
+                                                           else
+                                                               taken += static_cast<std::size_t>(n);
+                                                       }),
+                            "the case expects the refusal right after");
     EXPECT_TRUE(refused) << "the flooder's writes were never refused: " << taken << " octets taken";
     EXPECT_LT(taken, qb::io::async::detail::closing_socket_byte_budget())
         << "the server's loop read the flooder: its socket took " << taken << " octets after the GOAWAY";
@@ -1008,7 +1025,8 @@ TEST_F(Http2ClientCloseAfterPeerTest, AConnectionTheClientEndsForAFloodIsClosedA
             << "the server closed and the client's loop kept its socket";
     }
     // Each linger on a connection of its own, and judged on its own: a fatal assertion ends that one, not the test.
-    const auto floods = [&](std::optional<qb::duration> set) {
+    const auto floods = [&](std::optional<qb::duration> set, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(set ? "a flood, the client's linger set to 750 ms" : "a flood, the client's default linger");
         ClosingPeer peer(ClosingPeer::provoke::empty_data_flood);
         ASSERT_NE(peer.port(), 0);

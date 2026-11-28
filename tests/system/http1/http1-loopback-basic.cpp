@@ -553,7 +553,8 @@ public:
 /// Runs @p plan on a server of type ServerT, and returns what was seen once its thread is joined.
 template <typename ServerT>
 void
-run(Plan plan, Seen &seen) {
+run(Plan plan, Seen &seen, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     g_seen = &seen;
     {
         ServerThread<ServerT> thread([plan](ServerT &srv) -> bool {
@@ -568,8 +569,8 @@ run(Plan plan, Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /held HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -706,8 +707,8 @@ TEST(Http1SessionReason, ALingeringSessionIsNotCutByItsInactivityTimeout) {
         EXPECT_EQ(std::string(buffer, 12), "HTTP/1.1 200");
         std::this_thread::sleep_for(milliseconds(1000)); // the client keeps its end open
         client.disconnect();
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(4), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(4), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.done.load()) << "the session was not released";
@@ -795,7 +796,8 @@ public:
 
 template <typename S>
 void
-run(Seen &seen) {
+run(Seen &seen, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     g_seen = &seen;
     {
         ServerThread<Server<S>> thread([](Server<S> &srv) -> bool {
@@ -809,8 +811,8 @@ run(Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -911,8 +913,8 @@ TEST(Http1SessionReason, ABareSessionEndedInThePassOfTheDrainDeadlineKeepsItsRea
         ASSERT_TRUE(thread.ready());
         qb::io::tcp::socket client;
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -1102,7 +1104,8 @@ public:
 
 template <typename S>
 void
-run(Seen &seen) {
+run(Seen &seen, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     g_seen = &seen;
     {
         ServerThread<Server<S>> thread([](Server<S> &srv) -> bool {
@@ -1116,8 +1119,8 @@ run(Seen &seen) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;
@@ -1127,8 +1130,9 @@ run(Seen &seen) {
 
 template <typename S>
 void
-expect_the_inactivity_timer_alone_stopped() {
-    Seen seen;
+expect_the_inactivity_timer_alone_stopped(std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    Seen                                         seen;
     ASSERT_NO_FATAL_FAILURE(run<S>(seen));
     EXPECT_EQ(seen.reason_after.load(), 0) << "the session whose transport was taken was disconnected";
     EXPECT_EQ(seen.server_unknown.load(), 0) << "the server was told of a session it no longer had";
@@ -1237,8 +1241,8 @@ TEST(Http1SessionReason, AClosingSessionNotYetDeliveredStillTimesOut) {
         ASSERT_EQ(client.connect_v4("127.0.0.1", thread.port()), 0);
         const std::string request = "GET /late HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         ASSERT_EQ(client.write(request.data(), request.size()), static_cast<int>(request.size()));
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(3), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(3), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
         client.disconnect();
     }
     g_seen = nullptr;

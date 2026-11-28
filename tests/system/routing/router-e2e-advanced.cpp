@@ -112,41 +112,43 @@ url_encode(const std::string &value) {
 }
 
 bool
-write_all(qb::io::tcp::socket &socket, std::string_view bytes) {
-    std::size_t sent = 0;
-    qb::http::test::wait_until([&] { return sent >= bytes.size(); }, kClientTimeout, "write_all",
-                               [&] {
-                                   const int n = socket.write(bytes.data() + sent, static_cast<int>(bytes.size() - sent));
-                                   if (n > 0) {
-                                       sent += static_cast<std::size_t>(n);
-                                   } else {
-                                       std::this_thread::sleep_for(1ms);
-                                   }
-                               });
-    return sent == bytes.size();
+write_all(qb::io::tcp::socket &socket, std::string_view bytes, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::size_t                                  sent = 0;
+    return qb::http::test::wait_until([&] { return sent >= bytes.size(); }, kClientTimeout, "write_all",
+                                      [&] {
+                                          const int n = socket.write(bytes.data() + sent, static_cast<int>(bytes.size() - sent));
+                                          if (n > 0) {
+                                              sent += static_cast<std::size_t>(n);
+                                          } else {
+                                              std::this_thread::sleep_for(1ms);
+                                          }
+                                      });
 }
 
 std::string
-read_wire_response(qb::io::tcp::socket &socket) {
-    std::string response;
-    auto        last_byte = std::chrono::steady_clock::now();
-    bool        ended     = false;
-    qb::http::test::wait_until([&] { return ended; }, kClientTimeout, "read_wire_response",
-                               [&] {
-                                   char      buffer[1024];
-                                   const int n = socket.read(buffer, sizeof(buffer));
-                                   if (n > 0) {
-                                       response.append(buffer, static_cast<std::size_t>(n));
-                                       last_byte = std::chrono::steady_clock::now();
-                                   } else if (n == 0) {
-                                       ended = true;
-                                   } else if (response.find("\r\n\r\n") != std::string::npos
-                                              && std::chrono::steady_clock::now() - last_byte >= 200ms) {
-                                       ended = true;
-                                   } else {
-                                       std::this_thread::sleep_for(1ms);
-                                   }
-                               });
+read_wire_response(qb::io::tcp::socket &socket, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::string                                  response;
+    auto                                         last_byte = std::chrono::steady_clock::now();
+    bool                                         ended     = false;
+    qb::http::test::discard(qb::http::test::wait_until([&] { return ended; }, kClientTimeout, "read_wire_response",
+                                                       [&] {
+                                                           char      buffer[1024];
+                                                           const int n = socket.read(buffer, sizeof(buffer));
+                                                           if (n > 0) {
+                                                               response.append(buffer, static_cast<std::size_t>(n));
+                                                               last_byte = std::chrono::steady_clock::now();
+                                                           } else if (n == 0) {
+                                                               ended = true;
+                                                           } else if (response.find("\r\n\r\n") != std::string::npos
+                                                                      && std::chrono::steady_clock::now() - last_byte >= 200ms) {
+                                                               ended = true;
+                                                           } else {
+                                                               std::this_thread::sleep_for(1ms);
+                                                           }
+                                                       }),
+                            "the caller reads the response it returns");
     return response;
 }
 
@@ -401,14 +403,16 @@ protected:
 
     /// One request line on a connection of its own, with `Host: localhost`: the status line and the body.
     [[nodiscard]] std::pair<std::string, std::string>
-    exchange(const std::string &method, const std::string &target) const {
+    exchange(const std::string &method, const std::string &target, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
         return exchange_raw(method + " " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     }
 
     /// @p request, its bytes as given, on a connection of its own: the status line and the body.
     [[nodiscard]] std::pair<std::string, std::string>
-    exchange_raw(const std::string &request) const {
-        qb::io::tcp::socket socket;
+    exchange_raw(const std::string &request, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
+        qb::io::tcp::socket                          socket;
         if (socket.connect_v4("127.0.0.1", _port) != qb::io::SocketStatus::Done)
             return {"no connection", {}};
         if (!write_all(socket, request))
@@ -647,7 +651,9 @@ TEST_F(RouterE2ETest, ARefusedTargetIsAnsweredAfterThePipelinedRequestBeforeIt) 
 // (QB-1177): with two, `header("Host")` read the first and a proxy before the server may route by the other.
 TEST_F(RouterE2ETest, AnHttp11RequestNamesItsHostInOneWellFormedField) {
     using Wire     = std::pair<std::string, std::string>;
-    auto const get = [this](std::string const &version, std::string const &fields) {
+    auto const get = [this](std::string const &version, std::string const &fields,
+                            std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return exchange_raw("GET /where/x " + version + "\r\n" + fields + "Connection: close\r\n\r\n");
     };
     for (std::string const fields :
@@ -674,7 +680,8 @@ TEST_F(RouterE2ETest, AnHttp11RequestNamesItsHostInOneWellFormedField) {
 TEST_F(RouterE2ETest, AnAbsoluteFormTargetsAuthorityIsTheHostFieldsValue) {
     using Wire              = std::pair<std::string, std::string>;
     std::string const local = "localhost:" + std::to_string(_port);
-    auto const        get   = [&](std::string const &fields) {
+    auto const        get   = [&](std::string const &fields, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return exchange_raw("GET http://" + local + "/where/x HTTP/1.1\r\n" + fields + "Connection: close\r\n\r\n");
     };
     EXPECT_EQ(get("Host: evil.test\r\n"), (Wire{"HTTP/1.1 200 OK", "route=plain;path=/where/x;host=localhost;userinfo=;Host=" + local}));

@@ -1226,7 +1226,8 @@ public:
     }
 
     bool
-    send(std::string_view data, std::chrono::milliseconds budget = 2s) {
+    send(std::string_view data, std::chrono::milliseconds budget = 2s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
         return qb::http::test::wait_until(
             [&] {
@@ -1267,33 +1268,35 @@ public:
 
     template <typename Pred>
     bool
-    read_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
-        qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
-                                   [this] {
-                                       if (!read_some())
-                                           std::this_thread::sleep_for(1ms);
-                                   });
-        return pred();
+    read_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        return qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
+                                          [this] {
+                                              if (!read_some())
+                                                  std::this_thread::sleep_for(1ms);
+                                          })
+               && pred();
     }
 
     /// Reads `n` body bytes past what `buffer` holds without keeping them; true when all came and every one is `fill`.
     bool
-    count_body(std::size_t n, char fill, std::chrono::milliseconds budget) {
-        std::size_t seen  = buffer.size();
-        bool        clean = buffer.find_first_not_of(fill) == std::string::npos;
+    count_body(std::size_t n, char fill, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  seen  = buffer.size();
+        bool                                         clean = buffer.find_first_not_of(fill) == std::string::npos;
         buffer.clear();
         std::string piece;
-        qb::http::test::wait_until([&] { return eof || seen >= n; }, budget, "count_body",
-                                   [&] {
-                                       piece.clear();
-                                       if (!read_into(piece)) {
-                                           std::this_thread::sleep_for(1ms);
-                                           return;
-                                       }
-                                       seen += piece.size();
-                                       clean = clean && piece.find_first_not_of(fill) == std::string::npos;
-                                   });
-        return seen == n && clean;
+        return qb::http::test::wait_until([&] { return eof || seen >= n; }, budget, "count_body",
+                                          [&] {
+                                              piece.clear();
+                                              if (!read_into(piece)) {
+                                                  std::this_thread::sleep_for(1ms);
+                                                  return;
+                                              }
+                                              seen += piece.size();
+                                              clean = clean && piece.find_first_not_of(fill) == std::string::npos;
+                                          })
+               && seen == n && clean;
     }
 
     void
@@ -1396,7 +1399,8 @@ get(std::string_view path, std::string_view version = "HTTP/1.1", std::string_vi
 
 template <typename Pred>
 bool
-wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s) {
+wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});
 }
 

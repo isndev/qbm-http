@@ -51,17 +51,20 @@ constexpr const char  STRING_MESSAGE[] = "Here is my content test";
 /// reactor pass still makes progress on both server and client threads.
 template <typename F>
 bool
-pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20)) {
+pump_loop_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20),
+                std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::expect_until(done, budget, "pump_loop_until");
 }
 
-/// The same for a worker thread, which turns a loop of its own while the case's thread serves: a peer's wait, which the
-/// kit never fails; a deadline reached is a failure all the same.
+/// The same for a worker thread that runs the case's body -- the client, on a loop of its own, while the case's thread
+/// only serves (`join_serving()`): the case's wait, which the kit fails, under the worker's `case_on_this_thread`.
 template <typename F>
 void
-worker_pump_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20)) {
-    EXPECT_TRUE(qb::http::test::peer_wait_until(done, budget, qb::http::test::fail_wait::one_pass{}))
-        << "worker_pump_until: predicate not satisfied within " << budget.count() << "ms";
+worker_pump_until(const F &done, std::chrono::milliseconds budget = std::chrono::seconds(20),
+                  std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::http::test::expect_until(done, budget, "worker_pump_until");
 }
 
 // ---- Host-header-on-the-wire fixture -------------------------------------
@@ -228,6 +231,7 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
     std::atomic<bool>  worker_ended{false}; // set last by the worker: until then it may need this thread's loop
     std::exception_ptr worker_error;
     std::thread        t([&] {
+        qb::http::test::fail_wait::case_on_this_thread const the_case; // the client is the case's body; this thread serves
         try {
             async::init();
             TestClient client;
@@ -259,7 +263,6 @@ TEST(Http1Loopback, ChunkedRequestsRoundTripOverPlainTcp) {
         worker_ended.store(true, std::memory_order_release);
     });
 
-    pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
     qb::http::test::join_serving(t, worker_ended); // the server's turns go on until the worker has ended
 
     if (worker_error) {
@@ -380,26 +383,27 @@ std::string              CookieEchoClient::session_cookie_seen;
 
 // Send a fixed raw HTTP/1.1 request over a connected socket and drain the
 // response header block (bounded), returning the accumulated bytes. For a worker
-// thread, while the case's thread serves: its wait is a peer's.
+// thread that runs the case's body while the case's thread serves: its wait is the case's.
 std::string
-raw_request_response(std::uint16_t port, const std::string &raw) {
-    qb::io::tcp::socket sock;
+raw_request_response(std::uint16_t port, const std::string &raw, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::io::tcp::socket                          sock;
     EXPECT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(port)}), 0);
     (void) sock.set_nonblocking(true);
     sock.write(raw.data(), static_cast<int>(raw.size()));
 
     std::string response;
     // 600 reads, 2 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 600 x 16 ms as a budget.
-    qb::http::test::peer_wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 9600ms,
-                                    [&] {
-                                        char buf[512];
-                                        int  n = sock.read(buf, sizeof(buf));
-                                        if (n > 0) {
-                                            response.append(buf, static_cast<std::size_t>(n));
-                                        } else {
-                                            std::this_thread::sleep_for(2ms);
-                                        }
-                                    });
+    qb::http::test::expect_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 9600ms, "raw_request_response",
+                                 [&] {
+                                     char buf[512];
+                                     int  n = sock.read(buf, sizeof(buf));
+                                     if (n > 0) {
+                                         response.append(buf, static_cast<std::size_t>(n));
+                                     } else {
+                                         std::this_thread::sleep_for(2ms);
+                                     }
+                                 });
     sock.close();
     return response;
 }
@@ -419,8 +423,10 @@ TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
     ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
-    std::string response;
-    std::thread worker([&] {
+    std::string       response;
+    std::atomic<bool> worker_ended{false}; // set last by the worker: until then it needs this thread's loop
+    std::thread       worker([&] {
+        qb::http::test::fail_wait::case_on_this_thread const the_case; // the client is the case's body; this thread serves
         async::init();
         const std::string raw = "GET /cookie HTTP/1.1\r\n"
                                 "Host: 127.0.0.1:"
@@ -430,10 +436,9 @@ TEST(Http1Loopback, ValidCookieHeaderIsParsedAndVisibleToHandler) {
                                   "Connection: close\r\n"
                                   "\r\n";
         response              = raw_request_response(port, raw);
+        worker_ended.store(true, std::memory_order_release);
     });
-
-    pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
-    worker.join();
+    qb::http::test::join_serving(worker, worker_ended); // the server's turns go on until the worker has ended
 
     EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
     EXPECT_EQ(CookieEchoClient::cookie_count_seen.load(), 2u) << "both cookies should have parsed";
@@ -454,8 +459,10 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
     ASSERT_NE(port, 0) << "listen_v4(0) did not yield a kernel-assigned port";
     server.start();
 
-    std::string response;
-    std::thread worker([&] {
+    std::string       response;
+    std::atomic<bool> worker_ended{false}; // set last by the worker: until then it needs this thread's loop
+    std::thread       worker([&] {
+        qb::http::test::fail_wait::case_on_this_thread const the_case; // the client is the case's body; this thread serves
         async::init();
         // Cookie lines that join past max_cookie_header_size (16 KiB) -- the one refusal of the request
         // parser, which drops a malformed pair and keeps the others -- make parse_cookie_header() throw
@@ -470,10 +477,9 @@ TEST(Http1Loopback, MalformedCookieHeaderIsCaughtAndRequestStillHandled) {
             raw += "Cookie: pad" + std::to_string(line) + "=" + std::string(6000, 'v') + "\r\n";
         raw += "Connection: close\r\n\r\n";
         response = raw_request_response(port, raw);
+        worker_ended.store(true, std::memory_order_release);
     });
-
-    pump_loop_until([&] { return CookieEchoClient::requests_seen.load() >= 1; });
-    worker.join();
+    qb::http::test::join_serving(worker, worker_ended); // the server's turns go on until the worker has ended
 
     // The request was still delivered to the handler (no terminate, no crash)...
     EXPECT_EQ(CookieEchoClient::requests_seen.load(), 1u);
@@ -569,6 +575,7 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
     std::atomic<bool>  worker_ended{false}; // set last by the worker: until then it may need this thread's loop
     std::exception_ptr worker_error;
     std::thread        t([&] {
+        qb::http::test::fail_wait::case_on_this_thread const the_case; // the client is the case's body; this thread serves
         try {
             async::init();
             TestSecureClient client;
@@ -600,7 +607,6 @@ TEST(Http1Loopback, SecureRequestsRoundTripOverTls) {
         worker_ended.store(true, std::memory_order_release);
     });
 
-    pump_loop_until([&] { return all_done() || worker_failed.load(std::memory_order_acquire); });
     qb::http::test::join_serving(t, worker_ended); // the server's turns go on until the worker has ended
 
     if (worker_error) {

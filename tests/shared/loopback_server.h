@@ -290,7 +290,9 @@ public:
      */
     template <typename Pred>
     static bool
-    pump_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
+    pump_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5),
+               std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return expect_until(std::forward<Pred>(pred), budget, "pump_until");
     }
 

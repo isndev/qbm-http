@@ -67,9 +67,9 @@ reset_globals() {
 }
 
 bool
-wait_for_report(std::chrono::milliseconds budget = 5000ms) {
-    qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});
-    return g_reports.load() != 0;
+wait_for_report(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    return qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});
 }
 
 /// The bytes a raw client sends, built with the shared frame writers (they append to `input`).
@@ -101,20 +101,22 @@ class H2RawClient {
     std::string              _received;
 
     void
-    send(Wire const &wire) {
-        std::size_t off    = 0;
-        const auto  size   = wire.input.size();
-        bool        failed = false;
-        qb::http::test::wait_until([&] { return failed || off >= size; }, 5s, "send",
-                                   [&] {
-                                       const int n = _sock.write(wire.input.cbegin() + off, size - off);
-                                       if (n > 0)
-                                           off += static_cast<std::size_t>(n);
-                                       else if (n < 0)
-                                           failed = true;
-                                       else
-                                           std::this_thread::sleep_for(1ms);
-                                   });
+    send(Wire const &wire, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  off    = 0;
+        const auto                                   size   = wire.input.size();
+        bool                                         failed = false;
+        qb::http::test::discard(qb::http::test::wait_until([&] { return failed || off >= size; }, 5s, "send",
+                                                           [&] {
+                                                               const int n = _sock.write(wire.input.cbegin() + off, size - off);
+                                                               if (n > 0)
+                                                                   off += static_cast<std::size_t>(n);
+                                                               else if (n < 0)
+                                                                   failed = true;
+                                                               else
+                                                                   std::this_thread::sleep_for(1ms);
+                                                           }),
+                                "a write the draining server may refuse: the case reads the answer, or the close, that follows");
     }
 
 public:
@@ -141,14 +143,16 @@ public:
     }
 
     bool
-    complete_handshake(std::chrono::milliseconds budget = 5000ms) {
-        int status = 0;
-        qb::http::test::wait_until(
-            [&] {
-                status = _sock.handshake_status();
-                return status == 1 || status < 0;
-            },
-            budget, "complete_handshake", qb::http::test::fail_wait::nap{1ms});
+    complete_handshake(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        int                                          status = 0;
+        qb::http::test::discard(qb::http::test::wait_until(
+                                    [&] {
+                                        status = _sock.handshake_status();
+                                        return status == 1 || status < 0;
+                                    },
+                                    budget, "complete_handshake", qb::http::test::fail_wait::nap{1ms}),
+                                "status says how it ended: done, failed, or still at it when the budget ran out");
         if (status != 1)
             return false;
         _sock.set_nonblocking(true);
@@ -162,24 +166,27 @@ public:
 
     /// The client preface and an empty SETTINGS.
     void
-    preface() {
-        Wire wire;
+    preface(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        Wire                                         wire;
         qb::http::test::push_preface(wire);
         qb::http::test::push_frame(wire, h2::FrameType::SETTINGS, 0, 0, {});
         send(wire);
     }
 
     void
-    get(std::uint32_t stream_id, std::string const &path) {
-        Wire wire;
+    get(std::uint32_t stream_id, std::string const &path, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        Wire                                         wire;
         qb::http::test::push_frame(wire, h2::FrameType::HEADERS, h2::FLAG_END_HEADERS | h2::FLAG_END_STREAM, stream_id,
                                    qb::http::test::encode_hpack_headers(qb::http::test::default_request_headers(path)));
         send(wire);
     }
 
     void
-    ping_ack(std::vector<std::uint8_t> const &data) {
-        Wire wire;
+    ping_ack(std::vector<std::uint8_t> const &data, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        Wire                                         wire;
         qb::http::test::push_frame(wire, h2::FrameType::PING, h2::FLAG_ACK, 0, data);
         send(wire);
     }
@@ -187,25 +194,28 @@ public:
     /// Reads until @p done holds, the connection ends, or @p budget elapses.
     template <typename Pred>
     void
-    read_until(Pred &&done, std::chrono::milliseconds budget = 5000ms) {
-        char buffer[16384];
-        qb::http::test::wait_until([&] { return closed || done(); }, budget, "read_until",
-                                   [&] {
-                                       const int got = _sock.read(buffer, sizeof(buffer));
-                                       if (got > 0) {
-                                           _received.append(buffer, static_cast<std::size_t>(got));
-                                           return;
-                                       }
-                                       if (got < 0) {
-                                           closed = true;
-                                           return;
-                                       }
-                                       std::this_thread::sleep_for(1ms);
-                                   });
+    read_until(Pred &&done, std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        char                                         buffer[16384];
+        qb::http::test::discard(qb::http::test::wait_until([&] { return closed || done(); }, budget, "read_until",
+                                                           [&] {
+                                                               const int got = _sock.read(buffer, sizeof(buffer));
+                                                               if (got > 0) {
+                                                                   _received.append(buffer, static_cast<std::size_t>(got));
+                                                                   return;
+                                                               }
+                                                               if (got < 0) {
+                                                                   closed = true;
+                                                                   return;
+                                                               }
+                                                               std::this_thread::sleep_for(1ms);
+                                                           }),
+                                "the caller reads what came, or that the connection closed");
     }
 
     void
-    read_to_close(std::chrono::milliseconds budget = 5000ms) {
+    read_to_close(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         read_until([] { return false; }, budget);
     }
 
@@ -719,7 +729,8 @@ protected:
 
     template <typename Pred>
     [[nodiscard]] static bool
-    watch_until(Pred &&pred, std::chrono::milliseconds budget) {
+    watch_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "watch_until", qb::http::test::fail_wait::nap{2ms});
     }
 
@@ -727,7 +738,8 @@ protected:
     /// watch runs from there. With @p octets, /large is then queued in the session's output; either way the client
     /// reads nothing from there, so that the PING of the drain's notice is never answered.
     void
-    connect(std::chrono::milliseconds linger, std::size_t octets = 0) {
+    connect(std::chrono::milliseconds linger, std::size_t octets = 0, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(qb::http::test::certs_available());
         const std::string cert = qb::http::test::ssl_cert_path().string();
         const std::string key  = qb::http::test::ssl_key_path().string();
@@ -760,7 +772,8 @@ protected:
 
     /// The drain, to its deadline's report (which a case may have asked to take its time).
     void
-    drain_to_the_deadline() {
+    drain_to_the_deadline(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         asked.drain = true;
         ASSERT_TRUE(watch_until([this] { return asked.outcome.load() >= 0; }, 5s)) << "the drain did not report";
         ASSERT_EQ(asked.outcome.load(), static_cast<int>(qb::http::drain_outcome::deadline));
@@ -785,11 +798,11 @@ TEST_F(Http2ServerDrainDelivery, AClientThatTakesALittleAtATimeIsAbortedAtTheBou
     constexpr std::size_t kTake   = std::size_t{256} << 10;
     ASSERT_NO_FATAL_FAILURE(connect(kLinger, kLarge));
     ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
-    qb::http::test::wait_until([this] { return asked.released_at.load() != 0; }, 3s, "the release",
-                               [&] {
-                                   raw.read_octets(kTake, 100ms);
-                                   std::this_thread::sleep_for(250ms);
-                               });
+    qb::http::test::expect_until([this] { return asked.released_at.load() != 0; }, 3s, "the release",
+                                 [&] {
+                                     raw.read_octets(kTake, 100ms);
+                                     std::this_thread::sleep_for(250ms);
+                                 });
     ASSERT_NE(asked.released_at.load(), 0) << "the session outlived the bound of its last delivery: each write restarted it";
     EXPECT_LT(raw.streams[large].data_bytes, kLarge) << "the client took the whole response: the case proves nothing";
     const auto ended = between(asked.drain_at.load(), asked.released_at.load());

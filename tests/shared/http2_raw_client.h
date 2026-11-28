@@ -122,7 +122,9 @@ public:
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
     bool
-    connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {}) {
+    connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {},
+            std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         _sock = qb::io::tcp::ssl::socket{qb::io::ssl::Context::client().alpn({"h2"})};
         _sock.set_insecure();
         if (_sock.connect_v4("127.0.0.1", port) != 0)
@@ -147,8 +149,10 @@ public:
 
     /// Send a request as one HEADERS frame with END_STREAM (no body); returns its stream id (1, 3, 5, ...).
     std::uint32_t
-    request(std::string_view path, std::string_view method = "GET", std::vector<std::pair<std::string, std::string>> const &extra = {}) {
-        const std::uint32_t stream_id = _next_stream_id;
+    request(std::string_view path, std::string_view method = "GET", std::vector<std::pair<std::string, std::string>> const &extra = {},
+            std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        const std::uint32_t                          stream_id = _next_stream_id;
         _next_stream_id += 2;
         std::vector<qb::protocol::hpack::HeaderField> fields = {
             {":method", std::string(method)}, {":scheme", "https"}, {":authority", "localhost"}, {":path", std::string(path)}
@@ -189,8 +193,10 @@ public:
     /// empty DATA takes a token of. `false` when the write did not finish within `write_budget`, or the connection is
     /// broken.
     bool
-    solicit(int count, soliciting what = soliciting::pings, std::uint32_t closed_stream = 0) {
-        std::vector<uint8_t> out;
+    solicit(int count, soliciting what = soliciting::pings, std::uint32_t closed_stream = 0,
+            std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         out.reserve(static_cast<std::size_t>(count) * 17u);
         for (int i = 0; i < count; ++i) {
             if (what == soliciting::settings)
@@ -204,8 +210,9 @@ public:
     }
 
     bool
-    window_update(std::uint32_t stream_id, std::uint32_t increment) {
-        std::vector<uint8_t> out;
+    window_update(std::uint32_t stream_id, std::uint32_t increment, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         append_frame(out, WINDOW_UPDATE, 0, stream_id,
                      {static_cast<uint8_t>(increment >> 24), static_cast<uint8_t>(increment >> 16), static_cast<uint8_t>(increment >> 8),
                       static_cast<uint8_t>(increment)});
@@ -215,8 +222,10 @@ public:
     /// Several WINDOW_UPDATEs in ONE write, so that the server reads them in one pass (Huly QB-86): each pair is a
     /// stream id and its increment.
     bool
-    window_updates(std::vector<std::pair<std::uint32_t, std::uint32_t>> const &updates) {
-        std::vector<uint8_t> out;
+    window_updates(std::vector<std::pair<std::uint32_t, std::uint32_t>> const &updates,
+                   std::source_location const                                  where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         for (auto const &[stream_id, increment] : updates)
             append_frame(out, WINDOW_UPDATE, 0, stream_id,
                          {static_cast<uint8_t>(increment >> 24), static_cast<uint8_t>(increment >> 16), static_cast<uint8_t>(increment >> 8),
@@ -226,8 +235,10 @@ public:
 
     /// Any frame, as given: a frame the server must refuse, say (Huly QB-1270). `false` when the write did not finish.
     bool
-    frame(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::vector<uint8_t> const &payload) {
-        std::vector<uint8_t> out;
+    frame(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::vector<uint8_t> const &payload,
+          std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         append_frame(out, type, flags, stream_id, payload);
         return write_all(out);
     }
@@ -235,8 +246,10 @@ public:
     /// The 9 octets of a frame header declaring `length` octets of payload, and no payload: a frame the server refuses on
     /// its header alone, with nothing of it left unread when the server closes (Huly QB-1270).
     bool
-    frame_header(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::uint32_t length) {
-        const std::vector<uint8_t> out{
+    frame_header(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::uint32_t length,
+                 std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        const std::vector<uint8_t>                   out{
             static_cast<uint8_t>(length >> 16),
             static_cast<uint8_t>(length >> 8),
             static_cast<uint8_t>(length),
@@ -251,8 +264,9 @@ public:
     }
 
     bool
-    rst_stream(std::uint32_t stream_id, std::uint32_t code) {
-        std::vector<uint8_t> out;
+    rst_stream(std::uint32_t stream_id, std::uint32_t code, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         append_frame(
             out, RST_STREAM, 0, stream_id,
             {static_cast<uint8_t>(code >> 24), static_cast<uint8_t>(code >> 16), static_cast<uint8_t>(code >> 8), static_cast<uint8_t>(code)});
@@ -260,8 +274,9 @@ public:
     }
 
     bool
-    goaway(std::uint32_t last_stream_id, std::uint32_t code) {
-        std::vector<uint8_t> out;
+    goaway(std::uint32_t last_stream_id, std::uint32_t code, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::vector<uint8_t>                         out;
         append_frame(out, GOAWAY, 0, 0,
                      {static_cast<uint8_t>(last_stream_id >> 24), static_cast<uint8_t>(last_stream_id >> 16),
                       static_cast<uint8_t>(last_stream_id >> 8), static_cast<uint8_t>(last_stream_id), static_cast<uint8_t>(code >> 24),
@@ -272,36 +287,42 @@ public:
     /// Read frames until `pred()` holds, the connection ends, or `budget` elapses; `pred()` at the end.
     template <typename Pred>
     bool
-    read_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5)) {
-        wait_until([&] { return eof || pred(); }, budget, "read_until",
-                   [this] {
-                       if (!read_some())
-                           idle();
-                   });
-        return pred();
+    read_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5),
+               std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        return wait_until([&] { return eof || pred(); }, budget, "read_until",
+                          [this] {
+                              if (!read_some())
+                                  idle();
+                          })
+               && pred();
     }
 
     /// Read whatever comes for `window`, then stop: what the server sent while the test held something back.
     void
-    read_for(std::chrono::milliseconds window) {
-        wait_until([this] { return eof; }, window, "read_for",
-                   [this] {
-                       if (!read_some())
-                           idle();
-                   });
+    read_for(std::chrono::milliseconds window, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        discard(wait_until([this] { return eof; }, window, "read_for",
+                           [this] {
+                               if (!read_some())
+                                   idle();
+                           }),
+                "a window: it reads for its whole span, unless the connection ends");
     }
 
     /// Read until `octets` more came from the socket, the connection ends, or `window` elapses: a client that takes a
     /// set amount at a time, whatever the host's speed -- `read_for()` takes what the host reads in its window, from
     /// 0.2 to 8 MiB in 5 ms as measured (Huly QB-1248). A read brings 64 KiB at most: the amount is met within that.
     void
-    read_octets(std::size_t octets, std::chrono::milliseconds window) {
-        const std::size_t goal = octets_read + octets;
-        wait_until([&] { return eof || octets_read >= goal; }, window, "read_octets",
-                   [this] {
-                       if (!read_some())
-                           idle();
-                   });
+    read_octets(std::size_t octets, std::chrono::milliseconds window, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        const std::size_t                            goal = octets_read + octets;
+        discard(wait_until([&] { return eof || octets_read >= goal; }, window, "read_octets",
+                           [this] {
+                               if (!read_some())
+                                   idle();
+                           }),
+                "the caller reads octets_read, which says how far it got");
     }
 
     [[nodiscard]] RawStream const &
@@ -341,31 +362,33 @@ private:
     }
 
     bool
-    write_all(std::vector<uint8_t> const &bytes) {
-        std::size_t sent   = 0;
-        bool        failed = false;
+    write_all(std::vector<uint8_t> const &bytes, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  sent   = 0;
+        bool                                         failed = false;
         // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
-        wait_until(
-            [&] {
-                int n = 1;
-                while (n > 0 && sent < bytes.size()) {
-                    n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
-                    if (n > 0)
-                        sent += static_cast<std::size_t>(n);
-                }
-                if (n < 0)
-                    failed = write_failed = true;
-                return failed || sent == bytes.size();
-            },
-            write_budget, "write_all", fail_wait::nap{});
-        return !failed && sent == bytes.size();
+        return wait_until(
+                   [&] {
+                       int n = 1;
+                       while (n > 0 && sent < bytes.size()) {
+                           n = _sock.write(reinterpret_cast<char const *>(bytes.data() + sent), bytes.size() - sent);
+                           if (n > 0)
+                               sent += static_cast<std::size_t>(n);
+                       }
+                       if (n < 0)
+                           failed = write_failed = true;
+                       return failed || sent == bytes.size();
+                   },
+                   write_budget, "write_all", fail_wait::nap{})
+               && !failed;
     }
 
     /// One read; the frames it completes are dispatched. `true` when bytes came.
     bool
-    read_some() {
-        char      tmp[64 * 1024];
-        const int n = _sock.read(tmp, sizeof tmp);
+    read_some(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        char                                         tmp[64 * 1024];
+        const int                                    n = _sock.read(tmp, sizeof tmp);
         if (n < 0) {
             eof = true; // the TLS socket reports the end of the connection as -1, and "nothing yet" as 0
             return false;

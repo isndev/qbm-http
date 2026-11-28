@@ -191,7 +191,8 @@ public:
 
     /// Connected to the server, the handshake complete.
     [[nodiscard]] ::testing::AssertionResult
-    connect(std::uint16_t port) {
+    connect(std::uint16_t port, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         if (!ssl)
             return ::testing::AssertionFailure() << "no SSL object";
         if (tcp.connect_v4("127.0.0.1", port) != 0)
@@ -200,51 +201,54 @@ public:
             return ::testing::AssertionFailure() << "the socket could not be set up";
         SSL_set_connect_state(ssl);
         ::testing::AssertionResult out = ::testing::AssertionFailure() << "the handshake did not complete";
-        qb::http::test::wait_until(
-            [&] {
-                ERR_clear_error();
-                const int ret = SSL_do_handshake(ssl);
-                if (ret == 1) {
-                    out = ::testing::AssertionSuccess();
-                    return true;
-                }
-                const int error = SSL_get_error(ssl, ret);
-                if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
-                    out = ::testing::AssertionFailure() << "the handshake failed: SSL_get_error " << error;
-                    return true;
-                }
-                return false;
-            },
-            5s, "handshake", qb::http::test::fail_wait::nap{1ms});
+        qb::http::test::discard(qb::http::test::wait_until(
+                                    [&] {
+                                        ERR_clear_error();
+                                        const int ret = SSL_do_handshake(ssl);
+                                        if (ret == 1) {
+                                            out = ::testing::AssertionSuccess();
+                                            return true;
+                                        }
+                                        const int error = SSL_get_error(ssl, ret);
+                                        if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
+                                            out = ::testing::AssertionFailure() << "the handshake failed: SSL_get_error " << error;
+                                            return true;
+                                        }
+                                        return false;
+                                    },
+                                    5s, "handshake", qb::http::test::fail_wait::nap{1ms}),
+                                "out says how it ended: the handshake's result, or that it did not complete");
         return out;
     }
 
     /// Writes `what` whole.
     [[nodiscard]] ::testing::AssertionResult
-    send(std::string_view what) {
-        std::size_t                sent = 0;
-        ::testing::AssertionResult out  = ::testing::AssertionFailure() << "the request was not written";
+    send(std::string_view what, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  sent = 0;
+        ::testing::AssertionResult                   out  = ::testing::AssertionFailure() << "the request was not written";
         // Each look writes what the stream takes: all of it, a failure, or a stream that takes no more for now.
-        qb::http::test::wait_until(
-            [&] {
-                while (sent < what.size()) {
-                    ERR_clear_error();
-                    const int n = SSL_write(ssl, what.data() + sent, static_cast<int>(what.size() - sent));
-                    if (n > 0) {
-                        sent += static_cast<std::size_t>(n);
-                        continue;
-                    }
-                    const int error = SSL_get_error(ssl, n);
-                    if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
-                        out = ::testing::AssertionFailure() << "SSL_write failed: SSL_get_error " << error;
-                        return true;
-                    }
-                    return false;
-                }
-                out = ::testing::AssertionSuccess();
-                return true;
-            },
-            5s, "send", qb::http::test::fail_wait::nap{1ms});
+        qb::http::test::discard(qb::http::test::wait_until(
+                                    [&] {
+                                        while (sent < what.size()) {
+                                            ERR_clear_error();
+                                            const int n = SSL_write(ssl, what.data() + sent, static_cast<int>(what.size() - sent));
+                                            if (n > 0) {
+                                                sent += static_cast<std::size_t>(n);
+                                                continue;
+                                            }
+                                            const int error = SSL_get_error(ssl, n);
+                                            if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) {
+                                                out = ::testing::AssertionFailure() << "SSL_write failed: SSL_get_error " << error;
+                                                return true;
+                                            }
+                                            return false;
+                                        }
+                                        out = ::testing::AssertionSuccess();
+                                        return true;
+                                    },
+                                    5s, "send", qb::http::test::fail_wait::nap{1ms}),
+                                "out says how it ended: written, failed, or not written within the budget");
         return out;
     }
 
@@ -252,92 +256,96 @@ public:
     /// budget ran out first.
     template <typename Done>
     [[nodiscard]] bool
-    read_until(Done &&done, std::chrono::milliseconds budget = 5000ms) {
-        char buffer[16384];
-        bool ended = false; // the stream ended: read_to_end() reads how
+    read_until(Done &&done, std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        char                                         buffer[16384];
+        bool                                         ended = false; // the stream ended: read_to_end() reads how
         // Each look reads what the stream has: until `done`, its end, or a stream that has no more for now.
-        qb::http::test::wait_until(
-            [&] {
-                while (!done(received)) {
-                    ERR_clear_error();
-                    const int n = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
-                    if (n > 0) {
-                        received.append(buffer, static_cast<std::size_t>(n));
-                        continue;
-                    }
-                    const int error = SSL_get_error(ssl, n);
-                    ended           = error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE;
-                    return ended;
-                }
-                return true;
-            },
-            budget, "read_until", qb::http::test::fail_wait::nap{1ms});
-        return !ended && done(received);
+        return qb::http::test::wait_until(
+                   [&] {
+                       while (!done(received)) {
+                           ERR_clear_error();
+                           const int n = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
+                           if (n > 0) {
+                               received.append(buffer, static_cast<std::size_t>(n));
+                               continue;
+                           }
+                           const int error = SSL_get_error(ssl, n);
+                           ended           = error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE;
+                           return ended;
+                       }
+                       return true;
+                   },
+                   budget, "read_until", qb::http::test::fail_wait::nap{1ms})
+               && !ended && done(received);
     }
 
     /// Reads the stream to its end: the application octets, how TLS ended, then what TCP still carried.
     [[nodiscard]] TlsEnd
-    read_to_end(std::chrono::milliseconds budget = 5000ms) {
-        TlsEnd     out;
-        const auto deadline = steady::now() + budget;
-        char       buffer[16384];
+    read_to_end(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        TlsEnd                                       out;
+        const auto                                   deadline = steady::now() + budget;
+        char                                         buffer[16384];
         enum class stream { open, over, reset } tls = stream::open;
         // Each look reads what the stream has: until its end, or a stream that has no more for now.
-        qb::http::test::wait_until(
-            [&] {
-                for (;;) {
-                    ERR_clear_error();
-                    const int n      = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
-                    const int system = n > 0 ? 0 : qb::io::socket::get_last_errno(); // before anything else replaces it
-                    if (n > 0) {
-                        received.append(buffer, static_cast<std::size_t>(n));
-                        continue;
-                    }
-                    out.error = SSL_get_error(ssl, n);
-                    if (out.error != SSL_ERROR_WANT_READ && out.error != SSL_ERROR_WANT_WRITE) {
-                        out.first_error = ERR_peek_error();
-                        tls             = stream::over;
-                        if (out.error == SSL_ERROR_SYSCALL && system != 0) { // a reset: that is its whole end
-                            out.tcp_error = system;
-                            tls           = stream::reset;
-                        }
-                        return true;
-                    }
-                    out.error = SSL_ERROR_WANT_READ;
-                    return false;
-                }
-            },
-            deadline, "read_to_end", qb::http::test::fail_wait::nap{1ms});
+        qb::http::test::discard(qb::http::test::wait_until(
+                                    [&] {
+                                        for (;;) {
+                                            ERR_clear_error();
+                                            const int n      = SSL_read(ssl, buffer, static_cast<int>(sizeof(buffer)));
+                                            const int system = n > 0 ? 0 : qb::io::socket::get_last_errno(); // before anything else replaces it
+                                            if (n > 0) {
+                                                received.append(buffer, static_cast<std::size_t>(n));
+                                                continue;
+                                            }
+                                            out.error = SSL_get_error(ssl, n);
+                                            if (out.error != SSL_ERROR_WANT_READ && out.error != SSL_ERROR_WANT_WRITE) {
+                                                out.first_error = ERR_peek_error();
+                                                tls             = stream::over;
+                                                if (out.error == SSL_ERROR_SYSCALL && system != 0) { // a reset: that is its whole end
+                                                    out.tcp_error = system;
+                                                    tls           = stream::reset;
+                                                }
+                                                return true;
+                                            }
+                                            out.error = SSL_ERROR_WANT_READ;
+                                            return false;
+                                        }
+                                    },
+                                    deadline, "read_to_end", qb::http::test::fail_wait::nap{1ms}),
+                                "out says how the stream ended, the budget included");
         out.received = received;
         if (tls != stream::over)
             return out; // a reset, or the budget: nothing more to read
         // The TLS stream is over. What the TCP connection still carries is read raw: after a close_notify, the FIN.
         // Each look reads once: octets, the FIN, an error, or nothing for now.
         bool idle = false;
-        qb::http::test::wait_until(
-            [&] {
-                const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
-                idle        = n <= 0;
-                if (n > 0) {
-                    out.octets_after += static_cast<std::size_t>(n);
-                    return false; // the next look reads on
-                }
-                if (n == 0) {
-                    out.fin = true;
-                    return true;
-                }
-                const int error = qb::io::socket::get_last_errno();
-                if (!qb::io::socket::not_recv_error(error)) {
-                    out.tcp_error = error;
-                    return true;
-                }
-                return false;
-            },
-            deadline, "read_to_end",
-            [&idle] {
-                if (idle)
-                    std::this_thread::sleep_for(1ms);
-            });
+        qb::http::test::discard(qb::http::test::wait_until(
+                                    [&] {
+                                        const int n = qb::io::socket::recv(tcp.native_handle(), buffer, static_cast<int>(sizeof(buffer)));
+                                        idle        = n <= 0;
+                                        if (n > 0) {
+                                            out.octets_after += static_cast<std::size_t>(n);
+                                            return false; // the next look reads on
+                                        }
+                                        if (n == 0) {
+                                            out.fin = true;
+                                            return true;
+                                        }
+                                        const int error = qb::io::socket::get_last_errno();
+                                        if (!qb::io::socket::not_recv_error(error)) {
+                                            out.tcp_error = error;
+                                            return true;
+                                        }
+                                        return false;
+                                    },
+                                    deadline, "read_to_end",
+                                    [&idle] {
+                                        if (idle)
+                                            std::this_thread::sleep_for(1ms);
+                                    }),
+                                "out says how the stream ended, the budget included");
         return out;
     }
 };
@@ -689,9 +697,10 @@ protected:
 
     /// Asks for `target`, reads until the first piece arrived, lets the server act, and reads the stream to its end.
     [[nodiscard]] TlsEnd
-    exchange(std::string_view target, bool connection_close = false) {
-        RawTlsClient client;
-        TlsEnd       end;
+    exchange(std::string_view target, bool connection_close = false, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        RawTlsClient                                 client;
+        TlsEnd                                       end;
         [&] {
             ASSERT_TRUE(client.connect(port));
             ASSERT_TRUE(client.send(request(target, connection_close)));
@@ -748,8 +757,11 @@ expect_whole(TlsEnd const &end) {
 /// What the server's thread published in `seen`, once it did (up to 5 s): a parked stream looks every 10 ms, so the
 /// client may read the end of the connection before the park sees it.
 [[nodiscard]] int
-published(std::atomic<int> const &seen) {
-    qb::http::test::wait_until([&] { return seen.load() != -1; }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms});
+published(std::atomic<int> const &seen, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::http::test::discard(
+        qb::http::test::wait_until([&] { return seen.load() != -1; }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms}),
+        "the caller compares the value it returns, -1 when nothing was published");
     return seen.load();
 }
 

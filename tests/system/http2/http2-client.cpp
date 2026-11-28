@@ -2244,7 +2244,8 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAConnectTimeoutWhoseFailureCallbackRa
         if (++failed != 1)
             return;
         open_at_entry = client->transport().is_open(); // the deadline found TLS done: the end below is this transport's
-        qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 5s); // the peer's end is read here
+        qb::http::test::discard(qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 5s),
+                                "ended_in_pump records it, which the case asserts"); // the peer's end is read here
         ended_in_pump = !client->transport().is_open();
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return failed != 0; }, 10s));
@@ -2288,7 +2289,8 @@ TEST_F(Http2ClientTest, ARequestPushedAfterAGracefulGoawaysDrainWhoseFailureCall
         EXPECT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response response) {
             ++failed;
             failure = response.body().as<std::string>();
-            qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 3s); // the peer's end is read here
+            qb::http::test::discard(qb::http::test::wait_until([&] { return !client->transport().is_open(); }, 3s),
+                                    "ended_in_pump records it, which the case asserts"); // the peer's end is read here
             ended_in_pump = !client->transport().is_open();
         }));
     }));
@@ -3619,7 +3621,9 @@ enum class SilentCompletion { Post, RequestComplete, MemberDestructor };
 // transfers no new bytes. Two initially complete donors make the ordering of
 // their destruction observable without depending on the map's iteration order.
 void
-check_silent_completion_drain(SilentCompletion transition, bool observe_hooks = true) {
+check_silent_completion_drain(SilentCompletion transition, bool observe_hooks = true,
+                              std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     qb::io::async::init();
     std::vector<std::shared_ptr<Context>> held(3);
     std::weak_ptr<Context>                silent;
@@ -4320,7 +4324,7 @@ TEST_F(Http2ClientGoawayTest, ExplicitDisconnectEndsWithGoawayThenEofEvenWithUnr
 
     // The PING reaches the client's socket while its loop does not run: it stays unread.
     peer.send_ping();
-    qb::http::test::wait_until([&] { return peer.ping_sent(); }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms});
+    qb::http::test::expect_until([&] { return peer.ping_sent(); }, 5s, "wait_until", qb::http::test::fail_wait::nap{1ms});
     ASSERT_TRUE(peer.ping_sent());
     std::this_thread::sleep_for(50ms);
 
@@ -4542,8 +4546,9 @@ protected:
 
     /// `first`, then `second` on the same connection once `first` is answered: the connection outlives a reset stream.
     [[nodiscard]] std::pair<qb::http::Response, qb::http::Response>
-    get_twice(std::string const &first, std::string const &second) const {
-        auto client = qb::http2::make_client("https://localhost:" + std::to_string(_port));
+    get_twice(std::string const &first, std::string const &second, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
+        auto                                         client = qb::http2::make_client("https://localhost:" + std::to_string(_port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
         std::optional<qb::http::Response> r1, r2;
@@ -4563,7 +4568,8 @@ protected:
     }
 
     [[nodiscard]] qb::http::Response
-    get(std::string const &path) const {
+    get(std::string const &path, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
         return get_twice(path, "").first;
     }
 };
@@ -4657,9 +4663,10 @@ TEST(Http2StaticFilesTest, ABodyOverTheStreamThresholdStreamsAndMaxFileSizeNoLon
     ASSERT_TRUE(server->ready());
     const auto port = server->port();
 
-    const auto get = [port](std::string const &path) {
-        std::optional<qb::http::Response> response;
-        auto                              client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+    const auto get = [port](std::string const &path, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::optional<qb::http::Response>            response;
+        auto                                         client = qb::http2::make_client("https://localhost:" + std::to_string(port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
         qb::http::Request request;
@@ -4849,41 +4856,42 @@ TEST(Http2FallbackTimeout, ABodySentSlowlyButSteadilyOverTheHttp11FallbackIsServ
     ASSERT_EQ(sock.set_nonblocking(true), 0);
 
     std::string answer;
-    const auto  closed_within = [&](std::chrono::milliseconds window) { // reads what comes; true once the connection ended
-        char buffer[4096];
-        bool closed = false;
-        qb::http::test::wait_until([&] { return closed; }, window, "closed_within",
-                                   [&] {
-                                       const int n = sock.read(buffer, sizeof buffer);
-                                       if (n < 0)
-                                           closed = true;
-                                       else if (n > 0)
-                                           answer.append(buffer, static_cast<std::size_t>(n));
-                                       else
-                                           std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                                   });
-        return closed;
+    const auto  closed_within = [&](std::chrono::milliseconds window, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where}; // reads what comes; true once the connection ended
+        char                                         buffer[4096];
+        bool                                         closed = false;
+        return qb::http::test::wait_until([&] { return closed; }, window, "closed_within",
+                                          [&] {
+                                              const int n = sock.read(buffer, sizeof buffer);
+                                              if (n < 0)
+                                                  closed = true;
+                                              else if (n > 0)
+                                                  answer.append(buffer, static_cast<std::size_t>(n));
+                                              else
+                                                  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                                          });
     };
-    const auto send = [&](std::string const &bytes) {
-        std::size_t sent   = 0;
-        bool        failed = false;
+    const auto send = [&](std::string const &bytes, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        std::size_t                                  sent   = 0;
+        bool                                         failed = false;
         // Each look writes what the socket takes: all of it, a failure, or a socket that takes no more for now.
-        qb::http::test::wait_until(
-            [&] {
-                while (sent < bytes.size()) {
-                    const int n = sock.write(bytes.data() + sent, bytes.size() - sent);
-                    if (n < 0) {
-                        failed = true;
-                        return true;
-                    }
-                    if (n == 0)
-                        return false;
-                    sent += static_cast<std::size_t>(n);
-                }
-                return true;
-            },
-            std::chrono::seconds(10), "send", qb::http::test::fail_wait::nap{});
-        return !failed && sent == bytes.size();
+        return qb::http::test::wait_until(
+                   [&] {
+                       while (sent < bytes.size()) {
+                           const int n = sock.write(bytes.data() + sent, bytes.size() - sent);
+                           if (n < 0) {
+                               failed = true;
+                               return true;
+                           }
+                           if (n == 0)
+                               return false;
+                           sent += static_cast<std::size_t>(n);
+                       }
+                       return true;
+                   },
+                   std::chrono::seconds(10), "send", qb::http::test::fail_wait::nap{})
+               && !failed;
     };
 
     ASSERT_TRUE(send("POST /up HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\n\r\n"));
@@ -4892,8 +4900,8 @@ TEST(Http2FallbackTimeout, ABodySentSlowlyButSteadilyOverTheHttp11FallbackIsServ
         ASSERT_TRUE(send("x"));
     }
     bool ended = false; // each turn reads for 50 ms, or until the connection ended
-    qb::http::test::wait_until([&] { return ended || answer.find("\r\n\r\n") != std::string::npos; }, std::chrono::seconds(3), "the answer",
-                               [&] { ended = closed_within(std::chrono::milliseconds(50)); });
+    qb::http::test::expect_until([&] { return ended || answer.find("\r\n\r\n") != std::string::npos; }, std::chrono::seconds(3), "the answer",
+                                 [&] { ended = closed_within(std::chrono::milliseconds(50)); });
     EXPECT_EQ(answer.rfind("HTTP/1.1 200 ", 0), 0u) << answer;
 }
 
@@ -4917,8 +4925,9 @@ protected:
     }
 
     [[nodiscard]] static std::shared_ptr<qb::http2::Client>
-    connected_client(uint16_t port) {
-        auto client = qb::http2::make_client("https://localhost:" + std::to_string(port));
+    connected_client(uint16_t port, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        auto                                         client = qb::http2::make_client("https://localhost:" + std::to_string(port));
         client->set_verify_peer(false);
         client->set_connect_timeout(5s);
         client->set_request_timeout(90s); // a request ends with its response or with the connection, not on its own
@@ -4991,7 +5000,8 @@ TEST_F(Http2ClientCrossingTest, ARequestTheClientsOwnGoawayFailsNamesTheClientsR
         uint32_t               code;
     };
     // Each kind on a connection of its own, and judged on its own: a fatal assertion ends that kind, not the test.
-    const auto closes = [&](const kind &each) {
+    const auto closes = [&](const kind &each, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(each.reason);
         Http2PlannedPeer peer(each.plan);
         ASSERT_NE(peer.port(), 0);
@@ -5248,15 +5258,17 @@ TEST_F(Http2NativeTimeout, AHeaderBlockSentSlowlyStillEndsATimeoutAfterItsFirstH
     std::size_t at   = 1;
     bool        over = false; // the connection ended, or took no more
     // One octet a quarter of the timeout apart, never the last: each turn waits a quarter, then sends the next.
-    qb::http::test::wait_until([&] { return over || at + 1 >= block.second.size(); },
-                               kTimeout / 4 * static_cast<int>(block.second.size()) + std::chrono::seconds(5), "a block dribbled",
-                               [&] {
-                                   if (ended_within(kTimeout / 4)
-                                       || !raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
-                                       over = true;
-                                   else
-                                       ++at;
-                               });
+    qb::http::test::discard(
+        qb::http::test::wait_until([&] { return over || at + 1 >= block.second.size(); },
+                                   kTimeout / 4 * static_cast<int>(block.second.size()) + std::chrono::seconds(5), "a block dribbled",
+                                   [&] {
+                                       if (ended_within(kTimeout / 4)
+                                           || !raw.frame(Raw::CONTINUATION, 0, block.first, slice(block.second, at, at + 1)))
+                                           over = true;
+                                       else
+                                           ++at;
+                                   }),
+        "how the connection ended is expect_ended_a_timeout_after()'s to say");
     expect_ended_a_timeout_after(first, "a header block dribbled in CONTINUATION frames");
 }
 
@@ -5281,13 +5293,15 @@ TEST_F(Http2NativeTimeout, EmptyDataFramesDoNotHoldTheConnection) {
     int  frames = 0;
     bool over   = false; // the connection ended, or took no more
     // A quarter of the timeout apart, three timeouts at most, nothing in them: each turn waits a quarter, then sends one.
-    qb::http::test::wait_until([&] { return over || frames == 12; }, kTimeout * 3 + std::chrono::seconds(5), "empty DATA frames",
-                               [&] {
-                                   if (ended_within(kTimeout / 4) || !raw.frame(Raw::DATA, 0, block.first, {}))
-                                       over = true;
-                                   else
-                                       ++frames;
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return over || frames == 12; }, kTimeout * 3 + std::chrono::seconds(5),
+                                                       "empty DATA frames",
+                                                       [&] {
+                                                           if (ended_within(kTimeout / 4) || !raw.frame(Raw::DATA, 0, block.first, {}))
+                                                               over = true;
+                                                           else
+                                                               ++frames;
+                                                       }),
+                            "how the connection ended is expect_ended_a_timeout_after()'s to say");
     expect_ended_a_timeout_after(headers, "empty DATA frames");
 }
 
@@ -5377,7 +5391,8 @@ protected:
     Raw                                                   raw;
 
     void
-    start(bool clear_on_cancel) {
+    start(bool clear_on_cancel, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
         const std::string cert = qb::http::test::ssl_cert_path().string();
         const std::string key  = qb::http::test::ssl_key_path().string();
@@ -5421,13 +5436,15 @@ TEST_F(Http2StreamSweep, ARequestItsHandlerDoesNotAnswerIsResetOnAConnectionThat
         return raw.streams[never].reset || ended(raw);
     };
     // Each turn reads for a quarter of the timeout, then sends the next piece: until the reset, twenty pieces at most.
-    qb::http::test::wait_until([&] { return !taken || pieces == 20 || swept(); }, kTimeout * 5 + std::chrono::seconds(5), "the sweep",
-                               [&] {
-                                   if (raw.read_until(swept, kTimeout / 4))
-                                       return;
-                                   taken = raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x'));
-                                   ++pieces;
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return !taken || pieces == 20 || swept(); },
+                                                       kTimeout * 5 + std::chrono::seconds(5), "the sweep",
+                                                       [&] {
+                                                           if (raw.read_until(swept, kTimeout / 4))
+                                                               return;
+                                                           taken = raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x'));
+                                                           ++pieces;
+                                                       }),
+                            "the case asserts what ended it right after");
     ASSERT_TRUE(taken);
     const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - begun);
     ASSERT_FALSE(ended(raw)) << "the connection ended";
@@ -5476,14 +5493,16 @@ TEST_F(Http2StreamSweep, AHookThatClearsTheProtocolsUnderTheSweepsResetEndsOnlyI
     int  pieces = 0;
     bool over   = false; // the connection ended: read so, or under a write
     // Each turn reads for a quarter of the timeout, then sends the next piece: twenty pieces at most.
-    qb::http::test::wait_until([&] { return over || pieces == 20; }, kTimeout * 5 + std::chrono::seconds(5), "the swept upload",
-                               [&] {
-                                   if (raw.read_until([&] { return raw.eof; }, kTimeout / 4)
-                                       || !raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')))
-                                       over = true;
-                                   else
-                                       ++pieces;
-                               });
+    qb::http::test::discard(qb::http::test::wait_until([&] { return over || pieces == 20; }, kTimeout * 5 + std::chrono::seconds(5),
+                                                       "the swept upload",
+                                                       [&] {
+                                                           if (raw.read_until([&] { return raw.eof; }, kTimeout / 4)
+                                                               || !raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')))
+                                                               over = true;
+                                                           else
+                                                               ++pieces;
+                                                       }),
+                            "the case asserts the end right after");
     ASSERT_TRUE(raw.eof || raw.read_until([&] { return raw.eof; }, kTimeout)) << "the swept request's hook did not end its connection";
     EXPECT_EQ(cancelled.load(), 1);
 
@@ -5584,15 +5603,15 @@ TEST(Http2StreamSweepExtraction, NoTickRunsOnASessionExtractedUnderTheSweep) {
     const auto upload = raw.next_header_block("/up");
     ASSERT_TRUE(raw.frame(Raw::HEADERS, Raw::END_HEADERS, upload.first, upload.second));
     bool third = false;
-    qb::http::test::wait_until([&] { return seen.done.load(); }, begun + std::chrono::seconds(12), "the sweep",
-                               [&] {
-                                   if (!third && Clock::now() - begun > std::chrono::milliseconds(1400)) {
-                                       third = raw.request("/never") != 0; // a third, stamped a tick later: it outlives the sweep that extracts
-                                   }
-                                   (void) raw.frame(Raw::DATA, 0, upload.first,
-                                                    std::vector<uint8_t>(1, 'x')); // the session's timeout keeps restarting
-                                   raw.read_for(std::chrono::milliseconds(250));
-                               });
+    qb::http::test::expect_until(
+        [&] { return seen.done.load(); }, begun + std::chrono::seconds(12), "the sweep",
+        [&] {
+            if (!third && Clock::now() - begun > std::chrono::milliseconds(1400)) {
+                third = raw.request("/never") != 0; // a third, stamped a tick later: it outlives the sweep that extracts
+            }
+            (void) raw.frame(Raw::DATA, 0, upload.first, std::vector<uint8_t>(1, 'x')); // the session's timeout keeps restarting
+            raw.read_for(std::chrono::milliseconds(250));
+        });
     ASSERT_TRUE(third);
     ASSERT_TRUE(seen.extracted.load()) << "no session was extracted under the sweep: the case proves nothing";
     ASSERT_TRUE(seen.done.load()) << "the observations did not run";
@@ -5728,8 +5747,8 @@ TEST(Http2RefusedBlock, TheSessionArmsItsSweepForARefusedBlockLeftOpen) {
     // the server a dispatch later. A session that stayed to deliver the frame kept its contexts and its output for as
     // long as its client took to read (the eighth independent review; delivering it was written, and withdrawn).
     EXPECT_FALSE(asked.up_after_the_sweep.load()) << "the session outlived the sweep's GOAWAY: it stayed to deliver it";
-    qb::http::test::wait_until([&] { return asked.sessions_left.load() >= 0; }, std::chrono::seconds(3), "wait_until",
-                               qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
+    qb::http::test::expect_until([&] { return asked.sessions_left.load() >= 0; }, std::chrono::seconds(3), "wait_until",
+                                 qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
     EXPECT_EQ(asked.sessions_left.load(), 0) << "the server still holds the session";
 }
 
@@ -5846,7 +5865,8 @@ Session::Session(Server &server)
 
 /// Runs @p plan, and returns what was seen once the server's thread is joined.
 inline void
-run(Plan plan, Seen &seen) {
+run(Plan plan, Seen &seen, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
     const std::string cert = qb::http::test::ssl_cert_path().string();
     const std::string key  = qb::http::test::ssl_key_path().string();
@@ -5864,8 +5884,8 @@ run(Plan plan, Seen &seen) {
         Raw raw;
         ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
         ASSERT_NE(raw.request("/held"), 0u);
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.done.load()) << "the session was not read after its release";
@@ -6104,7 +6124,8 @@ public:
 
 template <typename S>
 void
-expect_the_inactivity_timer_alone_stopped() {
+expect_the_inactivity_timer_alone_stopped(std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     ASSERT_TRUE(qb::http::test::certs_available()) << "the HTTP/2 client system suite REQUIRES the TLS test certificates";
     const std::string cert = qb::http::test::ssl_cert_path().string();
     const std::string key  = qb::http::test::ssl_key_path().string();
@@ -6122,8 +6143,8 @@ expect_the_inactivity_timer_alone_stopped() {
         Raw raw;
         ASSERT_TRUE(raw.connect(thread.port()) && raw.read_until([&] { return raw.settings_acked; }, std::chrono::seconds(3)));
         ASSERT_NE(raw.request("/x"), 0u);
-        qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                                   qb::http::test::fail_wait::nap{milliseconds(5)});
+        qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                     qb::http::test::fail_wait::nap{milliseconds(5)});
     }
     g_seen = nullptr;
     ASSERT_TRUE(seen.extracted.load()) << "no session was extracted: the case proves nothing";
@@ -6223,8 +6244,8 @@ TEST(Http2FallbackIdentity, AProtocolInstalledWhereTheFallbacksWasDoesNotSpeakHt
     ASSERT_EQ(sock.get_alpn_selected_protocol(), "http/1.1");
     const std::string request = "GET /swap HTTP/1.1\r\nHost: localhost\r\n\r\n";
     ASSERT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
-    qb::http::test::wait_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
-                               qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
+    qb::http::test::expect_until([&] { return seen.done.load(); }, std::chrono::seconds(5), "wait_until",
+                                 qb::http::test::fail_wait::nap{std::chrono::milliseconds(5)});
     ASSERT_TRUE(seen.done.load()) << "the swap did not run";
     EXPECT_TRUE(seen.spoke_before.load());
     EXPECT_FALSE(seen.speaks_after_clear.load()) << "no protocol at all";
@@ -6308,7 +6329,8 @@ protected:
 
     /// The responses to @p paths, requested at once on the client's one connection.
     std::vector<std::optional<qb::http::Response>>
-    get_all(std::vector<const char *> const &paths) {
+    get_all(std::vector<const char *> const &paths, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         // Shared with the callbacks: a request not answered here is answered by TearDown()'s close, once the case has returned.
         auto responses = std::make_shared<std::vector<std::optional<qb::http::Response>>>(paths.size());
         for (std::size_t i = 0; i < paths.size(); ++i) {
@@ -6383,8 +6405,9 @@ hang() {
 /// bounded by a watchdog that ends the process, saying so.
 template <typename Done>
 bool
-run_the_loop_until(Done &&done, char const *const what) {
-    qb::http::test::watchdog bound(what, 10s);
+run_the_loop_until(Done &&done, char const *const what, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::http::test::watchdog                     bound(what, 10s);
     return qb::http::test::expect_until(std::forward<Done>(done), 9s, what, [] { qb::io::async::run(EVRUN_NOWAIT); });
 }
 
@@ -6501,7 +6524,8 @@ struct NextConnection {
     Answer riding; ///< a request pushed once the next connection is up, never answered by the server: only that connection's end fails it
 
     void
-    ask(qb::http2::Client &client) {
+    ask(qb::http2::Client &client, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         asked = client.connect([this, &client](bool ok, const std::string &) {
             answered = true;
             up       = ok;
@@ -6515,7 +6539,8 @@ struct NextConnection {
     /// The connection the callback saw come up is still the client's: a round trip on it -- by its answer every loop turn
     /// a close fed before it would need has run --, and the request that rides it is still unanswered.
     void
-    expect_left_open(qb::http2::Client &client, Answer &probe) const {
+    expect_left_open(qb::http2::Client &client, Answer &probe, std::source_location const where = std::source_location::current()) const {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(asked && up) << "the next connection did not come up inside the callback: the case proves nothing";
         ASSERT_TRUE(client.push_request(reconnect::get_test(), std::ref(probe)));
         EXPECT_TRUE(ServerThread::pump_until([&] { return probe.count != 0; }, 5s));
@@ -6552,7 +6577,8 @@ TEST_F(Http2ClientTest, ARequestPushedFromACallbackOfAConnectACloseRefusedIsNotF
 /// Runs the loop from inside a callback until the client's transport has ended -- the peer's end is read there; a
 /// transport still open after nine seconds is a failure of the case, recorded by the wait.
 inline bool
-run_the_loop_until_the_transport_ends(qb::http2::Client &client) {
+run_the_loop_until_the_transport_ends(qb::http2::Client &client, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return run_the_loop_until([&] { return !client.transport().is_open(); }, "the loop a callback of a close runs until the peer's end");
 }
 
@@ -6703,7 +6729,8 @@ TEST_F(Http2ClientTest, AConnectAskedFromACallbackOfALostConnectionThatRunsTheLo
         });
         connecting = client->is_connecting();
         // Long enough for an attempt started here to connect: TLS and SETTINGS on the loopback.
-        qb::http::test::wait_until([&] { return answered; }, 500ms);
+        qb::http::test::discard(qb::http::test::wait_until([&] { return answered; }, 500ms),
+                                "a window: answered_in_the_callback records what it saw, which the case asserts");
         answered_in_the_callback = answered;
     }));
     ASSERT_TRUE(ServerThread::pump_until([&] { return _server->server().hang_routed() == 1; }));
@@ -6734,7 +6761,8 @@ elsewhere() {
 
 /// Runs the loop for @p span: the client's turns, and what the connection brings.
 inline void
-settle(std::chrono::milliseconds const span = 50ms) {
+settle(std::chrono::milliseconds const span = 50ms, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until;)
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
 }
@@ -6778,7 +6806,8 @@ struct Relaunch {
     }
 
     void
-    run_the_loop() {
+    run_the_loop(std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ++loop_turns;
         for (int pass = 0; pass < 4; ++pass) {
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
@@ -7260,7 +7289,7 @@ TEST_F(Http2ClientTest, ARefusalKeptIsHeardBeforeAnyAnswerGivenAfterIt) {
             order.push_back(1);
             client->push_request(elsewhere(), [&](qb::http::Response) { order.push_back(2); }); // kept
             // The loop turns of this callback: the client's turn, and the response.
-            qb::http::test::wait_until([&] { return order.size() >= 3; }, 5s);
+            qb::http::test::expect_until([&] { return order.size() >= 3; }, 5s);
         });
         EXPECT_EQ(order, (std::vector<int>{1, 2, 9})) << "the response overtook the refusal owed before it";
         client->disconnect();
@@ -7570,7 +7599,7 @@ TEST_F(Http2ClientTest, AnAnsweredRequestLeavesNoTimeoutArmed) {
     ASSERT_TRUE(client->push_request(reconnect::get_test(), [&](qb::http::Response) { ++answered; }));
     EXPECT_GT(client->getTimeout(), qb::duration::zero()) << "a request in flight has no deadline armed";
     // Each turn blocks until the loop has an event: it returns from the turn that brought the response.
-    qb::http::test::wait_until([&] { return answered != 0; }, 10s, "wait_until", [] { qb::io::async::run(EVRUN_ONCE); });
+    qb::http::test::expect_until([&] { return answered != 0; }, 10s, "wait_until", [] { qb::io::async::run(EVRUN_ONCE); });
     EXPECT_EQ(client->getTimeout(), qb::duration::zero()) << "a response left its request's deadline armed";
 
     ASSERT_TRUE(client->push_request(elsewhere(), [&](qb::http::Response) { ++answered; }));
@@ -7623,7 +7652,8 @@ TEST_F(Http2ClientTest, ACallbackThatDropsTheLastReferenceEndsCleanlyWhoeverCall
             if (destroyed == 0) // the last reference -- not under the client's destructor (a case that failed)
                 client.reset();
         };
-        const auto connected = [&] {
+        const auto connected = [&](std::source_location const where = std::source_location::current()) {
+            qb::http::test::fail_wait::called_from const caller{where};
             raw->connect([&](bool ok, const std::string &) { up = ok; });
             return ServerThread::pump_until([&] { return up; });
         };
@@ -7936,13 +7966,16 @@ TEST_F(Http2ClientTest, AFailedConnectWhoseCallbackThrowsStillAnswersTheRequests
     }));
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(first)));
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(second)));
-    const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        qb::http::test::wait_until(done, span, "run", [] {
-            try {
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-            } catch (std::runtime_error const &) {
-            }
-        });
+    const auto run = [](std::chrono::milliseconds const span, auto &&done, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where}; // what leaves the loop's own failure is not this case's
+        qb::http::test::discard(qb::http::test::wait_until(done, span, "run",
+                                                           [] {
+                                                               try {
+                                                                   qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                                               } catch (std::runtime_error const &) {
+                                                               }
+                                                           }),
+                                "a window, or a wait whose condition the case asserts right after each run()");
     };
     run(5s, [&] { return told != 0; });
     ASSERT_EQ(told, 1) << "the attempt did not fail: the case proves nothing";
@@ -7976,13 +8009,16 @@ TEST_F(Http2ClientTest, AGracefulGoawaysDrainWhoseCallbackThrowsStillEndsItsTran
             throw std::runtime_error("the callback of the request the drain's end fails throws");
         }));
     }));
-    const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        qb::http::test::wait_until(done, span, "run", [] {
-            try {
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-            } catch (std::runtime_error const &) {
-            }
-        });
+    const auto run = [](std::chrono::milliseconds const span, auto &&done, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where}; // what leaves the loop's own failure is not this case's
+        qb::http::test::discard(qb::http::test::wait_until(done, span, "run",
+                                                           [] {
+                                                               try {
+                                                                   qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                                               } catch (std::runtime_error const &) {
+                                                               }
+                                                           }),
+                                "a window, or a wait whose condition the case asserts right after each run()");
     };
     run(10s, [&] { return failed != 0; });
     ASSERT_EQ(answered, 1);
@@ -8032,8 +8068,10 @@ TEST_F(Http2ClientTest, AConnectAskedFromACallbackOfALostConnectionHasItsDeadlin
             {
                 qb::http::test::watchdog bound("the loop a callback runs until its connect() is answered", 10s);
                 const auto               until = began + 3s; // a program's loop has no bound
-                qb::http::test::wait_until([&] { return connect_answers != 0; },
-                                           std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()));
+                qb::http::test::discard(
+                    qb::http::test::wait_until([&] { return connect_answers != 0; },
+                                               std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now())),
+                    "answered_in_the_loop records it, which the case asserts");
             }
             waited               = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began);
             answered_in_the_loop = connect_answers != 0;
@@ -8089,7 +8127,8 @@ TEST_F(Http2ClientTest, ARequestPushedOnceADeferredConnectTimedOutRidesTheNextAt
         });
         {
             qb::http::test::watchdog bound("the loop a callback runs until its connect() is answered", 10s);
-            qb::http::test::wait_until([&] { return connect_answers != 0; }, 3s);
+            qb::http::test::discard(qb::http::test::wait_until([&] { return connect_answers != 0; }, 3s),
+                                    "a callback's bounded pass: connect_answers and told_false record it, which the case asserts");
         }
         silent.reset();                              // the port is free
         server = reconnect::make_h2_server_on(port); // and serves h2 from here on
@@ -8261,13 +8300,13 @@ TEST_F(Http2ClientTest, ALostConnectionWhoseFirstFailureCallbackThrowsStillRecon
         server.reset(); // the connection is lost
         auto back = reconnect::make_h2_server_on(port);
         ASSERT_TRUE(back->ready()) << "no h2 server on the port the first left: the case proves nothing";
-        qb::http::test::wait_until([&] { return again.count != 0; }, 8s, "wait_until",
-                                   [] {
-                                       try {
-                                           qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-                                       } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
-                                       }
-                                   });
+        qb::http::test::expect_until([&] { return again.count != 0; }, 8s, "wait_until",
+                                     [] {
+                                         try {
+                                             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                         } catch (std::runtime_error const &) { // what leaves the loop's own failure is not this case's
+                                         }
+                                     });
         EXPECT_EQ(failures, 3) << "a request behind the callback that threw was not answered";
         EXPECT_EQ(again.count, 1) << "the request a failure callback pushed back was never served";
         EXPECT_EQ(again.status, qb::http::status::OK) << again.body;
@@ -8295,13 +8334,16 @@ TEST_F(Http2ClientTest, ALostAttemptWhoseConnectCallbackThrowsStillAnswersTheReq
         throw std::runtime_error("the callback of the connect() throws");
     }));
     ASSERT_TRUE(client->push_request(reconnect::get_test(), std::ref(waiting)));
-    const auto run = [](std::chrono::milliseconds const span, auto &&done) { // what leaves the loop's own failure is not this case's
-        qb::http::test::wait_until(done, span, "run", [] {
-            try {
-                qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
-            } catch (std::runtime_error const &) {
-            }
-        });
+    const auto run = [](std::chrono::milliseconds const span, auto &&done, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where}; // what leaves the loop's own failure is not this case's
+        qb::http::test::discard(qb::http::test::wait_until(done, span, "run",
+                                                           [] {
+                                                               try {
+                                                                   qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
+                                                               } catch (std::runtime_error const &) {
+                                                               }
+                                                           }),
+                                "a window, or a wait whose condition the case asserts right after each run()");
     };
     run(5s, [&] { return told != 0; });
     ASSERT_EQ(told, 1) << "the attempt was not lost: the case proves nothing";
@@ -8451,7 +8493,8 @@ TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTh
 /// wait it names fails at once, as a wait that reached its end does (fail_wait.h).
 template <typename Done>
 bool
-loop_until(Done &&done, std::chrono::milliseconds const span = 5s) {
+loop_until(Done &&done, std::chrono::milliseconds const span = 5s, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Done>(done), span, "loop_until");
 }
 
@@ -9404,7 +9447,8 @@ TEST_F(Http2ClientTest, TheTimeoutsOfAConnectionAreNeverAnsweredOnTheNextOne) {
     client->connect([&](bool ok, const std::string &) { up = ok; });
     ASSERT_TRUE(ServerThread::pump_until([&] { return up; }));
     const auto routed = _server->server().hang_routed(), cancelled = _server->server().hang_cancelled();
-    const auto first = [&](qb::http::Response response) {
+    const auto first = [&](qb::http::Response response, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         if (response.status() == qb::http::status::REQUEST_TIMEOUT) {
             ++timed_out;
         } else if (response.status() == qb::http::status::SERVICE_UNAVAILABLE) {

@@ -359,15 +359,15 @@ TEST_F(MiddlewarePipelineTest, HstsIsNotSentOverPlainTcpForAnHttpsAbsoluteTarget
 
     std::string head;
     // 400 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 400 x 16 ms as a budget.
-    qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
-                               [&] {
-                                   char buf[512];
-                                   if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
-                                       head.append(buf, static_cast<std::size_t>(n));
-                                   } else {
-                                       std::this_thread::sleep_for(5ms);
-                                   }
-                               });
+    qb::http::test::expect_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
+                                 [&] {
+                                     char buf[512];
+                                     if (const int n = sock.read(buf, sizeof(buf)); n > 0) {
+                                         head.append(buf, static_cast<std::size_t>(n));
+                                     } else {
+                                         std::this_thread::sleep_for(5ms);
+                                     }
+                                 });
     sock.close();
     ASSERT_EQ(head.rfind("HTTP/1.1 200", 0), 0u) << head;
     std::string lowered = head;
@@ -388,8 +388,10 @@ TEST_F(MiddlewarePipelineTest, CsrfMiddlewareReadsTheHostFieldOfAnHttp11Request)
         });
     });
     ASSERT_TRUE(server->ready());
-    auto status_of = [this](std::string const &target, std::string const &origin) {
-        qb::io::tcp::socket sock;
+    auto status_of = [this](std::string const &target, std::string const &origin,
+                            std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        qb::io::tcp::socket                          sock;
         EXPECT_EQ(sock.connect(qb::io::uri{"tcp://127.0.0.1:" + std::to_string(_port)}), 0);
         (void) sock.set_nonblocking(true);
         const std::string request = "POST " + target + " HTTP/1.1\r\nHost: localhost:" + std::to_string(_port) + "\r\nOrigin: " + origin
@@ -397,14 +399,15 @@ TEST_F(MiddlewarePipelineTest, CsrfMiddlewareReadsTheHostFieldOfAnHttp11Request)
         EXPECT_EQ(sock.write(request.data(), request.size()), static_cast<int>(request.size()));
         std::string head;
         // 400 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 400 x 16 ms as a budget.
-        qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
-                                   [&] {
-                                       char buf[512];
-                                       if (const int n = sock.read(buf, sizeof(buf)); n > 0)
-                                           head.append(buf, static_cast<std::size_t>(n));
-                                       else
-                                           std::this_thread::sleep_for(5ms);
-                                   });
+        qb::http::test::discard(qb::http::test::wait_until([&] { return head.find("\r\n\r\n") != std::string::npos; }, 6400ms, "the head",
+                                                           [&] {
+                                                               char buf[512];
+                                                               if (const int n = sock.read(buf, sizeof(buf)); n > 0)
+                                                                   head.append(buf, static_cast<std::size_t>(n));
+                                                               else
+                                                                   std::this_thread::sleep_for(5ms);
+                                                           }),
+                                "the caller compares the status line it returns");
         sock.close();
         return head.substr(0, head.find("\r\n"));
     };

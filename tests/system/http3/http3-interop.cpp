@@ -162,7 +162,9 @@ struct CommandResult {
 // the qb event loop pumping so the in-process server can answer it. On timeout
 // the Windows job is terminated; POSIX sends SIGTERM then SIGKILL.
 CommandResult
-run_command_while_pumping(std::string const &command, std::chrono::milliseconds timeout) {
+run_command_while_pumping(std::string const &command, std::chrono::milliseconds timeout,
+                          std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
 #ifdef _WIN32
     // The command is assembled from filesystem::path::string() and getenv(),
     // both native narrow strings on Windows. Decode it with the active Windows
@@ -220,24 +222,25 @@ run_command_while_pumping(std::string const &command, std::chrono::milliseconds 
 
     // How the child ended, once it has: the wait looks at it between two passes of the loop, and stops there.
     std::optional<CommandResult> ended;
-    qb::http::test::wait_until(
-        [&] {
-            const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
-            if (wait_result == WAIT_OBJECT_0) {
-                DWORD      exit_code     = 0;
-                const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
-                CloseHandle(process.hProcess);
-                CloseHandle(job);
-                ended = CommandResult{got_exit_code ? static_cast<int>(exit_code) : -1, false};
-            } else if (wait_result == WAIT_FAILED) {
-                CloseHandle(job);
-                WaitForSingleObject(process.hProcess, INFINITE);
-                CloseHandle(process.hProcess);
-                ended = CommandResult{-1, false};
-            }
-            return ended.has_value();
-        },
-        timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{1ms});
+    qb::http::test::discard(qb::http::test::wait_until(
+                                [&] {
+                                    const DWORD wait_result = WaitForSingleObject(process.hProcess, 0);
+                                    if (wait_result == WAIT_OBJECT_0) {
+                                        DWORD      exit_code     = 0;
+                                        const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
+                                        CloseHandle(process.hProcess);
+                                        CloseHandle(job);
+                                        ended = CommandResult{got_exit_code ? static_cast<int>(exit_code) : -1, false};
+                                    } else if (wait_result == WAIT_FAILED) {
+                                        CloseHandle(job);
+                                        WaitForSingleObject(process.hProcess, INFINITE);
+                                        CloseHandle(process.hProcess);
+                                        ended = CommandResult{-1, false};
+                                    }
+                                    return ended.has_value();
+                                },
+                                timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{1ms}),
+                            "a deadline is handled right after: the child is ended and the result says so");
     if (ended)
         return *ended;
 
@@ -258,22 +261,23 @@ run_command_while_pumping(std::string const &command, std::chrono::milliseconds 
     // How the child ended, once it has: the wait looks at it between two passes of the loop, and stops there.
     int                          status = 0;
     std::optional<CommandResult> ended;
-    qb::http::test::wait_until(
-        [&] {
-            const auto result = waitpid(pid, &status, WNOHANG);
-            if (result == pid) {
-                if (WIFEXITED(status))
-                    ended = CommandResult{WEXITSTATUS(status), false};
-                else if (WIFSIGNALED(status))
-                    ended = CommandResult{128 + WTERMSIG(status), false};
-                else
-                    ended = CommandResult{-1, false};
-            } else if (result < 0) {
-                ended = CommandResult{-1, false};
-            }
-            return ended.has_value();
-        },
-        timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{std::chrono::milliseconds(1)});
+    qb::http::test::discard(qb::http::test::wait_until(
+                                [&] {
+                                    const auto result = waitpid(pid, &status, WNOHANG);
+                                    if (result == pid) {
+                                        if (WIFEXITED(status))
+                                            ended = CommandResult{WEXITSTATUS(status), false};
+                                        else if (WIFSIGNALED(status))
+                                            ended = CommandResult{128 + WTERMSIG(status), false};
+                                        else
+                                            ended = CommandResult{-1, false};
+                                    } else if (result < 0) {
+                                        ended = CommandResult{-1, false};
+                                    }
+                                    return ended.has_value();
+                                },
+                                timeout, "run_command_while_pumping", qb::http::test::fail_wait::pass_or_sleep{std::chrono::milliseconds(1)}),
+                            "a deadline is handled right after: the child is ended and the result says so");
     if (ended)
         return *ended;
 

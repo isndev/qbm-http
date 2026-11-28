@@ -159,9 +159,10 @@ public:
 template <typename ServerT>
 void
 expect_close_code_after_frames(WsServerThread<ServerT> &server, std::vector<std::vector<std::uint8_t>> const &frames,
-                               qb::http::ws::CloseStatus expected) {
-    qb::io::tcp::socket sock;
-    const auto          rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
+                               qb::http::ws::CloseStatus expected, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    qb::io::tcp::socket                          sock;
+    const auto                                   rc = sock.connect(qb::io::uri{std::string("tcp://localhost:") + std::to_string(server.port)});
     ASSERT_EQ(rc, 0);
     (void) sock.set_nonblocking(true);
     perform_upgrade(sock, server.port, "/edge");
@@ -939,25 +940,26 @@ public:
 
 /// Sends `frame` after the upgrade; true once the server has closed the connection, what it sent before in `received`.
 bool
-server_closes_after(qb::io::tcp::socket &sock, std::vector<std::uint8_t> const &frame, std::string &received) {
+server_closes_after(qb::io::tcp::socket &sock, std::vector<std::uint8_t> const &frame, std::string &received,
+                    std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     sock.write(reinterpret_cast<const char *>(frame.data()), static_cast<int>(frame.size()));
     char buf[256];
     bool closed = false;
-    qb::http::test::wait_until([&] { return closed; }, 3s, "server_closes_after",
-                               [&] {
-                                   const int n = sock.read(buf, sizeof(buf));
-                                   if (n > 0)
-                                       received.append(buf, static_cast<std::size_t>(n));
-                                   if (n == 0)
-                                       closed = true; // the server's FIN
-                                   if (n < 0) {
-                                       if (!qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
-                                           closed = true; // reset: closed with bytes unread
-                                       else
-                                           std::this_thread::sleep_for(5ms);
-                                   }
-                               });
-    return closed;
+    return qb::http::test::wait_until([&] { return closed; }, 3s, "server_closes_after",
+                                      [&] {
+                                          const int n = sock.read(buf, sizeof(buf));
+                                          if (n > 0)
+                                              received.append(buf, static_cast<std::size_t>(n));
+                                          if (n == 0)
+                                              closed = true; // the server's FIN
+                                          if (n < 0) {
+                                              if (!qb::io::socket::not_recv_error(qb::io::socket::get_last_errno()))
+                                                  closed = true; // reset: closed with bytes unread
+                                              else
+                                                  std::this_thread::sleep_for(5ms);
+                                          }
+                                      });
 }
 
 void

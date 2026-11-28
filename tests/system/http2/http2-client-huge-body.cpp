@@ -39,7 +39,8 @@ namespace http2_client_huge_body_test {
 
 template <typename Pred>
 [[nodiscard]] bool
-pump_until(Pred &&pred, std::chrono::milliseconds budget) {
+pump_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until");
 }
 

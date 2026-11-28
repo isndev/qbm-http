@@ -88,13 +88,15 @@ public:
 
 template <typename Pred>
 bool
-pump_until(Pred &&pred, std::chrono::milliseconds budget = 5s) {
+pump_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
 }
 
 template <typename Session>
 void
-expect_extraction_runs_the_handler(bool expect_hook_silent) {
+expect_extraction_runs_the_handler(bool expect_hook_silent, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     using Ctx = qb::http::Context<Session>;
     qb::io::async::init();
     g_held.reset();

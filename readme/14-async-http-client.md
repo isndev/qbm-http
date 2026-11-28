@@ -354,7 +354,7 @@ namespace qb::http1 {
 
 A typical coroutine flow — connect once, then fire requests against the same connection:
 
-<!-- src: qbm/http/tests/system/http1/http1-client.cpp:795-806 -->
+<!-- src: qbm/http/tests/system/http1/http1-client.cpp:813-824 -->
 ```cpp
 #include <qbm/http/http.h>
 
@@ -512,7 +512,7 @@ namespace qb::http3 {
 
 The callback form, run-to-completion driven by the event loop:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:188-209 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:190-211 -->
 ```cpp
 #ifdef QBM_HTTP_HAS_HTTP3
 auto client = qb::http3::make_client("https://127.0.0.1:31943");
@@ -529,7 +529,7 @@ client->disconnect();
 
 And the coroutine form with lazy connect:
 
-<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:292-303 -->
+<!-- src: qbm/http/tests/system/http3/http3-loopback.cpp:294-305 -->
 ```cpp
 auto client = qb::http3::make_client("https://127.0.0.1:31992");
 client->set_verify_peer(false);  // self-signed local endpoint; default is true

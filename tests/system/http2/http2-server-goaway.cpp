@@ -115,14 +115,17 @@ protected:
     /// Each of @p frames on a connection of its own: the server's last frame is a GOAWAY of its code and debug data, and
     /// it resets no stream.
     static void
-    each_ends_the_connection_with_its_goaway(const std::vector<refused_frame> &frames) {
+    each_ends_the_connection_with_its_goaway(const std::vector<refused_frame> &frames,
+                                             std::source_location const        where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         for (const auto &frame : frames) {
             ends_the_connection_with_its_goaway(frame); // a fatal failure ends that frame's case, not the others
         }
     }
 
     static void
-    ends_the_connection_with_its_goaway(const refused_frame &frame) {
+    ends_the_connection_with_its_goaway(const refused_frame &frame, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         SCOPED_TRACE(frame.name);
         auto server = start_server();
         ASSERT_TRUE(server->ready());

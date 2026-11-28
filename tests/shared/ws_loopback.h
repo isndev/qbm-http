@@ -216,9 +216,11 @@ struct WsServerThread {
  * @param path request-target for the upgrade (defaults to @c "/").
  */
 inline void
-perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/") {
-    const std::string port_s  = std::to_string(port);
-    std::string       upgrade = "GET ";
+perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/",
+                std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    const std::string                            port_s  = std::to_string(port);
+    std::string                                  upgrade = "GET ";
     upgrade += path;
     upgrade += " HTTP/1.1\r\n"
                "Host: localhost:";
@@ -233,7 +235,7 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
 
     std::string response;
     // 500 looks 5 ms apart, each reading what came: such a sleep is 16 ms on Windows, so 500 x 16 ms as a budget.
-    wait_until(
+    expect_until(
         [&] {
             char buf[512];
             int  n = sock.read(buf, sizeof(buf));
@@ -254,19 +256,21 @@ perform_upgrade(qb::io::tcp::socket &sock, int port, std::string_view path = "/"
  * polls so a stuck server fails the test instead of hanging forever.
  */
 [[nodiscard]] inline std::string
-read_http_response(qb::io::tcp::socket &sock) {
-    std::string response;
+read_http_response(qb::io::tcp::socket &sock, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::string                                  response;
     // 500 reads, 5 ms after each that brought nothing: such a sleep is 16 ms on Windows, so 500 x 16 ms as a budget.
-    wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 8000ms, "read_http_response",
-               [&] {
-                   char buf[512];
-                   int  n = sock.read(buf, sizeof(buf));
-                   if (n > 0) {
-                       response.append(buf, static_cast<std::size_t>(n));
-                   } else {
-                       std::this_thread::sleep_for(5ms);
-                   }
-               });
+    discard(wait_until([&] { return response.find("\r\n\r\n") != std::string::npos; }, 8000ms, "read_http_response",
+                       [&] {
+                           char buf[512];
+                           int  n = sock.read(buf, sizeof(buf));
+                           if (n > 0) {
+                               response.append(buf, static_cast<std::size_t>(n));
+                           } else {
+                               std::this_thread::sleep_for(5ms);
+                           }
+                       }),
+            "the caller reads the response it returns");
     return response;
 }
 
@@ -326,26 +330,29 @@ make_client_frame(std::uint8_t opcode_with_flags, std::string_view payload) {
  *       least allowed to have.
  */
 [[nodiscard]] inline std::string
-read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms, std::chrono::milliseconds quiet = 200ms) {
-    std::string out;
-    const auto  start     = std::chrono::steady_clock::now();
-    auto        last_byte = start;
-    char        buf[256];
-    bool        ended = false;
-    wait_until([&] { return ended || out.size() >= max; }, start + deadline, "read_some",
-               [&] {
-                   int n = sock.read(buf, sizeof(buf));
-                   if (n > 0) {
-                       out.append(buf, static_cast<std::size_t>(n));
-                       last_byte = std::chrono::steady_clock::now();
-                   } else if (n == 0) {
-                       ended = true; // peer closed: nothing more is coming
-                   } else if (!out.empty() && std::chrono::steady_clock::now() - last_byte >= quiet) {
-                       ended = true; // delivered, then went silent
-                   } else {
-                       std::this_thread::sleep_for(5ms);
-                   }
-               });
+read_some(qb::io::tcp::socket &sock, std::size_t max, std::chrono::milliseconds deadline = 1500ms, std::chrono::milliseconds quiet = 200ms,
+          std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
+    std::string                                  out;
+    const auto                                   start     = std::chrono::steady_clock::now();
+    auto                                         last_byte = start;
+    char                                         buf[256];
+    bool                                         ended = false;
+    discard(wait_until([&] { return ended || out.size() >= max; }, start + deadline, "read_some",
+                       [&] {
+                           int n = sock.read(buf, sizeof(buf));
+                           if (n > 0) {
+                               out.append(buf, static_cast<std::size_t>(n));
+                               last_byte = std::chrono::steady_clock::now();
+                           } else if (n == 0) {
+                               ended = true; // peer closed: nothing more is coming
+                           } else if (!out.empty() && std::chrono::steady_clock::now() - last_byte >= quiet) {
+                               ended = true; // delivered, then went silent
+                           } else {
+                               std::this_thread::sleep_for(5ms);
+                           }
+                       }),
+            "a read of what comes: the caller reads what it returns");
     return out;
 }
 
