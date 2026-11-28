@@ -214,7 +214,7 @@ public:
         return _sock.connect_v4("127.0.0.1", port) == 0 && _sock.set_nonblocking(true) == 0;
     }
 
-    bool
+    [[nodiscard]] bool
     send(std::string_view data, std::chrono::milliseconds budget = 2s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
@@ -251,7 +251,7 @@ public:
     }
 
     template <typename Pred>
-    bool
+    [[nodiscard]] bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = 20s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
@@ -335,7 +335,7 @@ request(std::string_view path, std::string_view probe, std::string_view extra = 
 }
 
 template <typename Pred>
-bool
+[[nodiscard]] bool
 wait_for(Pred &&pred, std::chrono::milliseconds budget = 10s, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});
@@ -353,7 +353,8 @@ exchange(std::uint16_t port, std::string const &wire, bool head_request = false)
     Client c;
     if (!c.connect(port) || !c.send(wire))
         return {};
-    c.read_until([&] { return parse_response(c.buffer, head_request).complete; });
+    qb::http::test::discard(c.read_until([&] { return parse_response(c.buffer, head_request).complete; }),
+                            "the caller reads the response it returns, and whether the connection ended");
     return {parse_response(c.buffer, head_request), c.eof};
 }
 
@@ -498,7 +499,9 @@ take_paced(RawClient &c, std::size_t bytes, std::chrono::milliseconds pause, std
             [&] { return c.eof || parse_response(c.buffer, false).complete; }, budget, "take_paced",
             [&] {
                 const auto before = c.buffer.size();
-                c.read_until([&] { return c.buffer.size() >= before + bytes || c.eof || parse_response(c.buffer, false).complete; }, 2s);
+                qb::http::test::discard(
+                    c.read_until([&] { return c.buffer.size() >= before + bytes || c.eof || parse_response(c.buffer, false).complete; }, 2s),
+                    "a read of one piece: the wait around it reads what came");
                 if (c.eof || parse_response(c.buffer, false).complete)
                     return;
                 std::this_thread::sleep_for(pause);
@@ -755,7 +758,8 @@ TEST_F(StaticFilesStreamTest, AFileThatShrinksUnderTheReadClosesTheConnectionSho
     ASSERT_TRUE(c.read_until([&] { return c.buffer.find("\r\n\r\n") != std::string::npos; }));
     ASSERT_TRUE(wait_for([] { return g_max_pending.load() >= kHighMark; })) << "the output never reached the mark";
     std::filesystem::resize_file(root / "shrink.bin", kHuge / 2);
-    c.read_until([] { return false; }); // to the end of the connection
+    qb::http::test::discard(c.read_until([] { return false; }),
+                            "a read to the connection's end: the case expects it right after"); // to the end of the connection
     EXPECT_TRUE(c.eof) << "the server must close a message it can no longer complete";
     const auto r = parse_response(c.buffer);
     EXPECT_EQ(r.status, 200);
@@ -871,7 +875,7 @@ TEST_F(StaticFilesStreamTest, ACancelMidBodyReleasesTheProducerItsStreamAndTheFi
 #ifdef __linux__
     EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the cancellation";
 #endif
-    c.read_until([] { return false; }, 5s);
+    qb::http::test::discard(c.read_until([] { return false; }, 5s), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(c.eof) << "a cancelled download closes its connection";
 }
 
@@ -902,7 +906,7 @@ TEST_F(StaticFilesStreamTest, AnAbortMidBodyReleasesTheProducerItsStreamAndTheFi
 #ifdef __linux__
     EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the abort";
 #endif
-    c.read_until([] { return false; }, 5s);
+    qb::http::test::discard(c.read_until([] { return false; }, 5s), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(c.eof) << "an aborted download closes its connection";
 }
 
@@ -938,7 +942,7 @@ TEST_F(StaticFilesStreamTest, AClientThatStopsReadingIsCutAtTheIdleDeadlineAndTh
 #ifdef __linux__
     EXPECT_TRUE(wait_for([&] { return open_descriptors_on(file) == 0; })) << "the file outlived the deadline";
 #endif
-    c.read_until([] { return false; }, 5s);
+    qb::http::test::discard(c.read_until([] { return false; }, 5s), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(c.eof) << "HTTP/1.1: the aborted download closes its connection";
 }
 
@@ -1068,7 +1072,7 @@ TEST_F(StaticFilesStreamTest, AnHttp10RequestStreamsUnderItsLengthThenTheConnect
     RawClient c;
     ASSERT_TRUE(c.connect(server->port()));
     ASSERT_TRUE(c.send(request("/static/big.bin", "http10", "", "GET", "HTTP/1.0")));
-    c.read_until([] { return false; });
+    qb::http::test::discard(c.read_until([] { return false; }), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(c.eof);
     const auto r = parse_response(c.buffer);
     ASSERT_TRUE(r.complete) << r.head;
@@ -1382,7 +1386,7 @@ TEST_F(StaticFilesStreamTest, ASessionThatDropsWhatItIsGivenEndsTheStreamCancell
     EXPECT_TRUE(dropped.streaming);
     EXPECT_TRUE(dropped.cancelled) << "the request must end with its connection, not as delivered";
     EXPECT_LT(dropped.streamed, kHuge) << "the whole file was read into a session that queued none of it";
-    c.read_until([] { return false; }, 5s);
+    qb::http::test::discard(c.read_until([] { return false; }, 5s), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(c.eof);
     const auto next = exchange(server->port(), request("/static/small.txt", "after-drop"));
     EXPECT_EQ(next.response.body, small);
@@ -1457,8 +1461,9 @@ with_compression(std::vector<std::string> encodings) {
     };
 }
 /// `wire`, a whole request, sent on a fresh connection and its chunked response read to the last-chunk.
-inline bool
-read_chunked(RawClient &c, std::uint16_t port, std::string const &wire) {
+[[nodiscard]] inline bool
+read_chunked(RawClient &c, std::uint16_t port, std::string const &wire, std::source_location const where = std::source_location::current()) {
+    qb::http::test::fail_wait::called_from const caller{where};
     if (!c.connect(port) || !c.send(wire))
         return false;
     return c.read_until([&] { return c.buffer.size() >= 5 && c.buffer.compare(c.buffer.size() - 5, 5, "0\r\n\r\n") == 0; }, 10s);

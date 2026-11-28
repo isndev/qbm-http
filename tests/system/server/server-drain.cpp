@@ -146,7 +146,7 @@ get(std::string const &target) {
 }
 
 /// Waits (from the test thread) until the drain reported.
-bool
+[[nodiscard]] bool
 wait_for_report(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});

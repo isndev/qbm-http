@@ -75,8 +75,10 @@
  *   - after a case, on stderr: `[fail_wait] site <place> (<helper>): <n> waits, the first wait <k>, stretch <j> past
  *     wait <K>` for every place a wait was reached from (the stretch its first wait opened, 0 when that wait is not
  *     past K: `K+j` names it again in a run whose stretches before it count the same), `[fail_wait] past wait <K>: <n>
- *     waits opened a stretch` under `K+J`, then `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned
- *     for <ms> ms`. A place is `<file>:<line>` steps joined by `>`, outermost first, with no space.
+ *     waits opened a stretch` under `K+J`, `[fail_wait] last wait <n> at <place>` (the wait the case ended at), then
+ *     `[fail_wait] after <Suite.Case>: <n> waits reached, the loop turned for <ms> ms`. A place is
+ *     `<file>:<line>:<column>` steps joined by `>`, outermost first, with no space: two calls on one line are two
+ *     places, the calls of a loop one.
  *
  * It includes gtest and qb-io's `async.h`, and is included by every test file that waits.
  *
@@ -165,7 +167,7 @@ asked() noexcept {
 
 /// A place a failable wait was reached from, and how often.
 struct site {
-    std::string place;  ///< `<file>:<line>` steps joined by `>`, outermost first
+    std::string place;  ///< `<file>:<line>:<column>` steps joined by `>`, outermost first
     char const *helper; ///< the name its first wait gave
     int         count;
     int         first;   ///< the number of its first wait
@@ -197,11 +199,24 @@ leaf(char const *path) noexcept {
     return name;
 }
 
+/// A caller a `called_from` keeps, numbered so that it can tell its own entry from another's.
+struct caller_kept {
+    unsigned long long   serial;
+    std::source_location where;
+};
+
 /// The callers of the helpers running on this thread, outermost first: what a `called_from` keeps while it lives.
-inline std::vector<std::source_location> &
+inline std::vector<caller_kept> &
 callers() noexcept {
-    thread_local std::vector<std::source_location> kept;
+    thread_local std::vector<caller_kept> kept;
     return kept;
+}
+
+/// The number the next `called_from` of this thread takes.
+inline unsigned long long &
+callers_made() noexcept {
+    thread_local unsigned long long made = 0;
+    return made;
 }
 
 /**
@@ -211,38 +226,56 @@ callers() noexcept {
  * takes `std::source_location const where = std::source_location::current()` and holds one of these first, so that
  * the waits it reaches are named by the line of its caller, not by its own line alone: two waits a case writes at two
  * lines through one helper are two places, and a case failed past `K` is failed at both. Unarmed, it keeps nothing.
+ * The callers of a thread are a stack: a helper that suspends while another runs -- a coroutine -- would leave its
+ * caller under the other's, so `--lint` refuses one in a coroutine, and one that leaves out of turn records a failure
+ * here, its own entry taken out and the others kept.
  */
 class called_from {
 public:
     explicit called_from(std::source_location const where)
-        : _kept(asked().armed) {
+        : _kept(asked().armed)
+        , _serial(_kept ? ++callers_made() : 0) {
         if (_kept)
-            callers().push_back(where);
+            callers().push_back({_serial, where});
     }
     called_from(called_from const &)            = delete;
     called_from &operator=(called_from const &) = delete;
     ~called_from() {
-        if (_kept)
-            callers().pop_back();
+        if (!_kept)
+            return;
+        std::vector<caller_kept> &kept = callers();
+        if (!kept.empty() && kept.back().serial == _serial) {
+            kept.pop_back();
+            return;
+        }
+        ADD_FAILURE() << "[fail_wait] called_from left out of turn: a helper that names its caller suspended while another ran";
+        kept.erase(std::remove_if(kept.begin(), kept.end(), [this](caller_kept const &c) { return c.serial == _serial; }), kept.end());
     }
 
 private:
-    bool const _kept;
+    bool const               _kept;
+    unsigned long long const _serial;
 };
+
+/// One step of a place: `<file>:<line>:<column>` -- two calls on one line are two places, a loop's calls one.
+inline void
+step_of(std::string &out, std::source_location const &where) {
+    out += leaf(where.file_name());
+    out += ':';
+    out += std::to_string(where.line());
+    out += ':';
+    out += std::to_string(where.column());
+}
 
 /// The place of a wait whose kit call is at @p where: the callers kept on this thread, then @p where.
 inline std::string
 place_of(std::source_location const &where) {
     std::string out;
-    for (std::source_location const &step : callers()) {
-        out += leaf(step.file_name());
-        out += ':';
-        out += std::to_string(step.line());
+    for (caller_kept const &step : callers()) {
+        step_of(out, step.where);
         out += '>';
     }
-    out += leaf(where.file_name());
-    out += ':';
-    out += std::to_string(where.line());
+    step_of(out, where);
     return out;
 }
 
@@ -285,6 +318,8 @@ public:
                          s.count, s.first, s.stretch, asked().past);
         if (asked().stretch != 0)
             std::fprintf(stderr, "[fail_wait] past wait %d: %d waits opened a stretch\n", asked().past, b.stretches);
+        if (b.reached > 0)
+            std::fprintf(stderr, "[fail_wait] last wait %d at %s\n", b.reached, b.last.c_str());
         std::fprintf(stderr, "[fail_wait] after %s.%s: %d waits reached, the loop turned for %lld ms\n", info.test_suite_name(), info.name(),
                      b.reached, static_cast<long long>(k_turn.count()));
         std::fflush(stderr);

@@ -79,7 +79,7 @@ constexpr int kBindEphemeral = 0;
 // ===========================================================================
 
 template <typename Pred>
-bool
+[[nodiscard]] bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until", qb::http::test::fail_wait::pass_then_sleep{1ms});
@@ -267,7 +267,8 @@ TEST(WsClientEcho, CallbackClientEchoesContent) {
 
     qb::http::ws::MessageClose close(qb::http::ws::CloseStatus::Normal, "done");
     ws_client << close;
-    pump_until([] { return false; }, 100ms); // brief drain for the close frame
+    qb::http::test::discard(pump_until([] { return false; }, 100ms),
+                            "a window: the close frame's brief drain"); // brief drain for the close frame
 }
 
 #ifdef QB_HAS_SSL

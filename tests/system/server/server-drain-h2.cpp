@@ -66,7 +66,7 @@ reset_globals() {
     g_counted = 0;
 }
 
-bool
+[[nodiscard]] bool
 wait_for_report(std::chrono::milliseconds budget = 5000ms, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until([&] { return g_reports.load() != 0; }, budget, "wait_until", qb::http::test::fail_wait::nap{1ms});
@@ -760,7 +760,8 @@ protected:
         ASSERT_TRUE(raw.read_until([this] { return raw.settings_acked; }, 3s));
         first = raw.request("/first");
         ASSERT_NE(first, 0u);
-        raw.read_until([this] { return raw.streams[first].end_stream || raw.eof; }, 3s);
+        qb::http::test::discard(raw.read_until([this] { return raw.streams[first].end_stream || raw.eof; }, 3s),
+                                "the case asserts the first answer right after");
         ASSERT_TRUE(raw.streams[first].end_stream) << "the first request was not answered";
         ASSERT_TRUE(asked.send_buffer_set.load()) << "the session's socket refused its send buffer";
         if (octets == 0)
@@ -826,7 +827,7 @@ TEST_F(Http2ServerDrainDelivery, ADeliveryCompletedWithinTheBoundHasItsLingering
     ASSERT_NO_FATAL_FAILURE(connect(kLinger));
     asked.hold_ms = static_cast<int>(kHold.count());
     ASSERT_NO_FATAL_FAILURE(drain_to_the_deadline());
-    raw.read_until([this] { return raw.eof; }, 5s);
+    qb::http::test::discard(raw.read_until([this] { return raw.eof; }, 5s), "a read to the connection's end: the case expects it right after");
     EXPECT_TRUE(raw.eof) << "the server did not end its side after the delivery";
     EXPECT_TRUE(raw.goaway_seen);
     EXPECT_EQ(raw.goaway_code, kNoError);

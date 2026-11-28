@@ -281,7 +281,7 @@ qb::http::ws::client_secure ws;            // = Client<qb::io::transport::stcp>
 ws.connect(qb::io::uri{"wss://localhost:9443/ws"}); // verify_peer defaults to true
 ```
 
-Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:268-371, src/qbm/http/ws/ws.h:1154,1946-1947 -->
+Server-side WSS follows the HTTPS server pattern: build the session on a secure transport (`qb::io::use<Self>::tcp::ssl::client<Server>` / `...ssl::server<Session>`), initialize it with a certificate/key pair as in [Enabling HTTPS (SSL/TLS)](./18-https-ssl-tls.md), then run the identical HTTP/1.1 upgrade flow — `switch_protocol<ws_protocol>` is transport-agnostic. <!-- src: qbm/http/tests/system/ws/ws-client-echo.cpp:268-372, src/qbm/http/ws/ws.h:1154,1946-1947 -->
 
 ## Pitfalls
 

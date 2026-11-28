@@ -111,7 +111,7 @@ parse_frames(std::vector<std::uint8_t> const &in, std::size_t at, Each &&each) {
 
 /// Waits, sleeping, until @p pred holds or @p budget elapses: what the test's thread does while another thread works.
 template <typename Pred>
-bool
+[[nodiscard]] bool
 watch_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "watch_until", qb::http::test::fail_wait::nap{1ms});
@@ -120,7 +120,7 @@ watch_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location 
 /// Runs the test thread's loop -- the client's, and the loop that closes its sockets -- until @p pred holds or @p budget
 /// elapses. Unlike ServerThread::pump_until it fails nothing: the caller's assertion names what did not happen.
 template <typename Pred>
-bool
+[[nodiscard]] bool
 pump_until(Pred &&pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "pump_until",
@@ -299,14 +299,14 @@ protected:
         std::size_t pushed  = 0;
         bool        refused = false; // the socket took no more within the budget of a write
         // Each turn is one write of sixteen PING frames: 964 of them at most, each within its own budget.
-        qb::http::test::discard(qb::http::test::wait_until([&] { return refused || pushed >= std::size_t{256} << 10; }, 60s, "still sending",
-                                                           [&] {
-                                                               if (client.solicit(16))
-                                                                   pushed += 16 * 17;
-                                                               else
-                                                                   refused = true;
-                                                           }),
-                                "it returns what was pushed: refused or not is the caller's to judge");
+        // A deadline with neither a refusal nor 256 KiB taken is the case's failure: the server held a client that writes.
+        qb::http::test::expect_until([&] { return refused || pushed >= std::size_t{256} << 10; }, 60s, "still sending",
+                                     [&] {
+                                         if (client.solicit(16))
+                                             pushed += 16 * 17;
+                                         else
+                                             refused = true;
+                                     });
         client.write_budget = 2s;
         return pushed;
     }
@@ -516,8 +516,7 @@ private:
     /// and a PING, and again at each PONG, until the client's GOAWAY -- the shape of http2_planned_peer.h's empty-data
     /// flood. A round is one write the client reads whole: when it cuts the flood, nothing is left unread on its side.
     bool
-    flood(std::source_location const where = std::source_location::current()) {
-        qb::http::test::fail_wait::called_from const caller{where};
+    flood() {
         static constexpr std::array<std::uint8_t, 8> opaque{'q', 'b', '-', '1', '2', '7', '0', 7};
         const auto                                   round = [&](int empty_frames) {
             std::vector<std::uint8_t> frames;
@@ -581,8 +580,7 @@ private:
     }
 
     void
-    play(std::source_location const where = std::source_location::current()) {
-        qb::http::test::fail_wait::called_from const caller{where};
+    play() {
         if (!read_until([this] { return _answered && _acked; }))
             return;
         _ready = true;
@@ -607,8 +605,7 @@ private:
     }
 
     void
-    run(std::source_location const where = std::source_location::current()) {
-        qb::http::test::fail_wait::called_from const caller{where};
+    run() {
         _deadline = std::chrono::steady_clock::now() + 60s;
         qb::http::test::peer_wait_until([this] { return over() || (_listener.accept(_sock) == 0 && _sock.is_open()); },
                                         qb::http::test::fail_wait::never);

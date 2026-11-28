@@ -86,7 +86,7 @@ public:
 
 /// Pump the local event loop for a bounded window, returning as soon as `pred` holds.
 template <typename Pred>
-bool
+[[nodiscard]] bool
 pump_until(Pred pred, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(pred, budget, "pump_until", [] { qb::io::async::run_for(5ms); });

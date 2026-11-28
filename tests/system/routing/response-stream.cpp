@@ -1225,7 +1225,7 @@ public:
         return _sock.connect_v4("127.0.0.1", port) == 0 && _sock.set_nonblocking(true) == 0;
     }
 
-    bool
+    [[nodiscard]] bool
     send(std::string_view data, std::chrono::milliseconds budget = 2s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         // Each look writes what the socket takes: all of it, or a socket that takes no more for now.
@@ -1267,7 +1267,7 @@ public:
     }
 
     template <typename Pred>
-    bool
+    [[nodiscard]] bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
@@ -1279,7 +1279,7 @@ public:
     }
 
     /// Reads `n` body bytes past what `buffer` holds without keeping them; true when all came and every one is `fill`.
-    bool
+    [[nodiscard]] bool
     count_body(std::size_t n, char fill, std::chrono::milliseconds budget, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::size_t                                  seen  = buffer.size();
@@ -1398,7 +1398,7 @@ get(std::string_view path, std::string_view version = "HTTP/1.1", std::string_vi
 }
 
 template <typename Pred>
-bool
+[[nodiscard]] bool
 wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});

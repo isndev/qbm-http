@@ -121,7 +121,7 @@ public:
 
     /// Connect over TLS (the self-signed certificate accepted), ALPN h2, then the preface and our SETTINGS. `settings`
     /// are id/value pairs (an initial window size, say). `false` when the connection or the ALPN failed.
-    bool
+    [[nodiscard]] bool
     connect(std::uint16_t port, std::vector<std::pair<std::uint16_t, std::uint32_t>> const &settings = {},
             std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -192,7 +192,7 @@ public:
     /// QB-1270) -- an octet, so that they meet the reset guards, not the bucket of the frames that make no progress an
     /// empty DATA takes a token of. `false` when the write did not finish within `write_budget`, or the connection is
     /// broken.
-    bool
+    [[nodiscard]] bool
     solicit(int count, soliciting what = soliciting::pings, std::uint32_t closed_stream = 0,
             std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -209,7 +209,7 @@ public:
         return write_all(out);
     }
 
-    bool
+    [[nodiscard]] bool
     window_update(std::uint32_t stream_id, std::uint32_t increment, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::vector<uint8_t>                         out;
@@ -221,7 +221,7 @@ public:
 
     /// Several WINDOW_UPDATEs in ONE write, so that the server reads them in one pass (Huly QB-86): each pair is a
     /// stream id and its increment.
-    bool
+    [[nodiscard]] bool
     window_updates(std::vector<std::pair<std::uint32_t, std::uint32_t>> const &updates,
                    std::source_location const                                  where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -234,7 +234,7 @@ public:
     }
 
     /// Any frame, as given: a frame the server must refuse, say (Huly QB-1270). `false` when the write did not finish.
-    bool
+    [[nodiscard]] bool
     frame(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::vector<uint8_t> const &payload,
           std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -245,7 +245,7 @@ public:
 
     /// The 9 octets of a frame header declaring `length` octets of payload, and no payload: a frame the server refuses on
     /// its header alone, with nothing of it left unread when the server closes (Huly QB-1270).
-    bool
+    [[nodiscard]] bool
     frame_header(std::uint8_t type, std::uint8_t flags, std::uint32_t stream_id, std::uint32_t length,
                  std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -263,7 +263,7 @@ public:
         return write_all(out);
     }
 
-    bool
+    [[nodiscard]] bool
     rst_stream(std::uint32_t stream_id, std::uint32_t code, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::vector<uint8_t>                         out;
@@ -273,7 +273,7 @@ public:
         return write_all(out);
     }
 
-    bool
+    [[nodiscard]] bool
     goaway(std::uint32_t last_stream_id, std::uint32_t code, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::vector<uint8_t>                         out;
@@ -286,7 +286,7 @@ public:
 
     /// Read frames until `pred()` holds, the connection ends, or `budget` elapses; `pred()` at the end.
     template <typename Pred>
-    bool
+    [[nodiscard]] bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = std::chrono::seconds(5),
                std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
@@ -361,7 +361,7 @@ private:
         out.insert(out.end(), payload.begin(), payload.end());
     }
 
-    bool
+    [[nodiscard]] bool
     write_all(std::vector<uint8_t> const &bytes, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::size_t                                  sent   = 0;

@@ -111,7 +111,7 @@ url_encode(const std::string &value) {
     return escaped.str();
 }
 
-bool
+[[nodiscard]] bool
 write_all(qb::io::tcp::socket &socket, std::string_view bytes, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     std::size_t                                  sent = 0;

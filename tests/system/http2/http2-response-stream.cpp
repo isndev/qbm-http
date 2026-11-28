@@ -186,7 +186,8 @@ sip(Http2RawClient &c, std::uint32_t b, std::size_t bytes, std::chrono::millisec
     std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     const auto                                   before = c.stream(b).data_bytes;
-    c.read_until([&] { return c.stream(b).data_bytes >= before + bytes || stop() || c.eof; }, 500ms);
+    qb::http::test::discard(c.read_until([&] { return c.stream(b).data_bytes >= before + bytes || stop() || c.eof; }, 500ms),
+                            "a read for its window: what it brought is what sip() returns");
     if (c.stream(b).data_bytes + (std::uint64_t{4} << 20) > credited) {
         (void) c.window_update(0, 8u << 20);
         (void) c.window_update(b, 8u << 20);
@@ -458,7 +459,7 @@ protected:
     }
 
     template <typename Pred>
-    static bool
+    [[nodiscard]] static bool
     wait_for(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until(std::forward<Pred>(pred), budget, "wait_for", qb::http::test::fail_wait::nap{1ms});

@@ -5197,21 +5197,27 @@ protected:
     }
 
     /// Reads what comes for at most @p window; true once the connection ended (a GOAWAY, or its close).
-    bool
-    ended_within(std::chrono::milliseconds window) {
+    [[nodiscard]] bool
+    ended_within(std::chrono::milliseconds window, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return raw.read_until([this] { return raw.eof || raw.goaway_seen; }, window);
     }
 
     /// Reads until stream @p id is answered whole or reset, or the connection ends; the answer's status, 0 for none.
     int
-    answer(std::uint32_t id) {
-        raw.read_until([this, id] { return raw.streams[id].end_stream || raw.streams[id].reset; }, std::chrono::seconds(3));
+    answer(std::uint32_t id, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
+        qb::http::test::discard(
+            raw.read_until([this, id] { return raw.streams[id].end_stream || raw.streams[id].reset; }, std::chrono::seconds(3)),
+            "the status it returns says how it ended: 0 when nothing answered");
         return raw.streams[id].end_stream ? raw.streams[id].status() : 0;
     }
 
     /// The connection ends within 0.8 to 1.4 timeouts of @p since.
     void
-    expect_ended_a_timeout_after(Clock::time_point since, const char *what) {
+    expect_ended_a_timeout_after(Clock::time_point since, const char *what,
+                                 std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         ASSERT_TRUE(ended_within(kTimeout * 3)) << what << ": the connection did not end";
         const auto after = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since);
         EXPECT_GE(after, kTimeout * 8 / 10) << what;
@@ -5409,7 +5415,8 @@ protected:
         ASSERT_TRUE(connected(raw));
     }
     [[nodiscard]] bool
-    connected(Raw &client) {
+    connected(Raw &client, std::source_location const where = std::source_location::current()) {
+        qb::http::test::fail_wait::called_from const caller{where};
         return client.connect(thread->port()) && client.read_until([&client] { return client.settings_acked; }, std::chrono::seconds(3));
     }
     [[nodiscard]] static bool
@@ -5455,8 +5462,10 @@ TEST_F(Http2StreamSweep, ARequestItsHandlerDoesNotAnswerIsResetOnAConnectionThat
 
     // The connection serves on: the upload ends, and is answered.
     ASSERT_TRUE(raw.frame(Raw::DATA, Raw::END_STREAM, upload.first, std::vector<uint8_t>(1, 'x')));
-    raw.read_until([&] { return raw.streams[upload.first].end_stream || raw.streams[upload.first].reset || ended(raw); },
-                   std::chrono::seconds(3));
+    qb::http::test::discard(
+        raw.read_until([&] { return raw.streams[upload.first].end_stream || raw.streams[upload.first].reset || ended(raw); },
+                       std::chrono::seconds(3)),
+        "the case asserts the stream's end right after");
     ASSERT_TRUE(raw.streams[upload.first].end_stream);
     EXPECT_EQ(raw.streams[upload.first].status(), 200);
 }
@@ -5509,7 +5518,9 @@ TEST_F(Http2StreamSweep, AHookThatClearsTheProtocolsUnderTheSweepsResetEndsOnlyI
     Raw next;
     ASSERT_TRUE(connected(next));
     const auto id = next.request("/up", "POST");
-    next.read_until([&] { return next.streams[id].end_stream || next.streams[id].reset || ended(next); }, std::chrono::seconds(3));
+    qb::http::test::discard(
+        next.read_until([&] { return next.streams[id].end_stream || next.streams[id].reset || ended(next); }, std::chrono::seconds(3)),
+        "the case asserts the stream's end right after");
     ASSERT_TRUE(next.streams[id].end_stream);
     EXPECT_EQ(next.streams[id].status(), 200);
 }
@@ -5723,7 +5734,9 @@ TEST(Http2RefusedBlock, TheSessionArmsItsSweepForARefusedBlockLeftOpen) {
     };
     const auto first = raw.request("/first"); // answered: the server's thread watches its session from there
     ASSERT_NE(first, 0u);
-    raw.read_until([&] { return raw.streams[first].end_stream || raw.streams[first].reset || ended(); }, std::chrono::seconds(3));
+    qb::http::test::discard(
+        raw.read_until([&] { return raw.streams[first].end_stream || raw.streams[first].reset || ended(); }, std::chrono::seconds(3)),
+        "the case asserts the first answer right after");
     ASSERT_TRUE(raw.streams[first].end_stream) << "the first request was not answered";
     // The tick that request armed finds no stream and arms no other: five of its periods.
     raw.read_for(kBlockTimeout / 2 * 5);
@@ -6761,8 +6774,7 @@ elsewhere() {
 
 /// Runs the loop for @p span: the client's turns, and what the connection brings.
 inline void
-settle(std::chrono::milliseconds const span = 50ms, std::source_location const where = std::source_location::current()) {
-    qb::http::test::fail_wait::called_from const caller{where};
+settle(std::chrono::milliseconds const span = 50ms) {
     for (const auto until = std::chrono::steady_clock::now() + span; std::chrono::steady_clock::now() < until;)
         qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
 }
@@ -6806,8 +6818,7 @@ struct Relaunch {
     }
 
     void
-    run_the_loop(std::source_location const where = std::source_location::current()) {
-        qb::http::test::fail_wait::called_from const caller{where};
+    run_the_loop() {
         ++loop_turns;
         for (int pass = 0; pass < 4; ++pass) {
             qb::io::async::run(EVRUN_ONCE | EVRUN_NOWAIT);
@@ -8492,7 +8503,7 @@ TEST_F(Http2ClientTest, ATargetPastTheUrlLimitIsRefusedWhereItIsPushedAndOneAtTh
 /// Runs the loop until @p done or for @p span; nothing leaves it into the case. Under `QBM_HTTP_TEST_FAIL_WAIT_AT` the
 /// wait it names fails at once, as a wait that reached its end does (fail_wait.h).
 template <typename Done>
-bool
+[[nodiscard]] bool
 loop_until(Done &&done, std::chrono::milliseconds const span = 5s, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(std::forward<Done>(done), span, "loop_until");

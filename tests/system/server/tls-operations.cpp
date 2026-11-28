@@ -48,7 +48,7 @@ static_assert(requires(H2 &s, qb::io::uri uri) {
 });
 
 template <typename Predicate>
-bool
+[[nodiscard]] bool
 pump_until(Predicate predicate, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};
     return qb::http::test::wait_until(predicate, budget, "pump_until", [] { qb::io::async::run_for(1ms); });

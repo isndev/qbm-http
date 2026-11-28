@@ -939,7 +939,7 @@ public:
 };
 
 /// Sends `frame` after the upgrade; true once the server has closed the connection, what it sent before in `received`.
-bool
+[[nodiscard]] bool
 server_closes_after(qb::io::tcp::socket &sock, std::vector<std::uint8_t> const &frame, std::string &received,
                     std::source_location const where = std::source_location::current()) {
     qb::http::test::fail_wait::called_from const caller{where};

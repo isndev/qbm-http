@@ -231,7 +231,7 @@ struct RawH1 {
     connect(std::uint16_t port) {
         return sock.connect_v4("127.0.0.1", port) == 0 && sock.set_nonblocking(true) == 0;
     }
-    bool
+    [[nodiscard]] bool
     send(std::string const &request, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         std::string_view                             data(request);
@@ -288,7 +288,7 @@ struct RawH1 {
         }
     }
     template <typename Pred>
-    bool
+    [[nodiscard]] bool
     read_until(Pred &&pred, std::chrono::milliseconds budget = 5s, std::source_location const where = std::source_location::current()) {
         qb::http::test::fail_wait::called_from const caller{where};
         return qb::http::test::wait_until([&] { return eof || pred(); }, budget, "read_until",
